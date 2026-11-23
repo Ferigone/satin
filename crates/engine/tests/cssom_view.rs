@@ -21,6 +21,66 @@ fn check(runtime: &mut ScriptRuntime, source: &str) {
         "{source}"
     );
 }
+
+fn runner_controls() -> ScriptRuntime {
+    let mut page = LoadedPage::from_html(
+        "https://example.test/",
+        include_str!("fixtures/cssom_runner_controls.html"),
+    );
+    ScriptRuntime::for_page_with_viewport(
+        &mut page,
+        Viewport {
+            width: 800.,
+            height: 200.,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn owner_document_view_exposes_computed_style_for_runner_controls() {
+    let mut r = runner_controls();
+    check(
+        &mut r,
+        "showRunPanel(); var fill=document.getElementById('fill');
+         fill.style.width==='25%' && fill.getBoundingClientRect().width===40",
+    );
+    check(
+        &mut r,
+        "document.defaultView===window && document.defaultView.document===document &&
+         document.createElement('div').ownerDocument.defaultView===window",
+    );
+}
+
+#[test]
+fn compat_mode_selects_the_viewport_height_for_runner_overlays() {
+    let mut r = runner_controls();
+    check(
+        &mut r,
+        "resizeOverlay();
+         document.getElementById('overlay').getBoundingClientRect().height===180 &&
+         document.body.clientHeight===60 && document.compatMode==='CSS1Compat'",
+    );
+}
+
+#[test]
+fn compat_mode_distinguishes_quirks_from_limited_quirks() {
+    let mut r = runtime("<body><p>No doctype</p>");
+    check(
+        &mut r,
+        "document.compatMode==='BackCompat' && document.body.clientHeight===innerHeight",
+    );
+    let mut r = runtime(
+        "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.0 Transitional//EN' 'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'><p>Limited quirks</p>",
+    );
+    check(
+        &mut r,
+        "document.compatMode==='CSS1Compat' && document.documentElement.clientHeight===innerHeight",
+    );
+}
+
 #[test]
 fn geometry_charges_displayed_text_and_allows_large_inert_data_blocks() {
     let html = format!(

@@ -1,0 +1,31 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<meta charset="utf-8">
+<style>
+  body { margin: 0; height: 60px; }
+  #overlay { position: absolute; width: 100%; }
+  #run-panel { display: none; }
+  #progress { width: 160px; }
+  #fill { height: 8px; }
+</style>
+<div id="overlay"></div>
+<div id="run-panel"><div id="progress"><div id="fill"></div></div></div>
+<script>
+  // Reduced from jQuery 1.4.2's computed-style fallback for show().
+  var hasComputedStyle = document.defaultView && document.defaultView.getComputedStyle;
+  function showRunPanel() {
+    var panel = document.getElementById("run-panel");
+    panel.style.display = "";
+    if (hasComputedStyle &&
+        panel.ownerDocument.defaultView.getComputedStyle(panel, null).getPropertyValue("display") === "none") {
+      panel.style.display = "block";
+    }
+    document.getElementById("fill").style.width = "25%";
+  }
+
+  // Reduced from $(window).height() and the runner's loading overlay handler.
+  function resizeOverlay() {
+    var height = document.compatMode === "CSS1Compat" && document.documentElement.clientHeight ||
+                 document.body.clientHeight;
+    document.getElementById("overlay").style.height = (height - 20) + "px";
+  }
+</script>
