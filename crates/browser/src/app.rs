@@ -36,6 +36,8 @@ use winit::{
     window::{CursorIcon, Icon, ResizeDirection, Theme, Window, WindowId},
 };
 
+mod icons;
+
 const TAB_H: f32 = 58.;
 const TOP: f32 = TAB_H + 64.;
 const MAX_TABS: usize = 24;
@@ -3106,16 +3108,9 @@ fn chrome_icon(
         )
     };
     match action {
-        Action::Back => {
-            line(3., 10., 17., 10.);
-            line(3., 10., 9., 4.);
-            line(3., 10., 9., 16.);
-        }
-        Action::Forward => {
-            line(3., 10., 17., 10.);
-            line(17., 10., 11., 4.);
-            line(17., 10., 11., 16.);
-        }
+        Action::Back => paint_glyph(canvas, x, y, scale, icons::Glyph::Back, color),
+        Action::Forward => paint_glyph(canvas, x, y, scale, icons::Glyph::Forward, color),
+        Action::Address => paint_glyph(canvas, x, y, scale, icons::Glyph::Search, color),
         Action::Home => {
             line(2., 9., 10., 2.);
             line(10., 2., 18., 9.);
@@ -3130,20 +3125,7 @@ fn chrome_icon(
             line(5., 5., 15., 15.);
             line(15., 5., 5., 15.);
         }
-        Action::Reload => {
-            for i in 0..24 {
-                let a = 0.25 + i as f32 / 24. * std::f32::consts::PI * 1.65;
-                let b = 0.25 + (i + 1) as f32 / 24. * std::f32::consts::PI * 1.65;
-                line(
-                    10. + 7. * a.cos(),
-                    10. + 7. * a.sin(),
-                    10. + 7. * b.cos(),
-                    10. + 7. * b.sin(),
-                );
-            }
-            line(17., 2., 17., 8.);
-            line(17., 8., 11., 8.);
-        }
+        Action::Reload => paint_glyph(canvas, x, y, scale, icons::Glyph::Reload, color),
         Action::Close(_) => {
             line(4.5, 4.5, 15.5, 15.5);
             line(15.5, 4.5, 4.5, 15.5);
@@ -3165,19 +3147,6 @@ fn chrome_icon(
             }
             line(10., 9., 10., 14.);
             line(10., 6.5, 10., 6.75);
-        }
-        Action::Address => {
-            for step in 0..24 {
-                let a = step as f32 * std::f32::consts::TAU / 24.;
-                let b = (step + 1) as f32 * std::f32::consts::TAU / 24.;
-                line(
-                    8. + 7. * a.cos(),
-                    8. + 7. * a.sin(),
-                    8. + 7. * b.cos(),
-                    8. + 7. * b.sin(),
-                );
-            }
-            line(13., 13., 19., 19.);
         }
         Action::Minimize => line(4., 10., 16., 10.),
         Action::Maximize if loading => {
@@ -3205,6 +3174,28 @@ fn chrome_icon(
         }
         Action::Select(_) | Action::MenuItem(_) => {}
     }
+}
+
+fn paint_glyph(canvas: &mut Canvas, x: f32, y: f32, scale: f32, glyph: icons::Glyph, color: Color) {
+    glyph.rasterize(
+        x * scale,
+        y * scale,
+        scale,
+        canvas.width,
+        canvas.height,
+        |x, y, coverage| {
+            let alpha = (u16::from(color.3) * u16::from(coverage) + 127) / 255;
+            canvas.fill_rect(
+                Rect {
+                    x: x as f32,
+                    y: y as f32,
+                    width: 1.,
+                    height: 1.,
+                },
+                Color(color.0, color.1, color.2, alpha as u8),
+            );
+        },
+    );
 }
 
 fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {
