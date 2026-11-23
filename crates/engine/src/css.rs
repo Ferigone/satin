@@ -4281,6 +4281,10 @@ pub fn color(value: &str) -> Option<Color> {
                 ))
             }
             6 | 8 => {
+                // The radix parser accepts a leading '+', which is not a hex digit.
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
                 let n = u32::from_str_radix(hex, 16).ok()?;
                 Some(if hex.len() == 6 {
                     Color((n >> 16) as u8, (n >> 8) as u8, n as u8, 255)
