@@ -7,8 +7,11 @@ use super::{
     Shared, State, abort::dom_exception_error, arg, diagnostic, document_base, event_target, fatal,
     message_ports::MessagePorts, structured_clone, webidl,
 };
-use crate::loader::DocumentPolicy;
-use crate::network::CancelSignal;
+use crate::{
+    loader::{ConnectPolicy, DocumentPolicy, LoadedPage},
+    network::CancelSignal,
+};
+use fetch::Network;
 use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox, Received, Reservation};
 use realm::WorkerRealm;
 use rust_browser_javascript::{
@@ -641,6 +644,7 @@ mod worker_lifecycle_tests {
         let source = Source {
             bytes: Arc::new(source.to_vec()),
             range: 0..source.len(),
+            policy: DocumentPolicy::default(),
         };
         let (done, finished) = mpsc::channel();
         let worker = connection.clone();
