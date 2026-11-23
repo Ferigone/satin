@@ -2,8 +2,8 @@
 mod user_timing;
 
 use super::{
-    Shared, arg, diagnostic, drain_microtask_queue, event_target, fatal, getter, unsupported,
-    webidl,
+    Shared, arg, diagnostic, drain_microtask_queue, error_event, event_target, fatal, getter,
+    unsupported, webidl,
 };
 use rust_browser_javascript::{JsError, JsString, RootId, Value, Vm};
 use std::{
@@ -508,11 +508,13 @@ pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsE
     vm.set_global("performance", result)
 }
 
-fn report_callback(state: &Shared, result: Result<Value, JsError>) -> Result<(), JsError> {
+fn report_callback(vm: &mut Vm, state: &Shared, result: Result<Value, JsError>) -> Result<(), JsError> {
     match result {
         Err(error) if fatal(&error) => Err(error),
         Err(error) => {
-            diagnostic(state, error.to_string());
+            if error_event::report(vm, state, &error, None)? {
+                diagnostic(state, error.to_string());
+            }
             Ok(())
         }
         Ok(_) => Ok(()),
@@ -532,7 +534,7 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
                 Handler::Callable(callback) => vm.call(callback.clone(), window, &timer.args),
                 Handler::Source(code) => vm.eval_with_identifier(&code.to_string_lossy(), &url),
             };
-            report_callback(state, result)?;
+            report_callback(vm, state, result)?;
             drain_microtask_queue(vm, state)
         });
         state
@@ -557,7 +559,7 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
         let callback = vm.unroot(frame.callback).unwrap();
         let result = vm.with_task(|vm| {
             let result = vm.call(callback, Value::Undefined, &[timestamp.into()]);
-            report_callback(state, result)?;
+            report_callback(vm, state, result)?;
             drain_microtask_queue(vm, state)
         });
         if let Err(error) = result {

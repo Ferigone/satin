@@ -6,6 +6,7 @@ mod canvas;
 mod collections;
 mod dom_api;
 mod element_interface;
+mod error_event;
 mod event_target;
 mod fetch;
 mod file_list;
@@ -75,6 +76,8 @@ struct State {
     character_data_prototype: Value,
     window: Value,
     event_prototype: Value,
+    error_event_prototype: Value,
+    reporting_error: bool,
     handlers: HashMap<(Option<NodeId>, String), (Value, RootId)>,
     dirty: bool,
     revision: u64,
@@ -613,6 +616,8 @@ impl ScriptRuntime {
             character_data_prototype: character_data_prototype.clone(),
             window: window.clone(),
             event_prototype: Value::Undefined,
+            error_event_prototype: Value::Undefined,
+            reporting_error: false,
             handlers: HashMap::new(),
             dirty: fresh_parser_snapshot,
             revision: u64::from(fresh_parser_snapshot),
@@ -838,7 +843,14 @@ impl ScriptRuntime {
         blobs.set_scheduler(&state);
         let fetch = fetch::FetchHost::install(&mut vm, page, abort, streams, blobs.clone())?;
         let event_constructor = vm.get_global("Event")?;
-        state.borrow_mut().event_prototype = vm.get_property(event_constructor, "prototype")?;
+        let event_proto = vm.get_property(event_constructor.clone(), "prototype")?;
+        let error_proto = error_event::install(&mut vm, event_constructor, event_proto.clone())?;
+        vm.root(error_proto.clone());
+        {
+            let mut state = state.borrow_mut();
+            state.event_prototype = event_proto;
+            state.error_event_prototype = error_proto;
+        }
         media::install(&mut vm, &state)?;
         media::install_streaming(&mut vm, &state, events.clone())?;
         let url = state.borrow().url.clone();
@@ -916,12 +928,13 @@ impl ScriptRuntime {
                     continue;
                 }
                 if let Some(source) = &script.source {
+                    let external = page.document.attr(script.node, "src").is_some();
                     self.execute_classic(
                         script.node,
                         source,
                         &script.name,
-                        page.base.as_str(),
-                        false,
+                        if external { &script.name } else { page.base.as_str() },
+                        external,
                     );
                 }
             }
@@ -1494,10 +1507,17 @@ fn run_classic(
         state.ignore_destructive_writes += usize::from(external);
         state.current_script.replace(node)
     };
-    let evaluated = vm.eval_with_identifier(source, identifier);
-    if evaluated.is_ok() {
-        state.borrow_mut().executed += 1;
-    }
+    let evaluated = match vm.eval_with_identifier(source, identifier) {
+        Ok(_) => {
+            state.borrow_mut().executed += 1;
+            Ok(())
+        }
+        Err(error) => match error_event::report(vm, state, &error, external.then_some(identifier)) {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(error),
+            Err(reporting_failure) => Err(reporting_failure),
+        },
+    };
     let drained = if checkpoint && evaluated.as_ref().err().is_none_or(|error| !fatal(error)) {
         drain_microtask_queue(vm, state)
     } else {
@@ -1510,7 +1530,7 @@ fn run_classic(
     }
     // Preserve fatal checkpoint failures even when evaluation also threw.
     drained?;
-    evaluated.map(|_| ())
+    evaluated
 }
 
 fn drain_microtask_queue(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
@@ -2335,8 +2355,20 @@ fn dispatch_prepared_with_mode(
                     }
                 };
                 if let Some(handler) = handler {
-                    match vm.call(handler, this, std::slice::from_ref(&event)) {
-                        Ok(Value::Bool(false)) if info.cancelable => info.prevented.set(true),
+                    let error_args = if current.is_none() && kind == "error" {
+                        error_event::handler_args(vm, &event)
+                    } else {
+                        None
+                    };
+                    let args = error_args
+                        .as_ref()
+                        .map_or(std::slice::from_ref(&event), |args| args.as_slice());
+                    match vm.call(handler, this, args) {
+                        Ok(Value::Bool(value))
+                            if info.cancelable && value == error_args.is_some() =>
+                        {
+                            info.prevented.set(true);
+                        }
                         Err(error) => {
                             if fatal(&error) {
                                 return Err(error);

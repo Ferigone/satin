@@ -1,0 +1,29 @@
+<!doctype html>
+<title>Waiting for errors</title>
+<script>
+var calls = [];
+var eventValues = [];
+var original = new Error("script exception");
+
+window.addEventListener("error", function(event) {
+    if (event instanceof ErrorEvent && event.isTrusted && event.cancelable &&
+        event.target === window && event.currentTarget === window && !event.bubbles) {
+        eventValues.push([event.message, event.filename, event.lineno, event.colno, event.error]);
+    }
+});
+window.onerror = function(message, filename, line, column, error) {
+    var values = eventValues[calls.length];
+    if (this === window && arguments.length === 5 && values &&
+        message === values[0] && filename === values[1] &&
+        line === values[2] && column === values[3] && error === values[4]) {
+        calls.push(error === original ? "script" : error.name);
+    }
+    return true;
+};
+</script>
+<script>var =</script>
+<script>throw original;</script>
+<script>
+setTimeout(function() { throw new TypeError("timer exception"); }, 0);
+setTimeout(function() { document.title = calls.join(","); }, 0);
+</script>

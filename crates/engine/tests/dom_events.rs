@@ -106,3 +106,96 @@ fn dispatches_the_same_event_through_window_document_and_element_targets() {
         runtime.diagnostics()
     );
 }
+
+#[test]
+fn reports_classic_script_and_timer_exceptions_to_window() {
+    let fixture = include_str!("../../../tools/fixtures/window-error-reporting.html");
+    let page = LoadedPage::from_html("https://events.test/errors", fixture);
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.run_initial(&page);
+    runtime.pump();
+    assert_eq!(
+        runtime.eval("document.title").unwrap(),
+        Value::from("SyntaxError,script,TypeError"),
+        "{:?}",
+        runtime.diagnostics()
+    );
+    assert_eq!(runtime.executed_scripts(), 2);
+    assert!(runtime.diagnostics().is_empty());
+}
+
+#[test]
+fn window_error_handler_uses_legacy_arguments_and_cancellation_only_for_error_events() {
+    let page = LoadedPage::from_html("https://events.test/", "<!doctype html><body></body>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                (function() {
+                    var original = {};
+                    var args;
+                    var blank = new ErrorEvent("error");
+                    var error = new ErrorEvent("error", {
+                        cancelable: true, message: "example", filename: "sample.js",
+                        lineno: 1, colno: -1, error: original
+                    });
+                    window.onerror = function() { args = Array.from(arguments); return true; };
+                    if (window.dispatchEvent(error) || !error.defaultPrevented ||
+                        args.length !== 5 || args[0] !== "example" || args[1] !== "sample.js" ||
+                        args[2] !== 1 || args[3] !== 4294967295 || args[4] !== original) return false;
+                    error.initEvent("error", false, true);
+                    window.onerror = function() { return false; };
+                    if (!window.dispatchEvent(error) || error.defaultPrevented) return false;
+                    window.onerror = function(event) { args = [event, arguments.length]; return false; };
+                    var plain = new Event("error", {cancelable: true});
+                    if (window.dispatchEvent(plain) || args[0] !== plain || args[1] !== 1) return false;
+                    document.body.onerror = window.onerror;
+                    if (document.body.dispatchEvent(error) || args[0] !== error || args[1] !== 1) return false;
+                    return blank instanceof Event && !blank.isTrusted && blank.message === "" &&
+                        blank.filename === "" && blank.lineno === 0 && blank.colno === 0 &&
+                        blank.error === null && !blank.cancelable;
+                })()
+                "#,
+            )
+            .unwrap(),
+        Value::Bool(true),
+        "{:?}",
+        runtime.diagnostics()
+    );
+}
+
+#[test]
+fn uncanceled_errors_are_diagnosed_but_cross_origin_script_details_are_muted() {
+    let mut page = LoadedPage::from_html(
+        "https://events.test/errors",
+        r#"<!doctype html>
+        <script>
+        var reports = [];
+        window.onerror = function(message, filename, line, column, error) {
+            reports.push([message, filename, line, column, error].join("/"));
+            return false;
+        };
+        </script>
+        <script src="https://other.test/external.js"></script>
+        <script>throw "uncanceled";</script>"#,
+    );
+    let external = &mut std::sync::Arc::make_mut(&mut page.scripts)[1];
+    external.name = "https://other.test/external.js".into();
+    external.source = Some(r#"throw new Error("cross origin detail");"#.into());
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.run_initial(&page);
+    assert_eq!(
+        runtime.eval("reports.join('|')").unwrap(),
+        Value::from(
+            "Script error.//0/0/|Uncaught uncanceled/https://events.test/errors/0/0/uncanceled"
+        )
+    );
+    assert_eq!(runtime.diagnostics().len(), 2);
+    assert!(
+        runtime
+            .diagnostics()
+            .iter()
+            .any(|message| message.contains("Thrown: uncanceled"))
+    );
+}
