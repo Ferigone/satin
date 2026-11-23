@@ -166,13 +166,15 @@ fn deep_and_remeasured_grid_layout_is_bounded_on_one_mib_stack() {
 }
 
 fn check_grid(source: &str, expected: &[(&str, [f32; 4])]) {
-    let fonts = Fonts::new().unwrap();
-    let page = LoadedPage::from_html(
-        "about:grid",
-        &format!(
-            "<!doctype html><style>body{{margin:0;font-size:0;line-height:0}}</style>{source}"
-        ),
+    check_grid_document(
+        &format!("<!doctype html><style>body{{margin:0;font-size:0;line-height:0}}</style>{source}"),
+        expected,
     );
+}
+
+fn check_grid_document(source: &str, expected: &[(&str, [f32; 4])]) {
+    let fonts = Fonts::new().unwrap();
+    let page = LoadedPage::from_html("about:grid", source);
     let layout = Layout::build(&page, &fonts, 800.);
     assert!(!layout.limited, "unexpected Grid limit");
     for (name, expected) in expected {
@@ -191,6 +193,19 @@ fn check_grid(source: &str, expected: &[(&str, [f32; 4])]) {
             "{name}: {coords:?} != {expected:?}",
         );
     }
+}
+
+#[test]
+fn empty_axis_does_not_create_an_implicit_track() {
+    check_grid_document(
+        include_str!("fixtures/grid_empty_implicit_axis.html"),
+        &[
+            ("empty-rows", [0., 0., 180., 0.]),
+            ("explicit-row", [0., 0., 180., 25.]),
+            ("occupied-row", [0., 25., 180., 40.]),
+            ("item", [0., 25., 180., 40.]),
+        ],
+    );
 }
 
 #[test]

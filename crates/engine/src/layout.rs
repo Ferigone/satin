@@ -794,9 +794,11 @@ fn grid_placement(
         }
         positions.push((node, axes));
     }
+    // An axis can have no tracks. Implicit tracks are added for item
+    // placement, not merely because an auto-track sizing function exists.
     let mut counts = [
-        (ends[0] - origins[0]).max(1) as usize,
-        (ends[1] - origins[1]).max(1) as usize,
+        (ends[0] - origins[0]) as usize,
+        (ends[1] - origins[1]) as usize,
     ];
     if counts.iter().any(|count| *count > GRID_TRACK_LIMIT) {
         return None;
