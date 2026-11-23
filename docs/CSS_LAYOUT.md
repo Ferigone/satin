@@ -60,6 +60,10 @@ The channel-toolbar fixture matches Chrome 157.0.8103.79 for geometry and live C
 
 Computed scrollable overflow on a flex item's main axis gives it a zero automatic content-box minimum. This lets the viewport of a scrolling pane shrink to its assigned space while preserving border, padding, and explicit minimum sizes. A main axis with visible or clipped overflow keeps a content-based minimum. The preview-caption and chat-pane fixture matches 44 rectangle coordinates in Chrome 157.0.8103.79. [CSS Flexible Box Layout Level 1](https://drafts.csswg.org/css-flexbox-1/#min-size-auto) · [Reference fixture](../crates/engine/tests/fixtures/css_flex_overflow_minimum.html)
 
+## Viewport-sized Flexbox shells
+
+Percentage heights on the root element resolve against the initial containing block's viewport height. A chain of definite percentage heights can then fill the viewport without making percentage heights under auto-sized block parents definite. The reduced fixture is based on Twitch's static loading shell and records 48 CSSOM rectangle coordinates at 1280 × 800 and 640 × 480 CSS px in Chrome 157.0.8103.79. In alpha.17, the same reduction collapsed to 72 px in both viewports. This checks the shell, not Twitch's JavaScript app or its player. [CSS 2.2: containing blocks](https://www.w3.org/TR/CSS22/visudet.html#containing-block-details) · [Reference fixture](../crates/engine/tests/fixtures/css_flex_viewport_shell.html)
+
 ## Other limits at alpha.6
 
 At alpha.6, remaining Grid features included named lines and areas, `grid-template-areas`, `auto-fit`, `auto-fill`, `fit-content()`, subgrid and masonry, baseline alignment, vertical writing modes, fragmentation, and replaced-element sizing with aspect ratios and constraints on both axes. The Grid feature notes describe subsequent additions. CSS Syntax, Selectors, CSSOM, and Flexbox have partial coverage. Parent-child margin collapsing, full bidirectional and Unicode text support, broader font matching, and the CSS Font Loading API remain open at this stage. [Grid](GRID.md) · [CSSOM View](CSSOM_VIEW.md) · [Fonts](FONTS.md)

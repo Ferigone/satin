@@ -343,7 +343,15 @@ impl Layout {
                 .min(1_000_000),
             limited: false,
         };
-        let mut line = Line::new(0., 0., width, &styles[page.document.root.0], None);
+        // The root box resolves percentages against the initial containing
+        // block. Descendants still receive their containing box's own height.
+        let mut line = Line::new(
+            0.,
+            0.,
+            width,
+            &styles[page.document.root.0],
+            Some(viewport.height),
+        );
         for &child in &page.document.nodes[page.document.root.0].children {
             b.child(child, &mut line, None);
         }
