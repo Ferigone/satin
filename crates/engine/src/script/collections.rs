@@ -316,6 +316,7 @@ impl HostIndexedProperties for StaticList {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct StaticNodeLists {
     dom: Weak<RefCell<State>>,
     prototype: Value,

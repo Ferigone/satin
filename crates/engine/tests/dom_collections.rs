@@ -54,3 +54,68 @@ fn tag_names_match_html_case_and_preserve_foreign_case_and_template_inertness() 
     "#).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
+
+#[test]
+fn query_selector_all_returns_ordered_static_node_lists() {
+    let page = LoadedPage::from_html(
+        "https://example.test",
+        "<!doctype html><main><p id=a class=row>A</p><!-- comment --><p id=b class=row>B</p></main><p id=outside class=row></p>",
+    );
+    let mut realm = ScriptRuntime::new(&page).unwrap();
+    let result = realm
+        .eval(
+            r#"
+        var main = document.querySelector('main');
+        var list = main.querySelectorAll('#b, .row');
+        var a = main.firstChild;
+        var b = main.lastChild;
+        var replacement = a.cloneNode(true);
+        a.remove();
+        main.appendChild(replacement);
+        var current = main.querySelectorAll('.row');
+        var sliced = Array.prototype.slice.call(list);
+        list instanceof NodeList && !Array.isArray(list) &&
+        list.length === 2 && list[0] === a && list.item(1) === b &&
+        list[2] === undefined && list.item(2) === null &&
+        sliced.length === 2 && sliced[0] === a && sliced[1] === b &&
+        current[0] === b && current[1] === replacement && current !== list &&
+        main.querySelectorAll('span') instanceof NodeList
+    "#,
+        )
+        .unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn invalid_dom_selector_list_throws_before_any_member_can_match() {
+    let page = LoadedPage::from_html(
+        "https://example.test",
+        "<!doctype html><main><p class=row>A</p><p class=row>B</p></main>",
+    );
+    let mut realm = ScriptRuntime::new(&page).unwrap();
+    let result = realm
+        .eval(
+            r#"
+        var main = document.querySelector('main');
+        var first = main.firstChild;
+        function syntaxError(receiver, method, selector) {
+            try {
+                receiver[method](selector);
+                return false;
+            } catch (e) {
+                return e instanceof DOMException && e.name === 'SyntaxError';
+            }
+        }
+        document.querySelectorAll('main > .row:nth-child(2)')[0] === main.lastChild &&
+        syntaxError(document, 'querySelectorAll', '.row, .row:eq(1)') &&
+        syntaxError(document, 'querySelectorAll', 'main > .row:visible') &&
+        syntaxError(main, 'querySelectorAll', '.row:eq(1)') &&
+        syntaxError(document.createDocumentFragment(), 'querySelectorAll', '.row,') &&
+        syntaxError(document, 'querySelector', '.row, [') &&
+        syntaxError(first, 'matches', '.row, :unknown') &&
+        syntaxError(first, 'closest', '.row, :unknown')
+    "#,
+        )
+        .unwrap();
+    assert_eq!(result, Value::Bool(true));
+}

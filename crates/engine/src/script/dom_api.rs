@@ -167,6 +167,10 @@ pub(super) fn clone_exception(
 }
 
 impl Errors {
+    pub(super) fn invalid_selector(&self, vm: &mut Vm) -> JsError {
+        self.convert(vm, Failure::Dom("SyntaxError", "Invalid selector list"))
+    }
+
     fn value(&self, vm: &mut Vm, name: &str, message: &str) -> Result<Value, JsError> {
         let value = vm.new_object_with_prototype(self.prototype.clone())?;
         init_exception(vm, value, name.into(), message.into())
@@ -854,11 +858,12 @@ pub(super) fn install(
     state: &Shared,
     prototype: Value,
     document: Value,
-) -> Result<(), JsError> {
+) -> Result<Errors, JsError> {
     let errors = install_errors(vm)?;
     install_mutations(vm, state, prototype.clone(), &errors)?;
     install_html(vm, state, prototype.clone(), &errors)?;
-    install_cloning(vm, state, prototype, document, &errors)
+    install_cloning(vm, state, prototype, document, &errors)?;
+    Ok(errors)
 }
 
 fn install_mutations(

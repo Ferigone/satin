@@ -1802,6 +1802,26 @@ pub fn matches_selector(doc: &Document, id: NodeId, source: &str) -> bool {
         .into_iter()
         .any(|s| compile_selector(s, 0).is_some_and(|s| s.matches(doc, id)))
 }
+
+pub(crate) struct DomSelectorList(Vec<Selector>);
+
+impl DomSelectorList {
+    pub(crate) fn parse(source: &str) -> Option<Self> {
+        let clean = without_comments(source);
+        // DOM selector APIs reject the entire list if any member fails to
+        // parse. Do not test candidates before the last member is validated.
+        split_top(&clean, b',')
+            .into_iter()
+            .map(|s| compile_selector(s, 0))
+            .collect::<Option<Vec<_>>>()
+            .map(Self)
+    }
+
+    pub(crate) fn matches(&self, doc: &Document, id: NodeId) -> bool {
+        self.0.iter().any(|selector| selector.matches(doc, id))
+    }
+}
+
 impl Selector {
     fn matches(&self, doc: &Document, id: NodeId) -> bool {
         self.matches_part(doc, id, self.parts.len() - 1, &mut 16384)

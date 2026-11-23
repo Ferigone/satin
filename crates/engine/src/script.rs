@@ -256,13 +256,6 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
     state.wrappers.insert(id, value.clone());
     Ok(value)
 }
-fn wrap_array(vm: &mut Vm, state: &Shared, ids: Vec<NodeId>) -> Result<Value, JsError> {
-    let values = ids
-        .into_iter()
-        .map(|id| wrap(vm, state, Some(id)))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(vm.new_array(&values))
-}
 fn descendants(doc: &Document, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
     let mut pending = doc.nodes[root.0]
         .children
@@ -784,10 +777,18 @@ impl ScriptRuntime {
                 wrap(vm, &state_id, id)
             },
         )?;
-        dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =
             collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        install_selectors(
+            &mut vm,
+            &state,
+            &prototype,
+            &element_prototype,
+            &node_lists,
+            &dom_errors,
+        )?;
         mutation_observers::install(&mut vm, &state, node_lists)?;
         navigation::install_parser_methods(&mut vm, &state, document.clone())?;
         let file_lists = file_list::FileListHost::install(&mut vm)?;
@@ -1677,13 +1678,26 @@ fn install_node(
             }
         })?;
     }
+    install_style(vm, state, prototype)
+}
+
+fn install_selectors(
+    vm: &mut Vm,
+    state: &Shared,
+    node_prototype: &Value,
+    element_prototype: &Value,
+    node_lists: &collections::StaticNodeLists,
+    errors: &dom_api::Errors,
+) -> Result<(), JsError> {
     for name in ["querySelector", "querySelectorAll", "matches", "closest"] {
         let state = state.clone();
+        let node_lists = node_lists.clone();
+        let errors = errors.clone();
         let element_only = matches!(name, "matches" | "closest");
         let owner = if element_only {
             element_prototype
         } else {
-            &prototype
+            node_prototype
         };
         method(vm, owner.clone(), name, move |vm, this, args| {
             let id = if element_only {
@@ -1691,27 +1705,29 @@ fn install_node(
             } else {
                 node(&state, &this)?
             };
-            let selector = text(vm, arg(args, 0))?;
+            let source = args
+                .first()
+                .ok_or_else(|| JsError::type_error("Missing required selector argument"))?;
+            let source = text(vm, source.clone())?;
+            if source.len() > 16 * 1024 {
+                return Err(JsError::new(
+                    ErrorKind::HeapLimit,
+                    "DOM selector list exceeds 16 KiB",
+                ));
+            }
+            let selectors =
+                css::DomSelectorList::parse(&source).ok_or_else(|| errors.invalid_selector(vm))?;
             let ids = {
                 let state = state.borrow();
                 let doc = &state.document;
                 match name {
-                    "matches" => return Ok(css::matches_selector(doc, id, &selector).into()),
-                    "closest" => {
-                        let mut found = None;
-                        let mut current = Some(id);
-                        while let Some(id) = current {
-                            if css::matches_selector(doc, id, &selector) {
-                                found = Some(id);
-                                break;
-                            }
-                            current = doc.nodes[id.0].parent;
-                        }
-                        found.into_iter().collect()
-                    }
+                    "matches" => return Ok(selectors.matches(doc, id).into()),
+                    "closest" => std::iter::successors(Some(id), |id| doc.nodes[id.0].parent)
+                        .find(|&id| selectors.matches(doc, id))
+                        .into_iter()
+                        .collect(),
                     _ => {
-                        let matches = descendants(doc, id)
-                            .filter(|&id| css::matches_selector(doc, id, &selector));
+                        let matches = descendants(doc, id).filter(|&id| selectors.matches(doc, id));
                         if name == "querySelector" {
                             matches.take(1).collect::<Vec<_>>()
                         } else {
@@ -1721,13 +1737,13 @@ fn install_node(
                 }
             };
             if name == "querySelectorAll" {
-                wrap_array(vm, &state, ids)
+                node_lists.create(vm, ids.into())
             } else {
                 wrap(vm, &state, ids.first().copied())
             }
         })?;
     }
-    install_style(vm, state, prototype)
+    Ok(())
 }
 
 fn install_character_data(
