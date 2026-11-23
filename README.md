@@ -17,7 +17,7 @@ Satin brings tabs, browsing history, zoom, and a persistent profile to a desktop
 
 | Explore | Available in the alpha |
 | --- | --- |
-| Browse | HTTP and HTTPS pages, tabs, history, and zoom |
+| Browse | HTTP and HTTPS pages, tabs, tab history, bookmarks, startup settings, and zoom |
 | Interact | Links, forms, JavaScript events, and DOM updates |
 | Render | Text and images, CSS Flexbox and Grid, SVG, and Canvas 2D |
 | Play media | Progressive and segmented H.264/AAC MP4 playback on Windows |
