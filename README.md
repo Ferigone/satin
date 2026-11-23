@@ -185,3 +185,8 @@ Scenariusze lokalne uruchamiają własny serwer. W porównaniach z Chrome
 Wejście natywne trafia do wewnętrznych handlerów aplikacji. Próby nie sterują myszą/klawiaturą systemu ani otwartymi kartami użytkownika. Node orkiestruje testy; skrypty strony i Test262 wykonuje własna VM Rust. Na Windows GUI należy uruchamiać z oczekiwaniem i przekierowaniem wyjścia, np. przez scripts/Process.ps1.
 
 Opis mechanizmów i ograniczeń: [JavaScript](docs/JAVASCRIPT.md), [CSS/układ](docs/CSS_LAYOUT.md), [SVG](docs/SVG.md), [CSSOM View](docs/CSSOM_VIEW.md), [formularze](docs/FORMS.md). Cały zakres projektu i kryteria etapów: [ROADMAP](docs/ROADMAP.md).
+
+## Licencja
+
+Kod Satin jest dostępny na warunkach MIT lub Apache 2.0. Dane i testy pochodzące z innych projektów zachowują licencje opisane przy ich źródłach.
+[MIT](LICENSE-MIT) · [Apache 2.0](LICENSE-APACHE)
