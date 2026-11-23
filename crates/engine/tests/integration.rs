@@ -1,6 +1,10 @@
-use rust_browser_engine::{Fonts, Layout, LoadedPage, Loader};
+use rust_browser_engine::{
+    Fonts, Layout, LoadedPage, Loader,
+    loader::{NavigationPart, NavigationRequest},
+    script::DocumentSession,
+};
 use std::{
-    io::{Cursor, Read, Write},
+    io::{BufRead, BufReader, Cursor, Read, Write},
     net::TcpListener,
     sync::atomic::AtomicBool,
 };
@@ -39,7 +43,7 @@ fn redirect_base_stylesheet_image_and_preview() {
     let page = Loader::new()
         .unwrap()
         .load_with_preview(
-            &format!("{origin}/start"),
+            &format!("{origin}/start#chapter"),
             &AtomicBool::new(false),
             |page| {
                 preview_count += 1;
@@ -51,13 +55,76 @@ fn redirect_base_stylesheet_image_and_preview() {
         .unwrap();
     server.join().unwrap();
     assert_eq!(preview_count, 1);
-    assert_eq!(page.url, format!("{origin}/page/index.html"));
+    assert_eq!(page.url, format!("{origin}/page/index.html#chapter"));
     assert_eq!(
         page.resolve("next").unwrap(),
         format!("{origin}/assets/next")
     );
     assert_eq!(page.images.len(), 1);
     assert_eq!(page.stats.resources, 3);
+}
+
+#[test]
+fn streamed_http_navigation_keeps_the_document_fragment_off_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        for _ in 0..7 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut stream);
+            reader.read_line(&mut line).unwrap();
+            let route = line.split_ascii_whitespace().nth(1).unwrap();
+            for header in reader.lines() {
+                if header.unwrap().is_empty() {
+                    break;
+                }
+            }
+            let response = match route {
+                "/section?edition=2" => {
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 0\r\n"
+                }
+                "/inherit" => {
+                    "HTTP/1.1 302 Found\r\nLocation: /section?edition=2\r\nContent-Length: 0\r\n"
+                }
+                "/replace" => {
+                    "HTTP/1.1 302 Found\r\nLocation: /section?edition=2#new\r\nContent-Length: 0\r\n"
+                }
+                "/clear" => {
+                    "HTTP/1.1 302 Found\r\nLocation: /section?edition=2#\r\nContent-Length: 0\r\n"
+                }
+                _ => panic!("unexpected request target: {route}"),
+            };
+            write!(stream, "{response}Connection: close\r\n\r\n").unwrap();
+        }
+    });
+    let loader = Loader::new().unwrap();
+    let cancel = AtomicBool::new(false);
+    for (source, expected_fragment) in [
+        ("/section?edition=2#intro", "intro"),
+        ("/inherit#intro", "intro"),
+        ("/replace#intro", "new"),
+        ("/clear#intro", ""),
+    ] {
+        let request = NavigationRequest::get(&format!("{origin}{source}")).unwrap();
+        let mut address = None;
+        loader
+            .stream_navigation(&request, &cancel, |part| {
+                if let NavigationPart::Open(opened) = part {
+                    let (page, _) = DocumentSession::start(*opened).unwrap();
+                    assert!(address.replace(page.url).is_none());
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            address.unwrap(),
+            format!("{origin}/section?edition=2#{expected_fragment}")
+        );
+    }
+    server.join().unwrap();
 }
 
 #[test]
