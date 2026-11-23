@@ -78,6 +78,80 @@ fn nested_blocks_leave_room_for_ordinary_expression_recursion() {
 }
 
 #[test]
+fn bundled_callback_can_parse_a_nested_loop_condition() {
+    small_stack(|| {
+        // Mix the independently recursive statement and expression paths like
+        // a minified event-removal callback inside a bundle initializer.
+        let source = r#"
+            var observed = 0;
+            (function () {
+                var listener;
+                listener = { remove: function (record, test) {
+                    if (record) {
+                        if (test) {
+                            if (false) {
+                            } else {
+                                for (var i = 0; i < 1; i++) {
+                                    if (observed === 0)
+                                        if (test) {
+                                            for (var j = 0; j < 1; j++) {
+                                                if (record.tag) {
+                                                    if (false || test(record.tag)) {
+                                                        observed += 1;
+                                                        test(record.tag) && (observed += 2);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                }
+                            }
+                        }
+                    }
+                }};
+                listener.remove({tag: 2}, function (tag) { return tag === 2; });
+            })();
+            observed;
+        "#;
+        let mut vm = Vm::new();
+        vm.check_syntax(source).unwrap();
+        assert_eq!(vm.eval(source).unwrap(), Value::Number(3.0));
+    });
+}
+
+#[test]
+fn recursive_calls_functions_and_classes_stay_bounded_on_one_mib_stack() {
+    small_stack(|| {
+        // Each shape keeps different parser frames live at the guard. Do
+        // not assume that the same grammar depth means the same stack use.
+        let cases = [
+            ("calls", format!("{}0{}", "f(".repeat(128), ")".repeat(128))),
+            (
+                "function expressions with control blocks",
+                format!(
+                    "{}0{}",
+                    "(function(){if(true){return ".repeat(64),
+                    ";}})()".repeat(64)
+                ),
+            ),
+            (
+                "class expressions with methods",
+                format!(
+                    "var Root = {}0{};",
+                    "class { m(){ return ".repeat(64),
+                    "; } }".repeat(64)
+                ),
+            ),
+        ];
+        let mut vm = Vm::new();
+        for (name, source) in cases {
+            let error = vm.check_syntax(&source).expect_err(name);
+            assert_eq!(error.kind, ErrorKind::ExecutionLimit, "{name}: {error}");
+        }
+        assert_eq!(vm.eval("2 + 3").unwrap(), Value::Number(5.0));
+    });
+}
+
+#[test]
 fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
     small_stack(|| {
         let chains = [
