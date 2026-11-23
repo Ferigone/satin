@@ -27,6 +27,7 @@ pub(crate) fn install(vm: &mut Vm) {
     install_number(vm);
     install_math(vm);
     install_errors(vm);
+    crate::uri::install(vm);
     crate::symbol::install(vm);
     let math = vm.get_global("Math").expect("Math is installed");
     vm.define_data_property_key(

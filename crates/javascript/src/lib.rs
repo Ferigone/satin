@@ -28,6 +28,7 @@ mod regexp;
 mod structured_clone;
 mod symbol;
 mod syntax;
+mod uri;
 mod value;
 mod vm;
 mod wasm;
