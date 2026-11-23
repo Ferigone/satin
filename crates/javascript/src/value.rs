@@ -62,9 +62,11 @@ impl fmt::Display for JsString {
     }
 }
 
-/// An opaque, generation-checked heap handle. Keep externally held values rooted.
+/// An opaque, generation-checked handle valid only in its allocating heap.
+/// Keep externally held object values rooted in that heap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ObjectId {
+    pub(crate) heap_id: u64,
     pub(crate) index: u32,
     pub(crate) generation: u32,
 }

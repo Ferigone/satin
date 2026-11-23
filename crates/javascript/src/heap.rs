@@ -2,6 +2,7 @@ use crate::{ErrorKind, JsError, JsString, ObjectId, SymbolId, Value, Vm, bytecod
 use std::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 pub(crate) type NativeCallback = Rc<dyn Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError>>;
@@ -305,14 +306,30 @@ impl TraceEdges {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Heap {
+    id: u64,
     slots: Vec<Slot>,
     free: Vec<u32>,
     pub live: usize,
     weak_collections: usize,
     /// Conservative allocation-since-collection estimate, including containers.
     pub estimated_bytes: usize,
+}
+impl Default for Heap {
+    fn default() -> Self {
+        static NEXT_HEAP: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_HEAP
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("heap identifier space exhausted");
+        Self {
+            id,
+            slots: Vec::new(),
+            free: Vec::new(),
+            live: 0,
+            weak_collections: 0,
+            estimated_bytes: 0,
+        }
+    }
 }
 impl Heap {
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
@@ -327,6 +344,7 @@ impl Heap {
             slot.cell = Some(cell);
             slot.marked = false;
             ObjectId {
+                heap_id: self.id,
                 index,
                 generation: slot.generation,
             }
@@ -338,26 +356,31 @@ impl Heap {
                 cell: Some(cell),
             });
             ObjectId {
+                heap_id: self.id,
                 index,
                 generation: 1,
             }
         }
     }
-    fn cell(&self, id: ObjectId) -> Option<&Cell> {
-        let slot = self.slots.get(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.cell.as_ref()
-        } else {
-            None
+    fn slot(&self, id: ObjectId) -> Option<&Slot> {
+        if id.heap_id != self.id {
+            return None;
         }
+        let slot = self.slots.get(id.index as usize)?;
+        (slot.generation == id.generation).then_some(slot)
+    }
+    fn slot_mut(&mut self, id: ObjectId) -> Option<&mut Slot> {
+        if id.heap_id != self.id {
+            return None;
+        }
+        let slot = self.slots.get_mut(id.index as usize)?;
+        (slot.generation == id.generation).then_some(slot)
+    }
+    fn cell(&self, id: ObjectId) -> Option<&Cell> {
+        self.slot(id)?.cell.as_ref()
     }
     fn cell_mut(&mut self, id: ObjectId) -> Option<&mut Cell> {
-        let slot = self.slots.get_mut(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.cell.as_mut()
-        } else {
-            None
-        }
+        self.slot_mut(id)?.cell.as_mut()
     }
     pub fn object(&self, id: ObjectId) -> Result<&Object, JsError> {
         match self.cell(id) {
@@ -381,6 +404,9 @@ impl Heap {
         second: ObjectId,
     ) -> Result<(&mut Object, &mut Object), JsError> {
         let invalid = || JsError::type_error("Invalid or overlapping object handles");
+        if first.heap_id != self.id || second.heap_id != self.id {
+            return Err(invalid());
+        }
         let [a, b] = self
             .slots
             .get_disjoint_mut([first.index as usize, second.index as usize])
@@ -418,10 +444,7 @@ impl Heap {
 
     fn target_marked(&self, target: TraceTarget, symbols: &BTreeSet<usize>) -> bool {
         match target {
-            TraceTarget::Object(id) => self
-                .slots
-                .get(id.index as usize)
-                .is_some_and(|slot| slot.generation == id.generation && slot.marked),
+            TraceTarget::Object(id) => self.slot(id).is_some_and(|slot| slot.marked),
             TraceTarget::Symbol(symbol) => symbols.contains(&symbol),
         }
     }
@@ -435,10 +458,10 @@ impl Heap {
         while let Some(target) = pending.pop() {
             match target {
                 TraceTarget::Object(id) => {
-                    let Some(slot) = self.slots.get_mut(id.index as usize) else {
+                    let Some(slot) = self.slot_mut(id) else {
                         continue;
                     };
-                    if slot.generation != id.generation || slot.marked || slot.cell.is_none() {
+                    if slot.marked || slot.cell.is_none() {
                         continue;
                     }
                     slot.marked = true;
