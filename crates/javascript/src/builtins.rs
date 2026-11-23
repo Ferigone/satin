@@ -2368,7 +2368,10 @@ fn install_errors(vm: &mut Vm) {
         let proto = if kind == ErrorKind::Error {
             error_proto.clone()
         } else {
-            vm.new_object_with_prototype(error_proto.clone()).unwrap()
+            let proto = vm.new_object_with_prototype(error_proto.clone()).unwrap();
+            vm.define_data_property(proto.clone(), "message", "".into(), true, false, true)
+                .unwrap();
+            proto
         };
         vm.error_prototypes.insert(kind, proto.as_object().unwrap());
         vm.define_data_property(
