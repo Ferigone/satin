@@ -172,7 +172,7 @@ fn transfer_uses_the_final_resizable_store_and_detaches_unreferenced_buffers() {
         .eval(
             r#"
             var source = new ArrayBuffer(4, {maxByteLength: 16});
-            var unused = new ArrayBuffer(3);
+            var unused = new ArrayBuffer(16 * 1024);
             var typed = new Uint16Array(source, 2);
             var data = new DataView(source, 2);
             data.setUint8(0, 42);
@@ -239,6 +239,10 @@ fn transferred_storage_is_moved_once_and_subject_to_receiver_heap_limits() {
     });
     let source = sender.new_array_buffer(vec![42; LENGTH]).unwrap();
     let address = sender.fixed_buffer_source_bytes(&source).unwrap().as_ptr();
+    assert!(matches!(
+        sender.serialize_clone_packet(source.clone(), LENGTH + 4096),
+        Err(StructuredCloneError::JavaScript(error)) if error.kind == ErrorKind::HeapLimit
+    ));
     let before = sender.estimated_heap_bytes();
     let (packet, ()) = sender
         .serialize_clone_packet_with_transfer(source.clone(), &[source], LENGTH + 4096, |_| Ok(()))
@@ -252,10 +256,19 @@ fn transferred_storage_is_moved_once_and_subject_to_receiver_heap_limits() {
     assert_eq!(bytes.len(), LENGTH);
     assert_eq!(bytes[0], 42);
 
-    let source = sender.new_array_buffer(vec![21; LENGTH]).unwrap();
+    let mut backing = Vec::with_capacity(LENGTH);
+    backing.resize(LENGTH / 4, 21);
+    let capacity = backing.capacity();
+    let source = sender.new_array_buffer(backing).unwrap();
     let (packet, ()) = sender
-        .serialize_clone_packet_with_transfer(source.clone(), &[source], LENGTH + 4096, |_| Ok(()))
+        .serialize_clone_packet_with_transfer(
+            source.clone(),
+            &[source],
+            capacity + 4096,
+            |_| Ok(()),
+        )
         .unwrap();
+    // The receiver has room for the visible bytes but not the moved capacity.
     let mut receiver = Vm::with_limits(VmLimits {
         max_heap_bytes: baseline + LENGTH / 2,
         ..VmLimits::default()
@@ -265,14 +278,115 @@ fn transferred_storage_is_moved_once_and_subject_to_receiver_heap_limits() {
 }
 
 #[test]
+fn aliased_buffer_packets_charge_one_backing_at_its_retained_capacity() {
+    const LENGTH: usize = 64 * 1024;
+    const METADATA_BUDGET: usize = 4096;
+    let mut backing = Vec::with_capacity(2 * LENGTH);
+    backing.resize(LENGTH, 42);
+    let capacity = backing.capacity();
+    let mut sender = Vm::new();
+    let source = sender.new_array_buffer(backing).unwrap();
+    let address = sender.fixed_buffer_source_bytes(&source).unwrap().as_ptr();
+    sender.set_global("source", source.clone()).unwrap();
+    let message = sender
+        .eval(
+            "var typed = new Uint8Array(source), data = new DataView(source);\n\
+             ({typed: typed, buffer: source, same: source, again: typed, data: data})",
+        )
+        .unwrap();
+    let check_backing = |packet, transferred| {
+        let mut receiver = Vm::new();
+        let value = receiver.deserialize_clone_packet(packet).unwrap();
+        let buffer = receiver.get_property(value.clone(), "buffer").unwrap();
+        let bytes = receiver.fixed_buffer_source_bytes(&buffer).unwrap();
+        assert_eq!(bytes.as_ptr() == address, transferred);
+        assert_eq!(bytes.len(), LENGTH);
+        assert_eq!(bytes[LENGTH - 1], 42);
+        receiver.set_global("received", value).unwrap();
+        assert_eq!(
+            receiver
+                .eval(
+                    r#"
+                    received.data.setUint8(0, 9);
+                    received.buffer === received.same && received.typed === received.again
+                    && received.typed.buffer === received.buffer && received.data.buffer === received.buffer
+                    && received.typed[0] === 9
+                    "#,
+                )
+                .unwrap(),
+            Value::Bool(true)
+        );
+    };
+
+    let copied = sender
+        .serialize_clone_packet(message.clone(), LENGTH + METADATA_BUDGET)
+        .unwrap();
+    let copy_bytes = copied.retained_bytes();
+    assert!((LENGTH..=LENGTH + METADATA_BUDGET).contains(&copy_bytes));
+    check_backing(copied, false);
+
+    let transfer = std::slice::from_ref(&source);
+    assert!(matches!(
+        sender.serialize_clone_packet_with_transfer(
+            message.clone(),
+            transfer,
+            copy_bytes,
+            |_| -> Result<(), JsError> { panic!("the retained capacity exceeds the copy budget") },
+        ),
+        Err(StructuredCloneError::JavaScript(error)) if error.kind == ErrorKind::HeapLimit
+    ));
+    let bytes = sender.fixed_buffer_source_bytes(&source).unwrap();
+    assert_eq!(bytes.as_ptr(), address);
+    assert_eq!(bytes[0], 42);
+
+    let (packet, admitted_bytes) = sender
+        .serialize_clone_packet_with_transfer(message, transfer, capacity + METADATA_BUDGET, Ok)
+        .unwrap();
+    assert!((capacity..=capacity + METADATA_BUDGET).contains(&admitted_bytes));
+    assert_eq!(packet.retained_bytes(), admitted_bytes);
+    assert_eq!(sender.eval("source.detached").unwrap(), Value::Bool(true));
+    drop(sender);
+    check_backing(packet, true);
+}
+
+#[test]
+fn failed_decode_leaves_no_root_for_a_materialized_transfer() {
+    const LENGTH: usize = 64 * 1024;
+    let mut sender = Vm::new();
+    let source = sender.new_array_buffer(vec![42; LENGTH]).unwrap();
+    sender.set_global("source", source.clone()).unwrap();
+    // Put the buffer before the over-limit array in the packet record order.
+    let message = sender
+        .eval("({buffer: source, items: new Array(32)})")
+        .unwrap();
+    let (packet, ()) = sender
+        .serialize_clone_packet_with_transfer(message, &[source], LENGTH + 4096, |_| Ok(()))
+        .unwrap();
+    assert_eq!(sender.eval("source.detached").unwrap(), Value::Bool(true));
+
+    let mut receiver = Vm::with_limits(VmLimits {
+        max_array_length: 16,
+        ..VmLimits::default()
+    });
+    receiver.collect_garbage();
+    let baseline = receiver.estimated_heap_bytes();
+    let error = receiver.deserialize_clone_packet(packet).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+    receiver.collect_garbage();
+    assert_eq!(receiver.estimated_heap_bytes(), baseline);
+}
+
+#[test]
 fn transfer_admission_is_after_getters_and_budget_checks_but_before_detach() {
     let mut sender = Vm::new();
     let value = sender
         .eval(
             r#"
             var source = new ArrayBuffer(4, {maxByteLength: 4096});
+            var other = new ArrayBuffer(4);
             var typed = new Uint8Array(source), visits = 0;
             var message = {
+                other: other,
                 source: source,
                 get appended() { visits++; source.resize(2048); return true; }
             };
@@ -295,7 +409,7 @@ fn transfer_admission_is_after_getters_and_budget_checks_but_before_detach() {
     }
     assert_eq!(sender.eval("visits").unwrap(), Value::Number(0.0));
 
-    let transfer = std::slice::from_ref(&source);
+    let transfer = &[sender.get_global("other").unwrap(), source];
     assert!(matches!(
         sender.serialize_clone_packet_with_transfer(
             value.clone(),
@@ -316,7 +430,9 @@ fn transfer_admission_is_after_getters_and_budget_checks_but_before_detach() {
     ));
     assert_eq!(
         sender
-            .eval("visits === 2 && !source.detached && source.byteLength === 2048")
+            .eval(
+                "visits === 2 && !other.detached && !source.detached && source.byteLength === 2048"
+            )
             .unwrap(),
         Value::Bool(true)
     );
