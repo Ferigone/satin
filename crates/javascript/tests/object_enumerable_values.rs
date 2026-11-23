@@ -1,4 +1,4 @@
-use rust_browser_javascript::{Value, Vm};
+use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
 
 #[test]
 fn values_and_entries_snapshot_keys_but_check_live_own_enumerability() {
@@ -39,4 +39,37 @@ fn values_and_entries_snapshot_keys_but_check_live_own_enumerability() {
         .unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn values_and_entries_charge_work_even_when_no_keys_are_enumerable() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 256,
+        ..VmLimits::default()
+    });
+    let target = vm.new_object();
+    vm.set_global("target", target.clone()).unwrap();
+    let calls = [
+        "Object.values(target).length",
+        "Object.entries(target).length",
+    ];
+    for call in calls {
+        assert_eq!(vm.eval(call).unwrap(), Value::from(0));
+    }
+    // Build the input outside the script task so its creation cannot exhaust fuel.
+    for i in 0..1024 {
+        vm.define_data_property(
+            target.clone(),
+            &format!("hidden{i}"),
+            Value::Null,
+            true,
+            false,
+            true,
+        )
+        .unwrap();
+    }
+    for call in calls {
+        let error = vm.eval(call).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExecutionLimit, "{call}: {error}");
+    }
 }
