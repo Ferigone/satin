@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline chat delivery fixture</title>
+<h1>Offline chat delivery fixture</h1>
+<div id="chat-log" role="log" aria-label="Fixture chat"></div>
+<h2>Checks</h2>
+<pre id="checks">pending</pre>
+<h2>First error</h2>
+<pre id="first-error"></pre>
+<script>
+(function () {
+  var checks = {
+    loopbackLocation: false,
+    jsonParse: false,
+    domAppend: false,
+    messageEventConstructor: false,
+    webSocketConstructor: false,
+    webSocketConstructed: false,
+    opened: false,
+    textMessageEvent: false,
+    parsedSystemMessage: false,
+    rendered: false
+  };
+  var result = document.getElementById('checks');
+  var error = document.getElementById('first-error');
+  var log = document.getElementById('chat-log');
+  var stage = 'location';
+  var deadline;
+
+  function record() {
+    result.textContent = JSON.stringify(checks);
+  }
+
+  function fail(at, detail) {
+    if (checks.rendered || error.textContent) return;
+    clearTimeout(deadline);
+    error.textContent = at + ': ' + detail;
+    record();
+  }
+
+  try {
+    checks.loopbackLocation = location.protocol === 'http:' &&
+      /^127\.0\.0\.1:[0-9]+$/.test(location.host);
+    if (!checks.loopbackLocation) throw new Error('expected an IPv4 loopback HTTP URL');
+
+    stage = 'json control';
+    checks.jsonParse = JSON.parse('{"control":true}').control === true;
+    if (!checks.jsonParse) throw new Error('control object was not parsed');
+
+    stage = 'dom control';
+    var parent = document.createElement('div');
+    var child = document.createElement('p');
+    child.textContent = 'Detached control';
+    parent.appendChild(child);
+    checks.domAppend = parent.firstChild === child && child.textContent === 'Detached control';
+    if (!checks.domAppend) throw new Error('control element was not appended');
+
+    checks.messageEventConstructor = typeof MessageEvent === 'function';
+    stage = 'constructor';
+    checks.webSocketConstructor = typeof WebSocket === 'function';
+    if (!checks.webSocketConstructor) {
+      fail(stage, 'WebSocket unavailable (typeof ' + typeof WebSocket + ')');
+      return;
+    }
+    var socket = new WebSocket('ws://' + location.host + '/delivery');
+    checks.webSocketConstructed = true;
+    stage = 'open';
+    socket.onopen = function () {
+      if (error.textContent) return;
+      checks.opened = true;
+      stage = 'message';
+      record();
+    };
+    socket.onerror = function () { fail(stage, 'WebSocket error event'); };
+    socket.onclose = function () { fail(stage, 'WebSocket closed before delivery'); };
+    socket.onmessage = function (event) {
+      if (checks.rendered || error.textContent) return;
+      try {
+        if (!checks.opened) throw new Error('message arrived before open');
+        checks.textMessageEvent = event instanceof MessageEvent &&
+          event.isTrusted === true && typeof event.data === 'string';
+        if (!checks.textMessageEvent) throw new Error('expected a trusted text MessageEvent');
+
+        stage = 'parse';
+        var message = JSON.parse(event.data);
+        checks.parsedSystemMessage = message.type === 'system' &&
+          typeof message.text === 'string' && message.text.length > 0;
+        if (!checks.parsedSystemMessage) throw new Error('invalid system message');
+
+        stage = 'render';
+        var row = document.createElement('p');
+        row.id = 'system-message';
+        row.textContent = message.text;
+        log.appendChild(row);
+        checks.rendered = log.firstChild === row && row.textContent === message.text;
+        if (!checks.rendered) throw new Error('message was not appended');
+        clearTimeout(deadline);
+        record();
+      } catch (problem) {
+        fail(stage, String(problem));
+      }
+    };
+    deadline = setTimeout(function () { fail(stage, 'timed out before delivery'); }, 2500);
+    record();
+  } catch (problem) {
+    fail(stage, String(problem));
+  }
+}());
+</script>
