@@ -678,17 +678,22 @@ fn install_function(vm: &mut Vm) {
         vm.invoke(this, arg(a, 0), a.get(1..).unwrap_or_default())
     });
     method(vm, proto.clone(), "apply", 2, |vm, this, a| {
+        if !vm.is_callable(&this) {
+            return Err(JsError::type_error("Apply target is not callable"));
+        }
         let args = arg(a, 1);
         let values = if args.is_nullish() {
             Vec::new()
         } else {
-            let object = vm.coerce_object(args)?;
-            let len = length(vm, object.clone())?;
+            if args.as_object().is_none() {
+                return Err(JsError::type_error("Apply arguments must be an object"));
+            }
+            let len = length(vm, args.clone())?;
             vm.reserve_allocation(len.saturating_mul(std::mem::size_of::<Value>()))?;
             let mut values = Vec::with_capacity(len);
             for i in 0..len {
                 vm.tick()?;
-                values.push(vm.get_property(object.clone(), &i.to_string())?);
+                values.push(vm.get_property(args.clone(), &i.to_string())?);
             }
             values
         };
@@ -698,39 +703,48 @@ fn install_function(vm: &mut Vm) {
         if !vm.is_callable(&this) {
             return Err(JsError::type_error("Bind target is not callable"));
         }
-        let prototype = vm.heap.object(this.as_object().unwrap())?.prototype;
-        let target_length = vm.get_property(this.clone(), "length")?;
-        let n = vm.to_number(&target_length)?.max(0.0) as usize;
-        let name = vm.get_property(this.clone(), "name")?;
-        let name = vm.to_string(&name)?;
-        vm.ensure_string_allocation(name.len().saturating_add(6))?;
-        vm.consume_work(name.len().saturating_mul(4))?;
-        let name = name.to_string_lossy();
+        let target = this.as_object().unwrap();
+        let prototype = vm.heap.object(target)?.prototype;
+        let bound_args = a.get(1..).unwrap_or_default();
         vm.ensure_allocation(
-            a.len()
+            bound_args
+                .len()
                 .saturating_mul(std::mem::size_of::<Value>())
                 .saturating_add(256),
         )?;
         let bound = Value::Object(vm.heap.allocate(Cell::Object(Object::new(
             ObjectKind::Bound {
-                target: this,
+                target: this.clone(),
                 this: arg(a, 0),
-                args: a.get(1..).unwrap_or_default().to_vec(),
+                args: bound_args.to_vec(),
             },
             prototype,
         ))));
+        let length = if vm.own_descriptor_key(target, &"length".into())?.is_some() {
+            vm.get_property(this.clone(), "length")?
+                .as_number()
+                .map_or(0.0, |n| (n.trunc() - bound_args.len() as f64).max(0.0))
+        } else {
+            0.0
+        };
         vm.define_data_property(
             bound.clone(),
             "length",
-            Value::from(n.saturating_sub(a.len().saturating_sub(1))),
+            Value::Number(length),
             false,
             false,
             true,
         )?;
+        let name = match vm.get_property(this, "name")? {
+            Value::String(name) => name,
+            _ => JsString::default(),
+        };
+        vm.ensure_string_allocation(name.len().saturating_add(6))?;
+        vm.consume_work(name.len().saturating_mul(4))?;
         vm.define_data_property(
             bound.clone(),
             "name",
-            Value::from(format!("bound {name}")),
+            Value::String(JsString::from("bound ").concat(&name)),
             false,
             false,
             true,
