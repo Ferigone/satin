@@ -323,3 +323,212 @@ fn asynchronous_cors_denial_reaches_done_and_fires_error_without_exposing_respon
     assert_eq!(runtime.pending_network(), 0);
     server.join().unwrap();
 }
+
+fn xml_reply(mime: Option<&str>, body: &[u8]) -> Vec<u8> {
+    let typed = mime.map_or(String::new(), |value| format!("Content-Type: {value}\r\n"));
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\n{typed}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    [headers.as_bytes(), body].concat()
+}
+
+#[test]
+fn response_xml_is_an_inert_same_origin_document_with_case_sensitive_namespaces() {
+    let observer = TcpListener::bind("127.0.0.1:0").unwrap();
+    let foreign = observer.local_addr().unwrap();
+    let (address, server) = serve(move |request| {
+        assert!(request.starts_with("GET /payload.xml HTTP/1.1\r\n"));
+        let body = format!(
+            r#"<?xml version="1.0"?><?xml-stylesheet href="http://{foreign}/never.css"?>
+<Root xmlns:p="urn:example" xmlns:q="urn:example" Key="yes" key="no">
+  <q:Sec p:ID="abc">T&amp;T</q:Sec>
+  <script xmlns="http://www.w3.org/1999/xhtml">window.ran = true;</script>
+  <script xmlns="http://www.w3.org/1999/xhtml"
+    src="http://{foreign}/never.js"/>
+  <img xmlns="http://www.w3.org/1999/xhtml" src="http://{foreign}/never.png"/>
+</Root>"#
+        );
+        xml_reply(
+            Some("Application/Example+XML; charset=UTF-8"),
+            body.as_bytes(),
+        )
+    });
+    let mut runtime = realm(&format!("http://{address}/page"), "");
+    let actual = runtime
+        .eval(
+            r#"
+        var ran = false, xhr = new XMLHttpRequest();
+        xhr.open('GET', '/payload.xml', false);
+        var beforeSend = xhr.responseXML === null;
+        xhr.send();
+        var doc = xhr.responseXML, root = doc.documentElement, sec, count = 0;
+        root.childNodes.forEach(function(node) {
+            if (node.nodeName === 'q:Sec') { sec = node; count++; }
+        });
+        [
+            beforeSend, xhr.status, doc === xhr.responseXML, doc.contentType,
+            doc.defaultView === null, doc.nodeType, root.parentNode === doc,
+            doc.URL.slice(-12), root.nodeName, root.localName, root.namespaceURI === null,
+            root.getAttribute('Key'), root.getAttribute('key'), root.getAttribute('KEY') === null,
+            root.getAttribute('xmlns:q'), sec.nodeName, sec.prefix, sec.localName, sec.namespaceURI,
+            sec.getAttribute('p:ID'), sec.getAttributeNS('urn:example', 'ID'),
+            sec.getAttributeNS('urn:example', 'id') === null, sec.textContent,
+            sec.ownerDocument === doc, root.childNodes instanceof NodeList,
+            root.childNodes === root.childNodes, root.childNodes.item(1) === sec,
+            root.childNodes[1] === sec, count, ran
+        ].join('|');
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        actual,
+        Value::from(
+            "true|200|true|application/example+xml|true|9|true|/payload.xml|Root|Root|true|yes|no|true|urn:example|q:Sec|q|Sec|urn:example|abc|abc|true|T&T|true|true|true|true|true|1|false"
+        )
+    );
+    assert_eq!(runtime.pending_network(), 0);
+    assert!(runtime.take_network_jobs().is_empty());
+    server.join().unwrap();
+    observer.set_nonblocking(true).unwrap();
+    assert_eq!(
+        observer.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn response_xml_rejects_non_xml_mime_malformed_xml_dtd_and_excessive_input() {
+    let observer = TcpListener::bind("127.0.0.1:0").unwrap();
+    let foreign = observer.local_addr().unwrap();
+    let too_many_attrs = (0..129).map(|i| format!(" a{i}=''")).collect::<String>();
+    let too_many_nodes = format!("<root>{}</root>", "<a/>".repeat(4096));
+    let too_many_bytes = format!("<root>{}</root>", "x".repeat(256 * 1024));
+    let cases: Vec<(Option<&str>, Vec<u8>)> =
+        vec![
+        (Some("text/plain"), b"<Root/>".to_vec()),
+        (Some("text/html"), b"<Root/>".to_vec()),
+        (Some("application/xml"), b"<Root></root>".to_vec()),
+        (Some("application/xml"), b"<p:Root/>".to_vec()),
+        (Some("application/xml"), format!(
+            r#"<!DOCTYPE Root [<!ENTITY e SYSTEM "http://{foreign}/never">]><Root>&e;</Root>"#
+        ).into_bytes()),
+        (None, format!("{}{}", "<a>".repeat(65), "</a>".repeat(65)).into_bytes()),
+        (None, format!("<root{too_many_attrs}/>").into_bytes()),
+        (None, too_many_nodes.into_bytes()),
+        (None, too_many_bytes.into_bytes()),
+    ];
+    for (mime, body) in cases {
+        let (address, server) = serve(move |_| xml_reply(mime, &body));
+        let mut runtime = realm(&format!("http://{address}/page"), "");
+        assert_eq!(
+            runtime
+                .eval(
+                    r#"
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/payload', false);
+                xhr.send();
+                [xhr.readyState, xhr.status,
+                    xhr.responseXML === null, xhr.responseXML === null, xhr.responseText.length > 0
+                ].join('|');
+                "#
+                )
+                .unwrap(),
+            Value::from("4|200|true|true|true"),
+            "{mime:?}",
+        );
+        assert!(runtime.take_network_jobs().is_empty());
+        server.join().unwrap();
+    }
+    observer.set_nonblocking(true).unwrap();
+    assert_eq!(
+        observer.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn response_xml_uses_default_xml_mime_and_utf16_byte_order_mark() {
+    let mut body = vec![0xff, 0xfe];
+    for unit in "<?xml version='1.0' encoding='UTF-16'?><Root>é</Root>".encode_utf16() {
+        body.extend_from_slice(&unit.to_le_bytes());
+    }
+    let (address, server) = serve(move |_| xml_reply(None, &body));
+    let mut runtime = realm(&format!("http://{address}/page"), "");
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/payload', false);
+            xhr.send();
+            var doc = xhr.responseXML;
+            var result = [doc.contentType, doc.characterSet, doc.documentElement.textContent];
+            xhr.open('GET', '/reset');
+            result.concat([xhr.responseXML === null, xhr.responseText]).join('|');
+            "#
+            )
+            .unwrap(),
+        Value::from("text/xml|UTF-16LE|é|true|"),
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn response_xml_remains_null_for_an_allowed_cross_origin_xml_response() {
+    let (address, server) = serve(|request| {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("\r\norigin: http://127.0.0.1:1\r\n")
+        );
+        b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/xml\r\n\
+          Content-Length: 7\r\nConnection: close\r\n\r\n<Root/>"
+            .to_vec()
+    });
+    let mut runtime = realm("http://127.0.0.1:1/page", "");
+    assert_eq!(
+        runtime.eval(&format!(
+            "var xhr = new XMLHttpRequest(); xhr.open('GET', 'http://{address}/payload.xml', false); xhr.send(); [xhr.status,xhr.responseText,xhr.responseXML===null].join('|');"
+        )).unwrap(),
+        Value::from("200|<Root/>|true")
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn response_xml_only_materializes_at_done_on_async_completion() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime
+        .eval(
+            r#"
+        var xhr = new XMLHttpRequest(), states = [];
+        xhr.onreadystatechange = function() {
+            states.push(xhr.readyState === 4 ? xhr.responseXML.documentElement.nodeName :
+                xhr.responseXML === null);
+        };
+        xhr.open('GET', '/payload.xml');
+        xhr.send();
+    "#,
+        )
+        .unwrap();
+    let job = runtime.take_network_jobs().pop().unwrap();
+    runtime
+        .complete_network(
+            job.id,
+            Ok(WebResponse {
+                url: "https://example.test/payload.xml".into(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: vec![("content-type".into(), "application/xml".into())],
+                body: Some(Arc::new(b"<CaseSensitive/>".to_vec())),
+                response_type: ResponseType::Basic,
+                redirected: false,
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime.eval("states.join('|')").unwrap(),
+        Value::from("true|true|true|CaseSensitive"),
+    );
+}

@@ -10,6 +10,7 @@ use rust_browser_javascript::{JsError, RootId, Value, Vm};
 use std::{
     cell::RefCell,
     rc::Rc,
+    sync::Arc,
     task::Poll,
     time::{Duration, Instant},
 };
@@ -349,12 +350,21 @@ impl Host {
         };
         vm.set_host_slot(xhr.clone(), TEXT_SLOT, text)?;
         let pending = self.take(id, false).expect("completed XMLHttpRequest");
-        {
-            let mut data = data.borrow_mut();
-            data.pending = None;
-            data.ready = Ready::Done;
-        }
-        let result = self.success_events(vm, xhr, loaded, total);
+        let result = (|| {
+            let xml = {
+                let mut data = data.borrow_mut();
+                data.pending = None;
+                data.ready = Ready::Done;
+                data.response
+                    .as_ref()
+                    .and_then(|response| self.xml_source(response, Arc::new(pending.received)))
+            };
+            if let Some(xml) = xml {
+                self.budget(vm, None, xml.size())?;
+                data.borrow_mut().xml = Some(xml);
+            }
+            self.success_events(vm, xhr, loaded, total)
+        })();
         vm.unroot(pending.root);
         result
     }

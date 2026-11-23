@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 ring = "0.17"
 base64 = "0.22"
+roxmltree = "0.20"
 
 [dev-dependencies]
 http-body-util = "0.1"

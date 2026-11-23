@@ -1677,7 +1677,15 @@ mod tests {
         let abort = abort::AbortHost::install(&mut vm, None).unwrap();
         let streams = StreamHost::install(&mut vm, abort.clone()).unwrap();
         let blobs = blobs::install(&mut vm, streams.clone()).unwrap();
-        let host = FetchHost::install(&mut vm, &page, abort, streams, blobs).unwrap();
+        let host = FetchHost::install_with_urls(
+            &mut vm,
+            page.base,
+            Url::parse(&page.url).unwrap(),
+            abort,
+            streams,
+            blobs,
+        )
+        .unwrap();
         (vm, host)
     }
     fn drain(vm: &mut Vm) {

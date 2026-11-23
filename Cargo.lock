@@ -2079,6 +2079,7 @@ dependencies = [
  "image",
  "reqwest",
  "ring",
+ "roxmltree",
  "rust-browser-javascript",
  "rustls",
  "rustls-platform-verifier",

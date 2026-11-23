@@ -1,6 +1,7 @@
 //! Window XMLHttpRequest text loading over the existing Fetch transport.
 mod async_load;
 mod progress_event;
+mod xml_document;
 
 use super::{Shared, byte_string, typed, usv};
 use crate::{
@@ -22,6 +23,7 @@ use std::{
 };
 
 const TEXT_SLOT: u32 = 0;
+const XML_SLOT: u32 = 1;
 const LIVE_METADATA: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -43,6 +45,7 @@ struct Request {
     response: Option<WebResponse>,
     pending: Option<u64>,
     generation: u64,
+    xml: Option<xml_document::Source>,
 }
 
 impl Request {
@@ -56,7 +59,8 @@ impl Request {
             super::bytes(&response.headers)
                 + response.url.capacity()
                 + response.status_text.capacity()
-        }) + 256
+        }) + self.xml.as_ref().map_or(0, xml_document::Source::size)
+            + 256
     }
 
     fn can_send(&self) -> bool {
@@ -72,6 +76,7 @@ pub(super) struct Host {
     events: event_target::Events,
     exception: Value,
     progress_proto: Value,
+    xml: xml_document::Host,
     live: RefCell<Vec<Weak<RefCell<Request>>>>,
 }
 
@@ -161,6 +166,14 @@ impl Host {
         self.fire_progress(vm, xhr, "loadend", loaded, total)
     }
 
+    fn xml_source(
+        &self,
+        response: &WebResponse,
+        raw: Arc<Vec<u8>>,
+    ) -> Option<xml_document::Source> {
+        xml_document::Source::new(response, &self.fetch.borrow().client, raw)
+    }
+
     fn sync_fetch(&self, request: WebRequest) -> Result<WebResponse, FetchError> {
         let error = |message: String| FetchError::new(FetchErrorKind::Network, message);
         let loader = self
@@ -233,6 +246,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
     let events = fetch.borrow().abort.events().clone();
     let progress_proto = progress_event::install(vm, &events.event_proto)?;
     vm.root(progress_proto.clone());
+    let xml = xml_document::Host::install(vm)?;
     let host = Rc::new(Host {
         fetch: fetch.clone(),
         loader: page
@@ -248,6 +262,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         events,
         exception,
         progress_proto,
+        xml,
         live: RefCell::default(),
     });
     let prototype = vm.new_object_with_prototype(host.events.target_proto.clone())?;
@@ -326,6 +341,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         };
         context.budget(vm, Some(&data), replacement.metadata_size())?;
         vm.set_host_slot(xhr.clone(), TEXT_SLOT, "".into())?;
+        vm.set_host_slot(xhr.clone(), XML_SLOT, Value::Undefined)?;
         if let Some(id) = pending {
             context.discard(vm, id);
         }
@@ -418,13 +434,23 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             context.exception(vm, "NetworkError", "XMLHttpRequest transport failed")
         })?;
         let body = response.body.take();
-        let body = body.as_deref().map_or(&[][..], Vec::as_slice);
-        let text = response_text(vm, &response, body)?;
+        let bytes = body.as_deref().map_or(&[][..], Vec::as_slice);
+        let text = response_text(vm, &response, bytes)?;
+        let loaded = bytes.len();
         let total = content_length(&response);
-        context.budget(vm, None, response_size(&response))?;
+        let xml = body.and_then(|body| context.xml_source(&response, body));
+        context.budget(
+            vm,
+            None,
+            response_size(&response) + xml.as_ref().map_or(0, xml_document::Source::size),
+        )?;
         vm.set_host_slot(xhr.clone(), TEXT_SLOT, text)?;
-        data.borrow_mut().response = Some(response);
-        context.success_events(vm, xhr, body.len(), total)?;
+        {
+            let mut data = data.borrow_mut();
+            data.response = Some(response);
+            data.xml = xml;
+        }
+        context.success_events(vm, xhr, loaded, total)?;
         Ok(Value::Undefined)
     })?;
     let context = host.clone();
@@ -445,7 +471,9 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             let mut data = data.borrow_mut();
             data.ready = Ready::Unsent;
             data.response = None;
-            vm.set_host_slot(xhr, TEXT_SLOT, "".into())?;
+            data.xml = None;
+            vm.set_host_slot(xhr.clone(), TEXT_SLOT, "".into())?;
+            vm.set_host_slot(xhr, XML_SLOT, Value::Undefined)?;
         }
         Ok(Value::Undefined)
     })?;
@@ -531,6 +559,34 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             })
         })?;
     }
+    let context = host.clone();
+    getter(vm, prototype.clone(), "responseXML", move |vm, xhr, _| {
+        let data = receiver(vm, &xhr)?;
+        if data.borrow().ready != Ready::Done {
+            return Ok(Value::Null);
+        }
+        if let Some(cached) = vm
+            .host_slot(&xhr, XML_SLOT)
+            .filter(|value| !value.is_undefined())
+        {
+            return Ok(cached);
+        }
+        let source = data.borrow_mut().xml.take();
+        let value = if let Some(source) = source {
+            let data = data.borrow();
+            let url = data
+                .response
+                .as_ref()
+                .expect("XML has response metadata")
+                .url
+                .as_str();
+            context.xml.parse(vm, &source, url)?
+        } else {
+            Value::Null
+        };
+        vm.set_host_slot(xhr, XML_SLOT, value.clone())?;
+        Ok(value)
+    })?;
     for (name, state) in [
         ("UNSENT", Ready::Unsent),
         ("OPENED", Ready::Opened),
