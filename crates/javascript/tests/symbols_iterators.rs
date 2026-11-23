@@ -68,6 +68,41 @@ fn custom_has_instance_tags_and_symbol_throws_are_observable() {
 }
 
 #[test]
+fn math_tag_is_a_configurable_own_symbol_property() {
+    yes(r#"
+        var key = Symbol.toStringTag;
+        var tag = Object.getOwnPropertyDescriptor(Math, key);
+        tag.value === 'Math' && !tag.writable && !tag.enumerable && tag.configurable &&
+            String(Math) === '[object Math]' &&
+            delete Math[key] && String(Math) === '[object Object]'
+    "#);
+}
+
+#[test]
+fn to_string_uses_the_symbol_tag_of_a_boxed_receiver() {
+    yes(r#"
+        var key = Symbol.toStringTag, symbol = Symbol('example'), boxed = Object(symbol);
+        var toString = Object.prototype.toString;
+        var before = toString.call(symbol) === '[object Symbol]' &&
+            toString.call(boxed) === '[object Symbol]';
+        delete Symbol.prototype[key];
+        var after = toString.call(symbol) === '[object Object]' &&
+            toString.call(boxed) === '[object Object]';
+        var receivers = [];
+        Object.defineProperty(Symbol.prototype, key, {
+            get: function () {
+                'use strict';
+                receivers.push(this);
+                return this.valueOf() === symbol ? 'Tagged' : undefined;
+            }
+        });
+        before && after && toString.call(symbol) === '[object Tagged]' &&
+            toString.call(boxed) === '[object Tagged]' &&
+            typeof receivers[0] === 'object' && receivers[0] !== boxed && receivers[1] === boxed
+    "#);
+}
+
+#[test]
 fn native_symbol_api_and_lone_surrogates_survive_gc() {
     let mut vm = Vm::new();
     let symbol = vm

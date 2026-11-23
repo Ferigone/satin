@@ -26,6 +26,15 @@ pub(crate) fn install(vm: &mut Vm) {
     install_math(vm);
     install_errors(vm);
     crate::symbol::install(vm);
+    vm.define_data_property_key(
+        vm.get_global("Math").unwrap(),
+        vm.well_known_key("toStringTag"),
+        Value::from("Math"),
+        false,
+        false,
+        true,
+    )
+    .unwrap();
     crate::bigint::install(vm);
     crate::date::install(vm);
     crate::regexp::install(vm);
@@ -127,9 +136,8 @@ fn install_object(vm: &mut Vm) {
             Value::Null => "Null",
             Value::String(_) => "String",
             Value::Number(_) => "Number",
-            Value::BigInt(_) => "Object",
+            Value::BigInt(_) | Value::Symbol(_) => "Object",
             Value::Bool(_) => "Boolean",
-            Value::Symbol(_) => "Symbol",
             Value::Object(id) => match &vm.heap.object(*id)?.kind {
                 ObjectKind::Array { .. } => "Array",
                 ObjectKind::Function { .. }
@@ -139,7 +147,6 @@ fn install_object(vm: &mut Vm) {
                 ObjectKind::Boxed(Value::String(_)) => "String",
                 ObjectKind::Boxed(Value::Number(_)) => "Number",
                 ObjectKind::Boxed(Value::Bool(_)) => "Boolean",
-                ObjectKind::Boxed(Value::Symbol(_)) => "Symbol",
                 ObjectKind::RegExp(_) => "RegExp",
                 ObjectKind::Date(_) => "Date",
                 ObjectKind::Error(_) => "Error",
@@ -147,7 +154,8 @@ fn install_object(vm: &mut Vm) {
             },
         };
         let tag = if !this.is_nullish() && vm.well_known_symbol("toStringTag").is_some() {
-            match vm.get_property_key(this, vm.well_known_key("toStringTag"))? {
+            let receiver = vm.coerce_object(this)?;
+            match vm.get_property_key(receiver, vm.well_known_key("toStringTag"))? {
                 Value::String(tag) => tag,
                 _ => tag.into(),
             }
