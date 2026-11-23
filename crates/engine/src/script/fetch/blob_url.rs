@@ -25,7 +25,7 @@ pub(super) fn queue(vm: &mut Vm, state: &Shared, id: u64) -> Result<(), JsError>
             .get_mut(&id)
             .and_then(|pending| pending.blob.take());
         if let Some(result) = result {
-            FetchHost { state }.complete_response(vm, id, result)?;
+            FetchHost { state, xhr: None }.complete_response(vm, id, result)?;
         }
         Ok(Value::Undefined)
     });
