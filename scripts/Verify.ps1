@@ -104,12 +104,26 @@ $forms = $formsRun.Stdout | ConvertFrom-Json
 if ($forms.title -ne 'Formularz: OK' -or $forms.javascript.diagnostics.Count -ne 0 -or $forms.javascript.pending_requests -ne 0) { throw 'The forms, Promise.all, and JSON check failed.' }
 $media = Invoke-SatinMediaSmoke -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'media profile') -OutputDirectory $qaDirectory -LogDirectory $logs
 $streaming = Invoke-SatinMediaSmoke -Segmented -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'streaming profile') -OutputDirectory $qaDirectory -LogDirectory $logs
+foreach ($playback in @($media, $streaming)) {
+    foreach ($playbackResult in @($playback.headless, $playback.native)) {
+        $decoded = @($playbackResult.media | Where-Object {
+            $_.current_time -gt 0 -and $_.ready_state -ge 2 -and $_.video_width -gt 0 -and
+            $_.video_height -gt 0 -and $_.decoded_frames -gt 0 -and $_.has_audio
+        })
+        if ($decoded.Count -eq 0) {
+            throw "The demo $($playbackResult.url) did not report advancing video, decoded frames, and an audio track."
+        }
+    }
+}
+$workerDom = Join-Path $qaDirectory 'workers.html'
 $workerHeadless = Invoke-BrowserProcess -Executable $binary -LogDirectory $logs -Arguments @(
-    '--headless', '--url', 'about:workers', '--click-id', 'worker-run', '--run-for-ms', '2000'
+    '--headless', '--url', 'about:workers', '--click-id', 'worker-run', '--run-for-ms', '2000',
+    '--dump-dom', $workerDom, '--profile', (Join-Path $qaDirectory 'headless worker profile')
 )
 if ($workerHeadless.ExitCode -ne 0) { throw $workerHeadless.Stderr }
 $worker = $workerHeadless.Stdout | ConvertFrom-Json
-if ($worker.title -cne 'Satin Worker OK' -or $worker.javascript.diagnostics.Count -ne 0) {
+if ($worker.title -cne 'Satin Worker OK' -or $worker.javascript.diagnostics.Count -ne 0 -or
+    (Get-Content -LiteralPath $workerDom -Raw -Encoding UTF8) -notmatch '<p\b(?=[^>]*\bid="worker-status")(?=[^>]*\bdata-result="passed")') {
     throw 'The headless Worker and WebAssembly check failed.'
 }
 $workerActions = Join-Path $qaDirectory 'worker-actions.json'

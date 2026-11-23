@@ -19,7 +19,7 @@ From the repository root, build and verify the Windows release.
 
 The desktop checks exercise local navigation, script events, forms, and real MP4 playback. They navigate to a relative HTML path with an encoded space using `location.assign()` in headless mode and a regular link in a native window. Both verify that the destination runs its own script. The verifier also checks `about:media` and `about:streaming` in both modes. The streaming example advances its video clock before appending the final audio and video fragments. It uses a generated motion pattern and a sine tone. Results and screenshots go under `target`.
 
-The headless and desktop smoke reports include playback time, readiness, video dimensions, decoded frame count, and audio-track detection for each active media element.
+The headless and desktop smoke checks require positive playback time, a decoded frame, valid video dimensions, playback readiness, and an audio track. Audio-track detection is not an audible-output check. The smoke reports include playback counters for each active media element.
 
 The verifier also clicks the test button on `about:workers` in both modes. The page transfers a typed-array backing buffer to a classic Blob worker and checks that ownership moved. The worker changes one byte, executes an authored WebAssembly module, and sends the modified view and numeric result back to the page.
 
