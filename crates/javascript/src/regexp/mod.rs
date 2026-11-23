@@ -3,6 +3,7 @@ mod case;
 mod operations;
 mod pattern;
 mod program;
+mod property;
 mod runtime;
 
 use crate::{ErrorKind, JsError, JsString};

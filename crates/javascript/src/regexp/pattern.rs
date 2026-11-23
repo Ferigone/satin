@@ -1,4 +1,8 @@
-use super::{Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit, syntax, unsupported};
+use super::{
+    Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit,
+    property::{self, Property},
+    syntax,
+};
 use crate::{JsError, JsString};
 use std::ops::Range;
 
@@ -14,6 +18,7 @@ pub(super) enum Member {
     Point(u32),
     Range(u32, u32),
     Shorthand(Shorthand, bool),
+    Property(Property, bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +84,7 @@ struct Parser<'a> {
     total_captures: usize,
     next_capture: usize,
     has_named: bool,
+    uses_unsupported_property: bool,
     names: Vec<Named>,
     references: Vec<JsString>,
     disjunctions: usize,
@@ -115,6 +121,7 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
         total_captures,
         next_capture: 0,
         has_named,
+        uses_unsupported_property: false,
         names: Vec::new(),
         references: Vec::new(),
         disjunctions: 0,
@@ -128,6 +135,9 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
         if !parser.names.iter().any(|named| named.name == *name) {
             return Err(syntax("Unknown regular expression capture name"));
         }
+    }
+    if parser.uses_unsupported_property {
+        return Err(property::unsupported_escape());
     }
     Ok(Pattern {
         body,
@@ -673,9 +683,7 @@ impl Parser<'_> {
                 self.references.push(name.clone());
                 Ok(Escape::Name(name))
             }
-            Some(b'p' | b'P') if unicode => {
-                Err(unsupported("Unicode property escapes are unsupported"))
-            }
+            Some(ch @ (b'p' | b'P')) if unicode => self.property_escape(ch == b'P'),
             Some(b'0'..=b'9') => {
                 self.at = start;
                 self.numeric_escape(inside_class)
@@ -688,6 +696,29 @@ impl Parser<'_> {
             _ if !unicode => character(point),
             _ => Err(syntax("Invalid regular expression identity escape")),
         }
+    }
+
+    fn property_escape(&mut self, negated: bool) -> Result<Escape, JsError> {
+        if !self.eat(b'{') {
+            return Err(syntax("Expected '{' in Unicode property escape"));
+        }
+        let start = self.at;
+        while matches!(
+            self.byte(),
+            Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'=')
+        ) {
+            self.at += 1;
+        }
+        let end = self.at;
+        if !self.eat(b'}') {
+            return Err(syntax("Invalid Unicode property escape"));
+        }
+        let property = property::resolve(&self.units[start..end])
+            .ok_or_else(|| syntax("Invalid Unicode property escape"))?;
+        // Defer UnsupportedFeature until after checking the whole pattern,
+        // so a property that cannot be matched is still a class for syntax.
+        self.uses_unsupported_property |= property == Property::Unsupported;
+        Ok(Escape::Character(Member::Property(property, negated)))
     }
 
     fn numeric_escape(&mut self, inside_class: bool) -> Result<Escape, JsError> {

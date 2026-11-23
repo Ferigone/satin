@@ -467,7 +467,7 @@ impl Matcher<'_> {
             let success = match op {
                 Op::Match => return Ok(true),
                 Op::Character(member, flags) => {
-                    self.read(*flags, |ch| Ok(member_matches(*member, ch, *flags)))?
+                    self.read(*flags, |ch| member_matches(vm, *member, ch, *flags))?
                 }
                 Op::Class(..) => self.read_class(vm, op)?,
                 Op::Any(flags) => self.read(*flags, |ch| {
@@ -637,7 +637,7 @@ impl Matcher<'_> {
             }
             for member in members {
                 vm.consume_work(1)?;
-                if member_matches(*member, ch, *flags) {
+                if member_matches(vm, *member, ch, *flags)? {
                     return Ok(!*negative);
                 }
             }
@@ -683,7 +683,7 @@ impl Matcher<'_> {
             else {
                 return Ok(false);
             };
-            if !member_matches(Member::Point(expected), actual, flags) {
+            if !member_matches(vm, Member::Point(expected), actual, flags)? {
                 return Ok(false);
             }
             from = next;
@@ -872,7 +872,7 @@ fn word(ch: u32, flags: Flags) -> bool {
             && case::equivalents(ch, true).any(ascii_word)
 }
 
-fn member_matches(member: Member, actual: u32, flags: Flags) -> bool {
+fn member_matches(vm: &mut Vm, member: Member, actual: u32, flags: Flags) -> Result<bool, JsError> {
     let (first, last) = match member {
         Member::Point(point) => (point, point),
         Member::Range(first, last) => (first, last),
@@ -882,11 +882,27 @@ fn member_matches(member: Member, actual: u32, flags: Flags) -> bool {
                 Shorthand::Space => space(actual),
                 Shorthand::Word => word(actual, flags),
             };
-            return matches != negated;
+            return Ok(matches != negated);
+        }
+        Member::Property(property, negated) => {
+            // In u mode, apply the property's complement before case folding.
+            vm.consume_work(1)?;
+            if property.contains(actual)? != negated {
+                return Ok(true);
+            }
+            if flags.has(Flags::IGNORE_CASE) {
+                for equivalent in case::equivalents(actual, true) {
+                    vm.consume_work(1)?;
+                    if property.contains(equivalent)? != negated {
+                        return Ok(true);
+                    }
+                }
+            }
+            return Ok(false);
         }
     };
-    (first..=last).contains(&actual)
+    Ok((first..=last).contains(&actual)
         || flags.has(Flags::IGNORE_CASE)
             && case::equivalents(actual, flags.unicode())
-                .any(|point| (first..=last).contains(&point))
+                .any(|point| (first..=last).contains(&point)))
 }

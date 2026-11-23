@@ -100,7 +100,7 @@ Patterns support alternation, greedy and lazy quantifiers, character classes and
 
 The VM honors overridden `exec`, `Symbol.match`, `Symbol.matchAll`, `Symbol.search`, `Symbol.replace`, `Symbol.split`, and species constructors. String methods include matching, lazy `matchAll`, search, split with captures, and string or callback replacements. RegExp string iterators retain a traced matcher and the input until they finish. `RegExp.escape`, source formatting, and the browser compatibility method `compile` are available.
 
-The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. Unicode property escapes and the `v` flag currently raise `UnsupportedFeature`. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
+The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. In `u` mode, the matcher supports the Unicode 17.0.0 `Hex_Digit`, `ASCII_Hex_Digit`, and `Soft_Dotted` property escapes and their aliases. Malformed Unicode property escapes are syntax errors; valid escapes for other properties and the `v` flag still raise `UnsupportedFeature`. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
 
 ## Keyed collections
 
