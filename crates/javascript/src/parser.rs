@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 // can have different depths (e.g. a flat left-associative operator chain). Keep
 // both bounded before an unsafe-to-drop tree can be constructed. The limits are
 // verified together with compilation and destruction on a 1 MiB native stack.
-const MAX_PARSER_DEPTH: usize = 32;
+const MAX_PARSER_DEPTH: usize = 24;
 const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
@@ -721,6 +721,14 @@ impl Parser {
     }
 
     fn controlled_statement(&mut self) -> Result<Stmt, JsError> {
+        if self.eat("{") {
+            // The controlling statement already occupies a parser frame.
+            // Parse its braced body directly instead of reentering the
+            // statement dispatcher; child statements and the AST stay bounded.
+            let body = Stmt::Block(self.block_contents()?);
+            self.check_ast(Ast::Statement(&body))?;
+            return Ok(body);
+        }
         let statement = self.statement()?;
         if matches!(&statement, Stmt::Label(_, _, item) if matches!(**item, Stmt::Function(_))) {
             return Err(self.error("Labelled function in a controlled statement"));

@@ -60,10 +60,8 @@ fn ordinary_grammar_compile_execute_and_drop_on_one_mib_stack() {
 }
 
 #[test]
-fn nested_blocks_leave_room_for_ordinary_expression_recursion() {
+fn standalone_blocks_still_charge_parser_recursion() {
     small_stack(|| {
-        // A function defined in a bundle's initializer can already have several
-        // enclosing statements before parsing a call with nested arguments.
         let source = format!(
             "function bump(x){{return x+1;}} let result; {}result = {}0{};{} result;",
             "{".repeat(17),
@@ -71,9 +69,9 @@ fn nested_blocks_leave_room_for_ordinary_expression_recursion() {
             ")".repeat(10),
             "}".repeat(17),
         );
-        let mut vm = Vm::new();
-        vm.check_syntax(&source).unwrap();
-        assert_eq!(vm.eval(&source).unwrap(), Value::Number(10.0));
+        let error = Vm::new().check_syntax(&source).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+        assert_eq!(error.message, "Expression nesting limit exceeded");
     });
 }
 
@@ -148,6 +146,36 @@ fn recursive_calls_functions_and_classes_stay_bounded_on_one_mib_stack() {
             assert_eq!(error.kind, ErrorKind::ExecutionLimit, "{name}: {error}");
         }
         assert_eq!(vm.eval("2 + 3").unwrap(), Value::Number(5.0));
+    });
+}
+
+#[test]
+fn braced_controls_still_have_grammar_and_ast_limits_on_one_mib_stack() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        let recursive = format!("{};{}", "while(false){".repeat(128), "}".repeat(128));
+        let error = vm.check_syntax(&recursive).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+        assert_eq!(error.message, "Expression nesting limit exceeded");
+
+        // The flat expression fits its own AST and grammar budgets. Its
+        // enclosing if/block pairs still contribute two AST levels each.
+        for (terms, fits) in [(24, true), (40, false)] {
+            let source = format!(
+                "{}{}1;{}",
+                "if(false){".repeat(16),
+                "1+".repeat(terms - 1),
+                "}".repeat(16)
+            );
+            if fits {
+                vm.check_syntax(&source).unwrap();
+                vm.eval(&source).unwrap();
+            } else {
+                let error = vm.check_syntax(&source).unwrap_err();
+                assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+                assert_eq!(error.message, "AST nesting limit exceeded");
+            }
+        }
     });
 }
 
