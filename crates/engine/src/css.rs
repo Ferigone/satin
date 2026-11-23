@@ -507,6 +507,36 @@ pub struct Rule {
     pub specificity: u32,
 }
 
+// A raw newline ends a bad-string token; the caller resumes at that newline.
+// Treat CRLF and FF as CSS newlines without changing the stored source text.
+fn quoted_end(bytes: &[u8], open: usize) -> Result<usize, usize> {
+    let quote = bytes[open];
+    let mut i = open + 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b if b == quote => return Ok(i + 1),
+            b'\n' | b'\r' | b'\x0c' => return Err(i),
+            b'\\' => {
+                i += 1;
+                let start = i;
+                while i - start < 6 && bytes.get(i).is_some_and(u8::is_ascii_hexdigit) {
+                    i += 1;
+                }
+                // A newline can be escaped directly or consumed as the
+                // optional whitespace at the end of a hexadecimal escape.
+                i += match bytes.get(i) {
+                    Some(b'\r') if bytes.get(i + 1) == Some(&b'\n') => 2,
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => 1,
+                    Some(_) if i == start => 1,
+                    _ => 0,
+                };
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(i)
+}
+
 // Comments separate CSS tokens without creating a whitespace token. The private
 // NUL boundary preserves that difference until a grammar consumes the tokens.
 // Raw NUL input is normalized to U+FFFD, so it cannot impersonate a boundary.
@@ -515,7 +545,6 @@ fn without_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let bytes = source.as_bytes();
     let mut i = 0;
-    let mut quote = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'\\' {
@@ -528,17 +557,14 @@ fn without_comments(source: &str) -> String {
                 out.push(if c == '\0' { '\u{fffd}' } else { c });
                 i += c.len_utf8();
             }
-        } else if quote != 0 {
-            let c = source[i..].chars().next().unwrap();
-            out.push(if c == '\0' { '\u{fffd}' } else { c });
-            i += c.len_utf8();
-            if b == quote {
-                quote = 0;
-            }
         } else if matches!(b, b'\'' | b'"') {
-            quote = b;
-            out.push(b as char);
-            i += 1;
+            let end = quoted_end(bytes, i).unwrap_or_else(|newline| newline);
+            out.extend(
+                source[i..end]
+                    .chars()
+                    .map(|c| if c == '\0' { '\u{fffd}' } else { c }),
+            );
+            i = end;
         } else if bytes[i..].starts_with(b"/*") {
             i = source[i + 2..]
                 .find("*/")
@@ -561,33 +587,47 @@ fn serialized_tokens(source: &str) -> String {
     source.replace('\0', "/**/")
 }
 
-/// Indices of a separator at the top level of a CSS component value list.
-fn separators(source: &str, separator: u8) -> Vec<usize> {
+enum CssByte {
+    Unquoted(u8),
+    BadString,
+}
+
+fn structural_bytes(source: &str) -> impl Iterator<Item = (usize, CssByte)> + '_ {
     let bytes = source.as_bytes();
-    let (mut quote, mut escaped, mut round, mut square, mut curly) = (0, false, 0u32, 0u32, 0u32);
-    let mut result = vec![];
-    for (i, &b) in bytes.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while let Some(&b) = bytes.get(i) {
+            let start = i;
+            match b {
+                b'\\' => i += 2,
+                b'\'' | b'"' => match quoted_end(bytes, start) {
+                    Ok(end) => i = end,
+                    Err(newline) => {
+                        i = newline;
+                        return Some((start, CssByte::BadString));
+                    }
+                },
+                _ => {
+                    i += 1;
+                    return Some((start, CssByte::Unquoted(b)));
+                }
             }
-            continue;
         }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
-        if round == 0 && square == 0 && curly == 0 && b == separator {
-            result.push(i);
-        }
+        None
+    })
+}
+
+/// Top-level separators and bad strings (including within simple blocks).
+fn component_boundaries(
+    source: &str,
+    separator: u8,
+) -> impl Iterator<Item = (usize, CssByte)> + '_ {
+    let (mut round, mut square, mut curly) = (0u32, 0u32, 0u32);
+    structural_bytes(source).filter(move |(_, token)| {
+        let CssByte::Unquoted(b) = *token else {
+            return true;
+        };
+        let is_separator = round == 0 && square == 0 && curly == 0 && b == separator;
         match b {
             b'(' => round += 1,
             b')' => round = round.saturating_sub(1),
@@ -597,8 +637,15 @@ fn separators(source: &str, separator: u8) -> Vec<usize> {
             b'}' => curly = curly.saturating_sub(1),
             _ => {}
         }
-    }
-    result
+        is_separator
+    })
+}
+
+/// Indices of a separator at the top level of a CSS component value list.
+fn separators(source: &str, separator: u8) -> Vec<usize> {
+    component_boundaries(source, separator)
+        .filter_map(|(i, token)| matches!(token, CssByte::Unquoted(_)).then_some(i))
+        .collect()
 }
 fn split_top(source: &str, separator: u8) -> Vec<&str> {
     let mut result = vec![];
@@ -611,32 +658,17 @@ fn split_top(source: &str, separator: u8) -> Vec<&str> {
     result
 }
 fn matching_close(source: &str, open: usize, left: u8, right: u8) -> Option<usize> {
-    let (mut quote, mut escaped, mut depth) = (0, false, 0u32);
-    for (i, &b) in source.as_bytes().iter().enumerate().skip(open) {
-        if escaped {
-            escaped = false;
+    let mut depth = 0u32;
+    for (i, token) in structural_bytes(source.get(open..)?) {
+        let CssByte::Unquoted(b) = token else {
             continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
-            }
-            continue;
-        }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
+        };
         if b == left {
             depth += 1;
         } else if b == right {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
-                return Some(i);
+                return Some(open + i);
             }
         }
     }
@@ -1181,26 +1213,11 @@ fn media_allows(source: &str, width: f32) -> bool {
     })
 }
 fn first_top_delimiter(source: &str, delimiters: &[u8]) -> Option<(usize, u8)> {
-    let (mut quote, mut escaped, mut round, mut square) = (0, false, 0u32, 0u32);
-    for (i, &b) in source.as_bytes().iter().enumerate() {
-        if escaped {
-            escaped = false;
+    let (mut round, mut square) = (0u32, 0u32);
+    for (i, token) in structural_bytes(source) {
+        let CssByte::Unquoted(b) = token else {
             continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
-            }
-            continue;
-        }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
+        };
         if round == 0 && square == 0 && delimiters.contains(&b) {
             return Some((i, b));
         }
@@ -1219,9 +1236,21 @@ pub fn declarations(source: &str) -> Vec<Declaration> {
     clean_declarations(&clean)
 }
 fn clean_declarations(source: &str) -> Vec<Declaration> {
-    split_top(source, b';')
-        .into_iter()
-        .filter_map(|s| {
+    let mut start = 0;
+    let mut bad_string = false;
+    component_boundaries(source, b';')
+        .chain(std::iter::once((source.len(), CssByte::Unquoted(b';'))))
+        .filter_map(|(end, token)| {
+            if matches!(token, CssByte::BadString) {
+                // Discard the declaration at its boundary, not the rest of the list.
+                bad_string = true;
+                return None;
+            }
+            let s = source[start..end].trim();
+            start = end + 1;
+            if std::mem::take(&mut bad_string) {
+                return None;
+            }
             let colon = separators(s, b':').into_iter().next()?;
             let raw_name = trim_boundary(&s[..colon]);
             if raw_name.is_empty()

@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS bad-string declaration recovery (local reduction)</title>
+<style>
+  #controls {
+    /* A comment can contain }; but has no structural effect. */
+    font-family: "literal/* not a comment */;escaped\";tail", serif;
+    unknown: fn(a;b);
+    width: 31px;
+    invalid declaration;
+    height: 17px;
+    height /**/ : /**/ 19px;
+    hei/**/ght: 23px;
+  }
+  #broken { width: 29px; --broken: "bad
+    /* ; width: 13px; } */ ; width: 41px;
+  }
+  #later { width: 43px; }
+</style>
+<div id="controls"></div>
+<div id="broken"></div>
+<div id="later"></div>
+<div id="inline" style='width: 37px; --broken: "bad
+  /* ; width: 11px; } */ ; width: 47px'></div>
+<pre id="result"></pre>
+<script>
+  function width(id) {
+    return document.getElementById(id).getBoundingClientRect().width;
+  }
+  var result = JSON.stringify({
+    controls: width("controls"),
+    controlHeight: document.getElementById("controls").getBoundingClientRect().height,
+    sheet: width("broken"),
+    later: width("later"),
+    inline: width("inline")
+  });
+  document.getElementById("result").textContent = result;
+  console.log("CSS_BAD_STRING_RECOVERY " + result);
+</script>

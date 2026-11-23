@@ -52,6 +52,50 @@ fn lexical_boundaries_and_at_rule_recovery() {
     assert!(!d[1].important);
     assert!(!d[2].important);
 }
+
+#[test]
+fn css_bad_string_drops_one_declaration_and_preserves_following_rules() {
+    for newline in ["\n", "\r", "\r\n", "\x0c"] {
+        let body = format!(
+            "width:29px; --broken:\"bad{newline}/* ; width:13px; }} */;\
+             --nested:fn('bad{newline};still-nested); height:19px; width:41px"
+        );
+        let declarations = css::declarations(&body);
+        let pairs: Vec<_> = declarations
+            .iter()
+            .map(|d| (d.name.as_str(), d.value.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [("width", "29px"), ("height", "19px"), ("width", "41px")],
+            "{newline:?}"
+        );
+
+        let sheet = format!("#broken {{{body}}} #later {{width:43px}}");
+        let rules = css::parse(&sheet, 800.);
+        assert_eq!(rules.len(), 2, "{newline:?}");
+        assert_eq!(rules[0].declarations.len(), 3);
+        assert_eq!(rules[1].selector, "#later");
+        let (doc, computed) = styles("<div id=broken></div><div id=later></div>", &sheet);
+        assert_eq!(computed[by_id(&doc, "broken").0].width, Length::Px(41.));
+        assert_eq!(computed[by_id(&doc, "later").0].width, Length::Px(43.));
+    }
+}
+
+#[test]
+fn css_bad_string_recovery_does_not_treat_escaped_newlines_as_bad() {
+    for newline in ["\n", "\r", "\r\n", "\x0c"] {
+        for escape in ["\\", "\\61"] {
+            let value = format!("\"a{escape}{newline}/* literal */;z\"");
+            let source = format!("--keep:{value}; width:31px");
+            let declarations = css::declarations(&source);
+            assert_eq!(declarations.len(), 2, "{source:?}");
+            assert_eq!(declarations[0].value, value);
+            assert_eq!(declarations[1].name, "width");
+        }
+    }
+}
+
 #[test]
 fn longhand_cascade_is_independent_of_shorthand_priority() {
     let (d, s) = styles(
