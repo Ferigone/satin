@@ -208,3 +208,49 @@ fn late_completion_does_not_finish_a_new_append_after_abort() {
         Some(true)
     );
 }
+
+#[test]
+fn media_waiting_drops_readiness_and_recovery_does_not_repeat_loadeddata() {
+    let (mut runtime, key) = attached_source();
+    runtime
+        .eval(
+            r#"
+        for (const name of ["loadeddata", "canplay", "waiting", "playing"]) {
+          player.addEventListener(name, () => events.push(name + ":" + player.readyState));
+        }
+        player.play();
+    "#,
+        )
+        .unwrap();
+    runtime.update_media(
+        key,
+        MediaUpdate::Metadata {
+            width: 160,
+            height: 90,
+            duration: f64::INFINITY,
+            has_audio: true,
+        },
+    );
+    for update in [
+        MediaUpdate::Ready,
+        MediaUpdate::Playing,
+        MediaUpdate::Waiting,
+        MediaUpdate::Ready,
+        MediaUpdate::Playing,
+        MediaUpdate::Ready,
+        MediaUpdate::Waiting,
+        MediaUpdate::Playing,
+        MediaUpdate::Ready,
+    ] {
+        runtime.update_media(key, update);
+    }
+    assert_eq!(
+        runtime
+            .eval(
+                r#"events.join(",") === "sourceopen,loadeddata:4,canplay:4,playing:4,waiting:2,canplay:4,playing:4,waiting:2,canplay:4,playing:4""#,
+            )
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+}

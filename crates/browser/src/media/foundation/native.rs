@@ -362,7 +362,8 @@ impl Player {
                 capture = true;
                 EventKind::Ready
             }
-            Signal::Loaded => return Ok(()),
+            // Windows can report CANPLAY again after an open stream refills.
+            Signal::Loaded => EventKind::Ready,
             Signal::FirstFrame => {
                 if let Some(frame) = self
                     .frame(true, output, key)
