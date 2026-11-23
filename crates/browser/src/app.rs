@@ -48,6 +48,7 @@ mod settings;
 mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
 use self::bookmark_menu::Menu;
+use crate::testing::{Checkpoint, CheckpointDocument, CheckpointOutputs, SmokeAction};
 use navigation_error::Recovery;
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
@@ -288,6 +289,9 @@ pub fn run(
             .transpose()?
             .unwrap_or_default(),
         smoke_wait_deadline: None,
+        smoke_checkpoint_document: None,
+        smoke_checkpoint_last: None,
+        smoke_checkpoint_outputs: CheckpointOutputs::default(),
         file_picker_responses,
         smoke_result: None,
         presented_frames: 0,
@@ -299,9 +303,7 @@ pub fn run(
             .take()
             .ok_or("Window check did not finish")??;
         let tab = &app.tabs[app.active];
-        println!(
-            "{}",
-            serde_json::json!({
+        let mut summary = serde_json::json!({
                 "window_smoke": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "frames_presented": app.presented_frames,
@@ -313,8 +315,12 @@ pub fn run(
                 "javascript": {
                     "diagnostics": tab.runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()
                 }
-            })
-        );
+        });
+        if let Some(checkpoints) = app.smoke_checkpoint_outputs.summary() {
+            summary["checkpoints"] = checkpoints;
+        }
+        println!("{summary}");
+        app.smoke_checkpoint_outputs.commit();
     }
     Ok(())
 }
@@ -325,6 +331,9 @@ struct App {
     smoke_click: Option<String>,
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
     smoke_wait_deadline: Option<Instant>,
+    smoke_checkpoint_document: Option<CheckpointDocument>,
+    smoke_checkpoint_last: Option<Checkpoint>,
+    smoke_checkpoint_outputs: CheckpointOutputs,
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_result: Option<Result<(), String>>,
     presented_frames: u64,
@@ -2036,10 +2045,136 @@ impl App {
         }
     }
 
-    fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) {
-        use crate::testing::SmokeAction;
+    fn checkpoint_document(&self) -> CheckpointDocument {
+        let tab = &self.tabs[self.active];
+        CheckpointDocument {
+            tab_id: tab.id,
+            document_navigation: tab.document_navigation,
+        }
+    }
 
+    fn checkpoint_matches(&self, checkpoint: &Checkpoint) -> Result<bool, String> {
+        let tab = &self.tabs[self.active];
+        let (Some(page), Some(layout)) = (&tab.page, &tab.layout) else {
+            return Err(checkpoint.error("no current document layout"));
+        };
+        if tab.recovery.is_error_page()
+            || page.document.truncated
+            || layout.limited
+            || tab
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| !runtime.layout_is_current(layout))
+        {
+            return Err(checkpoint.error("document or layout is incomplete"));
+        }
+        checkpoint.matches(&page.document, layout, self.tab_viewport(self.active))
+    }
+
+    fn arm_smoke_checkpoint(&mut self) -> Result<(), String> {
+        if !matches!(self.smoke_actions.get(1), Some(SmokeAction::Checkpoint(_))) {
+            return Ok(());
+        }
+        self.sync_runtime(self.active);
+        self.ensure_layout();
+        let Some(SmokeAction::Checkpoint(checkpoint)) = self.smoke_actions.get(1) else {
+            unreachable!("refresh does not modify the smoke queue");
+        };
+        let identity = self.checkpoint_document();
+        if let Some(expected) = self.smoke_checkpoint_document {
+            checkpoint.require_document(expected, identity)?;
+        }
+        checkpoint.require_unmet(self.checkpoint_matches(checkpoint)?)?;
+        self.smoke_checkpoint_document = Some(identity);
+        self.smoke_wait_deadline =
+            Some(Instant::now() + Duration::from_millis(checkpoint.timeout_ms));
+        Ok(())
+    }
+
+    fn finish_smoke_checkpoint(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.tabs[self.active].loading
+            && self.smoke_checkpoint_document == Some(self.checkpoint_document())
+            && self
+                .smoke_wait_deadline
+                .is_some_and(|deadline| Instant::now() < deadline)
+        {
+            self.sync_runtime(self.active);
+            self.ensure_layout();
+        }
+        let Some(SmokeAction::Checkpoint(checkpoint)) = self.smoke_actions.front() else {
+            unreachable!("only called for checkpoints");
+        };
+        let result = (|| {
+            let identity = self.checkpoint_document();
+            let expected = self
+                .smoke_checkpoint_document
+                .ok_or_else(|| checkpoint.error("checkpoint was not armed before input"))?;
+            checkpoint.require_document(expected, identity)?;
+            let deadline = self
+                .smoke_wait_deadline
+                .ok_or_else(|| checkpoint.error("checkpoint has no input deadline"))?;
+            if Instant::now() >= deadline {
+                return Err(checkpoint.error("timed out waiting for a layout hit with exact text"));
+            }
+            let tab = &self.tabs[self.active];
+            if tab.loading
+                || tab.document_session.as_ref().is_some_and(|session| {
+                    !session.done() || session.needs_advance(tab.runtime.as_ref())
+                })
+                || !self.checkpoint_matches(checkpoint)?
+            {
+                return Ok(Some(deadline));
+            }
+            if Instant::now() >= deadline {
+                return Err(checkpoint.error("timed out waiting for a layout hit with exact text"));
+            }
+            checkpoint.capture(
+                self.smoke_output
+                    .as_deref()
+                    .expect("native smoke is active"),
+                &mut self.smoke_checkpoint_outputs,
+                identity,
+                &tab.url,
+                &tab.title,
+                &tab.page
+                    .as_ref()
+                    .expect("checkpoint matched a page")
+                    .document,
+            )?;
+            Ok(None)
+        })();
+        match result {
+            Ok(None) => {
+                let Some(SmokeAction::Checkpoint(checkpoint)) = self.smoke_actions.pop_front()
+                else {
+                    unreachable!("completed a checkpoint");
+                };
+                self.smoke_checkpoint_last = Some(checkpoint);
+                self.smoke_wait_deadline = None;
+                event_loop.set_control_flow(ControlFlow::Poll);
+            }
+            Ok(Some(deadline)) => match event_loop.control_flow() {
+                ControlFlow::Wait => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                ControlFlow::WaitUntil(next) if deadline < next => {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                }
+                _ => {}
+            },
+            Err(error) => {
+                self.smoke_output = None;
+                self.smoke_result = Some(Err(error));
+                event_loop.set_control_flow(ControlFlow::Poll);
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) {
         if self.smoke_output.is_none() {
+            return;
+        }
+        if matches!(self.smoke_actions.front(), Some(SmokeAction::Checkpoint(_))) {
+            self.finish_smoke_checkpoint(event_loop);
             return;
         }
         let tab = &self.tabs[self.active];
@@ -2090,8 +2225,11 @@ impl App {
         {
             return;
         }
-        if let Some(action) = self.smoke_actions.pop_front() {
-            let result = self.smoke_action(action, event_loop);
+        if !self.smoke_actions.is_empty() {
+            let result = self.arm_smoke_checkpoint().and_then(|()| {
+                let action = self.smoke_actions.pop_front().expect("action is pending");
+                self.smoke_action(action, event_loop)
+            });
             if let Err(error) = result {
                 self.smoke_output = None;
                 self.smoke_result = Some(Err(error));
@@ -2118,6 +2256,15 @@ impl App {
         let path = self.smoke_output.take().unwrap();
         self.draw();
         let result = (|| -> Result<(), String> {
+            if let Some(checkpoint) = &self.smoke_checkpoint_last {
+                let expected = self
+                    .smoke_checkpoint_document
+                    .expect("a completed checkpoint has a document");
+                checkpoint.require_document(expected, self.checkpoint_document())?;
+                if !self.checkpoint_matches(checkpoint)? {
+                    return Err(checkpoint.error("condition no longer matched at final frame"));
+                }
+            }
             if let Some(error) = &self.last_present_error {
                 return Err(error.clone());
             }
@@ -2305,7 +2452,6 @@ impl App {
         action: crate::testing::SmokeAction,
         event_loop: &ActiveEventLoop,
     ) -> Result<(), String> {
-        use crate::testing::SmokeAction;
         match action {
             SmokeAction::Click { id } => self.smoke_target(&id),
             SmokeAction::ClickAt { x, y } => {
@@ -2334,7 +2480,9 @@ impl App {
                     Err(format!("Expected native title {value:?}, got {actual:?}"))
                 }
             }
-            SmokeAction::WaitTitle { .. } => unreachable!("the event loop handles pending titles"),
+            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) => {
+                unreachable!("the event loop handles waiting actions")
+            }
             SmokeAction::Key {
                 value,
                 control,

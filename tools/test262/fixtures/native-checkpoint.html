@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Native checkpoint fixture</title>
+<h1>Native checkpoint fixture</h1>
+<p>Only Start schedules completion. Show Results reveals the report after completion.</p>
+<button id="start">Start</button>
+<button id="results">Show Results</button>
+<button id="rollback">Show then hide Results</button>
+<button id="wrong">No handler</button>
+<button id="duplicate">Add ambiguous marker</button>
+<a id="reload" href="native-checkpoint.html">Reload</a>
+<div id="run-state"><span id="marker" class="status">Waiting</span><span id="second" hidden>Done</span></div>
+<div id="report" style="display:none">Observed: <span class="ran">2</span></div>
+<script>
+var done = false;
+document.getElementById('start').onclick = function () {
+    setTimeout(function () {
+        done = true;
+        document.getElementById('marker').textContent = 'Done';
+    }, 100);
+};
+function revealResults() {
+    if (done) document.getElementById('report').setAttribute('style', 'display:block');
+}
+document.getElementById('results').onclick = revealResults;
+document.getElementById('rollback').onclick = function () {
+    revealResults();
+    setTimeout(function () {
+        document.getElementById('report').setAttribute('style', 'display:none');
+        document.title = 'Fixture rolled back';
+    }, 250);
+};
+document.getElementById('duplicate').onclick = function () {
+    document.getElementById('marker').textContent = 'Done';
+    document.getElementById('second').setAttribute('class', 'status');
+};
+</script>
