@@ -22,6 +22,7 @@ use std::{
     ops::Range,
     rc::{Rc, Weak},
     sync::{Arc, Weak as ArcWeak},
+    time::Instant,
 };
 use url::Url;
 
@@ -978,6 +979,14 @@ impl FetchHost {
     }
     pub(super) fn has_queued_xhr_tasks(&self) -> bool {
         !self.state.borrow().ready_xhr.is_empty()
+    }
+
+    pub(super) fn xhr_deadline(&self) -> Option<Instant> {
+        self.xhr.as_ref().and_then(|xhr| xhr.next_timeout())
+    }
+
+    pub(super) fn has_ready_xhr_task(&self) -> bool {
+        self.has_queued_xhr_tasks() || self.xhr.as_ref().is_some_and(|xhr| xhr.has_due_timeout())
     }
 
     pub(super) fn run_next_xhr_task(&self, vm: &mut Vm) -> Result<(), JsError> {

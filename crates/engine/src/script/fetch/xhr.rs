@@ -1,6 +1,8 @@
 //! Window XMLHttpRequest text loading over the existing Fetch transport.
 mod async_load;
 mod progress_event;
+#[cfg(test)]
+mod timeout_tests;
 mod xml_document;
 
 use super::{Shared, byte_string, typed, usv};
@@ -41,6 +43,7 @@ enum Ready {
 struct Request {
     ready: Ready,
     synchronous: bool,
+    timeout_ms: u32,
     request: Option<WebRequest>,
     response: Option<WebResponse>,
     pending: Option<u64>,
@@ -78,9 +81,19 @@ pub(super) struct Host {
     progress_proto: Value,
     xml: xml_document::Host,
     live: RefCell<Vec<Weak<RefCell<Request>>>>,
+    #[cfg(test)]
+    test_now: std::cell::Cell<Option<Instant>>,
 }
 
 impl Host {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.test_now.get() {
+            return now;
+        }
+        Instant::now()
+    }
+
     fn exception(&self, vm: &mut Vm, name: &str, message: &str) -> JsError {
         abort::dom_exception_error(vm, self.exception.clone(), name, message)
             .unwrap_or_else(|error| error)
@@ -255,6 +268,8 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         progress_proto,
         xml,
         live: RefCell::default(),
+        #[cfg(test)]
+        test_now: Default::default(),
     });
     let prototype = vm.new_object_with_prototype(host.events.target_proto.clone())?;
     let intrinsic = prototype.clone();
@@ -315,17 +330,26 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         }
         let mut request = WebRequest::get(url, client);
         request.method = method;
-        let (state_changed, generation, pending) = {
+        let (state_changed, generation, pending, timeout_ms) = {
             let data = data.borrow();
             (
                 data.ready != Ready::Opened,
                 data.generation.wrapping_add(1),
                 data.pending,
+                data.timeout_ms,
             )
         };
+        if synchronous && timeout_ms != 0 {
+            return Err(context.exception(
+                vm,
+                "InvalidAccessError",
+                "Synchronous Window XMLHttpRequest cannot use an author timeout",
+            ));
+        }
         let replacement = Request {
             ready: Ready::Opened,
             synchronous,
+            timeout_ms,
             request: Some(request),
             generation,
             ..Request::default()
@@ -342,6 +366,42 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         }
         Ok(Value::Undefined)
     })?;
+    let get_timeout = vm.new_native_function("get timeout", |vm, xhr, _| {
+        Ok(receiver(vm, &xhr)?.borrow().timeout_ms.into())
+    });
+    let context = host.clone();
+    let set_timeout = vm.new_native_function("set timeout", move |vm, xhr, args| {
+        let data = receiver(vm, &xhr)?;
+        let number = vm.to_number(&arg(args, 0))?;
+        let timeout_ms = if number.is_finite() {
+            number.trunc().rem_euclid(4294967296.0) as u32
+        } else {
+            0
+        };
+        if data.borrow().synchronous {
+            return Err(context.exception(
+                vm,
+                "InvalidAccessError",
+                "Cannot set timeout on a synchronous Window XMLHttpRequest",
+            ));
+        }
+        let pending = {
+            let mut data = data.borrow_mut();
+            data.timeout_ms = timeout_ms;
+            data.pending
+        };
+        if let Some(id) = pending {
+            context.update_timeout(id, timeout_ms, context.now());
+        }
+        Ok(Value::Undefined)
+    });
+    vm.define_data_property(set_timeout.clone(), "length", 1.into(), false, false, true)?;
+    vm.define_accessor(
+        prototype.clone(),
+        "timeout",
+        Some(get_timeout),
+        Some(set_timeout),
+    )?;
     let context = host.clone();
     webidl::operation(
         vm,
@@ -595,6 +655,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         "progress",
         "abort",
         "error",
+        "timeout",
         "load",
         "loadend",
     ] {

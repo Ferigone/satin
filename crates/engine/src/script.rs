@@ -1255,6 +1255,7 @@ impl ScriptRuntime {
             .next_deadline(self.intersections.needs_update(&self.layout))
             .into_iter()
             .chain(state.canvases.bitmap_deadline())
+            .chain(self.fetch.xhr_deadline())
             .min()
     }
     pub fn set_foreground(&mut self, foreground: bool) {
@@ -1280,7 +1281,7 @@ impl ScriptRuntime {
         // These continuations are fetch tasks. Cap each pump's batch and
         // use the usual per-task checkpoint, not a reset inside a handler.
         for _ in 0..16 {
-            if !self.fetch.has_queued_xhr_tasks() {
+            if !self.fetch.has_ready_xhr_task() {
                 break;
             }
             self.network_task(fetch::FetchHost::run_next_xhr_task, false)?;

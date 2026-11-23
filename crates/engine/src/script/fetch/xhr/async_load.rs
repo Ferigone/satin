@@ -21,6 +21,7 @@ pub(in crate::script::fetch) struct Pending {
     pipe: Option<FetchBody>,
     buffered: Option<Arc<Vec<u8>>>,
     scheduled: Option<Task>,
+    author_timeout: AuthorTimeout,
     received: Vec<u8>,
     request_size: usize,
     last_progress: Option<Instant>,
@@ -39,6 +40,27 @@ enum Task {
     Read,
     End,
     Error,
+    Timeout,
+}
+
+#[derive(Default)]
+struct AuthorTimeout {
+    started: Option<Instant>,
+    deadline: Option<Instant>,
+}
+
+impl AuthorTimeout {
+    fn set(&mut self, millis: u32) {
+        self.deadline = self
+            .started
+            .filter(|_| millis != 0)
+            .and_then(|start| start.checked_add(Duration::from_millis(u64::from(millis))));
+    }
+
+    fn stop(&mut self) {
+        self.started = None;
+        self.deadline = None;
+    }
 }
 
 impl Host {
@@ -72,6 +94,7 @@ impl Host {
                     pipe: None,
                     buffered: None,
                     scheduled: None,
+                    author_timeout: Default::default(),
                     received: Vec::new(),
                     request_size,
                     last_progress: None,
@@ -88,6 +111,14 @@ impl Host {
             id
         };
         let result = self.fire_progress(vm, xhr, "loadstart", 0, 0);
+        if result.is_ok()
+            && let Some(pending) = self.fetch.borrow_mut().pending_xhr.get_mut(&id)
+        {
+            // loadstart is synchronous and can change timeout or replace this
+            // request. Measure the remaining request's fetch from here.
+            pending.author_timeout.started = Some(self.now());
+            pending.author_timeout.set(data.borrow().timeout_ms);
+        }
         self.cleanup_failed_delivery(vm, id, result)
     }
 
@@ -124,7 +155,75 @@ impl Host {
         }
     }
 
+    pub(super) fn update_timeout(&self, id: u64, millis: u32, now: Instant) {
+        // In particular, zero or extending the timeout cannot undo expiry
+        // that occurred before this setter ran. Neither path runs JS here.
+        if self.latch_timeout(id, now) {
+            return;
+        }
+        if let Some(pending) = self.fetch.borrow_mut().pending_xhr.get_mut(&id) {
+            pending.author_timeout.set(millis);
+        }
+        self.latch_timeout(id, now);
+    }
+
+    fn latch_timeout(&self, id: u64, now: Instant) -> bool {
+        let mut host = self.fetch.borrow_mut();
+        let Some(pending) = host.pending_xhr.get_mut(&id) else {
+            return false;
+        };
+        if matches!(pending.scheduled, Some(Task::Timeout)) {
+            return true;
+        }
+        if pending
+            .author_timeout
+            .deadline
+            .is_none_or(|deadline| deadline > now)
+        {
+            return false;
+        }
+        pending.author_timeout.stop();
+        pending.cancel.cancel();
+        pending.scheduled = Some(Task::Timeout);
+        host.ready.retain(|job| job.id != id);
+        host.ready_xhr.retain(|queued| *queued != id);
+        host.ready_xhr.push_back(id);
+        true
+    }
+
+    pub(in crate::script::fetch) fn next_timeout(&self) -> Option<Instant> {
+        self.fetch
+            .borrow()
+            .pending_xhr
+            .values()
+            .filter_map(|pending| pending.author_timeout.deadline)
+            .min()
+    }
+
+    pub(in crate::script::fetch) fn has_due_timeout(&self) -> bool {
+        self.next_timeout()
+            .is_some_and(|deadline| deadline <= self.now())
+    }
+
     pub(in crate::script::fetch) fn run_next_task(&self, vm: &mut Vm) -> Result<(), JsError> {
+        let now = self.now();
+        let mut due = self
+            .fetch
+            .borrow()
+            .pending_xhr
+            .iter()
+            .filter_map(|(&id, pending)| {
+                pending
+                    .author_timeout
+                    .deadline
+                    .filter(|deadline| *deadline <= now)
+                    .map(|deadline| (deadline, id))
+            })
+            .collect::<Vec<_>>();
+        due.sort_unstable();
+        for (_, id) in due {
+            self.latch_timeout(id, now);
+        }
         let (id, task) = {
             let mut host = self.fetch.borrow_mut();
             let Some(id) = host.ready_xhr.pop_front() else {
@@ -143,6 +242,7 @@ impl Host {
             Task::Read => self.receive_body(vm, id),
             Task::End => self.finish(vm, id),
             Task::Error => self.fail(vm, id, "error"),
+            Task::Timeout => self.fail(vm, id, "timeout"),
         };
         self.cleanup_failed_delivery(vm, id, result)
     }
@@ -207,6 +307,9 @@ impl Host {
         id: u64,
         result: Result<StreamingResponse, FetchError>,
     ) -> Result<(), JsError> {
+        if self.latch_timeout(id, self.now()) {
+            return Ok(());
+        }
         let result = self.receive_head(vm, id, result);
         self.cleanup_failed_delivery(vm, id, result)
     }
@@ -249,8 +352,8 @@ impl Host {
             data.response = Some(metadata);
         }
         self.fire(vm, xhr, "readystatechange")?;
-        if data.borrow().pending != Some(id) {
-            // An event handler can abort or replace this request.
+        if data.borrow().pending != Some(id) || self.latch_timeout(id, self.now()) {
+            // A handler can abort, replace or time out this request.
             return Ok(());
         }
         if let Some(pipe) = transfer {
@@ -285,6 +388,9 @@ impl Host {
     }
 
     pub(in crate::script::fetch) fn progress(&self, vm: &mut Vm, id: u64) -> Result<(), JsError> {
+        if self.latch_timeout(id, self.now()) {
+            return Ok(());
+        }
         if self
             .fetch
             .borrow()
@@ -417,7 +523,7 @@ impl Host {
         let loaded = {
             let mut host = self.fetch.borrow_mut();
             let pending = host.pending_xhr.get_mut(&id).unwrap();
-            let now = Instant::now();
+            let now = self.now();
             if pending
                 .last_progress
                 .is_some_and(|last| now - last < Duration::from_millis(50))
@@ -433,7 +539,7 @@ impl Host {
             data.response.as_ref().map_or(0, content_length)
         };
         self.fire(vm, xhr.clone(), "readystatechange")?;
-        if data.borrow().pending == Some(id) {
+        if data.borrow().pending == Some(id) && !self.latch_timeout(id, self.now()) {
             self.fire_progress(vm, xhr, "progress", loaded, total)?;
         }
         Ok(())
@@ -444,7 +550,17 @@ impl Host {
             return Ok(());
         };
         let data = receiver(vm, &xhr)?;
-        let loaded = self.fetch.borrow().pending_xhr[&id].received.len();
+        let loaded = {
+            let mut host = self.fetch.borrow_mut();
+            let pending = host
+                .pending_xhr
+                .get_mut(&id)
+                .expect("completed XMLHttpRequest");
+            // This is the accepted terminal fetch task. Neither text
+            // decoding nor an author callback here is part of fetch time.
+            pending.author_timeout.stop();
+            pending.received.len()
+        };
         let total = data.borrow().response.as_ref().map_or(0, content_length);
         self.fire_progress(vm, xhr.clone(), "progress", loaded, total)?;
         if data.borrow().pending != Some(id) {
