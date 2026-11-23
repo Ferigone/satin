@@ -65,12 +65,15 @@ assert.equal((await launch('04-explicit-url', [], 'about:version')).url, 'about:
 // Default smoke geometry is 1180x840 logical pixels. Open Settings by mouse
 // from the toolbar, click the checkbox row, then dismiss with the Done button.
 const restore = await launch('05-mouse-toggle', [
-  click(1150, 90), click(1060, 220), click(580, 401), click(763, 500),
+  title('New Tab'), click(1150, 90), click(1060, 220), click(580, 401), click(763, 500),
   key('t', { control: true }), ...address('about:graphics'),
 ]);
 assert.equal(restore.url, 'about:graphics');
 assert.deepEqual(await readJson(settingsPath), { startup: 'restore_tabs' });
-const latest = { schema: 1, tabs: ['about:version', 'about:graphics'], active: 1 };
+// This is a new launch while Start page is still selected. The preceding
+// explicit URL applied only to its own process, and toggling does not replace
+// the current start page with a tab from an earlier process.
+const latest = { schema: 1, tabs: ['about:home', 'about:graphics'], active: 1 };
 assert.deepEqual(await readJson(sessionPath), latest);
 assert.equal((await launch('06-restart-restore')).url, 'about:graphics');
 assert.deepEqual(await readJson(sessionPath), latest);
