@@ -3,7 +3,7 @@ use rust_browser_javascript::Value;
 use std::{
     sync::{
         Arc,
-        mpsc::{self, Receiver},
+        mpsc::{self, Receiver, RecvTimeoutError},
     },
     time::{Duration, Instant},
 };
@@ -73,9 +73,11 @@ fn a_revoked_blob_worker_transfers_shared_views_and_closes_after_its_active_task
                 typeof window === 'undefined' && typeof documentMarker === 'undefined' &&
                 location.href === input.address &&
                 event instanceof MessageEvent && event.isTrusted && event.target === self;
+            setTimeout(() => postMessage('timer after close'), 0);
             close();
             postMessage({turns, shared, viewSawWrite, scope, buffer, bytes, view, alias: bytes}, [buffer]);
             postMessage({detached: buffer.byteLength === 0 && bytes.byteLength === 0});
+            queueMicrotask(() => postMessage('close checkpoint'));
         });
     "#;
     let mut source = format!(
@@ -127,7 +129,7 @@ fn a_revoked_blob_worker_transfers_shared_views_and_closes_after_its_active_task
                 transferred.view.buffer === transferred.buffer, transferred.bytes === transferred.alias,
                 transferred.bytes.byteOffset, transferred.view.byteOffset, transferred.view.byteLength,
                 Array.from(new Uint8Array(transferred.buffer)).join(','),
-                replies[1].value.detached
+                replies[1].value.detached, replies[2].value
             ].join('|');
             "#,
         )
@@ -135,7 +137,7 @@ fn a_revoked_blob_worker_transfers_shared_views_and_closes_after_its_active_task
     assert_eq!(
         transcript,
         Value::from(
-            "0|0|true|2|true|startup,first,microtask,second|true|true|true|true|true|true|1|2|2|12,42,8,10|true"
+            "0|0|true|3|true|startup,first,microtask,second|true|true|true|true|true|true|1|2|2|12,42,8,10|true|close checkpoint"
         ),
         "{:?}",
         runtime.diagnostics()
@@ -150,7 +152,10 @@ fn terminating_a_worker_discards_its_queued_window_message() {
         .eval(
             r#"
             var replies = [];
-            const url = URL.createObjectURL(new Blob(["onmessage = event => postMessage(event.data);"]));
+            const url = URL.createObjectURL(new Blob([`
+                setTimeout(() => postMessage('late timer'), 60000);
+                onmessage = event => postMessage(event.data);
+            `]));
             const worker = new Worker(url);
             URL.revokeObjectURL(url);
             worker.onmessage = event => replies.push(event.data);
@@ -174,4 +179,134 @@ fn terminating_a_worker_discards_its_queued_window_message() {
         Value::from("live")
     );
     assert!(runtime.diagnostics().is_empty());
+    drop(runtime);
+    assert_eq!(
+        wakes.recv_timeout(WORKER_TIMEOUT),
+        Err(RecvTimeoutError::Disconnected)
+    );
+}
+
+#[test]
+fn worker_timers_wake_without_an_incoming_message_and_run_checkpoints() {
+    let (mut runtime, wakes) = runtime();
+    runtime
+        .eval(
+            r#"
+            var replies = [];
+            const source = `
+                const cancelled = setTimeout(() => postMessage('cancelled'), 0);
+                clearInterval(cancelled);
+                setTimeout(function(payload, suffix) {
+                    postMessage('timeout:' + payload.value + suffix + ':' + (this === self));
+                    queueMicrotask(() => postMessage('timeout checkpoint'));
+                    let count = 0;
+                    const interval = setInterval(() => {
+                        const tick = ++count;
+                        postMessage('tick ' + tick);
+                        Promise.resolve().then(() => {
+                            postMessage('tick checkpoint ' + tick);
+                            if (tick === 2) {
+                                clearTimeout(interval);
+                                setTimeout(() => { close(); postMessage('end'); }, 20);
+                            }
+                        });
+                        if (tick === 1) throw Error('interval fixture');
+                    }, 0);
+                }, 10, {value: 42}, '!');
+                queueMicrotask(() => postMessage('startup checkpoint'));
+            `;
+            const url = URL.createObjectURL(new Blob([source]));
+            const worker = new Worker(url);
+            URL.revokeObjectURL(url);
+            worker.onmessage = event => replies.push(event.data);
+            worker.onerror = event => {
+                event.preventDefault();
+                replies.push(event.message.includes('interval fixture') ? 'caught' : event.message);
+            };
+            "#,
+        )
+        .unwrap();
+    wait_for_worker_close(&mut runtime, &wakes);
+    assert_eq!(
+        runtime.eval("replies.join('|')").unwrap(),
+        Value::from(
+            "startup checkpoint|timeout:42!:true|timeout checkpoint|tick 1|tick checkpoint 1|caught|tick 2|tick checkpoint 2|end"
+        ),
+        "{:?}",
+        runtime.diagnostics()
+    );
+    assert!(runtime.diagnostics().is_empty());
+}
+
+#[test]
+fn discarding_the_document_releases_a_parked_worker_and_its_wake_callback() {
+    let (mut previous, old_wakes) = runtime();
+    previous
+        .eval(
+            r#"
+            var replies = [];
+            const url = URL.createObjectURL(new Blob([`
+                setTimeout(() => postMessage('abandoned'), 60000);
+                postMessage('parked');
+            `]));
+            const worker = new Worker(url);
+            worker.onmessage = event => replies.push(event.data);
+            URL.revokeObjectURL(url);
+            "#,
+        )
+        .unwrap();
+    old_wakes.recv_timeout(WORKER_TIMEOUT).unwrap();
+    previous.pump();
+    assert_eq!(previous.eval("replies.join(',')").unwrap(), "parked".into());
+    assert!(previous.has_workers());
+
+    // A full navigation drops the old ScriptRuntime. Its connection must
+    // release the wake callback instead of retaining it until the timer fires.
+    drop(previous);
+    assert_eq!(
+        old_wakes.recv_timeout(WORKER_TIMEOUT),
+        Err(RecvTimeoutError::Disconnected)
+    );
+
+    let (mut next, next_wakes) = runtime();
+    next.eval(
+        r#"
+        var replies = [];
+        const url = URL.createObjectURL(new Blob(["postMessage('replacement'); close();"]));
+        const worker = new Worker(url);
+        worker.onmessage = event => replies.push(event.data);
+        URL.revokeObjectURL(url);
+        "#,
+    )
+    .unwrap();
+    wait_for_worker_close(&mut next, &next_wakes);
+    assert_eq!(
+        next.eval("replies.join(',')").unwrap(),
+        "replacement".into()
+    );
+}
+
+#[test]
+fn installing_a_window_wake_replays_an_already_queued_worker_notice() {
+    let page = LoadedPage::from_html("https://example.test/workers", "<!doctype html>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval(
+            r#"
+            var errors = 0;
+            const worker = new Worker('blob:https://example.test/unregistered');
+            worker.onerror = event => { errors++; event.preventDefault(); };
+            "#,
+        )
+        .unwrap();
+    let (notify, wakes) = mpsc::sync_channel(1);
+    runtime.set_worker_wake(Arc::new(move || {
+        let _ = notify.try_send(());
+    }));
+    // Unavailable Blob sources report the error during worker construction,
+    // before the embedder installs the wake callback.
+    assert!(wakes.try_recv().is_ok());
+    runtime.pump();
+    assert_eq!(runtime.eval("errors").unwrap(), Value::from(1));
+    assert!(!runtime.has_workers());
 }

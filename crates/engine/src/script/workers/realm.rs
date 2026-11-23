@@ -1,9 +1,11 @@
 //! JavaScript and its event loop checkpoint for a dedicated worker thread.
+mod timers;
+
 use crate::script::{
     arg, dom_api, event_target, fatal, getter, message_ports::message_event, scheduler, webidl,
 };
 use rust_browser_javascript::{ErrorKind, JsError, JsString, StructuredClonePacket, Value, Vm};
-use std::rc::Rc;
+use std::{rc::Rc, time::Instant};
 use url::{Position, Url};
 
 const NAME_SLOT: u32 = 0;
@@ -14,6 +16,7 @@ pub(super) struct WorkerRealm {
     vm: Vm,
     events: event_target::Events,
     message_events: message_event::MessageEvents,
+    timers: timers::Timers,
 }
 
 impl WorkerRealm {
@@ -111,12 +114,14 @@ impl WorkerRealm {
             close();
             Ok(Value::Undefined)
         })?;
-        scheduler::install_queue_microtask(&mut vm, global)?;
+        scheduler::install_queue_microtask(&mut vm, global.clone())?;
+        let timers = timers::Timers::install(&mut vm, global)?;
 
         Ok(Self {
             vm,
             events,
             message_events,
+            timers,
         })
     }
 
@@ -135,6 +140,15 @@ impl WorkerRealm {
             Ok(data) => ("message", data),
             Err(_) => ("messageerror", Value::Null),
         })
+    }
+
+    pub(super) fn timer_deadline(&self) -> Option<Instant> {
+        self.timers.deadline()
+    }
+
+    pub(super) fn dispatch_timer(&mut self, now: Instant) -> Result<(), JsError> {
+        let timers = &self.timers;
+        run_task(&mut self.vm, |vm| timers.fire(vm, now))
     }
 
     #[cfg(test)]

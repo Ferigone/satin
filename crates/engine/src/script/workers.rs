@@ -7,7 +7,7 @@ use super::{
     message_ports::MessagePorts, structured_clone, webidl,
 };
 use crate::loader::BlobWorkerPolicy;
-use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox};
+use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox, Received};
 use realm::WorkerRealm;
 use rust_browser_javascript::{
     ErrorKind, JsError, JsString, RootId, StructuredCloneError, StructuredClonePacket, Value, Vm,
@@ -21,6 +21,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 use url::Url;
 
@@ -46,16 +47,33 @@ struct Connection {
 }
 
 impl Connection {
+    fn new(budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
+        Self {
+            to_worker: Mailbox::default(),
+            to_window: Mailbox::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            done: AtomicBool::new(false),
+            budget,
+            wake,
+        }
+    }
+
     fn wake_window(&self) {
-        if let Some(wake) = self.wake.get() {
+        if !self.cancelled.load(Ordering::Relaxed)
+            && let Some(wake) = self.wake.get()
+        {
             wake();
         }
     }
 
+    fn close_ingress(&self) {
+        self.to_worker.close();
+    }
+
     fn stop(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
-        self.to_worker.close();
         self.to_window.close();
+        self.close_ingress();
     }
 
     fn report_error(&self, message: &str) {
@@ -68,7 +86,7 @@ impl Connection {
     }
 
     fn finish(&self) {
-        self.to_worker.close();
+        self.close_ingress();
         self.done.store(true, Ordering::Release);
         self.wake_window();
     }
@@ -180,6 +198,7 @@ fn run_worker(
     let mut vm = Vm::new();
     vm.set_interrupt_flag(connection.cancelled.clone());
     let parent = connection.clone();
+    let ingress = connection.clone();
     let closing = Rc::new(Cell::new(false));
     let close_state = closing.clone();
     let exception = Rc::new(Cell::new(None));
@@ -201,7 +220,12 @@ fn run_worker(
             }
             Ok(())
         },
-        move || close_state.set(true),
+        move || {
+            close_state.set(true);
+            // Do not interrupt the JS task that called close() or its
+            // checkpoint. Drop all future worker tasks.
+            ingress.close_ingress();
+        },
     )?;
     let vm = worker.vm_mut();
     let class = vm.get_global("DOMException")?;
@@ -215,10 +239,11 @@ fn run_worker(
         connection.report_error(&error.to_string());
     }
     while !closing.get() && !connection.cancelled.load(Ordering::Relaxed) {
-        let Some(Envelope(message, _charge)) = connection.to_worker.receive() else {
-            break;
+        let result = match connection.to_worker.receive_until(worker.timer_deadline()) {
+            Received::Message(Envelope(packet, _charge)) => worker.dispatch_packet(packet),
+            Received::Deadline => worker.dispatch_timer(Instant::now()),
+            Received::Closed => break,
         };
-        let result = worker.dispatch_packet(message);
         if let Err(error) = result
             && !connection.cancelled.load(Ordering::Relaxed)
         {
@@ -236,7 +261,12 @@ impl Workers {
     }
 
     pub(super) fn set_wake(&self, wake: Wake) {
-        let _ = self.store.borrow().wake.set(wake);
+        let slot = self.store.borrow().wake.clone();
+        // Parser scripts can start a worker before the embedder supplies its
+        // wake callback. Replay a wake for any work already waiting.
+        if slot.set(wake.clone()).is_ok() && self.has_tasks() {
+            wake();
+        }
     }
 
     pub(super) fn has_tasks(&self) -> bool {
@@ -276,14 +306,10 @@ impl Workers {
             }
             state.next_id += 1;
             let id = state.next_id;
-            let connection = Arc::new(Connection {
-                to_worker: Mailbox::default(),
-                to_window: Mailbox::default(),
-                cancelled: Arc::new(AtomicBool::new(false)),
-                done: AtomicBool::new(false),
-                budget: state.budget.clone(),
-                wake: state.wake.clone(),
-            });
+            let connection = Arc::new(Connection::new(
+                state.budget.clone(),
+                state.wake.clone(),
+            ));
             vm.set_host_data(object.clone(), Rc::new(WorkerObject(id)))?;
             state.active.insert(
                 id,
