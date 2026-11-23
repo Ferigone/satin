@@ -249,6 +249,19 @@ test('website CLI imports a manifest without spawning a browser or scoring missi
   const verified = await invoke();
   assert.equal(verified.code, 0);
   assert.equal(verified.run.websiteRun, 'complete');
+
+  // Replace only the selection evidence with another valid 1x1 PNG.
+  // Coordinates, final Results frame and visual review stay untouched.
+  const replacement = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64');
+  await writeFile(join(dir, reviewedFiles.selectionPng), replacement);
+  const staleSelection = await invoke();
+  assert.equal(staleSelection.code, 1);
+  assert.equal(staleSelection.run.firstFailedStage, 'visual-review');
+  assert.equal(staleSelection.run.websiteRun, 'unverified');
+  assert.match(staleSelection.run.error, /does not match selectionPng artifact/);
+  assert.equal(staleSelection.run.snapshots, undefined);
+  await writeFile(join(dir, reviewedFiles.selectionPng), input.selectionPng);
+
   delete input.manifest.visualReview;
   const unreviewed = await invoke();
   assert.equal(unreviewed.code, 1);
