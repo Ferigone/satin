@@ -1442,6 +1442,67 @@ fn append_units(vm: &mut Vm, out: &mut Vec<u16>, units: &[u16]) -> Result<(), Js
     out.extend_from_slice(units);
     Ok(())
 }
+
+fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> {
+    use icu_properties::{
+        CodePointSetData,
+        props::{CaseIgnorable, Cased},
+    };
+
+    if this.is_nullish() {
+        return Err(JsError::type_error(
+            "String method called on null or undefined",
+        ));
+    }
+    let s = vm.to_string(&this)?;
+    let mut units = Vec::new();
+    let mut previous_cased = false;
+    let mut pending_final_sigma = None;
+    let case_ignorable = CodePointSetData::new::<CaseIgnorable>();
+    let cased = CodePointSetData::new::<Cased>();
+    for decoded in char::decode_utf16(s.as_utf16().iter().copied()) {
+        vm.tick()?;
+        let c = match decoded {
+            Ok(c) => c,
+            Err(error) => {
+                // An unpaired surrogate is neither cased nor case-ignorable.
+                pending_final_sigma = None;
+                previous_cased = false;
+                append_units(vm, &mut units, &[error.unpaired_surrogate()])?;
+                continue;
+            }
+        };
+        let mut buffer = [0; 2];
+        if upper {
+            for mapped in c.to_uppercase() {
+                append_units(vm, &mut units, mapped.encode_utf16(&mut buffer))?;
+            }
+        } else {
+            // Final_Sigma uses the nearest non-ignorable code point on each
+            // side in the original string. Keep a candidate in the output
+            // until its right context is known, without rescanning the input.
+            let preceded_by_cased = previous_cased;
+            if !case_ignorable.contains(c) {
+                previous_cased = cased.contains(c);
+                if let Some(index) = pending_final_sigma.take()
+                    && previous_cased
+                {
+                    units[index] = 0x03c3; // ordinary small sigma
+                }
+            }
+            if c == '\u{03a3}' && preceded_by_cased {
+                pending_final_sigma = Some(units.len());
+                append_units(vm, &mut units, &[0x03c2])?; // final small sigma
+            } else {
+                for mapped in c.to_lowercase() {
+                    append_units(vm, &mut units, mapped.encode_utf16(&mut buffer))?;
+                }
+            }
+        }
+    }
+    vm.finish_string(units)
+}
+
 fn install_string(vm: &mut Vm) {
     let proto = Value::Object(vm.string_prototype);
     let string = constructor(vm, "String", 1, proto.clone(), |vm, _, a| {
@@ -1722,30 +1783,15 @@ fn install_string(vm: &mut Vm) {
         }
         vm.finish_string(units)
     });
-    for (name, upper) in [("toLowerCase", false), ("toUpperCase", true)] {
+    // Without Intl, use the Unicode default mappings as the locale fallback.
+    for (name, upper) in [
+        ("toLowerCase", false),
+        ("toUpperCase", true),
+        ("toLocaleLowerCase", false),
+        ("toLocaleUpperCase", true),
+    ] {
         method(vm, proto.clone(), name, 0, move |vm, this, _| {
-            let s = string_this(vm, this)?;
-            let mut units = Vec::new();
-            for decoded in char::decode_utf16(s.as_utf16().iter().copied()) {
-                vm.tick()?;
-                match decoded {
-                    Err(error) => append_units(vm, &mut units, &[error.unpaired_surrogate()])?,
-                    Ok(c) => {
-                        if upper {
-                            for c in c.to_uppercase() {
-                                let mut buffer = [0; 2];
-                                append_units(vm, &mut units, c.encode_utf16(&mut buffer))?;
-                            }
-                        } else {
-                            for c in c.to_lowercase() {
-                                let mut buffer = [0; 2];
-                                append_units(vm, &mut units, c.encode_utf16(&mut buffer))?;
-                            }
-                        }
-                    }
-                }
-            }
-            vm.finish_string(units)
+            string_case(vm, this, upper)
         });
     }
     for name in ["trim", "trimStart", "trimEnd"] {
