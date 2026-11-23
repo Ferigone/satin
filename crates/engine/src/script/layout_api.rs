@@ -968,7 +968,11 @@ fn computed_style(
         vm,
         object.clone(),
         "getPropertyValue",
-        move |vm, _, args| {
+        move |vm, this, args| {
+            let id = vm
+                .host_data::<ComputedStyleNode>(&this)
+                .ok_or_else(|| JsError::type_error("Expected a computed CSS style"))?
+                .0;
             let name = text(vm, arg(args, 0))?;
             computed_value(vm, &h, id, &name)
         },
