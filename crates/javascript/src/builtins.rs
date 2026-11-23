@@ -942,6 +942,7 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
             "Array length budget exhausted",
         ));
     }
+    let removed = vm.array_species_create(object.clone(), removed_count)?;
     let (len, start, removed_count, new_len) = (
         len as usize,
         start as usize,
@@ -949,7 +950,6 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
         new_len as usize,
     );
 
-    let removed = vm.array_species_create(object.clone(), removed_count)?;
     for i in 0..removed_count {
         vm.tick()?;
         let from = JsString::from((start + i).to_string());
