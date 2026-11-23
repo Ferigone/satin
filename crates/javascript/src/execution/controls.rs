@@ -1,13 +1,14 @@
 use super::{Advance, Flow};
 use crate::{
-    ErrorKind, JsError, JsString, Value, Vm,
+    ErrorKind, JsError, Value, Vm,
     bytecode::{Chunk, Op, PatternCode},
+    for_in::ForInKeys,
     heap::{Binding, EnvId, EnvKind, Environment},
     iterator::IteratorRecord,
     patterns::PatternMode,
     vm::Completion,
 };
-use std::{mem::size_of, rc::Rc, vec::IntoIter};
+use std::rc::Rc;
 
 pub(super) enum Resume {
     Pass,
@@ -42,7 +43,7 @@ pub(super) struct LoopState {
     result: Option<Value>,
 }
 enum Items {
-    Keys(IntoIter<JsString>, usize),
+    Keys(ForInKeys),
     Iterator(IteratorRecord),
     AsyncIterator(IteratorRecord),
 }
@@ -72,11 +73,7 @@ impl Resume {
             Self::Each(state) | Self::EachStep(state) => {
                 state.result.iter().for_each(&mut *visit);
                 match &state.items {
-                    Items::Keys(keys, _) => {
-                        for key in keys.as_slice() {
-                            visit(&Value::String(key.clone()));
-                        }
-                    }
+                    Items::Keys(keys) => keys.visit(visit),
                     Items::Iterator(iterator) | Items::AsyncIterator(iterator) => {
                         visit(&iterator.iterator);
                         visit(&iterator.next);
@@ -108,9 +105,9 @@ impl Resume {
     pub(super) fn extra_bytes(&self) -> usize {
         match self {
             Self::Each(EachState {
-                items: Items::Keys(_, bytes),
+                items: Items::Keys(keys),
                 ..
-            }) => *bytes,
+            }) => keys.extra_bytes(),
             Self::Finally(Err(error)) | Self::EachClose(Err(error)) => error.message.capacity(),
             _ => 0,
         }
@@ -259,11 +256,7 @@ pub(super) fn after_child(
                     Items::AsyncIterator(vm.get_async_iterator(source)?)
                 }
                 Op::ForOf(..) => Items::Iterator(vm.get_iterator(source)?),
-                _ => {
-                    let keys = vm.enumerable_keys(source)?;
-                    let bytes = keys.capacity() * size_of::<JsString>();
-                    Items::Keys(keys.into_iter(), bytes)
-                }
+                _ => Items::Keys(ForInKeys::new(vm, source)?),
             };
             EachState {
                 items,
@@ -499,7 +492,7 @@ impl EachState {
 
     fn next(mut self, vm: &mut Vm, op: &Op, env: EnvId, strict: bool) -> Result<Advance, JsError> {
         let value = match &mut self.items {
-            Items::Keys(keys, _) => keys.next().map(Value::String),
+            Items::Keys(keys) => keys.next(vm)?.map(Value::String),
             Items::Iterator(iterator) => vm.iterator_step(iterator)?,
             Items::AsyncIterator(iterator) => {
                 vm.tick()?;

@@ -12,6 +12,7 @@ mod collections;
 mod date;
 mod dynamic_import;
 mod execution;
+mod for_in;
 mod generator;
 mod heap;
 mod host_properties;

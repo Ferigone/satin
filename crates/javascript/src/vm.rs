@@ -1,6 +1,7 @@
 use crate::{
     ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value,
     bytecode::{self, Chunk, ClassName, Code, Op, ScopePlan},
+    for_in::ForInKeys,
     heap::{
         Binding, Cell, EnvId, EnvKind, Environment, Heap, Object, ObjectKind, Property,
         PropertyKind, array_index,
@@ -1907,29 +1908,6 @@ impl Vm {
         }
         Ok(keys)
     }
-    pub(crate) fn enumerable_keys(&mut self, value: Value) -> Result<Vec<JsString>, JsError> {
-        if value.is_nullish() {
-            return Ok(Vec::new());
-        }
-        let object = self.coerce_object(value)?;
-        let mut current = object.as_object();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut keys = Vec::new();
-        for _ in 0..1024 {
-            let Some(id) = current else {
-                break;
-            };
-            for key in self.own_keys(Value::Object(id), false)? {
-                if seen.insert(key.clone())
-                    && self.own_enumerability(id, &PropertyKey::String(key.clone()))? == Some(true)
-                {
-                    keys.push(key);
-                }
-            }
-            current = self.heap.object(id)?.prototype;
-        }
-        Ok(keys)
-    }
     pub(crate) fn resolve(&self, mut env: EnvId, key: &JsString) -> Result<Reference, JsError> {
         loop {
             let e = self.heap.environment(env);
@@ -3470,8 +3448,8 @@ impl Vm {
                 result = Some(Value::Undefined);
                 let head = self.iteration_scope(env, *kind, name)?;
                 let object = self.expression_value(object, head)?;
-                let keys = self.enumerable_keys(object)?;
-                for key in keys {
+                let mut keys = ForInKeys::new(self, object)?;
+                while let Some(key) = keys.next(self)? {
                     let scope =
                         self.bind_iteration_value(env, *kind, name, Value::String(key), strict)?;
                     if let Some(completion) = self
