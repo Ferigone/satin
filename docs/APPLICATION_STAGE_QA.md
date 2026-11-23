@@ -18,3 +18,16 @@ profiles were changed.
 The standalone Rust tests for the toolbar glyphs, tab geometry, and address
 editing also passed (10 tests). Native checks ran with throwaway profiles and
 in-process smoke actions, not desktop mouse or keyboard automation.
+
+## Combined settings and bookmarks menu
+
+On application commit `7920a76`, settings, navigation recovery, crowded tabs,
+address editing, and the start-page comparison passed again. On a 640 × 400
+native capture, the silver focus ring moved from the first to the second menu
+row with ArrowDown and disappeared on Escape.
+
+A variant of the bookmarks probe without a URL fragment passed all three
+native runs, including persistence and deletion after restart. The unmodified
+probe still fails: navigating to `/beta.html?edition=2#intro` loses `#intro`
+before the bookmark is saved. The full test remains required; the transport
+fix is tracked in the separate compatibility integration branch.
