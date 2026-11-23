@@ -117,3 +117,56 @@ fn decimal(value: &str) -> Option<Option<usize>> {
         })
         .map(Some)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{LoadedPage, script::ScriptRuntime};
+    use std::sync::Arc;
+    use url::Url;
+
+    #[test]
+    fn dropping_document_releases_registered_and_pending_blob_backings() {
+        let mut runtime =
+            ScriptRuntime::new(&LoadedPage::from_html("data:text/html,owner", "")).unwrap();
+        let track_blob = |runtime: &mut ScriptRuntime, text: &str| {
+            let address = runtime
+                .eval(&format!("URL.createObjectURL(new Blob(['{text}']))"))
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string_lossy();
+            let blob = runtime
+                .state
+                .borrow()
+                .media
+                .resolve_blob(&runtime.vm, &Url::parse(&address).unwrap())
+                .unwrap();
+            let (bytes, _) = blob.shared_bytes();
+            (address, Arc::downgrade(&bytes))
+        };
+        let (_, registered) = track_blob(&mut runtime, "registered");
+        let (address, pending) = track_blob(&mut runtime, "pending");
+        runtime
+            .eval(&format!(
+                "fetch('{address}'); URL.revokeObjectURL('{address}');"
+            ))
+            .unwrap();
+        assert!(
+            runtime
+                .state
+                .borrow()
+                .media
+                .resolve_blob(&runtime.vm, &Url::parse(&address).unwrap())
+                .is_none()
+        );
+        // Collect the revoked wrapper without running the queued Fetch task.
+        runtime.vm.collect_garbage();
+        assert_eq!(runtime.fetch.pending_count(), 1);
+        assert!(registered.upgrade().is_some());
+        assert!(pending.upgrade().is_some());
+
+        drop(runtime);
+        assert!(registered.upgrade().is_none());
+        assert!(pending.upgrade().is_none());
+    }
+}
