@@ -49,7 +49,8 @@ const expectedTrace = [
   'classic-redirect', 'sri-good', 'sri-cross', 'parser-tail', 'ready-interactive',
   'defer-first', 'defer-second', 'module-shared', 'module-relative', 'module-root',
   'cross-module-leaf', 'cross-module-root', 'module-inline', 'dom-content-loaded',
-  'async-script', 'ready-complete', 'window-load',
+  'ready-listener-job', 'second-ready-listener', 'async-script', 'ready-complete',
+  'load-listener-job', 'window-load',
 ];
 const expectedObservations = {
   prefixOnly: true,
@@ -75,6 +76,7 @@ const expectedObservations = {
   moduleInline: [2, 42, 'interactive', true],
   domContentLoaded: ['interactive', true, true],
   asyncScript: ['interactive', true],
+  windowLoadDispatch: [true, true, true],
   load: ['complete', true],
 };
 const expectedResourceEvents = Object.fromEntries([

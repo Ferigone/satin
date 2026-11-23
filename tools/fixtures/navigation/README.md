@@ -13,6 +13,9 @@ The request log records origins, methods, paths, CORS Origin headers and respons
 statuses. The receipt verifies script, `document.write()` and lifecycle order.
 An async script response waits for the page's `DOMContentLoaded` request. A
 bounded fallback releases it on failure so the verifier can report what happened.
+The request starts in a microtask between two readiness listeners. The receipt
+also checks the microtask between Window load listeners and the legacy load
+target (Document) on a Window-only dispatch path.
 
 Page observations cover the partial DOM at a parser-blocking script, blocking
 CSS, nested scripts and `currentScript`, deferred and async execution, module

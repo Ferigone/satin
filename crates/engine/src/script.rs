@@ -989,8 +989,13 @@ impl ScriptRuntime {
     }
     fn lifecycle_event(&mut self, target: Option<NodeId>, kind: &str, bubbles: bool) {
         let state = self.state.clone();
+        let mode = if target.is_none() && kind == "load" {
+            DispatchMode::WindowLoad
+        } else {
+            DispatchMode::Lifecycle
+        };
         let result = self.vm.with_task(|vm| {
-            dispatch_checked(vm, &state, target, kind, bubbles, false, &[])?;
+            dispatch_checked_with_mode(vm, &state, target, kind, bubbles, false, &[], mode)?;
             drain_microtask_queue(vm, &state)
         });
         if let Err(error) = result {
@@ -2157,6 +2162,25 @@ fn handler_source(state: &State, target: Option<NodeId>, event: &str) -> Option<
         .map(str::to_owned)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DispatchMode {
+    Ordinary,
+    Lifecycle,
+    WindowLoad,
+}
+
+impl DispatchMode {
+    fn checkpoint(self, vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
+        if self != Self::Ordinary {
+            // Lifecycle events start in the host. Cleanup after a callback
+            // can run jobs before the next listener because no JS caller is
+            // still on the stack (unlike dispatchEvent from a script).
+            drain_microtask_queue(vm, state)?;
+        }
+        Ok(())
+    }
+}
+
 // All DOM events share this propagation algorithm and preserve fatal host errors.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_checked(
@@ -2168,11 +2192,34 @@ fn dispatch_checked(
     cancelable: bool,
     properties: &[(&str, Value)],
 ) -> Result<bool, JsError> {
+    dispatch_checked_with_mode(
+        vm,
+        state,
+        target,
+        kind,
+        bubbles,
+        cancelable,
+        properties,
+        DispatchMode::Ordinary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_checked_with_mode(
+    vm: &mut Vm,
+    state: &Shared,
+    target: Option<NodeId>,
+    kind: &str,
+    bubbles: bool,
+    cancelable: bool,
+    properties: &[(&str, Value)],
+    mode: DispatchMode,
+) -> Result<bool, JsError> {
     let prototype = state.borrow().event_prototype.clone();
     let object = vm.new_object_with_prototype(prototype)?;
     let event =
         event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, false], true)?;
-    dispatch_prepared(vm, state, target, event, properties)
+    dispatch_prepared_with_mode(vm, state, target, event, properties, mode)
 }
 
 fn dispatch_prepared(
@@ -2182,9 +2229,25 @@ fn dispatch_prepared(
     event: Value,
     properties: &[(&str, Value)],
 ) -> Result<bool, JsError> {
+    dispatch_prepared_with_mode(vm, state, target, event, properties, DispatchMode::Ordinary)
+}
+
+fn dispatch_prepared_with_mode(
+    vm: &mut Vm,
+    state: &Shared,
+    target: Option<NodeId>,
+    event: Value,
+    properties: &[(&str, Value)],
+    mode: DispatchMode,
+) -> Result<bool, JsError> {
     let info = event_target::event(vm, &event)?;
     let kind = info.kind.to_string_lossy();
-    let target_value = if let Some(target) = target {
+    let target_value = if mode == DispatchMode::WindowLoad {
+        // HTML's legacy target override affects Event.target, not the
+        // invocation path: only Window receives this load event.
+        let root = state.borrow().document.root;
+        wrap(vm, state, Some(root))?
+    } else if let Some(target) = target {
         wrap(vm, state, Some(target))?
     } else {
         state.borrow().window.clone()
@@ -2234,10 +2297,17 @@ fn dispatch_prepared(
                 state.borrow().window.clone()
             };
             info.current(vm, &event, this.clone(), phase)?;
-            info.invoke(vm, &this, &event, capture, |_, error| {
-                diagnostic(state, format!("{kind}: {error}"));
-                Ok(())
-            })?;
+            info.invoke_with_checkpoint(
+                vm,
+                &this,
+                &event,
+                capture,
+                |_, error| {
+                    diagnostic(state, format!("{kind}: {error}"));
+                    Ok(())
+                },
+                |vm| mode.checkpoint(vm, state),
+            )?;
             if !capture && !info.immediate.get() {
                 let key = (current, kind.clone());
                 let handler = state
@@ -2275,6 +2345,7 @@ fn dispatch_prepared(
                         }
                         _ => {}
                     }
+                    mode.checkpoint(vm, state)?;
                 }
             }
         }

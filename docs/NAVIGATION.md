@@ -32,6 +32,10 @@ when the worker rejects a submission.
 deferred script start sequence. `complete` and window `load` wait for pending
 script fetches and the applicable sheet and image loads. Module evaluation
 can continue after a top-level suspension.
+Host-dispatched lifecycle callbacks run microtasks before the next listener.
+A script's synchronous `dispatchEvent()` does not suspend its caller between
+listeners. The document load event is dispatched only at Window, with
+`event.target` set to the Document for legacy compatibility.
 Fonts can change layout after `load`. Cached image data is shared by URL
 and CORS credentials policy; each parser-discovered element receives its own
 completion event. Static documents without author scripts, handlers or form

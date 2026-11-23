@@ -40,7 +40,18 @@ document.addEventListener('readystatechange', function() {
 document.addEventListener('DOMContentLoaded', function(event) {
   trace.push('dom-content-loaded');
   observations.domContentLoaded = [document.readyState, event.target === document, document.currentScript === null];
-  fetch(__RELEASE_JSON__, {method:'POST'}).catch(function(error) { issues.push(String(error)); });
+  queueMicrotask(function() {
+    trace.push('ready-listener-job');
+    fetch(__RELEASE_JSON__, {method:'POST'}).catch(function(error) { issues.push(String(error)); });
+  });
+});
+document.addEventListener('DOMContentLoaded', function() {
+  trace.push('second-ready-listener');
+});
+window.addEventListener('load', function(event) {
+  var path = event.composedPath();
+  observations.windowLoadDispatch = [event.target === document, event.currentTarget === window, path.length === 1 && path[0] === window];
+  queueMicrotask(function() { trace.push('load-listener-job'); });
 });
 window.addEventListener('load', function() {
   trace.push('window-load');

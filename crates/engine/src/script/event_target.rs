@@ -409,7 +409,19 @@ impl EventData {
         object: &Value,
         event: &Value,
         capture: bool,
+        report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
+    ) -> Result<(), JsError> {
+        self.invoke_with_checkpoint(vm, object, event, capture, report, |_| Ok(()))
+    }
+
+    pub(super) fn invoke_with_checkpoint(
+        &self,
+        vm: &mut Vm,
+        object: &Value,
+        event: &Value,
+        capture: bool,
         mut report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
+        mut checkpoint: impl FnMut(&mut Vm) -> Result<(), JsError>,
     ) -> Result<(), JsError> {
         let Some((table, data)) = target_table(vm, object) else {
             return Ok(());
@@ -445,13 +457,13 @@ impl EventData {
                 vm.get_property(callback.clone(), "handleEvent")
                     .and_then(|function| vm.call(function, callback, std::slice::from_ref(event)))
             };
+            let completed = match invoked {
+                Err(error) if fatal(&error) => Err(error),
+                Err(error) => checkpoint(vm).and_then(|()| report(vm, &error)),
+                Ok(_) => checkpoint(vm),
+            };
             self.passive.set(false);
-            if let Err(error) = invoked {
-                if fatal(&error) {
-                    return Err(error);
-                }
-                report(vm, &error)?;
-            }
+            completed?;
         }
         Ok(())
     }
