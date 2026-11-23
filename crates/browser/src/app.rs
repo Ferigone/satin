@@ -41,8 +41,10 @@ use winit::{
 mod address_bar;
 mod chrome_menu;
 mod icons;
+mod navigation_error;
 mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
+use navigation_error::Recovery;
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
 const TAB_H: f32 = 58.;
@@ -123,6 +125,7 @@ struct Tab {
     nested_scroll: HashMap<rust_browser_engine::dom::NodeId, ScrollOffset>,
     zoom: f32,
     loading: bool,
+    recovery: Recovery,
     navigation: u64,
     document_navigation: u64,
     cancel: CancelSignal,
@@ -151,6 +154,7 @@ impl Tab {
             nested_scroll: HashMap::new(),
             zoom: 1.,
             loading: false,
+            recovery: Recovery::default(),
             navigation: 0,
             document_navigation: 0,
             cancel: CancelSignal::new(),
@@ -361,18 +365,27 @@ impl App {
     }
 
     fn fail_page(&mut self, index: usize, error: &str) {
+        if index == self.active {
+            self.select_popup = None;
+            self.hover = None;
+        }
         let tab = &mut self.tabs[index];
         self.media.close_page(tab.id, tab.document_navigation);
         tab.cancel.cancel();
         tab.navigation = tab.navigation.wrapping_add(1);
         tab.document_navigation = tab.navigation;
-        let page = LoadedPage::error(&tab.url, error);
+        tab.recovery = tab.recovery.failed();
+        let page = tab.recovery.page(&tab.url, error);
         tab.title = page.title();
         tab.page = Some(Arc::new(page));
         tab.layout = None;
         tab.runtime = None;
         tab.document_session = None;
         tab.loading = false;
+        tab.history_scroll = None;
+        tab.scroll = 0.;
+        tab.scroll_x = 0.;
+        tab.nested_scroll.clear();
     }
 
     fn advance_page(&mut self, index: usize) -> bool {
@@ -737,6 +750,16 @@ impl App {
         };
         tab.history.visit(parsed.clone(), mode, scroll);
         tab.history_scroll = restore.or_else(|| parsed.fragment().map(|_| HistoryScroll::Fragment));
+        if tab.recovery.is_error_page() {
+            // Do not leave a stale retry action in the viewport during a new load.
+            tab.page = None;
+            tab.layout = None;
+            tab.title.clone_from(&url);
+            if index == self.active {
+                self.hover = None;
+            }
+        }
+        tab.recovery = Recovery::for_navigation(&parsed, request.as_ref());
         tab.cancel.cancel();
         tab.cancel = CancelSignal::new();
         tab.runtime = None;
@@ -2344,6 +2367,11 @@ impl App {
         }
         let mut link = self.pointer_link();
         let tab = &mut self.tabs[self.active];
+        if tab.recovery.is_retry_link(link.as_deref(), &tab.url) {
+            let url = tab.url.clone();
+            self.navigate(url, false);
+            return;
+        }
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
         let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
         let target = tab
