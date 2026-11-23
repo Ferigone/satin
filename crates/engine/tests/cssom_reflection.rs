@@ -113,3 +113,47 @@ fn padding_left_reflects_the_inline_longhand() {
         "#,
     );
 }
+
+#[test]
+fn equal_custom_property_writes_preserve_case_and_notify_only_real_edits() {
+    check(
+        r#"
+        var node = document.createElement("div");
+        node.setAttribute("style", "--tone:blue;--Tone:Red;");
+        var style = node.style;
+        var observer = new MutationObserver(function () {});
+        observer.observe(node, {attributes:true, attributeFilter:["style"]});
+        var authored = node.getAttribute("style");
+        style.setProperty("--Tone", "Red");
+        var initial = observer.takeRecords().length === 0 && node.getAttribute("style") === authored;
+        style.setProperty("--Tone", "Red", "important");
+        var addedPriority = observer.takeRecords().length === 1 &&
+            style.getPropertyPriority("--Tone") === "important";
+        style.setProperty("--Tone", "Red", "IMPORTANT");
+        var repeatedImportant = observer.takeRecords().length === 0;
+        style.setProperty("--Tone", "Green", "important");
+        var changed = observer.takeRecords().length === 1;
+        var removed = style.removeProperty("--Tone") === "Green";
+        initial && addedPriority && repeatedImportant && changed && removed &&
+            observer.takeRecords().length === 1 && style.getPropertyValue("--tone") === "blue";
+        "#,
+    );
+}
+
+#[test]
+fn float_aliases_do_not_skip_a_same_value_priority_change() {
+    check(
+        r#"
+        var node = document.createElement("div");
+        var style = node.style;
+        style.setProperty("FLOAT", "right", "important");
+        var observer = new MutationObserver(function () {});
+        observer.observe(node, {attributes:true, attributeFilter:["style"]});
+        style.cssFloat = "right";
+        var changed = observer.takeRecords().length === 1 &&
+            style.getPropertyPriority("float") === "";
+        style["float"] = "RIGHT";
+        changed && observer.takeRecords().length === 0 && style.cssFloat === "right";
+        "#,
+    );
+}
