@@ -43,6 +43,8 @@ The pinned shortcut can use the matching snapshot after a subsequent build and s
 | YouTube | More of the page bootstrap runs, including a large configuration script. Player initialization remains in development. |
 | Twitch | User Timing and additional JavaScript packages run during startup. The remaining script limits still prevent the player from appearing. |
 
+See [Public media compatibility QA](PUBLIC_MEDIA_QA.md) for the anonymous Twitch and YouTube comparison method.
+
 On Windows, a seek near the tail just before a stream finishes appending can occasionally stall resumption. The native checks also cover seeking after the stream is finalized.
 
 The selected web-platform and JavaScript test suites measure the behavior their cases cover. [Roadmap](ROADMAP.md) · [Test262](../tools/test262/README.md)
