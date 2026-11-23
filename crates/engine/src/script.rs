@@ -1542,11 +1542,12 @@ fn install_node(
     prototype: Value,
     element_prototype: &Value,
 ) -> Result<(), JsError> {
-    for (property, attr_name) in [
-        ("id", "id"),
-        ("className", "class"),
-        ("value", "value"),
-        ("href", "href"),
+    // FormHost installs the live value accessor; a reflected attribute here
+    // would shadow it for every element.
+    for (property, attr_name, owner) in [
+        ("id", "id", element_prototype),
+        ("className", "class", element_prototype),
+        ("href", "href", &prototype),
     ] {
         let get_state = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {
@@ -1563,7 +1564,7 @@ fn install_node(
             set_attribute(vm, &set_state, id, attr_name, Some(value))?;
             Ok(Value::Undefined)
         });
-        vm.define_accessor(element_prototype.clone(), property, Some(get), Some(set))?;
+        vm.define_accessor(owner.clone(), property, Some(get), Some(set))?;
     }
     for property in [
         "parentNode",

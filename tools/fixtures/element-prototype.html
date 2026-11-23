@@ -23,6 +23,9 @@
     const clone = detached.cloneNode();
     const text = document.createTextNode('text');
     const fragment = document.createDocumentFragment();
+    const input = document.createElement('input');
+    input.setAttribute('value', 'default');
+    input.value = 'edited';
     const checks = [
       Object.getPrototypeOf(elementPrototype) === Node.prototype &&
         Object.getPrototypeOf(Node.prototype) === EventTarget.prototype,
@@ -35,7 +38,7 @@
       [parsed, detached, clone, svg, document.createElement('script'),
         document.createElement('canvas'), document.createElement('video'),
         document.createElement('audio'), document.createElement('img'),
-        document.createElement('input')].every(function (node) {
+        input].every(function (node) {
           return node instanceof Element && node instanceof Node && node instanceof EventTarget &&
             node.readFixtureAttribute === elementPrototype.readFixtureAttribute;
         }),
@@ -52,6 +55,7 @@
       throwsTypeError(function () { elementPrototype.readFixtureAttribute.call(document); }) &&
         throwsTypeError(function () { elementPrototype.readFixtureAttribute.call(Object.create(elementPrototype)); }),
       parsed.tagName === 'DIV' && svg.tagName === 'svg' && !('tagName' in text),
+      input.value === 'edited' && input.getAttribute('value') === 'default',
     ];
     delete elementPrototype.readFixtureAttribute;
     checks.push(!('readFixtureAttribute' in detached));
