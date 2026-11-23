@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Flexbox: resolving flexible lengths</title>
+<style>
+  body { margin: 0; }
+  .row { display: flex; width: 120px; }
+  .row > div { min-width: 0; height: 10px; }
+</style>
+<div class="row">
+  <div id="ordinary-a" style="flex: 0 1 120px"></div>
+  <div id="ordinary-b" style="flex: 0 1 80px"></div>
+</div>
+<div class="row">
+  <div id="partial-shrink-a" style="flex: 0 .25 120px"></div>
+  <div id="partial-shrink-b" style="flex: 0 .25 80px"></div>
+</div>
+<div class="row" style="width: 400px">
+  <div id="partial-grow-a" style="flex: .25 0 100px; max-width: 120px"></div>
+  <div id="partial-grow-b" style="flex: .25 0 100px"></div>
+</div>
+<div class="row" style="width: 200px">
+  <div id="initial-freeze-a" style="flex: 0 1 100px; min-width: 140px"></div>
+  <div id="initial-freeze-b" style="flex: 0 .5 100px"></div>
+</div>
+<div class="row" style="width: 450px">
+  <div id="mixed-min" style="flex: 1 1 100px; min-width: 170px"></div>
+  <div id="mixed-max" style="flex: 1 1 100px; max-width: 100px"></div>
+  <div id="mixed-free" style="flex: 1 1 100px"></div>
+</div>
+<pre id="receipt"></pre>
+<script>
+  var items = document.querySelectorAll(".row > div");
+  var geometry = {};
+  for (var i = 0; i < items.length; i += 1) {
+    var rect = items[i].getBoundingClientRect();
+    geometry[items[i].id] = [rect.x, rect.y, rect.width, rect.height];
+  }
+  document.getElementById("receipt").textContent = JSON.stringify(geometry);
+</script>

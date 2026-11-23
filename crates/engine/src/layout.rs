@@ -625,54 +625,84 @@ struct FlexItem {
     fragment: Option<Fragment>,
 }
 fn distribute_flex(items: &[FlexItem], available: f32) -> Vec<f32> {
-    let mut sizes: Vec<_> = items.iter().map(|i| i.basis).collect();
-    let mut frozen = vec![false; items.len()];
-    let initial = available - sizes.iter().sum::<f32>();
-    let growing = initial >= 0.;
-    // Freezing items at min/max constraints redistributes their unused share to
-    // the remaining items. The pass bound protects pathological author input.
-    for _ in 0..64 {
-        let remaining = available
+    // The outer hypothetical sizes choose the used flex factor. Fixed items
+    // and bases on the wrong side of that size start frozen at it.
+    let mut sizes: Vec<_> = items.iter().map(|i| i.basis.clamp(i.min, i.max)).collect();
+    let growing = sizes.iter().sum::<f32>() < available;
+    let factor = |item: &FlexItem| if growing { item.grow } else { item.shrink };
+    let weight = |item: &FlexItem| {
+        if growing {
+            factor(item)
+        } else {
+            factor(item) * item.basis
+        }
+    };
+    let mut frozen: Vec<_> = items
+        .iter()
+        .zip(&sizes)
+        .map(|(item, &hypothetical)| {
+            factor(item) == 0.
+                || if growing {
+                    item.basis > hypothetical
+                } else {
+                    item.basis < hypothetical
+                }
+        })
+        .collect();
+    let free_space = |sizes: &[f32], frozen: &[bool]| {
+        available
             - items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| if frozen[i] { sizes[i] } else { item.basis })
-                .sum::<f32>();
-        let weight: f32 = items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !frozen[*i])
-            .map(|(_, i)| if growing { i.grow } else { i.shrink * i.basis })
-            .sum();
-        let denominator = if growing {
-            weight.max(1.)
-        } else {
-            weight.max(f32::EPSILON)
-        };
-        let mut changed = false;
+                .sum::<f32>()
+    };
+    let initial = free_space(&sizes, &frozen);
+    let mut violations = vec![0.; items.len()];
+    // The pass bound protects pathological author input.
+    for _ in 0..64 {
+        let (mut factor_sum, mut weight_sum) = (0., 0.);
+        for (i, item) in items.iter().enumerate() {
+            if !frozen[i] {
+                factor_sum += factor(item);
+                weight_sum += weight(item);
+            }
+        }
+        let mut remaining = free_space(&sizes, &frozen);
+        if factor_sum < 1. {
+            let partial = initial * factor_sum;
+            if partial.abs() < remaining.abs() {
+                remaining = partial;
+            }
+        }
+        if !growing {
+            remaining = -remaining.abs();
+        }
+        let mut total_violation = 0.;
         for (i, item) in items.iter().enumerate() {
             if frozen[i] {
                 continue;
             }
-            let factor = if growing {
-                item.grow
-            } else {
-                item.shrink * item.basis
-            };
             let target = item.basis
-                + if weight > 0. {
-                    remaining * factor / denominator
+                + if weight_sum > 0. {
+                    remaining * (weight(item) / weight_sum)
                 } else {
                     0.
                 };
             sizes[i] = target.clamp(item.min, item.max);
-            if (sizes[i] - target).abs() > 0.001 {
-                frozen[i] = true;
-                changed = true;
-            }
+            violations[i] = sizes[i] - target;
+            total_violation += violations[i];
         }
-        if !changed {
+        if total_violation == 0. {
             break;
+        }
+        // Only freeze the constraints on the side of the net violation.
+        // Opposite clamps may cease to be needed after redistribution.
+        for (is_frozen, &violation) in frozen.iter_mut().zip(&violations) {
+            if (total_violation > 0. && violation > 0.) || (total_violation < 0. && violation < 0.)
+            {
+                *is_frozen = true;
+            }
         }
     }
     sizes
