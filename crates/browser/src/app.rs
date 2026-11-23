@@ -38,6 +38,8 @@ use winit::{
 
 mod chrome_menu;
 mod icons;
+mod tab_strip;
+use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
 const TAB_H: f32 = 58.;
 const TOP: f32 = TAB_H + 64.;
@@ -237,6 +239,7 @@ pub fn run(
         preedit: false,
         select_popup: None,
         hits: vec![],
+        tab_hits_current: false,
         chrome_hover: None,
         chrome_menu: None,
         caption_pressed: None,
@@ -316,6 +319,7 @@ struct App {
     preedit: bool,
     select_popup: Option<SelectPopup>,
     hits: Vec<(Rect, Action)>,
+    tab_hits_current: bool,
     chrome_hover: Option<Action>,
     chrome_menu: Option<usize>,
     caption_pressed: Option<Action>,
@@ -833,6 +837,7 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        self.tab_hits_current = false;
         self.active = index;
         self.address_focus = false;
         self.sync_address();
@@ -1494,10 +1499,14 @@ impl App {
         })();
         match presented {
             Ok(()) => {
+                self.tab_hits_current = true;
                 self.presented_frames += 1;
                 self.last_present_error = None;
             }
-            Err(e) => self.last_present_error = Some(e),
+            Err(e) => {
+                self.tab_hits_current = false;
+                self.last_present_error = Some(e);
+            }
         }
         self.canvas = Some(canvas);
     }
@@ -1534,49 +1543,45 @@ impl App {
         } else {
             0.
         };
-        let available = (width - caption - 18. - 58.).max(0.);
-        let count = self.tabs.len() as f32;
-        let extra = (available / count - 80.).clamp(0., 32.);
-        let slot = ((available - extra) / count).min(216.);
+        let strip = TabStrip::new(width, caption, self.tabs.len(), self.active);
+        let compact = strip.slot < 62.;
+        let full_canvas = scaled_rect(1., 0., 0., canvas.width as f32, canvas.height as f32);
         let pointer = self.chrome_hover;
-        let bounds = |index: usize| {
-            let offset = if index > self.active { extra } else { 0. };
-            let bonus = if index == self.active { extra } else { 0. };
-            (
-                18. + index as f32 * slot + offset,
-                (slot + bonus - 4.).max(1.),
-            )
-        };
 
-        // The active shoulders join the toolbar and sit over adjacent tab edges.
+        // The normal active shoulders join the toolbar and overlap adjacent edges.
         for index in 0..self.tabs.len() {
             if index != self.active {
-                let (x, face) = bounds(index);
+                let tab = strip.tab(index);
                 let hover =
                     matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-                draw_tab_face(canvas, x, face, u, false, hover);
+                draw_tab_face(canvas, tab.x, tab.face, u, false, hover);
             }
         }
-        let (x, face) = bounds(self.active);
-        draw_tab_face(canvas, x, face, u, true, true);
+        let active_slot = strip.tab(self.active);
+        if compact {
+            // Don't paint the active shoulders over narrow neighbours' targets.
+            canvas.clip(scaled_rect(
+                u,
+                active_slot.x - 2.,
+                0.,
+                active_slot.face + 4.,
+                TAB_H,
+            ));
+        }
+        draw_tab_face(canvas, active_slot.x, active_slot.face, u, true, true);
+        if compact {
+            canvas.clip(full_canvas);
+        }
 
         for (index, tab) in self.tabs.iter().enumerate() {
-            let (x, face) = bounds(index);
-            let close_width = (face * 0.42).clamp(5., 42.);
-            let close_x = x + face - close_width;
+            let slot = strip.tab(index);
+            let select = slot.select();
+            let x = slot.x;
             let close = Action::Close(index);
             let active = index == self.active;
             let hovered =
                 matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-            if pointer == Some(close) {
-                rounded_chrome_rect(
-                    canvas,
-                    scaled_rect(u, close_x, 21., close_width, 25.),
-                    8. * u,
-                    CHROME_HOVER,
-                );
-            }
-            let icon = if slot >= 94. {
+            let icon = if strip.slot >= 94. {
                 built_in_site_icon(&tab.url)
             } else {
                 None
@@ -1584,32 +1589,62 @@ impl App {
             let padding = if let Some(icon) = icon {
                 canvas.image(scaled_rect(u, x + 14., 22., 24., 24.), icon);
                 48.
-            } else if slot < 62. {
+            } else if compact {
                 5.
             } else if active {
                 24.
             } else {
                 16.
             };
-            let font = if slot < 62. { 12. } else { 17. } * u;
-            let text_width = (close_x - x - padding - 3.) * u;
+            let font = if compact { 12. } else { 17. } * u;
+            let text_width = (select.end - x - padding - 3.) * u;
             if text_width >= 7. * u {
                 let title = if tab.is_home() { "New tab" } else { &tab.title };
                 let title = elide(&self.fonts, title, text_width, font);
-                canvas.label(
-                    &title,
-                    (x + padding) * u,
-                    40. * u,
-                    font,
-                    CHROME_TEXT,
-                    false,
-                    &mut self.fonts,
-                );
+                if !compact
+                    || title != "…"
+                    || self.fonts.shape(&title, font, false, false, false).advance <= text_width
+                {
+                    if compact {
+                        canvas.clip(scaled_rect(u, x + padding, 0., text_width / u, TAB_H));
+                    }
+                    canvas.label(
+                        &title,
+                        (x + padding) * u,
+                        40. * u,
+                        font,
+                        CHROME_TEXT,
+                        false,
+                        &mut self.fonts,
+                    );
+                    if compact {
+                        canvas.clip(full_canvas);
+                    }
+                }
             }
-            let mark = close_width.min(18.);
-            if mark >= 6. || active || hovered {
+            self.hits.push((
+                Rect {
+                    x,
+                    y: 8.,
+                    width: select.end - select.start,
+                    height: TAB_H - 8.,
+                },
+                Action::Select(index),
+            ));
+            if let Some(target) = slot.close() {
+                let close_x = target.start;
+                let close_width = target.end - target.start;
+                if pointer == Some(close) {
+                    rounded_chrome_rect(
+                        canvas,
+                        scaled_rect(u, close_x, 21., close_width, 25.),
+                        8. * u,
+                        CHROME_HOVER,
+                    );
+                }
+                let mark = 18.;
                 let icon_scale = mark / 20.;
-                let offset = if slot >= 90. { 5. } else { 0. };
+                let offset = if strip.slot >= 90. { 5. } else { 0. };
                 chrome_icon(
                     canvas,
                     (close_x + (close_width - mark) / 2. - offset) / icon_scale,
@@ -1623,37 +1658,28 @@ impl App {
                         CHROME_MUTED
                     },
                 );
+                self.hits.push((
+                    Rect {
+                        x: close_x,
+                        y: 13.,
+                        width: close_width,
+                        height: TAB_H - 13.,
+                    },
+                    close,
+                ));
             }
-            self.hits.push((
-                Rect {
-                    x,
-                    y: 8.,
-                    width: close_x - x,
-                    height: TAB_H - 8.,
-                },
-                Action::Select(index),
-            ));
-            self.hits.push((
-                Rect {
-                    x: close_x,
-                    y: 13.,
-                    width: close_width,
-                    height: TAB_H - 13.,
-                },
-                close,
-            ));
         }
-        let plus_x = 29. + count * slot + extra;
+        let plus_x = strip.new_tab_x;
         let button = Rect {
             x: plus_x,
             y: 12.,
-            width: 42.,
+            width: NEW_TAB_WIDTH,
             height: 43.,
         };
         if pointer == Some(Action::NewTab) {
             rounded_chrome_rect(
                 canvas,
-                scaled_rect(u, plus_x, 12., 42., 43.),
+                scaled_rect(u, plus_x, 12., NEW_TAB_WIDTH, 43.),
                 10. * u,
                 CHROME_HOVER,
             );
@@ -2127,6 +2153,11 @@ impl App {
             return;
         }
         let action = self.chrome_action_at_pointer();
+        // A keyboard tab switch/close or resize can precede the next frame.
+        // Don't apply an old tab hit to the new layout or tab indices.
+        if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
+            return;
+        }
         if self.chrome_menu.is_some() && !matches!(action, Some(Action::Menu | Action::MenuItem(_)))
         {
             self.chrome_menu = None;
@@ -2824,10 +2855,12 @@ impl ApplicationHandler<()> for App {
             WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => {
+                self.tab_hits_current = false;
                 self.ensure_layout();
                 self.redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.tab_hits_current = false;
                 self.scale = scale_factor as f32;
                 self.ensure_layout();
                 self.redraw();
