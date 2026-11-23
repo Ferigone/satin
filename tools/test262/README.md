@@ -34,6 +34,8 @@ After the checkpoint, the worker checks unhandled rejections against the rooted 
 
 Timers and external worker or agent hosts are unsupported. Unsupported language constructs receive `unsupported`. An upstream harness execution error receives `harness_error`.
 
+Variants explicitly tagged `IsHTMLDDA` or requiring `CanBlockIsTrue`/`CanBlockIsFalse` are counted as `unsupported` without substituting `undefined` or guessing an agent mode. They remain in the selected denominator. The runner does not skip variants just because they declare arbitrary language features.
+
 ## Reports and limits
 
 The report records the pinned revision, worker and runner SHA-256, selection, results per variant, and configured timeout and instruction limits. Pass rates apply to the selected paths. Exit code 1 indicates at least one non-passing result. Exit code 2 indicates a configuration or runner failure.

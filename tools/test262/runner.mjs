@@ -47,7 +47,12 @@ export function variants(meta) {
 }
 
 export function unsupportedReason(meta, variant) {
-  if (meta.flags.some(flag => flag.startsWith('CanBlockIs'))) return 'agent/blocking host is not implemented';
+  // INTERPRETING.md reserves this tag for cases that require the optional
+  // host value. Running them with undefined in its place can silently pass.
+  if (meta.features?.includes('IsHTMLDDA')) return 'optional Test262 host value $262.IsHTMLDDA is not implemented';
+  for (const flag of ['CanBlockIsFalse', 'CanBlockIsTrue']) {
+    if (meta.flags.includes(flag)) return `Test262 agent mode ${flag} is not implemented`;
+  }
   if (meta.negative?.phase === 'resolution' && variant !== 'module') return 'resolution phase requires the module flag';
   return null;
 }

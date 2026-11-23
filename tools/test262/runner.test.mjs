@@ -36,6 +36,16 @@ test('module goals select one strict execution and async completion failures can
   assert.equal(classify({negative:{phase:'runtime',type:'TypeError'}}, {outcome:'error',phase:'async',error:{kind:'AsyncTestFailure',message:'TypeError'}}).status, 'fail');
 });
 
+test('preflight labels only the explicit unsupported Test262 host requirements', () => {
+  assert.match(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), /\$262\.IsHTMLDDA/);
+  assert.match(unsupportedReason({ flags: ['CanBlockIsFalse'] }, 'sloppy'), /CanBlockIsFalse/);
+  assert.match(unsupportedReason({ flags: ['CanBlockIsTrue'] }, 'sloppy'), /CanBlockIsTrue/);
+  assert.equal(unsupportedReason({
+    flags: ['CanBlockIsNotARealFlag'],
+    features: ['cross-realm', 'SharedArrayBuffer', 'Symbol'],
+  }, 'sloppy'), null);
+});
+
 test('invalid metadata and CLI scopes fail visibly', () => {
   assert.throws(() => metadata('no metadata'));
   assert.throws(() => metadata('/*---\nflags: [onlyStrict, noStrict]\n---*/'));
