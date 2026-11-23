@@ -884,11 +884,7 @@ impl Parser {
             let source = self.expression(if enumerate { 1 } else { 2 })?;
             self.expect(")")?;
             self.loop_depth += 1;
-            let body = if asynchronous {
-                self.for_await_body()
-            } else {
-                self.controlled_statement()
-            };
+            let body = self.for_body(asynchronous);
             self.loop_depth -= 1;
             let body = Box::new(body?);
             return Ok(if enumerate {
@@ -914,28 +910,30 @@ impl Parser {
         };
         self.expect(")")?;
         self.loop_depth += 1;
-        let body = self.controlled_statement();
+        let body = self.for_body(false);
         self.loop_depth -= 1;
         Ok(Stmt::For(init, test, update, Box::new(body?)))
     }
-    fn for_await_body(&mut self) -> Result<Stmt, JsError> {
-        // This position admits Statement, with a distinct lookahead for `let [`.
-        // It cannot consume a lexical declaration from a surrounding statement list.
+    #[inline(always)]
+    fn for_body(&mut self, asynchronous: bool) -> Result<Stmt, JsError> {
+        // A for body admits Statement, not a lexical declaration. In sloppy
+        // code `let` can be an expression, but `let [` cannot start one here.
         if self.at("let") {
             if self
                 .lookahead(1)
                 .is_some_and(|t| t.kind == TokenKind::Punct("["))
             {
-                return Err(self.error("let [ cannot start a for-await body statement"));
+                return Err(self.error("let [ cannot start a for body statement"));
             }
             let expression = self.expression(1)?;
             self.semi()?;
             return Ok(Stmt::Expression(expression));
         }
-        if self.at("const")
-            || self.at("class")
-            || self.at("function")
-            || self.async_function_ahead()
+        if asynchronous
+            && (self.at("const")
+                || self.at("class")
+                || self.at("function")
+                || self.async_function_ahead())
         {
             return Err(self.error("Declaration requires a block in a for-await body"));
         }
