@@ -18,6 +18,8 @@ classic script pauses the parser, sees the parsed prefix and becomes
 run synchronously. A nested external script leaves its insertion pending until
 the outer execution returns. The parser then continues in input order. See
 [HTML_STREAMING.md](HTML_STREAMING.md) for tokenizer and tree limits.
+See [WebAssembly compilation policy](WASM_CSP.md) for the ordering of HTTP
+and parser-delivered CSP and inheritance in classic Blob workers.
 
 External parser resources use bounded worker queues and are associated with
 the current tab navigation. Normal classic scripts wait for the relevant

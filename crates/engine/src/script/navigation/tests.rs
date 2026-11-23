@@ -1,5 +1,7 @@
 use super::*;
 
+mod wasm_csp;
+
 const PAGE: &str = "https://example.test/path/index.html";
 
 const WORKER_PROBE: &str = r#"
@@ -50,7 +52,7 @@ startProbe('after');
     );
     let (page, _, mut runtime) = start(&source);
     wait_for_worker_probes(&mut runtime);
-    assert!(!page.worker_policy.allows_blob());
+    assert!(!page.document_policy.allows_blob());
     assert_eq!(
         evaluate(
             &mut runtime,

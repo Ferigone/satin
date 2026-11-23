@@ -27,7 +27,7 @@ pub use resources::{DocumentResource, ResourceBody, ResourceKind, ResourceReques
 pub use svg_image::SvgImage;
 use svg_image::svg_mime;
 use transport::{BodyError, CancelSignal, Interrupted, RequestControl};
-pub(crate) use worker_policy::BlobWorkerPolicy;
+pub(crate) use worker_policy::DocumentPolicy;
 
 pub const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(18);
 pub(crate) const USER_AGENT: &str = concat!(
@@ -73,7 +73,7 @@ pub struct LoadedPage {
     pub stats: LoadStats,
     pub cookies: CookieStore,
     pub navigation_context: CookieContext,
-    pub(crate) worker_policy: BlobWorkerPolicy,
+    pub(crate) document_policy: DocumentPolicy,
     pub form_controls: Arc<HashMap<NodeId, Arc<crate::script::ControlSnapshot>>>,
     pub fonts: Arc<crate::fonts::FontSet>,
 }
@@ -116,7 +116,7 @@ impl LoadedPage {
             },
             cookies,
             navigation_context,
-            worker_policy: BlobWorkerPolicy::default(),
+            document_policy: DocumentPolicy::default(),
             form_controls: Arc::default(),
             fonts: Arc::default(),
         }
@@ -143,6 +143,14 @@ impl LoadedPage {
     }
     pub fn from_html(url: &str, source: &str) -> Self {
         let document = Arc::new(html::parse_with_scripting(source, true));
+        // This API returns an already-parsed document. Activate its final
+        // meta policy; only DocumentSession executes scripts during parsing.
+        let mut document_policy = DocumentPolicy::default();
+        for node in document.html_elements("meta") {
+            if let Some(policy) = DocumentPolicy::from_meta_element(&document, node) {
+                document_policy.restrict(policy);
+            }
+        }
         let mut base = Url::parse(url).unwrap_or_else(|_| Url::parse("about:home").unwrap());
         if let Some(href) = document
             .html_elements("base")
@@ -215,7 +223,7 @@ impl LoadedPage {
                 &Url::parse(url).unwrap_or_else(|_| Url::parse("about:home").unwrap()),
                 "GET",
             ),
-            worker_policy: BlobWorkerPolicy::default(),
+            document_policy,
             form_controls,
             fonts: Arc::new(crate::fonts::FontSet::default()),
         };
@@ -447,7 +455,7 @@ impl Loader {
         let size = main.bytes.len();
         let mime = crate::mime::MimeType::parse(&main.content_type);
         let mut page = LoadedPage::empty(url, self.cookies.clone(), main.context);
-        page.worker_policy = main.worker_policy;
+        page.document_policy = main.document_policy;
         let input = if svg_mime(&main.content_type) {
             let source = decode_text(&main.bytes, "image/svg+xml; charset=utf-8");
             let svg = LoadedPage::from_svg(&page.url, &source)?;
@@ -552,7 +560,7 @@ impl Loader {
             return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
         }
         let content_type = response_content_type(response.headers(), true);
-        let worker_policy = BlobWorkerPolicy::from_headers(response.headers());
+        let document_policy = DocumentPolicy::from_headers(response.headers());
         let url = response.url().clone();
         let mime = crate::mime::MimeType::parse(&content_type);
         if mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
@@ -572,7 +580,7 @@ impl Loader {
                         nosniff: false,
                         origin_clean,
                         response_start,
-                        worker_policy,
+                        document_policy,
                     },
                     started,
                     control,
@@ -585,7 +593,7 @@ impl Loader {
         }
 
         let mut page = LoadedPage::empty(url, self.cookies.clone(), context);
-        page.worker_policy = worker_policy;
+        page.document_policy = document_policy;
         let opened = OpenedPage {
             page,
             input: DocumentInput::Streaming,
@@ -745,7 +753,7 @@ impl Loader {
         };
         page.cookies = self.cookies.clone();
         page.navigation_context = main.context;
-        page.worker_policy = main.worker_policy;
+        page.document_policy.restrict(main.document_policy);
         if page.document.truncated {
             return Err("Dokument przekracza limit złożoności parsera w tej wersji alfa.".into());
         }
@@ -1092,7 +1100,7 @@ impl Loader {
                     origin_clean: true,
                     context: request.context.clone(),
                     response_start: Instant::now(),
-                    worker_policy: BlobWorkerPolicy::default(),
+                    document_policy: DocumentPolicy::default(),
                 }
             }
             "http" | "https" => {
@@ -1103,10 +1111,10 @@ impl Loader {
                 }
                 let content_type =
                     response_content_type(response.headers(), request.context.top_level_navigation);
-                let worker_policy = if request.context.top_level_navigation {
-                    BlobWorkerPolicy::from_headers(response.headers())
+                let document_policy = if request.context.top_level_navigation {
+                    DocumentPolicy::from_headers(response.headers())
                 } else {
-                    BlobWorkerPolicy::default()
+                    DocumentPolicy::default()
                 };
                 let final_url = response.url().to_string();
                 let status = response.status().as_u16();
@@ -1128,7 +1136,7 @@ impl Loader {
                     context,
                     origin_clean,
                     response_start,
-                    worker_policy,
+                    document_policy,
                 }
             }
             "file" => {
@@ -1162,7 +1170,7 @@ impl Loader {
                     context: request.context.clone(),
                     origin_clean: false,
                     response_start: Instant::now(),
-                    worker_policy: BlobWorkerPolicy::default(),
+                    document_policy: DocumentPolicy::default(),
                 }
             }
             _ => {
@@ -1248,7 +1256,7 @@ struct Response {
     context: CookieContext,
     origin_clean: bool,
     response_start: Instant,
-    worker_policy: BlobWorkerPolicy,
+    document_policy: DocumentPolicy,
 }
 impl Response {
     fn resource(self) -> Result<Self, String> {
@@ -1522,7 +1530,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_policy_follows_the_final_http_response_in_every_navigation_path() {
+    fn csp_follows_the_final_http_response_in_every_navigation_path() {
         use std::{
             io::{BufRead, BufReader, Write},
             net::TcpListener,
@@ -1531,7 +1539,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let fixture = std::thread::spawn(move || {
-            for _ in 0..5 {
+            for _ in 0..6 {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
@@ -1548,22 +1556,36 @@ mod tests {
                 let (status, headers, body) = match path {
                     "/redirect" => (
                         "302 Found",
-                        "Location: /allowed\r\nContent-Security-Policy: worker-src 'none'\r\n",
+                        "Location: /allowed\r\nContent-Security-Policy: default-src 'none'\r\n",
                         "",
                     ),
                     "/allowed" => (
                         "200 OK",
                         concat!(
                             "Content-Type: text/html\r\n",
-                            "Content-Security-Policy: worker-src blob:\r\n",
-                            "Content-Security-Policy-Report-Only: worker-src 'none'\r\n"
+                            "Content-Security-Policy: worker-src blob:; script-src 'wasm-unsafe-eval'\r\n",
+                            "Content-Security-Policy-Report-Only: default-src 'none'\r\n"
                         ),
                         "<title>Allowed</title>",
                     ),
                     "/denied" => (
                         "200 OK",
-                        "Content-Type: text/plain\r\nContent-Security-Policy: worker-src 'self'\r\n",
+                        "Content-Type: text/plain\r\nContent-Security-Policy: default-src 'self'\r\n",
                         "Denied",
+                    ),
+                    "/blocked-script" => (
+                        "200 OK",
+                        "Content-Type: text/html\r\nContent-Security-Policy: script-src 'unsafe-inline'\r\n",
+                        r#"<!doctype html><head><script>
+                            function probe() {
+                                try { new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0])); }
+                                catch (error) { return error instanceof WebAssembly.CompileError; }
+                                return false;
+                            }
+                            var before = probe();
+                        </script>
+                        <meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline' 'wasm-unsafe-eval'">
+                        <script>var after = probe();</script></head><body></body>"#,
                     ),
                     _ => panic!("unexpected fixture request {path}"),
                 };
@@ -1580,14 +1602,10 @@ mod tests {
         let redirect = NavigationRequest::get(&format!("{origin}/redirect")).unwrap();
         let opened = loader.open_navigation(&redirect, &cancel).unwrap();
         assert_eq!(opened.page.url, format!("{origin}/allowed"));
-        assert!(opened.page.worker_policy.allows_blob());
-        assert!(
-            !loader
-                .load(&format!("{origin}/denied"), &cancel)
-                .unwrap()
-                .worker_policy
-                .allows_blob()
-        );
+        assert_eq!(opened.page.document_policy, DocumentPolicy::default());
+        let denied = loader.load(&format!("{origin}/denied"), &cancel).unwrap();
+        assert!(!denied.document_policy.allows_blob());
+        assert!(!denied.document_policy.allows_wasm_compilation());
         for (path, expected) in [("allowed", true), ("denied", false)] {
             let request = NavigationRequest::get(&format!("{origin}/{path}")).unwrap();
             let mut policy = None;
@@ -1596,31 +1614,67 @@ mod tests {
                     if let NavigationPart::Open(opened) = part {
                         assert!(
                             policy
-                                .replace(opened.page.worker_policy.allows_blob())
+                                .replace((
+                                    opened.page.document_policy.allows_blob(),
+                                    opened.page.document_policy.allows_wasm_compilation(),
+                                ))
                                 .is_none()
                         );
                     }
                 })
                 .unwrap();
-            assert_eq!(policy, Some(expected));
+            assert_eq!(policy, Some((expected, expected)));
         }
+
+        let request = NavigationRequest::get(&format!("{origin}/blocked-script")).unwrap();
+        let opened = loader.open_navigation(&request, &cancel).unwrap();
+        let (mut page, mut session) = crate::script::DocumentSession::start(opened).unwrap();
+        let mut runtime = None;
+        for _ in 0..64 {
+            if session.done() {
+                break;
+            }
+            session
+                .advance(&mut page, &mut runtime, crate::layout::Viewport::default())
+                .unwrap();
+        }
+        assert!(session.done());
+        let mut runtime = runtime.unwrap();
+        assert_eq!(
+            runtime.eval("before && after").unwrap(),
+            rust_browser_javascript::Value::Bool(true)
+        );
+        assert!(runtime.diagnostics().is_empty());
         fixture.join().unwrap();
     }
 
     #[test]
-    fn worker_policy_allows_pages_without_response_headers() {
+    fn csp_allows_pages_without_policy() {
         let loader = Loader::new().unwrap();
         let cancel = AtomicBool::new(false);
         for url in ["about:home", "data:text/html,<title>Fixture</title>"] {
             let request = NavigationRequest::get(url).unwrap();
             let opened = loader.open_navigation(&request, &cancel).unwrap();
-            assert!(opened.page.worker_policy.allows_blob());
+            assert_eq!(opened.page.document_policy, DocumentPolicy::default());
         }
-        assert!(
-            LoadedPage::from_html("https://example.test/", "")
-                .worker_policy
-                .allows_blob()
+        assert_eq!(
+            LoadedPage::from_html("https://example.test/", "").document_policy,
+            DocumentPolicy::default()
         );
+    }
+
+    #[test]
+    fn csp_is_active_in_an_already_parsed_html_snapshot() {
+        let page = LoadedPage::from_html(
+            "https://example.test/",
+            r#"<!doctype html><head>
+                <meta http-equiv="Content-Security-Policy" content="worker-src blob:; script-src 'none'">
+                </head><body>
+                <meta http-equiv="Content-Security-Policy" content="worker-src 'none'">
+                </body>"#,
+        );
+        assert!(page.document_policy.allows_blob());
+        assert!(!page.document_policy.allows_wasm_compilation());
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! The parser temporarily borrows the actual DOM arena from the realm. A
 //! pending parser script never holds that borrow while running JavaScript.
-use super::super::{Shared, fatal, mark_dirty, media, mutation_observers, run_classic, text, unsupported};
+use super::super::{
+    Shared, fatal, mark_dirty, media, mutation_observers, restrict_document_policy, run_classic,
+    text, unsupported,
+};
 use super::dynamic_scripts::{self, Flags};
 use crate::{
     dom::{Document, Namespace, NodeId, mutation::MutationSink},
@@ -8,7 +11,7 @@ use crate::{
         HtmlStream, HtmlStreamError, ParserEvent, ParserProgress, ParserScript, ParserScriptKind,
         WriteId,
     },
-    loader::{BlobWorkerPolicy, ResourceKind},
+    loader::{DocumentPolicy, ResourceKind},
     network::{CredentialsMode, crossorigin_credentials},
 };
 use rust_browser_javascript::{ErrorKind, JsError, Value, Vm};
@@ -89,7 +92,7 @@ pub(in crate::script) struct ParserHost {
     pub(super) script_flags: HashMap<NodeId, Flags>,
     pub discarded: usize,
     pub wants_realm: bool,
-    worker_policy: BlobWorkerPolicy,
+    meta_policy: DocumentPolicy,
     client: Arc<Url>,
     base: Arc<Url>,
     base_node: Option<NodeId>,
@@ -108,7 +111,7 @@ impl ParserHost {
             script_flags: HashMap::new(),
             discarded: 0,
             wants_realm: false,
-            worker_policy: BlobWorkerPolicy::default(),
+            meta_policy: DocumentPolicy::default(),
             base: client.clone(),
             client,
             base_node: None,
@@ -119,8 +122,8 @@ impl ParserHost {
         }
     }
 
-    pub(in crate::script) fn worker_policy(&self) -> BlobWorkerPolicy {
-        self.worker_policy
+    pub(super) fn meta_policy(&self) -> DocumentPolicy {
+        self.meta_policy
     }
 
     /// Advance several tokens, or stop at a point where the embedding must
@@ -292,20 +295,9 @@ impl ParserHost {
                 "script" => {
                     self.script_flags.insert(id, Flags::PARSING);
                 }
-                "meta"
-                    if self.worker_policy.allows_blob()
-                        && doc.attr(id, "http-equiv").is_some_and(|value| {
-                            value.eq_ignore_ascii_case("content-security-policy")
-                        })
-                        && doc.nodes[index].parent.is_some_and(|parent| {
-                            doc.namespace(parent) == Namespace::Html
-                                && doc.tag(parent) == "head"
-                                && connected(doc, parent)
-                        }) =>
-                {
-                    if let Some(content) = doc.attr(id, "content") {
-                        self.worker_policy
-                            .restrict(BlobWorkerPolicy::from_meta(content));
+                "meta" => {
+                    if let Some(policy) = DocumentPolicy::from_meta_element(doc, id) {
+                        self.meta_policy.restrict(policy);
                     }
                 }
                 "base"
@@ -415,15 +407,17 @@ impl ParserHost {
             return Ok(());
         }
         loop {
-            let (step, work) = {
+            let (step, work, policy) = {
                 let mut parser = handle.borrow_mut();
                 let before = parser.stream.report().work;
-                let step = parser
-                    .advance(Some(state), Some(id))
-                    .map_err(parser_error)?;
+                let step = parser.advance(Some(state), Some(id));
                 let work = parser.stream.report().work - before;
-                (step, work)
+                (step, work, parser.meta_policy())
             };
+            // A write can run nested scripts or return to its caller before
+            // the navigation scheduler sees these tokens.
+            restrict_document_policy(vm, state, policy);
+            let step = step.map_err(parser_error)?;
             mutation_observers::schedule(vm, state);
             if let Step::Blocking(tag) = step {
                 let node = tag.node;

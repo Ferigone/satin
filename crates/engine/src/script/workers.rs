@@ -6,7 +6,7 @@ use super::{
     Shared, State, abort::dom_exception_error, arg, diagnostic, document_base, event_target, fatal,
     message_ports::MessagePorts, structured_clone, webidl,
 };
-use crate::loader::BlobWorkerPolicy;
+use crate::loader::DocumentPolicy;
 use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox, Received};
 use realm::WorkerRealm;
 use rust_browser_javascript::{
@@ -145,13 +145,13 @@ pub(super) struct Workers {
     document: Weak<RefCell<State>>,
     events: event_target::Events,
     messages: MessagePorts,
-    policy: Rc<Cell<BlobWorkerPolicy>>,
     exception: RootId,
 }
 
 struct Source {
     bytes: Arc<Vec<u8>>,
     range: Range<usize>,
+    policy: DocumentPolicy,
 }
 
 fn exception(vm: &mut Vm, class: RootId, name: &str, message: &str) -> JsError {
@@ -196,6 +196,7 @@ fn run_worker(
         return Ok(());
     }
     let mut vm = Vm::new();
+    vm.set_wasm_compilation_allowed(source.policy.allows_wasm_compilation());
     vm.set_interrupt_flag(connection.cancelled.clone());
     let parent = connection.clone();
     let ingress = connection.clone();
@@ -254,12 +255,6 @@ fn run_worker(
 }
 
 impl Workers {
-    pub(super) fn restrict_policy(&self, policy: BlobWorkerPolicy) {
-        if !policy.allows_blob() {
-            self.policy.set(policy);
-        }
-    }
-
     pub(super) fn set_wake(&self, wake: Wake) {
         let slot = self.store.borrow().wake.clone();
         // Parser scripts can start a worker before the embedder supplies its
@@ -397,14 +392,12 @@ impl Workers {
         let address = document_base(&document.borrow())
             .join(&raw)
             .map_err(|_| exception(vm, self.exception, "SyntaxError", "Invalid Worker URL"))?;
-        // Parser-written metadata takes effect even for the next nested
-        // script, before the document scheduler has drained parser results.
-        let parser = document.borrow().parser.upgrade();
-        let policy_allows = self.policy.get().allows_blob()
-            && parser.is_none_or(|parser| parser.borrow().worker_policy().allows_blob());
+        // Snapshot the creator's effective policy when constructing the
+        // worker, not when its thread is scheduled or the Blob is created.
+        let policy = document.borrow().document_policy;
         let source = if address.scheme() != "blob" || !classic {
             Err("This Satin worker requires a classic Blob source")
-        } else if !policy_allows {
+        } else if !policy.allows_blob() {
             Err("Content Security Policy blocked the Blob worker")
         } else {
             document
@@ -417,7 +410,7 @@ impl Workers {
                     if range.len() > MAX_SOURCE_BYTES {
                         return Err("Worker script exceeds the source size limit");
                     }
-                    Ok(Source { bytes, range })
+                    Ok(Source { bytes, range, policy })
                 })
         };
         vm.mark_platform_object(&object)?;
@@ -480,7 +473,6 @@ pub(super) fn install(
     document: &Shared,
     events: event_target::Events,
     messages: MessagePorts,
-    policy: BlobWorkerPolicy,
 ) -> Result<Workers, JsError> {
     let prototype = vm.new_object_with_prototype(events.target_proto.clone())?;
     let exception = vm.get_global("DOMException")?;
@@ -489,7 +481,6 @@ pub(super) fn install(
         document: Rc::downgrade(document),
         events,
         messages,
-        policy: Rc::new(Cell::new(policy)),
         exception: vm.root(exception),
     };
     let constructor = workers.clone();

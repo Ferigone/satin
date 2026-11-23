@@ -42,7 +42,7 @@ use crate::{
     css,
     dom::{Document, NodeId, NodeKind, mutation::Mutation},
     history::{HistoryScroll, HistoryTransition, ScriptNavigation, SessionHistory},
-    loader::LoadedPage,
+    loader::{DocumentPolicy, LoadedPage},
     web_storage::TabStorage,
 };
 use navigation::{dynamic_scripts, module_tasks};
@@ -82,6 +82,7 @@ struct State {
     current_script: Option<NodeId>,
     ignore_destructive_writes: usize,
     parser: std::rc::Weak<RefCell<navigation::ParserHost>>,
+    document_policy: DocumentPolicy,
     navigation_attached: bool,
     dynamic_scripts: dynamic_scripts::DynamicScripts,
     import_requests: module_tasks::ImportRequests,
@@ -117,6 +118,13 @@ fn mark_dirty(state: &mut State) {
     state.dirty = true;
     state.revision = state.revision.wrapping_add(1);
 }
+
+fn restrict_document_policy(vm: &mut Vm, state: &Shared, policy: DocumentPolicy) {
+    let mut state = state.borrow_mut();
+    state.document_policy.restrict(policy);
+    vm.set_wasm_compilation_allowed(state.document_policy.allows_wasm_compilation());
+}
+
 fn document_snapshot(state: &mut State) -> Arc<Document> {
     if state.snapshot_revision != state.revision {
         state.snapshot_document = Arc::new(state.document.clone());
@@ -555,6 +563,7 @@ impl ScriptRuntime {
             ));
         }
         let mut vm = Vm::new();
+        vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
         let script_prototype = vm.new_object_with_prototype(prototype.clone())?;
@@ -603,6 +612,7 @@ impl ScriptRuntime {
             current_script: None,
             ignore_destructive_writes: 0,
             parser: std::rc::Weak::new(),
+            document_policy: page.document_policy,
             navigation_attached: false,
             dynamic_scripts,
             import_requests: module_tasks::ImportRequests::default(),
@@ -820,13 +830,7 @@ impl ScriptRuntime {
         let cloning =
             structured_clone::CloneHost::new(&mut vm, blobs, image_data, image_bitmap, file_lists)?;
         let messages = message_ports::install(&mut vm, events.clone(), cloning.clone())?;
-        let workers = workers::install(
-            &mut vm,
-            &state,
-            events,
-            messages.clone(),
-            page.worker_policy,
-        )?;
+        let workers = workers::install(&mut vm, &state, events, messages.clone())?;
         cloning.install(&mut vm, window, messages.clone())?;
         scheduler::install_performance(&mut vm, &state)?;
         history_api::install(&mut vm, &state, document, &layout)?;
@@ -1321,9 +1325,13 @@ impl ScriptRuntime {
     }
     pub fn snapshot(&self, page: &mut LoadedPage) -> bool {
         self.publish_canvas_frames();
-        page.canvas_frames = self.state.borrow().canvases.frames.clone();
-        if !self.state.borrow().dirty {
-            return false;
+        {
+            let state = self.state.borrow();
+            page.canvas_frames = state.canvases.frames.clone();
+            page.document_policy.restrict(state.document_policy);
+            if !state.dirty {
+                return false;
+            }
         }
         self.layout.snapshot_into(page);
         self.state.borrow_mut().dirty = false;

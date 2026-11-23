@@ -1,65 +1,119 @@
-//! Enforced document policy for the supported Blob worker source scheme.
+//! Effective decisions for the CSP checks supported by the engine.
+use crate::dom::{Document, Namespace, NodeId};
 use reqwest::header::HeaderMap;
 
 const SOURCE_DIRECTIVES: [&[u8]; 4] = [b"worker-src", b"child-src", b"script-src", b"default-src"];
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct BlobWorkerPolicy(bool);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocumentPolicy {
+    blob_worker_allowed: bool,
+    wasm_compilation_allowed: bool,
+}
 
-impl Default for BlobWorkerPolicy {
+impl Default for DocumentPolicy {
     fn default() -> Self {
-        Self(true)
+        Self {
+            blob_worker_allowed: true,
+            wasm_compilation_allowed: true,
+        }
     }
 }
 
-impl BlobWorkerPolicy {
+impl DocumentPolicy {
     pub(super) fn from_headers(headers: &HeaderMap) -> Self {
-        Self(
-            headers
-                .get_all("content-security-policy")
-                .iter()
-                .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
-                .all(allows_blob_source),
-        )
+        let mut policy = Self::default();
+        for value in headers.get_all("content-security-policy").iter() {
+            policy.restrict_serialized(value.as_bytes());
+        }
+        policy
     }
 
-    pub(crate) fn from_meta(content: &str) -> Self {
-        Self(allows_blob_source(content.as_bytes()))
+    pub(crate) fn from_meta_element(document: &Document, node: NodeId) -> Option<Self> {
+        if document.tag(node) != "meta"
+            || document.namespace(node) != Namespace::Html
+            || !document
+                .attr(node, "http-equiv")?
+                .eq_ignore_ascii_case("content-security-policy")
+        {
+            return None;
+        }
+        let head = document.nodes[node.0].parent?;
+        if document.namespace(head) != Namespace::Html
+            || document.tag(head) != "head"
+            || !std::iter::successors(Some(head), |id| document.nodes[id.0].parent)
+                .any(|id| id == document.root)
+        {
+            return None;
+        }
+        Some(Self::from_meta(document.attr(node, "content")?))
+    }
+
+    fn from_meta(content: &str) -> Self {
+        let mut policy = Self::default();
+        // Match Chromium's recovery for comma-separated meta content:
+        // keywords in a later policy must not authorize an earlier one.
+        policy.restrict_serialized(content.as_bytes());
+        policy
+    }
+
+    fn restrict_serialized(&mut self, policies: &[u8]) {
+        for serialized in policies.split(|&byte| byte == b',') {
+            self.restrict(Self::parse(serialized));
+        }
     }
 
     pub(crate) fn restrict(&mut self, policy: Self) {
-        self.0 &= policy.0;
+        self.blob_worker_allowed &= policy.blob_worker_allowed;
+        self.wasm_compilation_allowed &= policy.wasm_compilation_allowed;
     }
 
     pub(crate) fn allows_blob(self) -> bool {
-        self.0
+        self.blob_worker_allowed
     }
-}
 
-fn allows_blob_source(policy: &[u8]) -> bool {
-    let mut matches = [None; SOURCE_DIRECTIVES.len()];
-    for directive in policy
-        .split(|&byte| byte == b';')
-        .filter(|part| part.is_ascii())
-    {
-        let mut tokens = directive
-            .split(u8::is_ascii_whitespace)
-            .filter(|token| !token.is_empty());
-        let Some(name) = tokens.next() else {
-            continue;
-        };
-        let Some(index) = SOURCE_DIRECTIVES
-            .iter()
-            .position(|candidate| name.eq_ignore_ascii_case(candidate))
-        else {
-            continue;
-        };
-        // Keep the first occurrence of each directive. For HTTP documents a
-        // Blob URL matches only the explicit blob: scheme source.
-        matches[index]
-            .get_or_insert_with(|| tokens.any(|token| token.eq_ignore_ascii_case(b"blob:")));
+    pub(crate) fn allows_wasm_compilation(self) -> bool {
+        self.wasm_compilation_allowed
     }
-    matches.into_iter().flatten().next().unwrap_or(true)
+
+    fn parse(policy: &[u8]) -> Self {
+        let mut directives = [const { None }; SOURCE_DIRECTIVES.len()];
+        for directive in policy
+            .split(|&byte| byte == b';')
+            .filter(|part| part.is_ascii())
+        {
+            let mut tokens = directive
+                .split(u8::is_ascii_whitespace)
+                .filter(|token| !token.is_empty());
+            let Some(name) = tokens.next() else {
+                continue;
+            };
+            let Some(index) = SOURCE_DIRECTIVES
+                .iter()
+                .position(|candidate| name.eq_ignore_ascii_case(candidate))
+            else {
+                continue;
+            };
+            // The first directive wins, even if its source list is empty.
+            directives[index].get_or_insert(tokens);
+        }
+        let [worker_src, child_src, script_src, default_src] = directives;
+        Self {
+            // For HTTP documents a Blob URL matches only the explicit blob: scheme source.
+            blob_worker_allowed: worker_src
+                .or(child_src)
+                .or(script_src.clone())
+                .or(default_src.clone())
+                .is_none_or(|mut sources| {
+                    sources.any(|token| token.eq_ignore_ascii_case(b"blob:"))
+                }),
+            wasm_compilation_allowed: script_src.or(default_src).is_none_or(|mut sources| {
+                sources.any(|token| {
+                    token.eq_ignore_ascii_case(b"'wasm-unsafe-eval'")
+                        || token.eq_ignore_ascii_case(b"'unsafe-eval'")
+                })
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -67,12 +121,16 @@ mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
 
-    fn allows(headers: &[&'static str]) -> bool {
+    fn enforced(headers: &[&'static str]) -> DocumentPolicy {
         let mut map = HeaderMap::new();
         for header in headers {
             map.append("content-security-policy", HeaderValue::from_static(header));
         }
-        BlobWorkerPolicy::from_headers(&map).allows_blob()
+        DocumentPolicy::from_headers(&map)
+    }
+
+    fn allows(headers: &[&'static str]) -> bool {
+        enforced(headers).allows_blob()
     }
 
     #[test]
@@ -93,5 +151,66 @@ mod tests {
         assert!(allows(&["worker-src blob:", "img-src 'none'"]));
         assert!(!allows(&["worker-src blob:", "default-src 'none'"]));
         assert!(!allows(&["worker-src blob:, default-src 'none'"]));
+    }
+
+    #[test]
+    fn wasm_policy_uses_script_src_before_default_src() {
+        for content in [
+            "",
+            "worker-src 'none'; child-src 'none'; script-src-elem 'none'; script-src-attr 'none'",
+            "default-src 'none'; SCRIPT-SRC 'WASM-unsafe-Eval'",
+            "default-src 'unsafe-eval'",
+            "script-src 'unsafe-eval'; script-src 'none'",
+        ] {
+            assert!(
+                DocumentPolicy::from_meta(content).allows_wasm_compilation(),
+                "{content}"
+            );
+        }
+        for content in [
+            "default-src 'none'",
+            "script-src 'self' 'unsafe-inline' https:",
+            "default-src 'unsafe-eval'; script-src",
+            "script-src; script-src 'wasm-unsafe-eval'",
+            "script-src wasm-unsafe-eval unsafe-eval 'wasm-unsafe-eval-extra'",
+            "script-src 'none'; script-src-elem 'wasm-unsafe-eval'",
+            "script-src 'none', script-src 'wasm-unsafe-eval'",
+        ] {
+            assert!(
+                !DocumentPolicy::from_meta(content).allows_wasm_compilation(),
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_policy_intersects_all_enforcing_headers_and_meta() {
+        assert!(
+            enforced(&["worker-src 'none'", "script-src 'unsafe-eval'"]).allows_wasm_compilation()
+        );
+        for headers in [
+            &["script-src 'wasm-unsafe-eval'", "default-src 'none'"][..],
+            &["default-src 'none', script-src 'wasm-unsafe-eval'"],
+        ] {
+            assert!(!enforced(headers).allows_wasm_compilation());
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-security-policy-report-only",
+            HeaderValue::from_static("script-src 'none'"),
+        );
+        let mut policy = DocumentPolicy::from_headers(&headers);
+        assert_eq!(policy, DocumentPolicy::default());
+        policy.restrict(DocumentPolicy::from_meta("worker-src 'none'"));
+        assert!(policy.allows_wasm_compilation());
+        policy.restrict(DocumentPolicy::from_meta(
+            "script-src 'none'; worker-src blob:",
+        ));
+        policy.restrict(DocumentPolicy::from_meta(
+            "script-src 'unsafe-eval'; worker-src blob:",
+        ));
+        assert!(!policy.allows_wasm_compilation());
+        assert!(!policy.allows_blob());
     }
 }
