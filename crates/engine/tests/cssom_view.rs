@@ -55,6 +55,83 @@ fn owner_document_view_exposes_computed_style_for_runner_controls() {
 }
 
 #[test]
+fn repeated_runner_progress_width_does_not_mutate_or_invalidate_layout() {
+    let mut r = runner_controls();
+    check(
+        &mut r,
+        "document.getElementById('run-panel').style.display='block';
+         var fill=document.getElementById('fill');
+         var progressObserver=new MutationObserver(function(){});
+         progressObserver.observe(fill,{attributes:true,attributeFilter:['style']});
+         setProgress(1,16436);
+         progressObserver.takeRecords().length===1 && fill.offsetWidth===0",
+    );
+    let first = r.layout_for_viewport(r.viewport()).unwrap();
+    check(
+        &mut r,
+        "setProgress(2,16436);
+         progressObserver.takeRecords().length===0 && fill.style.width==='0%'",
+    );
+    assert!(r.layout_is_current(&first));
+    check(
+        &mut r,
+        "setProgress(500,16436);
+         progressObserver.takeRecords().length===1 && fill.style.width==='3%'",
+    );
+    assert!(r.layout_needs_refresh());
+    check(&mut r, "fill.offsetWidth===5");
+    check(
+        &mut r,
+        "fill.style.setProperty('width','3%','important');
+         progressObserver.takeRecords().length===1 &&
+         fill.style.getPropertyPriority('width')==='important'",
+    );
+}
+
+#[test]
+fn unchanged_cssom_declaration_leaves_authored_style_attribute_untouched() {
+    let mut r = runtime(
+        "<!doctype html><div style='width:160px'>
+         <div id=fill style='height: 10px; WIDTH : 25% '></div></div>",
+    );
+    check(
+        &mut r,
+        "var fill=document.getElementById('fill');
+         var original=fill.getAttribute('style');
+         var observer=new MutationObserver(function(){});
+         observer.observe(fill,{attributes:true,attributeFilter:['style'],attributeOldValue:true});
+         fill.style.width='25%';
+         observer.takeRecords().length===0 && fill.getAttribute('style')===original &&
+         fill.offsetWidth===40",
+    );
+    check(
+        &mut r,
+        "fill.setAttribute('style',original);
+         var records=observer.takeRecords();
+         records.length===1 && records[0].oldValue===original",
+    );
+}
+
+#[test]
+fn reapplying_width_can_change_its_precedence() {
+    let mut r = runtime(
+        "<!doctype html><div style='width:160px'>
+         <div id=alias style='width:25%;inline-size:80px'></div>
+         <div id=duplicate style='width:80px!important;width:25%'></div></div>",
+    );
+    check(
+        &mut r,
+        "var alias=document.getElementById('alias'), duplicate=document.getElementById('duplicate');
+         alias.offsetWidth===80 && duplicate.offsetWidth===80",
+    );
+    check(
+        &mut r,
+        "alias.style.width='25%'; duplicate.style.width='25%';
+         alias.offsetWidth===40 && duplicate.offsetWidth===40",
+    );
+}
+
+#[test]
 fn compat_mode_selects_the_viewport_height_for_runner_overlays() {
     let mut r = runner_controls();
     check(

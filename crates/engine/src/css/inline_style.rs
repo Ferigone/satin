@@ -291,6 +291,19 @@ pub(crate) fn edit(
     replacement: Option<Declaration>,
 ) -> bool {
     let target = Axis::find(name);
+    // If the same declaration is already last, moving it cannot change the
+    // cascade. Only skip standalone, unique declarations: an edit can still
+    // replace a stronger duplicate or alter other edges of a logical axis.
+    if target.is_none()
+        && let Some((last, earlier)) = declarations.split_last()
+        && let Some(new) = replacement.as_ref()
+        && last.name == name
+        && last.value == new.value
+        && last.important == new.important
+        && !earlier.iter().any(|declaration| declaration.name == name)
+    {
+        return false;
+    }
     let mut changed = replacement.is_some();
     declarations.retain_mut(|declaration| {
         if declaration.name == name {

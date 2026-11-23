@@ -19,7 +19,12 @@
         panel.ownerDocument.defaultView.getComputedStyle(panel, null).getPropertyValue("display") === "none") {
       panel.style.display = "block";
     }
-    document.getElementById("fill").style.width = "25%";
+    setProgress(1, 4);
+  }
+
+  // The legacy progress plugin writes a rounded percentage for each result.
+  function setProgress(count, total) {
+    document.getElementById("fill").style.width = Math.round(count / total * 100) + "%";
   }
 
   // Reduced from $(window).height() and the runner's loading overlay handler.
