@@ -49,3 +49,16 @@ Use fresh directories for all controls. The positive fixture must return zero, c
 | Pre-create `frame.png.run.json` with sentinel content | Fail and leave that file unchanged. |
 
 All negative cases must return nonzero and no final success summary. In the normal failure controls there should be no sidecars newly created by this attempt. Regression-check one existing smoke action sequence without checkpoints (stdout has no `checkpoints` field). Only the coordinator should try the public website afterward. For that run, use the real `harness` row and exactly two checkpoints (`#progressbar .text` / `Testing complete!`, then `#contentContainer .totalCases` / `55` after clicking Results); no Run All, script changes, or inferred first-count sample. The score additionally requires reconciled Run counts, matching same-session Results, and visual evidence—not merely the presence of sidecars or any expected diagnostic text.
+
+## Read-only harness artifact check
+
+After a coordinator-owned **public harness** attempt (not the two-case fixture), save the exit record and pass it alongside the existing stdout log and final frame:
+
+```powershell
+@{ code = $r.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $out 'process.json') -Encoding UTF8
+node tools/test262/native-checkpoint-verify.mjs (Join-Path $out 'process.json') $r.StdoutPath (Join-Path $out 'frame.png')
+```
+
+Keep the exit record and both `.run.json` / `.results.json` sidecars from that same fresh directory. A timeout or launch exception has no successful exit record. The tool does not launch a browser. `artifacts-consistent` means the receipt, PNG container, scope, selected panes and counters agree; it is not a visual check or a published score. Confirm that the actual `harness` Run image was used and that the final PNG displays the matching Results. Page diagnostic strings are kept as metadata, not used as pass/fail criteria.
+
+Offline verifier tests: `node --test tools/test262/native-checkpoint-verify.test.mjs`.
