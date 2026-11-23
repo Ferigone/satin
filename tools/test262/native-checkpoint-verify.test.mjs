@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { verifyNativeHarnessArtifacts as verify } from './native-checkpoint-verify.mjs';
+import { reportNativeHarnessArtifacts as report, verifyNativeHarnessArtifacts as verify } from './native-checkpoint-verify.mjs';
 import { site } from './website.mjs';
 
 const runId = '34-123456789';
@@ -22,6 +22,12 @@ const resultsHtml = `${nav('results')}<div class="content-results" style="displa
 function sample() {
   const identity = { tabId: 1, documentNavigation: 4, runId, title };
   return {
+    manifest: {
+      schema: 1, scope: 'legacy-test262-native-chapter', url: site,
+      selection: { kind: 'chapter', name: 'harness', planned: 55 },
+      suite: { version: '1234', date: '2016-03-23' },
+      files: { process: 'process.json', stdout: 'frame.stdout', frame: 'frame.png' },
+    },
     process: { code: 0, signal: null, timedOut: false, spawnError: null },
     summary: {
       window_smoke: true, frames_presented: 2, layout_limited: false, paint_limited: false,
@@ -101,4 +107,44 @@ test('rejects a partial run, wrong chapter, changed suite, and mismatched Result
     input[stage].html = input[stage].html.replace(from, to);
     assert.throws(() => verify(input), error);
   }
+});
+
+test('requires the explicit harness manifest and its suite identity, with local artifact names', () => {
+  assert.throws(() => verify({ ...sample(), manifest: null }), /manifest scope/);
+  const wrongScope = sample();
+  wrongScope.manifest.selection.name = 'built-ins';
+  assert.throws(() => verify(wrongScope), /55-case harness/);
+  const changedSuite = sample();
+  changedSuite.manifest.suite.version = 'new';
+  assert.throws(() => verify(changedSuite), /Suite identity/);
+  const externalFile = sample();
+  externalFile.manifest.files.frame = '../frame.png';
+  assert.throws(() => verify(externalFile), /simple filenames/);
+});
+
+test('reports observed zero, blank, nonexistent element and missing/invalid snapshots separately', () => {
+  const input = sample();
+  input.run.html = input.run.html.replace('id="totalCounter">55', 'id="totalCounter">0')
+    .replace('id="Pass">53', 'id="Pass">').replace('<span id="failedToLoadCounter1">1</span>', '');
+  input.results = null;
+  const output = report(input);
+  assert.equal(output.status, 'unverified');
+  assert.equal(Object.hasOwn(output, 'counters'), false);
+  assert.deepEqual(output.observed.run.ran, { state: 'observed', raw: '0', value: 0 });
+  assert.deepEqual(output.observed.run.pass, { state: 'blank', raw: '', value: null });
+  assert.deepEqual(output.observed.run.failedToLoad, { state: 'missing-element', raw: null, value: null });
+  assert.deepEqual(output.observed.results.ran, { state: 'missing-snapshot', raw: null, value: null });
+  input.artifacts = { results: 'invalid' };
+  assert.equal(report(input).observed.results.ran.state, 'invalid-snapshot');
+});
+
+test('keeps partial and timed-out observations separate from completions', () => {
+  const input = sample();
+  input.run.html = input.run.html.replace('id="totalCounter">55', 'id="totalCounter">54');
+  assert.equal(report(input).status, 'partial');
+  assert.equal(report(input).observed.run.ran.value, 54);
+  input.process.timedOut = true;
+  assert.equal(report(input).status, 'timeout');
+  assert.equal(report(input).observed.run.ran.value, 54);
+  assert.equal(Object.hasOwn(report(input), 'counters'), false);
 });

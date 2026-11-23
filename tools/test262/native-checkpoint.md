@@ -52,13 +52,27 @@ All negative cases must return nonzero and no final success summary. In the norm
 
 ## Read-only harness artifact check
 
-After a coordinator-owned **public harness** attempt (not the two-case fixture), save the exit record and pass it alongside the existing stdout log and final frame:
+After a coordinator-owned **public harness** attempt (not the two-case fixture), save the exit record and a manifest beside the existing stdout log and final frame. Set the suite version/date to the intended known reference, not values guessed from missing snapshots.
+
+```json
+{
+  "schema": 1,
+  "scope": "legacy-test262-native-chapter",
+  "url": "https://v8.github.io/test262/website/default.html",
+  "selection": { "kind": "chapter", "name": "harness", "planned": 55 },
+  "suite": { "version": "1234", "date": "2016-03-23" },
+  "files": { "process": "process.json", "stdout": "native.out", "frame": "frame.png" }
+}
+```
 
 ```powershell
 @{ code = $r.ExitCode } | ConvertTo-Json | Set-Content (Join-Path $out 'process.json') -Encoding UTF8
-node tools/test262/native-checkpoint-verify.mjs (Join-Path $out 'process.json') $r.StdoutPath (Join-Path $out 'frame.png')
+Copy-Item -LiteralPath $r.StdoutPath -Destination (Join-Path $out 'native.out')
+node tools/test262/native-checkpoint-verify.mjs (Join-Path $out 'manifest.json')
 ```
 
-Keep the exit record and both `.run.json` / `.results.json` sidecars from that same fresh directory. A timeout or launch exception has no successful exit record. The tool does not launch a browser. `artifacts-consistent` means the receipt, PNG container, scope, selected panes and counters agree; it is not a visual check or a published score. Confirm that the actual `harness` Run image was used and that the final PNG displays the matching Results. Page diagnostic strings are kept as metadata, not used as pass/fail criteria.
+Keep the exit record and both `.run.json` / `.results.json` sidecars in that same fresh directory. A timeout or launch exception has no successful exit record. If the owning runner recorded a timeout, set `timedOut: true` rather than inventing an exit code. The tool does not launch a browser. `artifacts-consistent` means the receipt, PNG container, scope, selected panes and counters agree; it is not a visual check or a published score. Confirm that the actual `harness` Run image was used and that the final PNG displays the matching Results. Page diagnostic strings are kept as metadata, not used as pass/fail criteria.
+
+`observed` shows raw DOM observations on failed and partial attempts too: `"0"` is an observed zero, `""` is blank, and `missing-element`, `missing-snapshot`, and `invalid-snapshot` are distinct. These fields are not proof that a pane was visible or that its counters belong to a completed run.
 
 Offline verifier tests: `node --test tools/test262/native-checkpoint-verify.test.mjs`.

@@ -1,16 +1,42 @@
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { completeCounters, count, site } from './website.mjs';
 
 const title = 'ECMAScript Language – test262';
-const planned = 55;
 const resultKeys = ['ran', 'pass', 'fail', 'failedToLoad'];
+const fields = {
+  run: {
+    planned: ['id', 'testsToRun'], ran: ['id', 'totalCounter'], pass: ['id', 'Pass'],
+    fail: ['id', 'Fail'], failedToLoad: ['id', 'failedToLoadCounter1'],
+  },
+  results: {
+    ran: ['class', 'totalCases'], pass: ['class', 'passedCases'], fail: ['class', 'failedCases'],
+    failedToLoad: ['id', 'failedToLoadCounter'],
+  },
+};
 const pngSignature = Buffer.from('89504e470d0a1a0a', 'hex');
 const pngEnd = Buffer.from('0000000049454e44ae426082', 'hex');
 
 function requireEvidence(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+export function validateNativeHarnessManifest(manifest) {
+  requireEvidence(manifest?.schema === 1 && manifest.scope === 'legacy-test262-native-chapter' &&
+    manifest.url === site, 'Invalid native harness manifest scope');
+  const { selection, suite, files } = manifest;
+  requireEvidence(selection?.kind === 'chapter' && selection.name === 'harness' && selection.planned === 55,
+    'Manifest must identify the 55-case harness chapter');
+  requireEvidence(typeof suite?.version === 'string' && suite.version.trim() &&
+    typeof suite.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(suite.date), 'Missing manifest suite identity');
+  const required = ['process', 'stdout', 'frame'];
+  requireEvidence(required.every(key => typeof files?.[key] === 'string' &&
+    /^[a-z\d][a-z\d_.-]*$/i.test(files[key]) && basename(files[key]) === files[key]),
+  'Manifest files must be simple filenames beside the manifest');
+  requireEvidence(new Set(required.map(key => files[key].toLowerCase())).size === required.length &&
+    /\.png$/i.test(files.frame), 'Manifest files must be distinct, with a PNG frame');
+  return manifest;
 }
 
 const sameSite = url => typeof url === 'string' && url.split('#')[0] === site;
@@ -72,7 +98,32 @@ function validPng(png) {
     png.readUInt32BE(16) > 0 && png.readUInt32BE(20) > 0 && png.subarray(-12).equals(pngEnd);
 }
 
-export function verifyNativeHarnessArtifacts({ process, summary, run, results, png }) {
+function observeCounters(snapshot, stage, artifactState) {
+  const selectors = fields[stage];
+  const all = state => Object.fromEntries(Object.keys(selectors).map(key => [key, { state, raw: null, value: null }]));
+  if (snapshot == null) return all(artifactState === 'invalid' ? 'invalid-snapshot' : 'missing-snapshot');
+  if (typeof snapshot.html !== 'string' || !snapshot.html) return all('invalid-snapshot');
+  const html = withoutInert(snapshot.html);
+  const paneClass = stage === 'run' ? 'content-tests' : 'content-results';
+  try {
+    const panes = regions(html, 'div', attrs => hasClass(attrs, paneClass), `.${paneClass}`);
+    if (panes.length !== 1) return all(panes.length ? 'ambiguous-pane' : 'missing-pane');
+    return Object.fromEntries(Object.entries(selectors).map(([key, [where, name]]) => {
+      const matches = regions(panes[0].body, 'span', attrs => where === 'id' ? attrs.id === name : hasClass(attrs, name), name);
+      if (matches.length !== 1) return [key, { state: matches.length ? 'ambiguous-element' : 'missing-element', raw: null, value: null }];
+      const raw = matches[0].body.trim();
+      const value = count(raw);
+      const state = value !== null ? 'observed' : raw === '' ? 'blank' : 'invalid-value';
+      return [key, { state, raw, value }];
+    }));
+  } catch {
+    return all('invalid-snapshot');
+  }
+}
+
+export function verifyNativeHarnessArtifacts({ manifest, process, summary, run, results, png }) {
+  const { selection, suite: expectedSuite } = validateNativeHarnessManifest(manifest);
+  const { planned } = selection;
   requireEvidence(process?.code === 0 && !process.signal && !process.timedOut && !process.spawnError, 'Native process did not succeed');
   requireEvidence(summary?.window_smoke === true && Number.isSafeInteger(summary.frames_presented) &&
     summary.frames_presented > 0 && summary.layout_limited === false && summary.paint_limited === false &&
@@ -97,45 +148,79 @@ export function verifyNativeHarnessArtifacts({ process, summary, run, results, p
   requireEvidence(!hidden(progress.attrs) && text(byClass(progress.body, 'span', 'text')) === 'Testing complete!',
     'Run completion marker absent');
   const chapters = byId(runPane, 'div', 'chapterSelector').body;
-  const fiftyFive = regions(chapters, 'td', attrs => hasClass(attrs, 'chapterName'), 'chapter label')
-    .map(text).filter(label => /\(55 tests\)$/.test(label));
-  requireEvidence(fiftyFive.length === 1 && fiftyFive[0] === 'Chapter - harness (55 tests)', 'Wrong or ambiguous chapter');
+  const sameSize = regions(chapters, 'td', attrs => hasClass(attrs, 'chapterName'), 'chapter label')
+    .map(text).filter(label => label.endsWith(`(${planned} tests)`));
+  requireEvidence(sameSize.length === 1 && sameSize[0] === `Chapter - ${selection.name} (${planned} tests)`, 'Wrong or ambiguous chapter');
 
-  const ids = { planned: 'testsToRun', ran: 'totalCounter', pass: 'Pass', fail: 'Fail', failedToLoad: 'failedToLoadCounter1' };
-  const runCounters = Object.fromEntries(Object.entries(ids).map(([key, id]) => [key, text(byId(runPane, 'span', id))]));
+  const counters = (stage, pane) => Object.fromEntries(Object.entries(fields[stage]).map(([key, [where, name]]) =>
+    [key, text((where === 'id' ? byId : byClass)(pane, 'span', name))]));
+  const runCounters = counters('run', runPane);
   requireEvidence(completeCounters(runCounters, planned), 'Run counters do not establish all 55 harness tests');
-  const resultsCounters = {
-    ran: text(byClass(resultsPane, 'span', 'totalCases')),
-    pass: text(byClass(resultsPane, 'span', 'passedCases')),
-    fail: text(byClass(resultsPane, 'span', 'failedCases')),
-    failedToLoad: text(byId(resultsPane, 'span', 'failedToLoadCounter')),
-  };
+  const resultsCounters = counters('results', resultsPane);
   requireEvidence(resultKeys.every(key => count(resultsCounters[key]) === count(runCounters[key])), 'Results counters do not match Run');
   const suite = pane => ({
     version: text(byClass(pane, 'span', 'targetTestSuiteVersion')),
     date: text(byClass(pane, 'span', 'targetTestSuiteDate')),
   });
   const runSuite = suite(runPane), resultsSuite = suite(resultsPane);
-  requireEvidence(runSuite.version && runSuite.date &&
-    runSuite.version === resultsSuite.version && runSuite.date === resultsSuite.date, 'Suite identity is missing or changed');
+  requireEvidence([runSuite, resultsSuite].every(observed =>
+    observed.version === expectedSuite.version && observed.date === expectedSuite.date), 'Suite identity is missing or changed');
   return {
     status: 'artifacts-consistent',
     visualConfirmationRequired: true,
-    selection: { kind: 'chapter', name: 'harness', planned },
+    selection: { kind: selection.kind, name: selection.name, planned },
     suite: runSuite,
     counters: Object.fromEntries(Object.entries(runCounters).map(([key, value]) => [key, count(value)])),
   };
 }
 
+export function reportNativeHarnessArtifacts(input) {
+  const { selection } = validateNativeHarnessManifest(input.manifest);
+  const observed = Object.fromEntries(['run', 'results'].map(stage =>
+    [stage, observeCounters(input[stage], stage, input.artifacts?.[stage])]));
+  try {
+    return { ...verifyNativeHarnessArtifacts(input), observed };
+  } catch (error) {
+    const countSeen = observed.run.ran.value;
+    const partial = observed.run.planned.value === selection.planned && countSeen > 0 && countSeen < selection.planned;
+    return {
+      status: input.process?.timedOut ? 'timeout' : partial ? 'partial' : 'unverified',
+      selection, observed, error: error.message,
+    };
+  }
+}
+
+const parseJson = bytes => JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+
+export async function readNativeHarnessArtifacts(manifestPath) {
+  const manifest = validateNativeHarnessManifest(parseJson(await readFile(manifestPath)));
+  const { files } = manifest;
+  const entries = {
+    process: files.process, summary: files.stdout, png: files.frame,
+    run: `${files.frame}.run.json`, results: `${files.frame}.results.json`,
+  };
+  const dir = dirname(resolve(manifestPath));
+  const capture = { manifest, artifacts: {} };
+  await Promise.all(Object.entries(entries).map(async ([key, file]) => {
+    try {
+      const bytes = await readFile(resolve(dir, file));
+      capture[key] = key === 'png' ? bytes : parseJson(bytes);
+      capture.artifacts[key] = capture[key] == null ? 'invalid' : 'present';
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      capture[key] = null;
+      capture.artifacts[key] = error.code === 'ENOENT' ? 'missing' : 'invalid';
+    }
+  }));
+  return capture;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const [outcome, stdout, frame] = process.argv.slice(2);
-    requireEvidence(process.argv.length === 5, 'Usage: node native-checkpoint-verify.mjs PROCESS_JSON STDOUT_JSON FRAME_PNG');
-    const json = async path => JSON.parse((await readFile(path, 'utf8')).replace(/^\uFEFF/, ''));
-    const [runProcess, summary, run, results, png] = await Promise.all([
-      json(outcome), json(stdout), json(`${frame}.run.json`), json(`${frame}.results.json`), readFile(frame),
-    ]);
-    console.log(JSON.stringify(verifyNativeHarnessArtifacts({ process: runProcess, summary, run, results, png })));
+    requireEvidence(process.argv.length === 3, 'Usage: node native-checkpoint-verify.mjs MANIFEST_JSON');
+    const report = reportNativeHarnessArtifacts(await readNativeHarnessArtifacts(process.argv[2]));
+    console.log(JSON.stringify(report));
+    if (report.status !== 'artifacts-consistent') process.exitCode = 1;
   } catch (error) {
     console.error(String(error));
     process.exitCode = 1;
