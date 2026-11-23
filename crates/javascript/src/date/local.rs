@@ -21,13 +21,15 @@ fn resolve_wall(
         .into_iter()
         .filter_map(|offset| {
             let utc = wall - offset;
-            let projected = utc + offset_at(utc);
-            // Exact matches come first, with the earlier instant on overlap.
-            // During a gap use the offset which moves wall time forward.
-            (projected >= wall).then_some((projected - wall, utc))
+            (offset_at(utc) == offset).then_some(utc)
         })
+        // For a repeated wall time, choose its first occurrence.
         .min()
-        .map_or_else(|| wall - offset_at(wall), |(_, utc)| utc)
+        .unwrap_or_else(|| {
+            // In a gap use the actual offset before the transition. Guessed
+            // biases from other rule years must not determine the adjustment.
+            wall - offset_at(wall - DAY_MS)
+        })
 }
 
 #[cfg(windows)]
@@ -281,6 +283,19 @@ mod tests {
         assert_eq!(
             resolve_wall(wall, [60 * MINUTE_MS, 90 * MINUTE_MS], offset_at),
             15 * MINUTE_MS
+        );
+    }
+
+    #[test]
+    fn gap_ignores_offsets_from_other_rule_years() {
+        let before = 30 * MINUTE_MS;
+        let after = 90 * MINUTE_MS;
+        let offset_at = |utc| if utc < 0 { before } else { after };
+        let wall = 75 * MINUTE_MS;
+        let other_rule = 60 * MINUTE_MS;
+        assert_eq!(
+            resolve_wall(wall, [before, after, other_rule], offset_at),
+            wall - before
         );
     }
 }
