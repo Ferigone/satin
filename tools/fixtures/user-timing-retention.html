@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>User Timing retention</title>
+<h1>User Timing retention</h1>
+<pre id="result">Not run</pre>
+<script>
+  const anchor = performance.mark('batch-start', {startTime: 3});
+  const first = performance.measure('render-row', {start: 4, duration: 1});
+  for (let i = 0; i < 1024; i++) {
+    performance.measure('render-row', {start: i + 5, duration: 1});
+  }
+
+  const rows = performance.getEntriesByName('render-row', 'measure');
+  const foundAnchor = performance.getEntriesByName('batch-start', 'mark');
+  let batchDuration;
+  try {
+    batchDuration = performance.measure('render-batch', {
+      start: 'batch-start', end: 1030
+    }).duration;
+  } catch (error) {
+    batchDuration = error.name;
+  }
+
+  performance.clearMeasures('render-row');
+  const afterClear = performance.getEntriesByType('measure').map(entry => entry.name);
+  performance.clearMarks('batch-start');
+  let missingAfterClear = false;
+  try {
+    performance.measure('missing-anchor', {start: 'batch-start', end: 1030});
+  } catch (error) {
+    missingAfterClear = error.name === 'SyntaxError';
+  }
+
+  document.getElementById('result').textContent = JSON.stringify({
+    rowCount: rows.length,
+    firstRetained: rows[0] === first,
+    lastStart: rows[rows.length - 1].startTime,
+    anchorRetained: foundAnchor[0] === anchor,
+    batchDuration,
+    afterClear,
+    missingAfterClear
+  });
+</script>

@@ -2,9 +2,8 @@
 use super::{NavigationTiming, clock};
 use crate::script::{abort::dom_exception_error, arg, getter, webidl};
 use rust_browser_javascript::{JsError, JsString, RootId, Value, Vm};
-use std::{cell::RefCell, cmp::Ordering, collections::VecDeque, rc::Rc, time::Instant};
+use std::{cell::RefCell, cmp::Ordering, rc::Rc, time::Instant};
 
-const ENTRY_LIMIT: usize = 1024;
 const NAME: u32 = 0;
 const DETAIL: u32 = 1;
 const FIELDS: [&str; 4] = ["name", "entryType", "startTime", "duration"];
@@ -78,7 +77,7 @@ struct BufferedEntry {
 }
 
 struct Timeline {
-    entries: RefCell<VecDeque<BufferedEntry>>,
+    entries: RefCell<Vec<BufferedEntry>>,
     timing: Rc<NavigationTiming>,
     clone_detail: RootId,
     exception: RootId,
@@ -197,12 +196,9 @@ impl Timeline {
     }
 
     fn buffer(&self, vm: &mut Vm, object: Value, data: Rc<Entry>) -> Value {
-        let mut entries = self.entries.borrow_mut();
-        if entries.len() == ENTRY_LIMIT {
-            let oldest = entries.pop_front().expect("full timing timeline");
-            vm.unroot(oldest.object);
-        }
-        entries.push_back(BufferedEntry {
+        // User Timing entries have no timeline-specific cap. Each is backed by
+        // a VM heap object and remains rooted until cleared or the realm ends.
+        self.entries.borrow_mut().push(BufferedEntry {
             data,
             object: vm.root(object.clone()),
         });
@@ -382,6 +378,10 @@ impl Timeline {
                         .is_none_or(|kind| matches_ascii(kind, entry.data.kind.name()))
             })
             .collect();
+        let sort_work = selected
+            .len()
+            .saturating_mul(selected.len().max(1).ilog2() as usize);
+        vm.charge_work(sort_work)?;
         selected.sort_by(|a, b| a.data.by_start(&b.data));
         let objects: Vec<_> = selected
             .into_iter()
