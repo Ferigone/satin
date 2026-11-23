@@ -28,7 +28,7 @@ fn scratch<T>(vm: &mut Vm, capacity: usize) -> Result<Vec<T>, JsError> {
     Ok(values)
 }
 
-fn compile(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
+fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
     let size = vm
         .buffer_source_len(bytes)?
         .ok_or_else(|| JsError::type_error("Expected a WebAssembly BufferSource"))?;
@@ -44,7 +44,12 @@ fn compile(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
 }
 
 fn create_module(vm: &mut Vm, bytes: &Value, prototype: ObjectId) -> Result<Value, JsError> {
-    let module = compile(vm, bytes)?;
+    if !vm.wasm_compilation_allowed {
+        return Err(compile_error(
+            "WebAssembly compilation is disallowed by policy",
+        ));
+    }
+    let module = decode_source(vm, bytes)?;
     vm.ensure_allocation(module.retained_bytes().saturating_add(384))?;
     vm.allocate_constructed(ObjectKind::WasmModule(Rc::new(module)), prototype)
 }
@@ -453,7 +458,7 @@ pub(crate) fn install(vm: &mut Vm) {
         namespace.clone(),
         "validate",
         1,
-        |vm, _, args| match compile(vm, &arg(args, 0)) {
+        |vm, _, args| match decode_source(vm, &arg(args, 0)) {
             Ok(_) => Ok(Value::Bool(true)),
             Err(error) if error.kind == ErrorKind::CompileError => Ok(Value::Bool(false)),
             Err(error) => Err(error),

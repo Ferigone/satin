@@ -153,6 +153,7 @@ pub struct Vm {
     pub(crate) module_realm: u64,
     pub(crate) active_referrer: Option<SourceReferrer>,
     pub(crate) dynamic_import_hook: Option<DynamicImportHook>,
+    pub(crate) wasm_compilation_allowed: bool,
 }
 #[derive(Clone)]
 pub(crate) enum Reference {
@@ -333,6 +334,7 @@ impl Vm {
             module_realm: crate::modules::module_realm_id(),
             active_referrer: None,
             dynamic_import_hook: None,
+            wasm_compilation_allowed: true,
         };
         crate::builtins::install(&mut vm);
         vm.initializing = false;
@@ -340,6 +342,13 @@ impl Vm {
     }
     pub fn limits(&self) -> &VmLimits {
         &self.limits
+    }
+    /// Controls whether this VM can compile new WebAssembly modules from bytes.
+    ///
+    /// Standalone VMs allow compilation by default. Validation and instantiation
+    /// of an already compiled module are unaffected.
+    pub fn set_wasm_compilation_allowed(&mut self, allowed: bool) {
+        self.wasm_compilation_allowed = allowed;
     }
     pub fn check_syntax(&mut self, source: &str) -> Result<(), JsError> {
         let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;

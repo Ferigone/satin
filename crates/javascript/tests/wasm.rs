@@ -127,3 +127,52 @@ fn invalid_bytes_and_incorrect_imports_reject_with_branded_errors() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn policy_blocks_new_modules_but_allows_validation_and_precompiled_modules() {
+    let mut vm = fixture();
+    vm.eval("var precompiled = new WebAssembly.Module(wasmBytes);")
+        .unwrap();
+    vm.set_wasm_compilation_allowed(false);
+    vm.eval(
+        r#"
+        var constructorFailure, compileFailure, instantiateFailure, existing, importReads = 0;
+        var imports = {get env() {
+            importReads++;
+            return {sum(a, b) { return a + b; }};
+        }};
+        try {
+            new WebAssembly.Module(wasmBytes);
+        } catch (error) {
+            constructorFailure = error instanceof WebAssembly.CompileError;
+        }
+        WebAssembly.compile(wasmBytes).catch(error => {
+            compileFailure = error instanceof WebAssembly.CompileError;
+        });
+        WebAssembly.instantiate(wasmBytes, imports).catch(error => {
+            instantiateFailure = error instanceof WebAssembly.CompileError;
+        });
+        var valid = WebAssembly.validate(wasmBytes);
+        var sync = new WebAssembly.Instance(precompiled, imports).exports.run(19, 23);
+        WebAssembly.instantiate(precompiled, imports).then(instance => {
+            existing = instance.exports.run(19, 23);
+        });
+    "#,
+    )
+    .unwrap();
+    flush(&mut vm);
+    assert_eq!(
+        vm.eval(
+            "constructorFailure && compileFailure && instantiateFailure && valid && \
+             sync === 42 && existing === 42 && importReads === 2"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    vm.set_wasm_compilation_allowed(true);
+    assert_eq!(
+        vm.eval("new WebAssembly.Module(wasmBytes) instanceof WebAssembly.Module")
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
