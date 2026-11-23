@@ -110,8 +110,10 @@ async function sample(page, site) {
     return {
       host: location.hostname, videoElements: videos.length, playerVideo: !!root?.querySelector('video'),
       playerShell: !!root, adMarker: !!document.querySelector('#movie_player.ad-showing,[data-a-target="video-ad-label"]'),
-      consentVisible: location.hostname === 'consent.youtube.com'
-        || !!document.querySelector('ytd-consent-bump-v2-lightbox:not([hidden])')?.getClientRects().length,
+      consentVisible: site === 'youtube' && (location.hostname === 'consent.youtube.com'
+        || [...document.querySelectorAll('button')].some(button =>
+          /reject (all|the use of cookies)|odrzuć wszystko/i.test(`${button.textContent} ${button.getAttribute('aria-label')}`)
+          && button.getClientRects().length && getComputedStyle(button).visibility === 'visible')),
       youtubeAccessWall: site === 'youtube' && /sign in to confirm|not a bot|not available/i.test(
         (document.querySelector('.ytp-error-content-wrap,ytd-enforcement-message-view-model')?.textContent ?? ''),
       ),
@@ -212,17 +214,26 @@ async function chromeCase(exe, chromium, { site, url }) {
         return video?.readyState >= 1;
       }, player[site].shell, { timeout: 12000 }).catch(() => {});
     } else if (!outcome.controls.rejectOptionalCookies) outcome.controls.rejectOptionalCookies = await click(reject);
+    if (outcome.controls.rejectOptionalCookies) {
+      await reject.first().waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    }
     const opening = await record('initial');
     if (opening?.video && !opening.video.paused) {
       outcome.controls.play = 'autoplay already active';
     } else {
       outcome.controls.play = await click(play) ? 'clicked' : 'play control unavailable';
     }
-    await page.waitForFunction(selector => {
+    const waitForPlaying = timeout => page.waitForFunction(selector => {
       const video = document.querySelector(selector)?.querySelector('video');
       return video && !video.paused && video.readyState >= 2 && video.currentTime > 0;
-    }, player[site].shell, { timeout: 18000 }).catch(() => {});
-    const start = await record('progress-start');
+    }, player[site].shell, { timeout, polling: 200 }).then(() => true, () => false);
+    const playing = await waitForPlaying(18000);
+    let start = await record('progress-start');
+    if (!playing && site === 'youtube' && start?.video?.paused && !start.youtubeAccessWall && !start.consentVisible) {
+      outcome.controls.playRetry = await click(play) ? 'clicked' : 'play control unavailable';
+      await waitForPlaying(8000);
+      start = await record('after-play-retry');
+    }
     await countScripts();
     if (start?.video) {
       await page.waitForTimeout(4500);
@@ -292,9 +303,11 @@ async function reaCase(chrome, cli, { site, url }, dir) {
   };
 }
 
-const [mode, executable, identifier] = process.argv.slice(2);
-if (!['chrome', 'satin'].includes(mode) || !executable || !identifier) {
-  console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> | satin <rust-browser.exe> <git commit>');
+const [mode, executable, identifier, site] = process.argv.slice(2);
+const selected = cases.filter(test => !site || test.site === site);
+if (!['chrome', 'satin'].includes(mode) || !executable || !identifier || !selected.length) {
+  console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
+  console.error('   or: node tools/verify-public-media.mjs satin <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
 }
 const root = fileURLToPath(new URL('../target/public-media/', import.meta.url));
@@ -319,14 +332,14 @@ try {
     const require = createRequire(cli);
     const { chromium } = require('playwright-core');
     report.reaVersion = JSON.parse(await readFile(join(dirname(cli), '..', 'package.json'), 'utf8')).version;
-    for (const test of cases) {
+    for (const test of selected) {
       report.rea.push(await reaCase(exe, cli, test, temporary));
       await save();
       report.cases.push(await chromeCase(exe, chromium, test));
       await save();
     }
   } else {
-    for (const test of cases) {
+    for (const test of selected) {
       await mkdir(join(temporary, test.site));
       report.cases.push(await satinCase(exe, test, join(temporary, test.site)));
       await save();

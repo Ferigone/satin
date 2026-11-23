@@ -11,6 +11,8 @@ node tools/verify-public-media.mjs chrome $chrome $rea
 node tools/verify-public-media.mjs satin $binary $sourceCommit
 ```
 
+Append `twitch` or `youtube` to repeat just one site. See the [2026-11-23 comparison](PUBLIC_MEDIA_QA_2026-11-23.md) for an example of observed versus untested results.
+
 The runner prints the path of a new sanitized `target/public-media/<run>/summary.json`. It records UTC timestamps, binary SHA-256, reported version, supplied source commit, OS, architecture, and viewport. The candidate is run read-only, with per-case profiles. The runner retains no raw DOM, cookies, storage, headers, network bodies, media URLs, or chat messages. The transient profiles and captures are removed on normal completion. If a run is interrupted, treat its `transient` directory as private; do not publish it.
 
 ## Reading the receipts
