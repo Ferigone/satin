@@ -20,6 +20,9 @@ use std::{
 
 use crate::dynamic_import::{DynamicImportHook, SourceReferrer};
 
+#[cfg(test)]
+mod global_environment_tests;
+
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
@@ -96,6 +99,7 @@ pub struct GcStats {
 /// values retained outside the callback. Captured Rust/DOM data needs no JS tracing.
 pub struct Vm {
     pub(crate) heap: Heap,
+    /// Binding object of `global_env`; it need not be the global this value.
     pub(crate) global_object: ObjectId,
     pub(crate) global_env: EnvId,
     pub(crate) object_prototype: ObjectId,
@@ -270,11 +274,7 @@ impl Vm {
             ObjectKind::Ordinary,
             Some(object_prototype),
         )));
-        let global_env = heap.allocate_env(Environment::new(
-            None,
-            EnvKind::Global,
-            Some(Value::Object(global_object)),
-        ));
+        let global_env = heap.allocate_env(Environment::new_global(global_object, global_object));
         let mut vm = Self {
             heap,
             global_object,
@@ -469,6 +469,25 @@ impl Vm {
     pub fn global(&self) -> Value {
         Value::Object(self.global_object)
     }
+    pub(crate) fn global_this(&self) -> Value {
+        self.heap
+            .environment(self.global_env)
+            .this
+            .clone()
+            .expect("global environment has a this binding")
+    }
+
+    pub(crate) fn install_global_this(&mut self) -> Result<(), JsError> {
+        self.define_data_property(
+            self.global(),
+            "globalThis",
+            self.global_this(),
+            true,
+            false,
+            true,
+        )
+    }
+
     pub fn get_global(&mut self, key: &str) -> Result<Value, JsError> {
         let reference = self.resolve(self.global_env, &key.into())?;
         if matches!(reference, Reference::Unresolvable(_)) {
@@ -898,7 +917,6 @@ impl Vm {
         }
         let mut roots = self.heap.trace_roots();
         roots.extend([
-            self.global_object,
             self.global_env.0,
             self.object_prototype,
             self.function_prototype,
@@ -1941,7 +1959,7 @@ impl Vm {
             if e.bindings.contains_key(key) {
                 return Ok(Reference::Binding(env, key.clone()));
             }
-            if e.kind == EnvKind::Global && self.has(&self.global(), key)? {
+            if matches!(e.kind, EnvKind::Global { .. }) && self.has(&self.global(), key)? {
                 return Ok(Reference::Global(key.clone()));
             }
             if let Some(p) = e.parent {

@@ -72,7 +72,7 @@ impl Vm {
         } else if code.strict {
             Some(this)
         } else if this.is_nullish() {
-            Some(self.global())
+            Some(self.global_this())
         } else {
             Some(self.coerce_object(this)?)
         };

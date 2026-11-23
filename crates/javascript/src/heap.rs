@@ -197,7 +197,7 @@ pub(crate) struct Binding {
 }
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum EnvKind {
-    Global,
+    Global { binding_object: ObjectId },
     Function,
     Block,
     Module,
@@ -217,6 +217,14 @@ pub(crate) struct Environment {
     pub private_names: BTreeMap<JsString, crate::private::PrivateId>,
 }
 impl Environment {
+    pub fn new_global(binding_object: ObjectId, global_this: ObjectId) -> Self {
+        Self::new(
+            None,
+            EnvKind::Global { binding_object },
+            Some(Value::Object(global_this)),
+        )
+    }
+
     pub fn new(parent: Option<EnvId>, kind: EnvKind, this: Option<Value>) -> Self {
         Self {
             parent,
@@ -534,6 +542,9 @@ impl Heap {
     fn trace_cell(cell: &Cell, pending: &mut TraceEdges) {
         match cell {
             Cell::Environment(env) => {
+                if let EnvKind::Global { binding_object } = env.kind {
+                    pending.push(binding_object);
+                }
                 if let Some(p) = env.parent {
                     pending.push(p.0);
                 }

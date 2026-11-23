@@ -1,8 +1,9 @@
 # Shared VM realms for blank iframes and Test262
 
-**Design only.** The heap identity guard does not create realms or expose
-`contentWindow`. The [browser probe](../tools/fixtures/iframe-script-realms.md)
-checks the intended behavior without changing the public ES5.1 suite.
+**Realm creation is not exposed.** The heap identity guard and the private
+global environment split do not create realms or expose `contentWindow`.
+The [browser probe](../tools/fixtures/iframe-script-realms.md) checks the
+intended behavior without changing the public ES5.1 suite.
 
 ## VM seam
 
@@ -12,6 +13,11 @@ checks the intended behavior without changing the public ES5.1 suite.
   `this` must be distinct slots so a browser realm can use a `WindowProxy` for
   global `this`. A new `Vm` is still an independent heap; its object handles
   are not transferable.
+- The first stage traces the binding object and global `this` independently
+  from the existing global environment. `Vm::global()` returns the binding
+  object; the built-in `globalThis` property and a sloppy function's nullish
+  receiver use the environment's `this`. This does not yet activate another
+  global environment or associate functions with their defining realms.
 - Provide host-only `create_realm`, `realm_global`, and scoped `with_realm`
   operations. Realm handles must be validated against the owning heap and
   remain live only while traced or explicitly retained. Create realms under
@@ -19,6 +25,8 @@ checks the intended behavior without changing the public ES5.1 suite.
   and errors; entering a realm must not reset the surrounding task budget.
 - Entry into a function uses its owning realm (including built-ins); jobs
   and suspended execution preserve the realm they need when resumed.
+  Global references held across execution boundaries must carry their
+  resolved binding object, not look up the ambient global again.
   `GetPrototypeFromConstructor` must use the realm of `newTarget` for
   intrinsic fallback, not the realm of the active constructor. Verify this
   with pinned `built-ins/Promise/proto-from-ctor-realm.js` after wiring

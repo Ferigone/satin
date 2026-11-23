@@ -18,8 +18,7 @@ pub(crate) fn install(vm: &mut Vm) {
         vm.define_data_property(vm.global(), name, value, false, false, false)
             .unwrap();
     }
-    vm.define_data_property(vm.global(), "globalThis", vm.global(), true, false, true)
-        .unwrap();
+    vm.install_global_this().unwrap();
     install_object(vm);
     install_function(vm);
     install_array(vm);
