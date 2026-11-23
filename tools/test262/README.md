@@ -2,6 +2,8 @@
 
 The runner sends test source to `rb-js`, the Satin JavaScript engine's test worker. Node handles YAML metadata, file selection, and process supervision. The worker runs each variant in a fresh VM.
 
+For the public legacy Test262 site instead, see the [separate live-browser probe](website.md). The numbers are not interchangeable.
+
 Use a [Test262 checkout](https://github.com/tc39/test262) at commit `48221d7c1f7745dc13e420a2e850a248c0b2afb4`. The runner reads source and harness bytes from Git objects and verifies blob hashes. Working-tree line endings leave the parser input unchanged.
 
 From the repository root, run
