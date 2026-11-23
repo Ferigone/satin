@@ -1,3 +1,5 @@
+mod settings;
+
 use crate::jobs::{Job, Message, Payload, Task, Workers};
 use crate::media::Bridge;
 use crate::profile::{Profile, Session};
@@ -81,6 +83,7 @@ enum Action {
     NewTab,
     Select(usize),
     Close(usize),
+    Settings,
     Version,
     Menu,
     MenuItem(usize),
@@ -95,9 +98,10 @@ impl Action {
     }
 }
 
-const MENU_ITEMS: [(Action, &str); 3] = [
+const MENU_ITEMS: [(Action, &str); 4] = [
     (Action::Home, "Start page"),
     (Action::NewTab, "New tab"),
+    (Action::Settings, "Settings"),
     (Action::Version, "About Satin"),
 ];
 
@@ -180,7 +184,9 @@ pub fn run(
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
 ) -> Result<(), String> {
-    let (profile, session) = Profile::open(path)?;
+    let (profile, session) = Profile::open(path.clone())?;
+    let settings = settings::Store::open(&path);
+    let session = settings.initial_session(session);
     let fonts = Fonts::new()?;
     let events = EventLoop::<()>::with_user_event()
         .build()
@@ -223,6 +229,8 @@ pub fn run(
         canvas: None,
         fonts,
         profile,
+        settings,
+        settings_panel: None,
         tabs,
         active,
         next_id,
@@ -303,6 +311,8 @@ struct App {
     canvas: Option<Canvas>,
     fonts: Fonts,
     profile: Profile,
+    settings: settings::Store,
+    settings_panel: Option<settings::Panel>,
     tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
@@ -898,6 +908,7 @@ impl App {
                 }
             }
             Action::Home => self.navigate("about:home".into(), true),
+            Action::Settings => self.open_settings(),
             Action::Version => self.navigate("about:version".into(), true),
             Action::Menu => {
                 self.select_popup = None;
@@ -966,6 +977,9 @@ impl App {
         event_loop.exit();
     }
     fn scroll(&mut self, dy: f32) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         self.address_focus = false;
         self.ensure_layout();
         let tab = &mut self.tabs[self.active];
@@ -1017,6 +1031,9 @@ impl App {
         self.redraw();
     }
     fn insert(&mut self, text: &str) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         if !self.address_focus {
             if let Some(runtime) = &mut self.tabs[self.active].runtime {
                 if let Err(error) = runtime.insert_form_text(text) {
@@ -1040,6 +1057,10 @@ impl App {
         self.redraw();
     }
     fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_key(key);
+            return;
+        }
         if let Some(selected) = self.chrome_menu {
             match key {
                 Key::Named(NamedKey::Escape) => {
@@ -1480,6 +1501,9 @@ impl App {
                     Color(93, 106, 118, 255),
                 );
             }
+        }
+        if let Some(panel) = &self.settings_panel {
+            panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
         }
         let presented = (|| -> Result<(), String> {
             let graphics = self
@@ -2146,6 +2170,10 @@ impl App {
     }
 
     fn left_press(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_press();
+            return;
+        }
         if let Some(edge) = self.frame_resize_at_pointer() {
             if let Some(window) = &self.window {
                 let _ = window.drag_resize_window(edge);
@@ -2193,6 +2221,10 @@ impl App {
     }
 
     fn left_release(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_release();
+            return;
+        }
         if let Some(action) = self.caption_pressed.take() {
             if self.chrome_action_at_pointer() == Some(action) {
                 self.action(action, event_loop);
@@ -2202,6 +2234,9 @@ impl App {
     }
 
     fn pointer_link(&self) -> Option<String> {
+        if self.settings_panel.is_some() {
+            return None;
+        }
         let tab = &self.tabs[self.active];
         if self.mouse.1 < TOP
             || self.window.as_ref().is_some_and(|window| {
@@ -2322,6 +2357,9 @@ impl App {
         }
     }
     fn content_click(&mut self) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         if let Some(popup) = self.select_popup.take() {
             if popup.rect.contains(self.mouse.0, self.mouse.1) {
                 let index = popup.first
@@ -2867,7 +2905,15 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.key(event.logical_key, event.text.as_deref(), event_loop)
+                if !(event.repeat
+                    && self.settings_panel.is_some()
+                    && matches!(
+                        event.logical_key,
+                        Key::Named(NamedKey::Enter | NamedKey::Space)
+                    ))
+                {
+                    self.key(event.logical_key, event.text.as_deref(), event_loop);
+                }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
@@ -2879,6 +2925,10 @@ impl ApplicationHandler<()> for App {
                     position.x as f32 / self.scale,
                     position.y as f32 / self.scale,
                 );
+                if self.settings_panel.is_some() {
+                    self.settings_cursor();
+                    return;
+                }
                 let chrome = self.chrome_action_at_pointer();
                 let link = if chrome.is_none() {
                     self.pointer_link()
@@ -2923,6 +2973,7 @@ impl ApplicationHandler<()> for App {
                     self.left_press(event_loop);
                 } else if button == MouseButton::Right
                     && WINDOW_FRAME
+                    && self.settings_panel.is_none()
                     && self.mouse.1 < TAB_H
                     && self.chrome_action_at_pointer().is_none()
                     && let Some(window) = &self.window
@@ -2947,7 +2998,7 @@ impl ApplicationHandler<()> for App {
                 };
                 self.scroll(amount / self.tabs[self.active].zoom);
             }
-            WindowEvent::DroppedFile(path) => {
+            WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
                 if let Ok(url) = url::Url::from_file_path(path) {
                     self.navigate(url.into(), true);
                 }
@@ -3201,7 +3252,7 @@ fn chrome_icon(
                 line(offset, 9., offset, 10.);
             }
         }
-        Action::Select(_) | Action::MenuItem(_) => {}
+        Action::Settings | Action::Select(_) | Action::MenuItem(_) => {}
     }
 }
 
