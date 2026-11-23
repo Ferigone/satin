@@ -1103,6 +1103,7 @@ impl Parser {
         parts: Vec<Expr>,
         trailing: bool,
         is_async: bool,
+        allow_comma: bool,
     ) -> Result<Expr, JsError> {
         let count = parts.len();
         let mut params = Vec::with_capacity(count);
@@ -1144,7 +1145,14 @@ impl Parser {
             FunctionKind::Ordinary
         };
         let function = self.function_body(None, params, true, kind)?;
-        self.checked_expression(Expr::Function(function))
+        let arrow = self.checked_expression(Expr::Function(function))?;
+        // An arrow is an AssignmentExpression, so a bare arrow can start
+        // a comma expression but cannot take a binary or postfix operator.
+        if allow_comma && self.at(",") {
+            self.expression_tail(1, false, arrow)
+        } else {
+            Ok(arrow)
+        }
     }
 
     fn parameter(&mut self, rest: bool) -> Result<Parameter, JsError> {
@@ -1319,7 +1327,12 @@ impl Parser {
             }
             let name = self.name()?;
             self.expect("=>")?;
-            return self.arrow_from_cover(vec![Expr::Identifier(name)], false, async_word_arrow);
+            return self.arrow_from_cover(
+                vec![Expr::Identifier(name)],
+                false,
+                async_word_arrow,
+                min == 1,
+            );
         }
 
         let async_parens = async_prefix
@@ -1351,7 +1364,7 @@ impl Parser {
                     return Err(self.error("await is not allowed in arrow parameters"));
                 }
                 self.advance(1);
-                return self.arrow_from_cover(parts, trailing, async_parens);
+                return self.arrow_from_cover(parts, trailing, async_parens, min == 1);
             }
             let primary = if async_parens {
                 Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
