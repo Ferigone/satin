@@ -11,7 +11,7 @@ if ($metadata.buildId -cnotmatch '^[A-Za-z0-9.+-]{1,160}$' -or $metadata.buildId
     throw 'The previous Satin version has an invalid executable path.'
 }
 $target = Join-Path $installRoot $metadata.executable
-if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $metadata.sha256) {
+if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-SatinFileSha256 $target) -ne $metadata.sha256) {
     throw 'The previous Satin executable is missing or has changed.'
 }
 

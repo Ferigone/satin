@@ -4,6 +4,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Process.ps1')
 $projectDirectory = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $ReleaseDirectory) { $ReleaseDirectory = Join-Path $projectDirectory 'target\release' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectDirectory 'dist\windows-x64' }
@@ -15,7 +16,7 @@ $updateAsset = Join-Path $OutputDirectory 'satin-windows-x64.exe'
 $installAsset = Join-Path $OutputDirectory 'Satin-windows-x64.zip'
 Copy-Item -LiteralPath $browser.FullName -Destination $updateAsset -Force
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression
 $utf8 = [Text.UTF8Encoding]::new($false)
 # Windows PowerShell uses a legacy code page for scripts without a BOM.
 $scriptEncoding = [Text.UTF8Encoding]::new($true)
@@ -72,6 +73,6 @@ try {
 } finally { $zipStream.Dispose() }
 
 $checksums = foreach ($asset in @($updateAsset, $installAsset)) {
-    '{0}  {1}' -f (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetFileName($asset)
+    '{0}  {1}' -f (Get-SatinFileSha256 $asset).ToLowerInvariant(), [IO.Path]::GetFileName($asset)
 }
 [IO.File]::WriteAllLines([IO.Path]::GetFullPath((Join-Path $OutputDirectory 'SHA256SUMS.txt')), $checksums, $utf8)

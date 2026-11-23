@@ -81,6 +81,17 @@ function ConvertFrom-SatinManifest {
     $manifest
 }
 
+function Get-SatinFileSha256 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $file = [IO.File]::OpenRead($Path)
+        try { [BitConverter]::ToString($sha256.ComputeHash($file)).Replace('-', '') }
+        finally { $file.Dispose() }
+    } finally { $sha256.Dispose() }
+}
+
 function Invoke-SatinMediaSmoke {
     param(
         [Parameter(Mandatory=$true)][string]$Executable,

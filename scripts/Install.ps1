@@ -193,7 +193,7 @@ $manifest = [ordered]@{
     version = $version
     buildId = $buildId
     executable = 'versions/' + $buildId + '/rust-browser.exe'
-    sha256 = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash
+    sha256 = Get-SatinFileSha256 $candidate
     profileSchema = 1
 }
 $pendingLauncher = Join-Path $versionRoot 'launcher.pending.exe'
