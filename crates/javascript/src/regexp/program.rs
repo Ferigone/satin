@@ -24,7 +24,7 @@ pub(crate) struct Program {
 enum Op {
     Match,
     Character(Member, Flags),
-    Class(Vec<Member>, bool, Flags),
+    Class(Vec<Member>, bool, Flags, Option<Box<u128>>),
     Any(Flags),
     Assert(Assertion, Flags),
     Split(usize),
@@ -120,7 +120,15 @@ impl Compiler<'_> {
                 }
             }
             Expr::Character(ch) => self.code.push(Op::Character(ch, flags)),
-            Expr::Class { members, negated } => self.code.push(Op::Class(members, negated, flags)),
+            Expr::Class { members, negated } => {
+                // A single member already needs at most one test.
+                let ascii = if members.len() > 1 {
+                    prefix::class_ascii(&members, negated, flags).map(Box::new)
+                } else {
+                    None
+                };
+                self.code.push(Op::Class(members, negated, flags, ascii));
+            }
             Expr::Any => self.code.push(Op::Any(flags)),
             Expr::Assert(assertion) => self.code.push(Op::Assert(assertion, flags)),
             Expr::Capture(slot, body) => {
@@ -254,7 +262,10 @@ impl Program {
                 .code
                 .iter()
                 .map(|op| match op {
-                    Op::Class(members, ..) => members.capacity() * size_of::<Member>(),
+                    Op::Class(members, _, _, ascii) => {
+                        members.capacity() * size_of::<Member>()
+                            + ascii.as_ref().map_or(0, |_| size_of::<u128>())
+                    }
                     _ => 0,
                 })
                 .sum::<usize>()
@@ -346,7 +357,14 @@ impl Matcher<'_> {
                 Op::Character(member, flags) => {
                     self.read(*flags, |ch| Ok(member_matches(*member, ch, *flags)))?
                 }
-                Op::Class(members, negative, flags) => self.read(*flags, |ch| {
+                Op::Class(members, negative, flags, ascii) => self.read(*flags, |ch| {
+                    if ch < 128
+                        && let Some(mask) = ascii
+                    {
+                        // One exact lookup replaces the member tests below.
+                        vm.consume_work(1)?;
+                        return Ok(**mask & (1u128 << ch) != 0);
+                    }
                     for member in members {
                         vm.consume_work(1)?;
                         if member_matches(*member, ch, *flags) {

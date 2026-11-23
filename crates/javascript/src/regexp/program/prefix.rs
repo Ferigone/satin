@@ -68,10 +68,7 @@ fn head(expr: &Expr, flags: Flags) -> Head {
             Head::consuming(ascii_member(*member).unwrap_or(ALL))
         }
         Expr::Class { members, negated } if !flags.has(Flags::IGNORE_CASE) => {
-            let mask = members
-                .iter()
-                .try_fold(0, |mask, &member| Some(mask | ascii_member(member)?));
-            Head::consuming(mask.map_or(ALL, |mask| if *negated { !mask } else { mask }))
+            Head::consuming(class_ascii(members, *negated, flags).unwrap_or(ALL))
         }
         Expr::Assert(_) | Expr::Look { .. } => Head::EMPTY,
         Expr::Capture(_, body) => head(body, flags),
@@ -94,6 +91,18 @@ fn head(expr: &Expr, flags: Flags) -> Head {
         // future op whose first point or empty-match behavior is unknown.
         _ => Head::UNKNOWN,
     }
+}
+
+/// Exact membership for ASCII code points, or no table if the class requires
+/// case folding, Unicode sets, or an unknown member predicate.
+pub(super) fn class_ascii(members: &[Member], negated: bool, flags: Flags) -> Option<u128> {
+    if flags.has(Flags::IGNORE_CASE | Flags::UNICODE_SETS) {
+        return None;
+    }
+    let mask = members
+        .iter()
+        .try_fold(0, |mask, &member| Some(mask | ascii_member(member)?))?;
+    Some(if negated { !mask } else { mask })
 }
 
 fn ascii_member(member: Member) -> Option<u128> {
