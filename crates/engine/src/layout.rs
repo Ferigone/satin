@@ -615,7 +615,8 @@ struct Builder<'a> {
 const MAX_LAYOUT_RECURSION: usize = 48;
 struct FlexItem {
     node: NodeId,
-    basis: f32,
+    basis: f32, // Border-box base used for free-space accounting.
+    inner_basis: f32,
     min: f32,
     max: f32,
     grow: f32,
@@ -634,7 +635,7 @@ fn distribute_flex(items: &[FlexItem], available: f32) -> Vec<f32> {
         if growing {
             factor(item)
         } else {
-            factor(item) * item.basis
+            factor(item) * item.inner_basis
         }
     };
     let mut frozen: Vec<_> = items
@@ -2080,8 +2081,14 @@ impl Builder<'_> {
             } else {
                 s.margin.map(|v| v == Length::Auto)
             };
+            let extra = if text {
+                0.
+            } else if row {
+                m.extra_x()
+            } else {
+                m.extra_y()
+            };
             let (basis, min, max, fragment) = if row {
-                let extra = if text { 0. } else { m.extra_x() };
                 let to_border = |v: f32| {
                     if !text && s.box_sizing == BoxSizing::BorderBox {
                         v.max(extra)
@@ -2154,7 +2161,6 @@ impl Builder<'_> {
                     },
                 );
                 let natural = (f.height - margin[0] - margin[2]).max(0.);
-                let extra = if text { 0. } else { m.extra_y() };
                 let to_border = |v: f32| {
                     if !text && s.box_sizing == BoxSizing::BorderBox {
                         v.max(extra)
@@ -2207,6 +2213,7 @@ impl Builder<'_> {
             items.push(FlexItem {
                 node,
                 basis,
+                inner_basis: basis - extra,
                 min,
                 max,
                 grow: if text { 0. } else { s.flex_grow },

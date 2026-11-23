@@ -113,6 +113,32 @@ fn flex_resolves_partial_factors_and_freezes_only_net_violations() {
     }
 }
 #[test]
+fn flex_shrink_weights_use_inner_basis_before_definite_minimums() {
+    let (p, l) = layout_document(
+        include_str!("fixtures/css_flex_inner_shrink_basis.html"),
+        800.,
+    );
+    // Edge 158.0.4370.33. Each row starts with 150 and 100 px outer bases.
+    for (name, expected) in [
+        ("plain-a", [0., 0., 120., 10.]),
+        ("plain-b", [120., 0., 80., 10.]),
+        ("inset-a", [0., 10., 125., 10.]),
+        ("inset-b", [125., 10., 75., 10.]),
+        ("border-box-a", [0., 20., 122., 10.]),
+        ("min-b", [122., 20., 78., 10.]),
+    ] {
+        let r = rect(&p, &l, name);
+        let actual = [r.x, r.y, r.width, r.height];
+        assert!(
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 0.05),
+            "{name}: expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+#[test]
 fn row_flex_shrinks_wraps_orders_and_aligns() {
     let (p, l) = layout(
         "<div style='display:flex;width:300px;gap:10px;align-items:center'><div id='a' style='width:200px;min-width:0;height:40px;order:2'></div><div id='b' style='width:200px;min-width:0;height:20px'></div></div><div id='wrap' style='display:flex;flex-wrap:wrap;width:250px;gap:10px'><div id='c' style='width:120px;height:30px;flex-shrink:0'></div><div style='width:120px;height:20px'></div><div id='d' style='width:120px;height:10px'></div></div>",

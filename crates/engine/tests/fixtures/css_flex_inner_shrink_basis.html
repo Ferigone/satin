@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Flexbox: shrink weights use inner flex bases</title>
+<style>
+  body { margin: 0; }
+  .row { display: flex; width: 200px; }
+  .row > div { flex: 0 1 100px; min-width: 0; height: 10px; }
+  .inset {
+    padding: 0 15px;
+    border-left: 10px solid;
+    border-right: 10px solid;
+  }
+</style>
+<div class="row">
+  <div id="plain-a" style="flex-basis: 150px"></div>
+  <div id="plain-b"></div>
+</div>
+<div class="row">
+  <div id="inset-a" class="inset"></div>
+  <div id="inset-b"></div>
+</div>
+<div class="row">
+  <div id="border-box-a" class="inset" style="box-sizing: border-box; flex-basis: 150px"></div>
+  <div id="min-b" style="min-width: 78px"></div>
+</div>
+<pre id="receipt"></pre>
+<script>
+  var items = document.querySelectorAll(".row > div");
+  var geometry = {};
+  for (var i = 0; i < items.length; i += 1) {
+    var rect = items[i].getBoundingClientRect();
+    geometry[items[i].id] = [rect.x, rect.y, rect.width, rect.height];
+  }
+  document.getElementById("receipt").textContent = JSON.stringify(geometry);
+</script>
