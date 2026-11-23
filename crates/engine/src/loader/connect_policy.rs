@@ -13,7 +13,7 @@ const MAX_SOURCES: usize = 128;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConnectPolicy {
-    lists: Arc<Vec<Vec<Source>>>,
+    lists: Arc<Vec<Arc<[Source]>>>,
     blocked: bool,
 }
 
@@ -144,7 +144,7 @@ impl ConnectPolicy {
         if sources.is_empty() {
             self.blocked = true;
         } else {
-            Arc::make_mut(&mut self.lists).push(sources);
+            Arc::make_mut(&mut self.lists).push(sources.into());
         }
     }
 
@@ -162,6 +162,37 @@ fn valid_scheme(scheme: &str) -> bool {
     let mut bytes = scheme.bytes();
     bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn valid_path(path: &str) -> bool {
+    let path = path.as_bytes();
+    path.iter().enumerate().all(|(index, &byte)| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+                    | b'/'
+            )
+            || (byte == b'%'
+                && path
+                    .get(index + 1..index + 3)
+                    .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit)))
+    })
 }
 
 impl Source {
@@ -188,28 +219,32 @@ impl Source {
         let (host_port, path) = rest
             .find('/')
             .map_or((rest, None), |i| (&rest[..i], Some(&rest[i..])));
-        if path.is_some_and(|path| path.contains(['?', '#', '\\'])) {
+        if path.is_some_and(|path| !valid_path(path)) {
             return None;
         }
-        let end = if host_port.starts_with('[') {
-            host_port.find(']')? + 1
-        } else {
-            host_port.find(':').unwrap_or(host_port.len())
-        };
+        let end = host_port.find(':').unwrap_or(host_port.len());
         let (host, port) = host_port.split_at(end);
         let port = match port {
             "" => Port::Default,
             ":*" => Port::Any,
-            port => Port::Exact(port.strip_prefix(':')?.parse().ok()?),
+            port => {
+                let digits = port.strip_prefix(':')?;
+                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                Port::Exact(digits.parse().ok()?)
+            }
         };
         let (host, subdomains) = host
             .strip_prefix("*.")
             .map_or((host, false), |host| (host, true));
-        if host.is_empty()
-            || (host != "*"
-                && !host.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'[' | b']' | b':')
-                }))
+        if !(host == "*" && !subdomains
+            || host.split('.').all(|label| {
+                !label.is_empty()
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            }))
         {
             return None;
         }
@@ -314,5 +349,8 @@ mod tests {
             true
         ));
         assert!(!allows("data:application/wasm,bytes", false));
+        let mut invalid = ConnectPolicy::default();
+        invalid.add_meta("connect-src https://a.test:+443 https://a.test/%zz/");
+        assert!(!invalid.allows(&client, &client, true));
     }
 }
