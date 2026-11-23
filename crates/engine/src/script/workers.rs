@@ -600,7 +600,8 @@ mod worker_lifecycle_tests {
                 vec![],
                 Url::parse("blob:https://example.test/host-task").unwrap(),
                 source,
-            );
+            )
+            .map_err(|error| error.to_string());
             worker.finish();
             done.send(result).unwrap();
         });
