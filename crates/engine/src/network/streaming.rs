@@ -4,7 +4,10 @@ use super::{
 };
 use crate::{
     Loader,
-    loader::transport::{CancelSignal, RequestControl},
+    loader::{
+        ConnectPolicy,
+        transport::{CancelSignal, RequestControl},
+    },
 };
 use std::{
     sync::{
@@ -166,10 +169,22 @@ impl Loader {
         generation: &CancelSignal,
         deadline: Instant,
     ) -> Result<(StreamingResponse, Option<FetchTransfer>), FetchError> {
+        self.open_web_fetch_with_connect_policy(request, upload, generation, deadline, None)
+            .await
+    }
+
+    pub(crate) async fn open_web_fetch_with_connect_policy(
+        &self,
+        request: &WebRequest,
+        upload: Option<UploadBody>,
+        generation: &CancelSignal,
+        deadline: Instant,
+        policy: Option<&ConnectPolicy>,
+    ) -> Result<(StreamingResponse, Option<FetchTransfer>), FetchError> {
         let control =
             RequestControl::new(generation, deadline).with_request(request.signal.as_ref());
         let opened = self
-            .open_fetch(request, &control, FETCH_BODY_LIMIT, true, upload)
+            .open_fetch(request, &control, FETCH_BODY_LIMIT, true, upload, policy)
             .await?;
         let Some(response) = opened.transfer else {
             return Ok((opened.metadata.into(), None));

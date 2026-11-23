@@ -6,7 +6,10 @@ mod upload;
 pub use crate::loader::transport::CancelSignal;
 use crate::{
     Loader,
-    loader::transport::{BodyError, Interrupted, RequestControl},
+    loader::{
+        ConnectPolicy,
+        transport::{BodyError, Interrupted, RequestControl},
+    },
 };
 use reqwest::{
     Method, StatusCode,
@@ -626,7 +629,7 @@ impl Loader {
             mut metadata,
             transfer,
         } = self
-            .open_fetch(request, control, body_limit, expose_only, None)
+            .open_fetch(request, control, body_limit, expose_only, None, None)
             .await?;
         if let Some(response) = transfer {
             let bytes =
@@ -652,6 +655,7 @@ impl Loader {
         body_limit: usize,
         expose_only: bool,
         mut upload: Option<UploadBody>,
+        connect_policy: Option<&ConnectPolicy>,
     ) -> Result<AuthorizedResponse, FetchError> {
         let mut request = request.clone();
         request.validate()?;
@@ -661,6 +665,19 @@ impl Loader {
             request.validate_streaming_upload()?;
         }
         control.check().map_err(interrupted_fetch)?;
+        let check_connect = |url: &Url, redirected| {
+            if connect_policy
+                .is_none_or(|policy| policy.allows(&request.client_url, url, redirected))
+            {
+                Ok(())
+            } else {
+                Err(FetchError::new(
+                    FetchErrorKind::Network,
+                    "Content Security Policy blocked this Fetch connection",
+                ))
+            }
+        };
+        check_connect(&request.url, false)?;
         if request.url.scheme() == "data" {
             let data = crate::data_url::process(&request.url, body_limit).map_err(|error| {
                 FetchError::new(
@@ -702,6 +719,9 @@ impl Loader {
         for redirects in 0..=20 {
             control.check().map_err(interrupted_fetch)?;
             validate_url(&request.url)?;
+            if redirects != 0 {
+                check_connect(&request.url, true)?;
+            }
             if request.client_url.scheme() == "https" && !trustworthy(&request.url) {
                 return Err(FetchError::new(
                     FetchErrorKind::Network,
