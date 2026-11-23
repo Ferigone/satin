@@ -33,33 +33,128 @@ fn script_opened_document_runs_split_classic_scripts_before_close() {
             document.writeln("log.push(document.currentScript.tagName);");
             document.writeln("</script>");
             document.writeln("<p id=tail>tail</p>");
-            document.addEventListener("DOMContentLoaded", function () {
-                log.push(document.readyState);
+            document.addEventListener("readystatechange", function () {
+                log.push("ready:" + document.readyState);
+                if (document.readyState === "interactive") {
+                    queueMicrotask(function () { log.push("ready-job"); });
+                }
             });
-            window.addEventListener("load", function () {
-                log.push(document.readyState);
+            document.addEventListener("readystatechange", function () {
+                log.push("second-ready:" + document.readyState);
+            });
+            document.addEventListener("DOMContentLoaded", function () {
+                log.push("dcl:" + document.readyState);
+            });
+            window.addEventListener("load", function (event) {
+                log.push("load:" + document.readyState + ":" + (event.target === document));
             });
             document.close();
+            log.push("returned:" + document.readyState);
             sameDocument && old.parentNode === null && old !== document.documentElement &&
                 beforeEndTag === 0 && afterEndTag === 1 &&
                 document.getElementById("tail").textContent === "tail" &&
                 document.currentScript === null && document.readyState === "interactive" &&
-                log.join("|") === "loading|SCRIPT";
+                log.join("|") === "loading|SCRIPT|ready:interactive|second-ready:interactive|returned:interactive";
             "#,
         )
         .unwrap();
     assert_eq!(result, Value::Bool(true));
+    // eval() was the author caller. End its task before driving the queued
+    // navigation events; do not checkpoint inside close()'s ready listeners.
+    realm.drain_microtasks();
     advance_ready(&mut page, &mut session, &mut runtime);
     assert!(session.done());
     let realm = runtime.as_mut().unwrap();
     assert_eq!(
         realm.eval("log.join('|')").unwrap(),
-        "loading|SCRIPT|interactive|complete".into()
+        "loading|SCRIPT|ready:interactive|second-ready:interactive|returned:interactive|ready-job|dcl:interactive|ready:complete|second-ready:complete|load:complete:true".into()
     );
     let diagnostics = realm.diagnostics();
     assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
     assert!(diagnostics[0].contains("SyntaxError"), "{diagnostics:?}");
     assert!(diagnostics[1].contains("prerequisite"), "{diagnostics:?}");
+}
+
+#[test]
+fn written_deferred_script_delays_readiness_events_but_not_the_close_caller() {
+    let (mut page, mut session, mut runtime) =
+        start("<!doctype html><script>var log = [];</script>");
+    assert_eq!(
+        evaluate(
+            &mut runtime,
+            r#"
+            document.open();
+            document.write("<!doctype html><script defer src='deferred.js'></script>");
+            document.addEventListener("DOMContentLoaded", function () {
+                log.push("dcl:" + document.readyState);
+            });
+            window.addEventListener("load", function () {
+                log.push("load:" + document.readyState);
+            });
+            document.close();
+            document.close();
+            document.readyState;
+            "#,
+        ),
+        "interactive".into()
+    );
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert!(!session.loaded());
+    assert_eq!(evaluate(&mut runtime, "log.length"), 0.into());
+    let request = session.next_resource().expect("written deferred script");
+    assert_eq!(request.request.url.path(), "/path/deferred.js");
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        request.id,
+        Some(("deferred.js", "log.push('defer:' + document.readyState);")),
+    );
+    assert!(session.done());
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "defer:interactive|dcl:interactive|load:complete".into()
+    );
+    assert!(runtime.unwrap().diagnostics().is_empty());
+}
+
+#[test]
+fn nested_close_does_not_end_the_active_script_insertion_point() {
+    let (mut page, mut session, mut runtime) =
+        start("<!doctype html><script>var log = [];</script>");
+    assert_eq!(
+        evaluate(
+            &mut runtime,
+            r#"
+            document.open();
+            document.write("<!doctype html>");
+            document.addEventListener("DOMContentLoaded", function () { log.push("dcl"); });
+            window.addEventListener("load", function () { log.push("load"); });
+            document.write('<script id="nested">' +
+                'document.open();' +
+                'log.push(document.currentScript.id);' +
+                'document.close();' +
+                'log.push(document.readyState);' +
+                'document.write("<p id=inside>inside</p>");' +
+                '</script><p id=outside>outside</p>');
+            document.close();
+            document.close();
+            document.body.children[0].id === "inside" &&
+                document.body.children[1].id === "outside" &&
+                document.currentScript === null;
+            "#,
+        ),
+        Value::Bool(true)
+    );
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert!(session.done());
+    evaluate(&mut runtime, "document.close()");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "nested|loading|dcl|load".into()
+    );
+    assert!(runtime.unwrap().diagnostics().is_empty());
 }
 
 #[test]

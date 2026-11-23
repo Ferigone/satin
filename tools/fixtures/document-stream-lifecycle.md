@@ -25,9 +25,43 @@ open:function|opened:loading|split-tag|split-entity|before-end|script:loading:tr
 
 Use the same control on a Satin candidate with script-created document streams.
 In this no-resource case both references dispatch `DOMContentLoaded` and Window
-`load` before `close()` returns. The caller is still on the JavaScript stack:
-the microtask created by the first `readystatechange` listener runs only after
-both listeners and the caller return. Do not assume those timing observations
-also apply when a written external script is still in flight. The navigation
-unit test `closing_a_written_document_waits_for_its_pending_classic_script`
-controls that case separately.
+`load` before `close()` returns, without a checkpoint in between. This is a
+record of the browsers' behavior, not a conformance expectation. HTML's
+[`close()` steps](https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#closing-the-input-stream)
+finish the tokenizer up to EOF or a spin of the event loop. The
+[stop-parsing algorithm](https://html.spec.whatwg.org/multipage/parsing.html#the-end)
+sets `interactive` at EOF, runs deferred scripts, and queues separate DOM
+manipulation tasks for `DOMContentLoaded` and for `complete`/Window `load`
+after load blockers clear. Neither task should be dispatched directly by the
+native `close()` call. A [spin of the event loop](https://html.spec.whatwg.org/multipage/webappapis.html#spin-the-event-loop)
+is not equivalent to that direct dispatch: it includes a microtask checkpoint.
+
+## Deferred and reentrant controls
+
+Run `document-stream-close-boundaries.html?defer` and
+`document-stream-close-boundaries.html?nested` with the same headless
+commands and fresh profiles. On both references, `?defer` lets an immediately
+available data-URL `defer` script run at `interactive`, before
+`DOMContentLoaded`, and emits one `load`.
+
+For a pending-network reference, serve the fixture over HTTP with
+`?held-defer`. Serve `held.js` from the same origin after 750 ms, with body
+`trace.push('deferred:' + document.readyState);`. Both measured references
+returned with `readyState === "complete"` before running `held.js`, then
+dispatched `DOMContentLoaded` followed by Window `load`. That early `complete`
+is an additional browser observation, not the stop-parsing order above.
+The engine regression `written_deferred_script_delays_readiness_events_but_not_the_close_caller`
+keeps an external deferred script pending until the test supplies its
+response; it expects `interactive` at close return, then deferred script,
+`DOMContentLoaded`, and `complete`/Window `load`. The
+`closing_a_written_document_waits_for_its_pending_classic_script`
+regression instead holds a parser-blocking external script and tests that
+readiness remains `loading` until it settles.
+
+With `?nested`, both references keep the same parser script active after its
+nested `open()`, keep readiness `loading` when its nested `close()` returns,
+and accept its nested write before the surrounding markup resumes. They
+finish the unblocked document before the outer write returns. The engine
+regression `nested_close_does_not_end_the_active_script_insertion_point`
+checks insertion order and one readiness/load cycle across repeated closes,
+without requiring the references' synchronous event dispatch.
