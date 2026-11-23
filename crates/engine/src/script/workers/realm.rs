@@ -142,6 +142,13 @@ impl WorkerRealm {
         })
     }
 
+    pub(super) fn dispatch_host_task(
+        &mut self,
+        task: impl FnOnce(&mut Vm) -> Result<(), JsError>,
+    ) -> Result<(), JsError> {
+        run_task(&mut self.vm, task)
+    }
+
     pub(super) fn timer_deadline(&self) -> Option<Instant> {
         self.timers.deadline()
     }

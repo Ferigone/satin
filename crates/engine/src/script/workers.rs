@@ -7,7 +7,8 @@ use super::{
     message_ports::MessagePorts, structured_clone, webidl,
 };
 use crate::loader::DocumentPolicy;
-use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox, Received};
+use crate::network::CancelSignal;
+use mailbox::{Budget, Envelope, MAX_PACKET_BYTES, Mailbox, Received, Reservation};
 use realm::WorkerRealm;
 use rust_browser_javascript::{
     ErrorKind, JsError, JsString, RootId, StructuredCloneError, StructuredClonePacket, Value, Vm,
@@ -18,7 +19,7 @@ use std::{
     ops::Range,
     rc::{Rc, Weak},
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak as ArcWeak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
@@ -37,23 +38,34 @@ enum Notice {
     Error(String),
 }
 
+type HostTask = Box<dyn FnOnce(&mut Vm) -> Result<(), JsError> + Send>;
+
+enum WorkerTask {
+    Message(StructuredClonePacket),
+    Host(HostTask),
+}
+
 struct Connection {
-    to_worker: Mailbox<StructuredClonePacket>,
+    to_worker: Mailbox<WorkerTask>,
     to_window: Mailbox<Notice>,
     cancelled: Arc<AtomicBool>,
+    lifecycle: CancelSignal,
     done: AtomicBool,
     budget: Budget,
+    task_budget: Budget,
     wake: Arc<OnceLock<Wake>>,
 }
 
 impl Connection {
-    fn new(budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
+    fn new(budget: Budget, task_budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
         Self {
             to_worker: Mailbox::default(),
             to_window: Mailbox::default(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            lifecycle: CancelSignal::new(),
             done: AtomicBool::new(false),
             budget,
+            task_budget,
             wake,
         }
     }
@@ -68,6 +80,7 @@ impl Connection {
 
     fn close_ingress(&self) {
         self.to_worker.close();
+        self.lifecycle.cancel();
     }
 
     fn stop(&self) {
@@ -93,6 +106,80 @@ impl Connection {
 
     fn ready(&self) -> bool {
         self.done.load(Ordering::Acquire) || self.to_window.has_messages()
+    }
+}
+
+/// A worker-side host API reserves a bounded result slot before starting async
+/// work. Neither the sender nor an in-flight permit keeps the worker alive.
+#[allow(
+    dead_code,
+    reason = "Integration point for the separate Worker Fetch host"
+)]
+#[derive(Clone)]
+pub(super) struct WorkerTaskSender {
+    connection: ArcWeak<Connection>,
+    lifecycle: CancelSignal,
+}
+
+#[allow(
+    dead_code,
+    reason = "Integration point for the separate Worker Fetch host"
+)]
+impl WorkerTaskSender {
+    fn new(connection: &Arc<Connection>) -> Self {
+        Self {
+            connection: Arc::downgrade(connection),
+            lifecycle: connection.lifecycle.clone(),
+        }
+    }
+
+    /// Give each request a child token so aborting one does not affect others.
+    pub(super) fn cancellation(&self) -> CancelSignal {
+        self.lifecycle.child_token()
+    }
+
+    /// `bytes` must cover the maximum owned Rust payload for this completion.
+    /// `Ok(None)` means the worker is closed; no new work should be started.
+    pub(super) fn reserve(&self, bytes: usize) -> Result<Option<WorkerTaskPermit>, JsError> {
+        let Some(connection) = self
+            .connection
+            .upgrade()
+            .filter(|_| !self.lifecycle.is_cancelled())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(WorkerTaskPermit {
+            connection: self.connection.clone(),
+            reservation: connection.task_budget.reserve(bytes)?,
+        }))
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "Integration point for the separate Worker Fetch host"
+)]
+pub(super) struct WorkerTaskPermit {
+    connection: ArcWeak<Connection>,
+    reservation: Reservation,
+}
+
+#[allow(
+    dead_code,
+    reason = "Integration point for the separate Worker Fetch host"
+)]
+impl WorkerTaskPermit {
+    /// Carry owned Rust data and, if needed, IDs for roots registered by the
+    /// worker. The callback runs only on that worker, as one event-loop task.
+    pub(super) fn complete(
+        self,
+        task: impl FnOnce(&mut Vm) -> Result<(), JsError> + Send + 'static,
+    ) -> bool {
+        self.connection.upgrade().is_some_and(|connection| {
+            connection
+                .to_worker
+                .send(Envelope(WorkerTask::Host(Box::new(task)), self.reservation))
+        })
     }
 }
 
@@ -128,6 +215,7 @@ struct Store {
     last_dispatch: u64,
     active: BTreeMap<u64, ActiveWorker>,
     budget: Budget,
+    task_budget: Budget,
     wake: Arc<OnceLock<Wake>>,
 }
 
@@ -224,7 +312,7 @@ fn run_worker(
         move || {
             close_state.set(true);
             // Do not interrupt the JS task that called close() or its
-            // checkpoint. Drop all future worker tasks.
+            // checkpoint. Drop all future worker tasks and abort host I/O.
             ingress.close_ingress();
         },
     )?;
@@ -241,7 +329,10 @@ fn run_worker(
     }
     while !closing.get() && !connection.cancelled.load(Ordering::Relaxed) {
         let result = match connection.to_worker.receive_until(worker.timer_deadline()) {
-            Received::Message(Envelope(packet, _charge)) => worker.dispatch_packet(packet),
+            Received::Message(Envelope(task, _charge)) => match task {
+                WorkerTask::Message(packet) => worker.dispatch_packet(packet),
+                WorkerTask::Host(task) => worker.dispatch_host_task(task),
+            },
             Received::Deadline => worker.dispatch_timer(Instant::now()),
             Received::Closed => break,
         };
@@ -303,6 +394,7 @@ impl Workers {
             let id = state.next_id;
             let connection = Arc::new(Connection::new(
                 state.budget.clone(),
+                state.task_budget.clone(),
                 state.wake.clone(),
             ));
             vm.set_host_data(object.clone(), Rc::new(WorkerObject(id)))?;
@@ -468,6 +560,114 @@ fn brand(vm: &Vm, object: &Value) -> Result<Rc<WorkerObject>, JsError> {
         .ok_or_else(|| JsError::type_error("Illegal Worker receiver"))
 }
 
+#[cfg(test)]
+mod worker_lifecycle_tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    fn connection() -> Arc<Connection> {
+        Arc::new(Connection::new(
+            Budget::default(),
+            Budget::default(),
+            Arc::default(),
+        ))
+    }
+
+    #[test]
+    fn a_host_completion_wakes_the_worker_and_runs_its_checkpoint_before_close() {
+        let connection = connection();
+        let sender = WorkerTaskSender::new(&connection);
+        let cancel = sender.cancellation();
+        let (notify, wakes) = mpsc::channel();
+        assert!(
+            connection
+                .wake
+                .set(Arc::new(move || {
+                    let _ = notify.send(());
+                }))
+                .is_ok()
+        );
+        let source = b"var log = ['script']; setTimeout(() => postMessage('late'), 60000); postMessage('ready');";
+        let source = Source {
+            bytes: Arc::new(source.to_vec()),
+            range: 0..source.len(),
+        };
+        let (done, finished) = mpsc::channel();
+        let worker = connection.clone();
+        let thread = thread::spawn(move || {
+            let result = run_worker(
+                &worker,
+                vec![],
+                Url::parse("blob:https://example.test/host-task").unwrap(),
+                source,
+            );
+            worker.finish();
+            done.send(result).unwrap();
+        });
+
+        let mut receiver = Vm::new();
+        wakes.recv_timeout(Duration::from_secs(5)).unwrap();
+        let Some(Envelope(Notice::Message(packet), _)) = connection.to_window.try_receive() else {
+            panic!("worker did not start");
+        };
+        assert_eq!(
+            receiver.deserialize_clone_packet(packet).unwrap(),
+            Value::from("ready")
+        );
+        let owner = thread.thread().id();
+        let first = sender.reserve(1024).unwrap().unwrap();
+        let second = sender.reserve(1024).unwrap().unwrap();
+        assert!(first.complete(move |vm| {
+            assert_eq!(std::thread::current().id(), owner);
+            vm.eval("log.push('first'); queueMicrotask(() => log.push('checkpoint'));")?;
+            Ok(())
+        }));
+        assert!(second.complete(|vm| {
+            vm.eval("close(); postMessage(log.join(','));")?;
+            Ok(())
+        }));
+
+        finished
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        thread.join().unwrap();
+        assert!(cancel.is_cancelled());
+        let Some(Envelope(Notice::Message(packet), _)) = connection.to_window.try_receive() else {
+            panic!("worker did not post the host task transcript");
+        };
+        assert_eq!(
+            receiver.deserialize_clone_packet(packet).unwrap(),
+            Value::from("script,first,checkpoint")
+        );
+        assert!(!connection.to_window.has_messages());
+    }
+
+    #[test]
+    fn closed_workers_drop_queued_and_late_host_completions() {
+        let connection = connection();
+        let sender = WorkerTaskSender::new(&connection);
+        let request_cancel = sender.cancellation();
+        request_cancel.cancel();
+        let other_request_cancel = sender.cancellation();
+        assert!(!other_request_cancel.is_cancelled());
+
+        let queued = sender.reserve(16 * 1024 * 1024).unwrap().unwrap();
+        let late = sender.reserve(16 * 1024 * 1024).unwrap().unwrap();
+        assert!(sender.reserve(1).is_err());
+        assert!(queued.complete(|_| panic!("discarded completion ran")));
+        connection.stop();
+        assert!(other_request_cancel.is_cancelled());
+        assert!(sender.reserve(1).unwrap().is_none());
+        assert!(!late.complete(|_| panic!("late completion ran")));
+        assert!(matches!(
+            connection.to_worker.receive_until(None),
+            Received::Closed
+        ));
+        assert!(connection.task_budget.reserve(32 * 1024 * 1024).is_ok());
+    }
+}
+
 pub(super) fn install(
     vm: &mut Vm,
     document: &Shared,
@@ -504,7 +704,7 @@ pub(super) fn install(
             link.as_ref().map(|link| &link.budget),
             messaging.exception,
             link.as_ref().map(|link| &link.to_worker),
-            |packet| packet,
+            WorkerTask::Message,
         )?;
         Ok(Value::Undefined)
     })?;
