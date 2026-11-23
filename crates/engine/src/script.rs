@@ -256,6 +256,13 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
     state.wrappers.insert(id, value.clone());
     Ok(value)
 }
+fn wrap_array(vm: &mut Vm, state: &Shared, ids: Vec<NodeId>) -> Result<Value, JsError> {
+    let values = ids
+        .into_iter()
+        .map(|id| wrap(vm, state, Some(id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vm.new_array(&values))
+}
 fn descendants(doc: &Document, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
     let mut pending = doc.nodes[root.0]
         .children
