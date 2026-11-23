@@ -879,6 +879,7 @@ impl DocumentSession {
                 realm
                     .workers
                     .set_meta_connect_policy(&page.meta_connect_policy);
+                realm.fetch.set_xhr_meta_policy(&page.meta_connect_policy);
             }
         }
     }
