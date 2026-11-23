@@ -49,7 +49,9 @@ const key = (value, modifiers = {}) => ({ action: 'key', value, ...modifiers });
 const click = id => ({ action: 'click', id });
 const at = (x, y) => ({ action: 'click_at', x, y });
 const title = value => ({ action: 'title', value });
-const open = [key('f', { alt: true }), key('ArrowDown'), key('ArrowDown'), key('Enter')];
+const open = [
+  key('f', { alt: true }), ...Array.from({ length: 4 }, () => key('ArrowDown')), key('Enter'),
+];
 
 async function run(name, actions, start) {
   const screenshot = join(output, `${name}.png`);
@@ -125,7 +127,7 @@ try {
   const mixed = await run('mixed', [
     title('History A'), click('next'), title('History B'),
     click('push'), title('History C'), click('next'), title('History D'),
-    at(1143, 90), at(1100, 219), at(1100, 280), title('History D'), // Current can't be selected.
+    at(1143, 90), at(1100, 289), at(1100, 280), title('History D'), // Current can't be selected.
     at(1100, 222), title('History B'), // Click two steps back; this is a document load.
     ...open, key('ArrowDown'), key('Enter'), title('History C restored'), // No request for /c.
     ...open, key('Tab', { shift: true }), key('Tab'), key('Space'), title('History B restored'),
