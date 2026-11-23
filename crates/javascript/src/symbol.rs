@@ -795,6 +795,15 @@ pub(crate) fn install(vm: &mut Vm) {
         vm.try_new_array(&keys)
     });
     let reflect = vm.new_object();
+    vm.define_data_property_key(
+        reflect.clone(),
+        vm.well_known_key("toStringTag"),
+        Value::from("Reflect"),
+        false,
+        false,
+        true,
+    )
+    .unwrap();
     method(vm, reflect.clone(), "ownKeys", 1, |vm, _, args| {
         let value = args.first().cloned().unwrap_or_default();
         if value.as_object().is_none() {
@@ -857,6 +866,29 @@ pub(crate) fn install(vm: &mut Vm) {
         let value = args.get(2).cloned().unwrap_or_default();
         let receiver = args.get(3).cloned().unwrap_or_else(|| target.clone());
         Ok(Value::Bool(vm.set_from(target, &key, value, receiver)?))
+    });
+    method(vm, reflect.clone(), "getPrototypeOf", 1, |vm, _, args| {
+        let id = reflect_target(args)?.as_object().unwrap();
+        Ok(vm
+            .heap
+            .object(id)?
+            .prototype
+            .map(Value::Object)
+            .unwrap_or(Value::Null))
+    });
+    method(vm, reflect.clone(), "setPrototypeOf", 2, |vm, _, args| {
+        let id = reflect_target(args)?.as_object().unwrap();
+        let prototype = args.get(1).cloned().unwrap_or_default();
+        if prototype != Value::Null && prototype.as_object().is_none() {
+            return Err(JsError::type_error("Prototype must be object or null"));
+        }
+        Ok(Value::Bool(
+            vm.try_set_prototype(id, prototype.as_object())?,
+        ))
+    });
+    method(vm, reflect.clone(), "isExtensible", 1, |vm, _, args| {
+        let id = reflect_target(args)?.as_object().unwrap();
+        Ok(Value::Bool(vm.heap.object(id)?.extensible))
     });
     method(
         vm,

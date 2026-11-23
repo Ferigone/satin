@@ -1706,21 +1706,31 @@ impl Vm {
         target: ObjectId,
         prototype: Option<ObjectId>,
     ) -> Result<(), JsError> {
-        let old = self.heap.object(target)?.prototype;
-        if old == prototype {
+        if self.try_set_prototype(target, prototype)? {
             return Ok(());
         }
-        if !self.heap.object(target)?.extensible {
-            return Err(JsError::type_error("Object is not extensible"));
+        Err(JsError::type_error("Cannot set object prototype"))
+    }
+    pub(crate) fn try_set_prototype(
+        &mut self,
+        target: ObjectId,
+        prototype: Option<ObjectId>,
+    ) -> Result<bool, JsError> {
+        let object = self.heap.object(target)?;
+        if object.prototype == prototype {
+            return Ok(true);
+        }
+        if target == self.object_prototype || !object.extensible {
+            return Ok(false);
         }
         let mut current = prototype;
         for _ in 0..1024 {
             let Some(id) = current else {
                 self.heap.object_mut(target)?.prototype = prototype;
-                return Ok(());
+                return Ok(true);
             };
             if id == target {
-                return Err(JsError::type_error("Cyclic prototype chain"));
+                return Ok(false);
             }
             current = self.heap.object(id)?.prototype;
         }
