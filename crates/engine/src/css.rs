@@ -4236,6 +4236,37 @@ pub fn length(value: &str) -> Option<Length> {
     let n = number(v)?;
     if n == 0. { Some(Length::Px(0.)) } else { None }
 }
+
+fn functional_color_components(inner: &str, rgb: bool) -> Option<([&str; 3], Option<&str>)> {
+    if inner.contains(',') {
+        // Legacy syntax uses commas exclusively, including before alpha.
+        if inner.contains('/') {
+            return None;
+        }
+        let mut values = inner.split(',').map(str::trim_ascii);
+        let channels = [values.next()?, values.next()?, values.next()?];
+        let alpha = values.next();
+        if values.next().is_some() {
+            return None;
+        }
+        if rgb {
+            let percent = channels[0].ends_with('%');
+            if channels[1..].iter().any(|s| s.ends_with('%') != percent) {
+                return None;
+            }
+        }
+        Some((channels, alpha))
+    } else {
+        // Modern syntax uses a slash before the optional alpha component.
+        let (channels, alpha) = inner.split_once('/').map_or((inner, None), |(head, tail)| {
+            (head, Some(tail.trim_ascii()))
+        });
+        let mut values = channels.split_ascii_whitespace();
+        let channels = [values.next()?, values.next()?, values.next()?];
+        values.next().is_none().then_some((channels, alpha))
+    }
+}
+
 pub fn color(value: &str) -> Option<Color> {
     let v = value.trim().to_ascii_lowercase();
     if let Some(hex) = v.strip_prefix('#') {
@@ -4274,15 +4305,10 @@ pub fn color(value: &str) -> Option<Color> {
         || v.starts_with("hsla(")
     {
         let inner = v.split_once('(')?.1.strip_suffix(')')?;
-        let values: Vec<_> = inner
-            .split([',', '/', ' ', '\t', '\n', '\r'])
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !(3..=4).contains(&values.len()) {
-            return None;
-        }
-        let a = values.get(3).map_or(Some(255), |s| alpha(s))?;
-        if v.starts_with("hsl") {
+        let rgb = v.starts_with("rgb");
+        let (values, opacity) = functional_color_components(inner, rgb)?;
+        let a = opacity.map_or(Some(255), alpha)?;
+        if !rgb {
             let hue = values[0];
             let h = if let Some(n) = hue.strip_suffix("turn") {
                 number(n)? * 360.
