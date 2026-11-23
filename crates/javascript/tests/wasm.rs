@@ -397,11 +397,7 @@ fn memory_cannot_be_detached_by_transfer_and_failed_growth_is_atomic() {
             try { mem.grow(8); } catch (e) { errors += e instanceof RangeError; }
             try { buffer.transfer(); } catch (e) { errors += e instanceof TypeError; }
             try { buffer.transferToFixedLength(); } catch (e) { errors += e instanceof TypeError; }
-            try {
-                structuredClone(buffer, {transfer: [buffer]});
-            } catch (e) { errors += e.name === 'DataCloneError'; }
-            var copy = structuredClone(view);
-            errors === 4 && copy[0] === 99 && copy.buffer !== buffer && mem.buffer === buffer &&
+            errors === 3 && mem.buffer === buffer &&
                 view.length === 65536 && view[0] === 99
         "#,
         )
@@ -411,6 +407,18 @@ fn memory_cannot_be_detached_by_transfer_and_failed_growth_is_atomic() {
     let buffer = vm.get_global("buffer").unwrap();
     assert!(vm.detach_array_buffer(&buffer).is_err());
     assert!(vm.transfer_array_buffer(&buffer).is_err());
+    assert!(matches!(
+        vm.structured_clone(buffer.clone(), std::slice::from_ref(&buffer)),
+        Err(StructuredCloneError::DataClone(_))
+    ));
+    let view = vm.get_global("view").unwrap();
+    let copy = vm.structured_clone(view, &[]).unwrap();
+    vm.set_global("copy", copy).unwrap();
+    assert_eq!(
+        vm.eval("copy[0] === 99 && copy.buffer !== buffer && !buffer.detached")
+            .unwrap(),
+        Value::Bool(true)
+    );
     assert!(matches!(
         vm.serialize_clone_packet_with_transfer(
             buffer.clone(),
