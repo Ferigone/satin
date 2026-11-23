@@ -4702,16 +4702,21 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
         stack.push(name.into());
         let resolved = substitute_variables(value, stack.len(), &mut |n| {
             resolve_name(n, raw, cache, invalid, stack).map(|value| value.to_string())
-        })
-        .map(Arc::<str>::from);
+        });
         stack.pop();
         if invalid.contains(name) {
             return None;
         }
-        if let Some(v) = &resolved {
-            cache.insert(name.into(), v.clone());
+        let resolved = resolved?;
+        // Substitution to the sole keyword `initial` yields the guaranteed-invalid
+        // value for an unregistered custom property, not a token to pass to callers.
+        if trim_boundary(&without_comments(&resolved)).eq_ignore_ascii_case("initial") {
+            invalid.insert(name.into());
+            return None;
         }
-        resolved
+        let resolved = Arc::<str>::from(resolved);
+        cache.insert(name.into(), resolved.clone());
+        Some(resolved)
     }
     let mut cache = HashMap::new();
     let mut invalid = HashSet::new();
