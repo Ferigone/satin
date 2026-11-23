@@ -1,4 +1,5 @@
 //! Decoder and validator for the straight-line i32 WebAssembly subset.
+use super::memory::{Limits, MAX_PAGES};
 use crate::{ErrorKind, JsError, Vm};
 use std::{collections::HashSet, mem::size_of, ops::Range};
 
@@ -18,12 +19,29 @@ pub(super) struct Signature {
 pub(super) struct Import {
     pub(super) module: Range<usize>,
     pub(super) field: Range<usize>,
-    pub(super) signature: Signature,
+    pub(super) kind: ImportKind,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ImportKind {
+    Function,
+    Memory(Limits),
 }
 
 pub(super) struct Export {
     pub(super) name: Range<usize>,
-    pub(super) function: usize,
+    pub(super) kind: ExportKind,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ExportKind {
+    Function(usize),
+    Memory,
+}
+
+pub(super) struct Data {
+    pub(super) offset: u32,
+    pub(super) bytes: Range<usize>,
 }
 
 pub(super) struct Function {
@@ -39,6 +57,17 @@ pub(super) enum Op {
     LocalTee(usize),
     Const(i32),
     CallImport(usize),
+    Load {
+        width: u8,
+        signed: bool,
+        offset: u32,
+    },
+    Store {
+        width: u8,
+        offset: u32,
+    },
+    MemorySize,
+    MemoryGrow,
     Drop,
     Add,
     Sub,
@@ -48,16 +77,21 @@ pub(super) enum Op {
 pub(crate) struct Module {
     source: Vec<u8>,
     pub(super) imports: Vec<Import>,
+    pub(super) imported_functions: Vec<Signature>,
     pub(super) functions: Vec<Function>,
     pub(super) exports: Vec<Export>,
+    pub(super) defined_memory: Option<Limits>,
+    pub(super) data: Vec<Data>,
 }
 
 impl Module {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.source.capacity()
             + self.imports.capacity() * size_of::<Import>()
+            + self.imported_functions.capacity() * size_of::<Signature>()
             + self.functions.capacity() * size_of::<Function>()
             + self.exports.capacity() * size_of::<Export>()
+            + self.data.capacity() * size_of::<Data>()
             + self
                 .functions
                 .iter()
@@ -67,14 +101,18 @@ impl Module {
     }
 
     pub(super) fn name(&self, range: &Range<usize>) -> &str {
-        std::str::from_utf8(&self.source[range.clone()]).expect("validated WebAssembly name")
+        std::str::from_utf8(self.bytes(range)).expect("validated WebAssembly name")
+    }
+
+    pub(super) fn bytes(&self, range: &Range<usize>) -> &[u8] {
+        &self.source[range.clone()]
     }
 
     pub(super) fn signature(&self, function: usize) -> Signature {
-        if function < self.imports.len() {
-            self.imports[function].signature
+        if function < self.imported_functions.len() {
+            self.imported_functions[function]
         } else {
-            self.functions[function - self.imports.len()].signature
+            self.functions[function - self.imported_functions.len()].signature
         }
     }
 }
@@ -238,21 +276,35 @@ fn read_imports(
     reader: &mut Reader<'_>,
     alloc: &mut Allocation<'_>,
     signatures: &[Signature],
+    functions: &mut Vec<Signature>,
+    has_memory: &mut bool,
 ) -> Result<Vec<Import>, JsError> {
     let count = reader.count(MAX_ENTRIES)?;
     let mut imports = alloc.vector(count)?;
+    *functions = alloc.vector(count)?;
     for _ in 0..count {
         let module = reader.name()?;
         let field = reader.name()?;
-        if reader.byte()? != 0 {
-            return Err(compile_error(
-                "Only WebAssembly function imports are supported",
-            ));
-        }
+        let kind = match reader.byte()? {
+            0 => {
+                functions.push(signature(signatures, reader.unsigned()?)?);
+                ImportKind::Function
+            }
+            2 if !*has_memory => {
+                *has_memory = true;
+                ImportKind::Memory(read_memory_limits(reader)?)
+            }
+            2 => {
+                return Err(compile_error(
+                    "Multiple WebAssembly memories are not supported",
+                ));
+            }
+            _ => return Err(compile_error("Unsupported WebAssembly import kind")),
+        };
         imports.push(Import {
             module,
             field,
-            signature: signature(signatures, reader.unsigned()?)?,
+            kind,
         });
     }
     Ok(imports)
@@ -262,6 +314,7 @@ fn read_exports(
     reader: &mut Reader<'_>,
     alloc: &mut Allocation<'_>,
     function_count: usize,
+    has_memory: bool,
 ) -> Result<Vec<Export>, JsError> {
     let count = reader.count(MAX_ENTRIES)?;
     let mut exports = alloc.vector(count)?;
@@ -273,25 +326,85 @@ fn read_exports(
         if !names.insert(&reader.source[name.clone()]) {
             return Err(compile_error("Duplicate WebAssembly export name"));
         }
-        if reader.byte()? != 0 {
-            return Err(compile_error(
-                "Only WebAssembly function exports are supported",
-            ));
-        }
-        let function = reader.unsigned()?;
-        if function >= function_count {
-            return Err(compile_error("Unknown exported WebAssembly function"));
-        }
-        exports.push(Export { name, function });
+        let tag = reader.byte()?;
+        let index = reader.unsigned()?;
+        let kind = match tag {
+            0 if index < function_count => ExportKind::Function(index),
+            0 => return Err(compile_error("Unknown exported WebAssembly function")),
+            2 if has_memory && index == 0 => ExportKind::Memory,
+            2 => return Err(compile_error("Unknown exported WebAssembly memory")),
+            _ => return Err(compile_error("Unsupported WebAssembly export kind")),
+        };
+        exports.push(Export { name, kind });
     }
     Ok(exports)
+}
+
+fn read_memory_limits(reader: &mut Reader<'_>) -> Result<Limits, JsError> {
+    let tag = reader.byte()?;
+    if tag > 1 {
+        return Err(compile_error("Only non-shared wasm32 memory is supported"));
+    }
+    let minimum = reader.count(MAX_PAGES)?;
+    let maximum = if tag == 1 {
+        let maximum = reader.count(MAX_PAGES)?;
+        if maximum < minimum {
+            return Err(compile_error("WebAssembly memory limits are inverted"));
+        }
+        Some(maximum)
+    } else {
+        None
+    };
+    Ok(Limits { minimum, maximum })
+}
+
+fn memory_offset(reader: &mut Reader<'_>, width: u8) -> Result<u32, JsError> {
+    if reader.unsigned()? > width.ilog2() as usize {
+        return Err(compile_error("Invalid WebAssembly memory alignment"));
+    }
+    reader.integer(false)
+}
+
+fn read_data(
+    reader: &mut Reader<'_>,
+    alloc: &mut Allocation<'_>,
+    has_memory: bool,
+) -> Result<Vec<Data>, JsError> {
+    let count = reader.count(MAX_ENTRIES)?;
+    let mut data = alloc.vector(count)?;
+    for _ in 0..count {
+        if !has_memory {
+            return Err(compile_error("Unknown WebAssembly data segment memory"));
+        }
+        match reader.unsigned()? {
+            0 => {}
+            2 if reader.unsigned()? == 0 => {}
+            _ => return Err(compile_error("Unsupported WebAssembly data segment")),
+        }
+        if reader.byte()? != 0x41 {
+            return Err(compile_error("Expected an i32 WebAssembly data offset"));
+        }
+        let offset = reader.integer(true)?;
+        if reader.byte()? != 0x0b {
+            return Err(compile_error("Invalid WebAssembly data offset expression"));
+        }
+        let length = reader.unsigned()?;
+        let start = reader.position;
+        reader.read(length)?;
+        data.push(Data {
+            offset,
+            bytes: start..reader.position,
+        });
+    }
+    Ok(data)
 }
 
 fn read_body(
     mut body: Reader<'_>,
     alloc: &mut Allocation<'_>,
     signature: Signature,
-    imports: &[Import],
+    imports: &[Signature],
+    has_memory: bool,
 ) -> Result<Function, JsError> {
     let groups = body.count(MAX_LOCALS)?;
     let mut locals = signature.params;
@@ -317,8 +430,8 @@ fn read_body(
                 })?;
                 (
                     Op::CallImport(index),
-                    import.signature.params,
-                    usize::from(import.signature.result),
+                    import.params,
+                    usize::from(import.result),
                 )
             }
             0x1a => (Op::Drop, 1, 0),
@@ -331,6 +444,40 @@ fn read_body(
                     0x20 => (Op::LocalGet(index), 0, 1),
                     0x21 => (Op::LocalSet(index), 1, 0),
                     _ => (Op::LocalTee(index), 1, 1),
+                }
+            }
+            0x28 | 0x2c..=0x2f if has_memory => {
+                let width = match opcode {
+                    0x28 => 4,
+                    0x2c | 0x2d => 1,
+                    _ => 2,
+                };
+                let signed = matches!(opcode, 0x2c | 0x2e);
+                let offset = memory_offset(&mut body, width)?;
+                (
+                    Op::Load {
+                        width,
+                        signed,
+                        offset,
+                    },
+                    1,
+                    1,
+                )
+            }
+            0x36 | 0x3a | 0x3b if has_memory => {
+                let width = match opcode {
+                    0x36 => 4,
+                    0x3a => 1,
+                    _ => 2,
+                };
+                let offset = memory_offset(&mut body, width)?;
+                (Op::Store { width, offset }, 2, 0)
+            }
+            0x3f | 0x40 if has_memory && body.byte()? == 0 => {
+                if opcode == 0x3f {
+                    (Op::MemorySize, 0, 1)
+                } else {
+                    (Op::MemoryGrow, 1, 1)
                 }
             }
             0x41 => (Op::Const(body.integer(true)? as i32), 0, 1),
@@ -387,8 +534,12 @@ pub(super) fn decode(vm: &mut Vm, source: Vec<u8>) -> Result<Module, JsError> {
     let mut signatures = Vec::new();
     let mut declared = Vec::new();
     let mut imports = Vec::new();
+    let mut imported_functions = Vec::new();
     let mut exports = Vec::new();
     let mut functions = Vec::new();
+    let mut has_memory = false;
+    let mut defined_memory = None;
+    let mut data = Vec::new();
     let mut previous = 0;
     while !reader.finished() {
         let id = reader.byte()?;
@@ -405,7 +556,15 @@ pub(super) fn decode(vm: &mut Vm, source: Vec<u8>) -> Result<Module, JsError> {
         previous = id;
         match id {
             1 => signatures = read_types(&mut section, &mut alloc)?,
-            2 => imports = read_imports(&mut section, &mut alloc, &signatures)?,
+            2 => {
+                imports = read_imports(
+                    &mut section,
+                    &mut alloc,
+                    &signatures,
+                    &mut imported_functions,
+                    &mut has_memory,
+                )?;
+            }
             3 => {
                 let count = section.count(MAX_ENTRIES)?;
                 declared = alloc.vector(count)?;
@@ -413,7 +572,26 @@ pub(super) fn decode(vm: &mut Vm, source: Vec<u8>) -> Result<Module, JsError> {
                     declared.push(signature(&signatures, section.unsigned()?)?);
                 }
             }
-            7 => exports = read_exports(&mut section, &mut alloc, imports.len() + declared.len())?,
+            5 => {
+                let count = section.count(1)?;
+                if count == 1 {
+                    if has_memory {
+                        return Err(compile_error(
+                            "Multiple WebAssembly memories are not supported",
+                        ));
+                    }
+                    defined_memory = Some(read_memory_limits(&mut section)?);
+                    has_memory = true;
+                }
+            }
+            7 => {
+                exports = read_exports(
+                    &mut section,
+                    &mut alloc,
+                    imported_functions.len() + declared.len(),
+                    has_memory,
+                )?;
+            }
             10 => {
                 let count = section.count(MAX_ENTRIES)?;
                 if count != declared.len() {
@@ -425,10 +603,12 @@ pub(super) fn decode(vm: &mut Vm, source: Vec<u8>) -> Result<Module, JsError> {
                         section.subsection()?,
                         &mut alloc,
                         *signature,
-                        &imports,
+                        &imported_functions,
+                        has_memory,
                     )?);
                 }
             }
+            11 => data = read_data(&mut section, &mut alloc, has_memory)?,
             _ => return Err(compile_error("Unsupported WebAssembly section")),
         }
         section.require_finished()?;
@@ -439,7 +619,10 @@ pub(super) fn decode(vm: &mut Vm, source: Vec<u8>) -> Result<Module, JsError> {
     Ok(Module {
         source,
         imports,
+        imported_functions,
         functions,
         exports,
+        defined_memory,
+        data,
     })
 }

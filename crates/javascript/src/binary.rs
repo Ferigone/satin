@@ -32,6 +32,7 @@ pub(crate) struct Intrinsics {
 pub(crate) struct Buffer {
     bytes: Option<Vec<u8>>,
     maximum: Option<usize>,
+    wasm: bool,
 }
 
 impl Buffer {
@@ -167,6 +168,7 @@ impl Vm {
             ObjectKind::ArrayBuffer(Buffer {
                 bytes: Some(bytes),
                 maximum,
+                wasm: false,
             }),
             prototype,
         )
@@ -230,6 +232,50 @@ impl Vm {
     /// Moves host bytes into a fixed-length native ArrayBuffer.
     pub fn new_array_buffer(&mut self, bytes: Vec<u8>) -> Result<Value, JsError> {
         self.create_buffer(bytes, None, self.array_buffer_prototype())
+    }
+
+    pub(crate) fn new_wasm_buffer(&mut self, length: usize) -> Result<ObjectId, JsError> {
+        let bytes = self.zero_bytes(length, 2)?;
+        let id = self.new_array_buffer(bytes)?.as_object().unwrap();
+        self.buffer_data_mut(id)?.wasm = true;
+        Ok(id)
+    }
+
+    pub(crate) fn grow_wasm_buffer(
+        &mut self,
+        id: ObjectId,
+        length: usize,
+    ) -> Result<ObjectId, JsError> {
+        let capacity = self.buffer_data(id)?.retained_bytes();
+        // Reallocation can temporarily hold both blocks. Preflight the peak,
+        // not just the eventual increase in capacity.
+        let temporary = if length > capacity { length } else { 0 };
+        self.check_binary_allocation(temporary, 1)?;
+        let replacement = self.new_array_buffer(Vec::new())?.as_object().unwrap();
+        self.resize_binary_store(id, length)?;
+        let bytes = self.buffer_data_mut(id)?.bytes.take().unwrap();
+        *self.buffer_data_mut(replacement)? = Buffer {
+            bytes: Some(bytes),
+            maximum: None,
+            wasm: true,
+        };
+        Ok(replacement)
+    }
+
+    pub(crate) fn wasm_buffer_bytes(&self, id: ObjectId) -> &[u8] {
+        self.buffer_data(id)
+            .expect("traced WebAssembly buffer")
+            .bytes
+            .as_deref()
+            .expect("current WebAssembly buffer")
+    }
+
+    pub(crate) fn wasm_buffer_bytes_mut(&mut self, id: ObjectId) -> &mut [u8] {
+        self.buffer_data_mut(id)
+            .expect("traced WebAssembly buffer")
+            .bytes
+            .as_deref_mut()
+            .expect("current WebAssembly buffer")
     }
 
     /// Moves host bytes into a native Uint8Array with its own ArrayBuffer.
@@ -349,7 +395,11 @@ impl Vm {
     /// Detaches an ArrayBuffer and releases its bytes. A view itself cannot be detached.
     pub fn detach_array_buffer(&mut self, value: &Value) -> Result<(), JsError> {
         let id = kind_id(self, value, "Expected an ArrayBuffer to detach")?;
-        let bytes = self.buffer_data_mut(id)?.bytes.take();
+        let buffer = self.buffer_data_mut(id)?;
+        if buffer.wasm {
+            return Err(JsError::type_error("Cannot detach a WebAssembly buffer"));
+        }
+        let bytes = buffer.bytes.take();
         let capacity = bytes.as_ref().map_or(0, Vec::capacity);
         self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_sub(capacity);
         Ok(())

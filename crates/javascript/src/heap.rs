@@ -78,6 +78,7 @@ pub(crate) enum ObjectKind {
     ModuleNamespace(crate::modules::ModuleNamespace),
     WasmModule(Rc<crate::wasm::Module>),
     WasmInstance,
+    WasmMemory(crate::wasm::Memory),
 }
 pub(crate) struct Object {
     /// Opaque host metadata is never script-visible and contains no JS handles.
@@ -555,6 +556,7 @@ impl Heap {
                     }
                     ObjectKind::Boxed(v) => pending.value(v),
                     ObjectKind::TypedArray(array) => pending.push(array.view.buffer),
+                    ObjectKind::WasmMemory(memory) => pending.push(memory.buffer),
                     ObjectKind::DataView(view) => pending.push(view.buffer),
                     ObjectKind::RegExpStringIterator(crate::regexp::StringIterator::Active {
                         matcher,
