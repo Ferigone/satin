@@ -3,13 +3,14 @@ use rust_browser_engine::{
     dom::NodeId,
     script::{MediaCommand, MediaKey, MediaUpdate, ScriptRuntime},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 struct PlayerState {
     opening: bool,
     starting: bool,
     seeking: bool,
+    updates: HashSet<(u64, u64)>,
 }
 
 pub(crate) struct Bridge {
@@ -44,6 +45,58 @@ impl Bridge {
                     key: native_key(key),
                     bytes,
                 },
+                MediaCommand::OpenStream { key } => Command::OpenStream {
+                    key: native_key(key),
+                },
+                MediaCommand::AddBuffer { key, buffer, mime } => Command::AddBuffer {
+                    key: native_key(key),
+                    buffer,
+                    mime,
+                },
+                MediaCommand::Append {
+                    key,
+                    buffer,
+                    operation,
+                    bytes,
+                    timestamp_offset,
+                    append_window,
+                } => Command::Append {
+                    key: native_key(key),
+                    buffer,
+                    operation,
+                    bytes,
+                    timestamp_offset,
+                    append_window,
+                },
+                MediaCommand::RemoveRange {
+                    key,
+                    buffer,
+                    operation,
+                    start,
+                    end,
+                } => Command::RemoveRange {
+                    key: native_key(key),
+                    buffer,
+                    operation,
+                    start,
+                    end,
+                },
+                MediaCommand::RemoveBuffer { key, buffer } => Command::RemoveBuffer {
+                    key: native_key(key),
+                    buffer,
+                },
+                MediaCommand::AbortBuffer { key, buffer } => Command::AbortBuffer {
+                    key: native_key(key),
+                    buffer,
+                },
+                MediaCommand::SetDuration { key, duration } => Command::SetDuration {
+                    key: native_key(key),
+                    duration,
+                },
+                MediaCommand::EndStream { key, error } => Command::EndStream {
+                    key: native_key(key),
+                    error,
+                },
                 MediaCommand::Play(key) => Command::Play(native_key(key)),
                 MediaCommand::Pause(key) => Command::Pause(native_key(key)),
                 MediaCommand::Seek { key, time } => Command::Seek {
@@ -62,7 +115,7 @@ impl Bridge {
             };
             let key = command.player_key().unwrap();
             match &command {
-                Command::Open { .. } => {
+                Command::Open { .. } | Command::OpenStream { .. } => {
                     self.players.retain(|prior, _| {
                         prior.tab != tab || prior.navigation != navigation || prior.node != key.node
                     });
@@ -87,6 +140,18 @@ impl Bridge {
                         Command::Play(_) => state.starting = true,
                         Command::Pause(_) => state.starting = false,
                         Command::Seek { .. } => state.seeking = true,
+                        Command::Append {
+                            buffer, operation, ..
+                        }
+                        | Command::RemoveRange {
+                            buffer, operation, ..
+                        } => {
+                            state.updates.insert((*buffer, *operation));
+                        }
+                        Command::AbortBuffer { buffer, .. }
+                        | Command::RemoveBuffer { buffer, .. } => {
+                            state.updates.retain(|(id, _)| id != buffer);
+                        }
                         _ => {}
                     }
                 }
@@ -116,7 +181,19 @@ impl Bridge {
                 return false;
             };
             match event.kind {
-                EventKind::Ready => state.opening = false,
+                EventKind::Ready | EventKind::StreamOpened => state.opening = false,
+                EventKind::BufferUpdated {
+                    buffer,
+                    operation: 0,
+                    result: Err(_),
+                } => {
+                    state.updates.retain(|(id, _)| *id != buffer);
+                }
+                EventKind::BufferUpdated {
+                    buffer, operation, ..
+                } => {
+                    state.updates.remove(&(buffer, operation));
+                }
                 EventKind::Playing | EventKind::Paused | EventKind::Ended => {
                     state.starting = false;
                 }
@@ -139,12 +216,22 @@ impl Bridge {
         self.players.iter().any(|(key, state)| {
             key.tab == tab
                 && key.navigation == navigation
-                && (state.opening || state.starting || state.seeking)
+                && (state.opening || state.starting || state.seeking || !state.updates.is_empty())
         })
     }
 
     pub(crate) fn apply(runtime: &mut ScriptRuntime, event: Event) -> bool {
         let update = match event.kind {
+            EventKind::StreamOpened => MediaUpdate::StreamOpened,
+            EventKind::BufferUpdated {
+                buffer,
+                operation,
+                result,
+            } => MediaUpdate::BufferUpdated {
+                buffer,
+                operation,
+                result,
+            },
             EventKind::Metadata {
                 width,
                 height,

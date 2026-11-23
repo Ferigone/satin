@@ -5,7 +5,9 @@ use super::{
 };
 use rust_browser_javascript::{JsError, JsString, RootId, Value, Vm};
 use std::{
+    cell::Cell,
     collections::VecDeque,
+    rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -60,10 +62,20 @@ impl Clock {
         // Use 100 microsecond resolution in ordinary browser realms.
         (instant.saturating_duration_since(self.origin).as_micros() / 100) as f64 / 10.
     }
+
+    fn epoch_at(self, instant: Instant) -> f64 {
+        (self.epoch_ms + self.now(instant)).floor().max(0.)
+    }
+}
+
+struct NavigationTiming {
+    clock: Clock,
+    response_start: Cell<Option<Instant>>,
 }
 
 pub(super) struct Scheduler {
     clock: Clock,
+    navigation_timing: Rc<NavigationTiming>,
     timers: Vec<Timer>,
     current: Option<ActiveTimer>,
     next_id: u32,
@@ -82,11 +94,16 @@ impl Scheduler {
             |time| time.as_secs_f64() * 1000.,
         );
         let epoch_ms = wall_ms - started.elapsed().as_secs_f64() * 1000.;
+        let clock = Clock {
+            origin: started,
+            epoch_ms,
+        };
         Self {
-            clock: Clock {
-                origin: started,
-                epoch_ms,
-            },
+            clock,
+            navigation_timing: Rc::new(NavigationTiming {
+                clock,
+                response_start: Cell::new(None),
+            }),
             timers: Vec::new(),
             current: None,
             next_id: 1,
@@ -96,6 +113,10 @@ impl Scheduler {
             frame_deadline: None,
             last_frame: None,
         }
+    }
+
+    pub(super) fn note_response_start(&self, instant: Instant) {
+        self.navigation_timing.response_start.set(Some(instant));
     }
 
     fn id(&mut self) -> Result<u32, JsError> {
@@ -401,6 +422,28 @@ fn clock(vm: &Vm, receiver: &Value) -> Result<Clock, JsError> {
         .ok_or_else(|| JsError::type_error("Illegal Performance receiver"))
 }
 
+fn install_navigation_timing(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
+    let prototype = vm.new_object();
+    webidl::interface(vm, prototype.clone(), "PerformanceTiming", 0, |_, _, _, _| {
+        Err(JsError::type_error("Illegal PerformanceTiming constructor"))
+    })?;
+    for name in ["navigationStart", "responseStart"] {
+        getter(vm, prototype.clone(), name, move |vm, this, _| {
+            let timing = vm
+                .host_data::<NavigationTiming>(&this)
+                .ok_or_else(|| JsError::type_error("Illegal PerformanceTiming receiver"))?;
+            let instant = match name {
+                "navigationStart" => Some(timing.clock.origin),
+                _ => timing.response_start.get(),
+            };
+            Ok(instant.map_or(0., |instant| timing.clock.epoch_at(instant)).into())
+        })?;
+    }
+    let timing = vm.new_object_with_prototype(prototype)?;
+    vm.set_host_data(timing.clone(), state.borrow().scheduler.navigation_timing.clone())?;
+    Ok(timing)
+}
+
 pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
     let base = vm.get_global("EventTarget")?;
     let parent = vm.get_property(base.clone(), "prototype")?;
@@ -416,6 +459,12 @@ pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsE
     })?;
     getter(vm, proto.clone(), "timeOrigin", |vm, this, _| {
         Ok(clock(vm, &this)?.epoch_ms.into())
+    })?;
+    let timing = install_navigation_timing(vm, state)?;
+    let timing_root = vm.root(timing);
+    getter(vm, proto.clone(), "timing", move |vm, this, _| {
+        clock(vm, &this)?;
+        Ok(vm.root_value(timing_root).expect("rooted navigation timing object"))
     })?;
     webidl::operation(vm, proto.clone(), "toJSON", 0, |vm, this, _| {
         let time_origin = clock(vm, &this)?.epoch_ms;

@@ -1,6 +1,9 @@
 use crate::{ErrorKind, JsBigInt, JsError, JsString};
 
 const BIGINT_SOURCE_WORK: usize = 8_388_608;
+// Account for the token buffer, parser metadata and AST, and compiled code
+// while they coexist. String and source storage are reserved separately.
+const COMPILATION_BYTES_PER_TOKEN: usize = 640;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
@@ -43,9 +46,10 @@ pub(crate) struct Lexer {
     newline: bool,
     templates: Vec<usize>,
     bigint_work: usize,
+    compilation_bytes: usize,
 }
 impl Lexer {
-    pub(crate) fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str, compilation_bytes: usize) -> Self {
         Self {
             chars: source.chars().collect(),
             pos: 0,
@@ -54,6 +58,7 @@ impl Lexer {
             newline: false,
             templates: Vec::new(),
             bigint_work: BIGINT_SOURCE_WORK,
+            compilation_bytes,
         }
     }
 
@@ -87,8 +92,17 @@ impl Lexer {
         }
         error
     }
+    fn reserve_compilation_bytes(&mut self, bytes: usize) -> Result<(), JsError> {
+        self.compilation_bytes = self.compilation_bytes.checked_sub(bytes).ok_or_else(|| {
+            JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted")
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn next(&mut self) -> Token {
-        let trivia = self.skip_trivia();
+        let trivia = self
+            .reserve_compilation_bytes(COMPILATION_BYTES_PER_TOKEN)
+            .and_then(|()| self.skip_trivia());
         let line = self.line;
         let column = self.column;
         let newline = std::mem::take(&mut self.newline);
@@ -311,6 +325,9 @@ impl Lexer {
         {
             self.bump();
         }
+        // The pattern compiler can emit many instructions from a single
+        // JavaScript literal token. Bound that work separately before copying.
+        self.reserve_compilation_bytes((self.pos - pattern_start).saturating_mul(512))?;
         let utf16 = |slice: &[char]| {
             let mut units = Vec::with_capacity(slice.len());
             for ch in slice {

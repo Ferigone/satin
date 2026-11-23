@@ -17,14 +17,17 @@ From the repository root, build and verify the Windows release.
 .\scripts\Verify.ps1
 ```
 
-The desktop checks exercise local navigation, script events, forms, and real MP4 playback. The native media check clicks Play in `about:media` and waits for the video clock to advance. The verifier writes results and screenshots under `target`.
+The desktop checks exercise local navigation, script events, forms, and real MP4 playback. The verifier checks `about:media` and `about:streaming` in a native window and headless. The streaming example advances its video clock before appending the final audio and video fragments. It uses a generated motion pattern and a sine tone. Results and screenshots go under `target`.
 
 ## Website compatibility
 
 | Feature | Current alpha |
 | --- | --- |
 | Progressive MP4 | H.264 video and AAC audio on Windows, with play, pause, and seek |
-| YouTube | The page reaches its initial video metadata. Player initialization remains in development. |
+| Segmented MP4 | Separate H.264 and AAC buffers, with frames and time advancing before the last append |
+| YouTube | More of the page bootstrap runs, including a large configuration script. Player initialization remains in development. |
 | Twitch | The page loads its HTML. Its startup scripts reach parser and runtime limits before the video player appears. |
+
+On Windows, a seek near the tail just before a stream finishes appending can occasionally stall resumption. The native checks also cover seeking after the stream is finalized.
 
 The selected web-platform and JavaScript test suites measure the behavior their cases cover. [Roadmap](ROADMAP.md) · [Test262](../tools/test262/README.md)

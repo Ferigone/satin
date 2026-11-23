@@ -27,6 +27,7 @@ pub(super) struct EventData {
     pub(super) cancelable: bool,
     pub(super) composed: bool,
     trusted: Cell<bool>,
+    initialized: Cell<bool>,
     pub(super) active: Cell<bool>,
     pub(super) phase: Cell<u32>,
     pub(super) stopped: Cell<bool>,
@@ -129,6 +130,7 @@ pub(super) fn init_event(
             cancelable: flags[1],
             composed: flags[2],
             trusted: Cell::new(trusted),
+            initialized: Cell::new(true),
             active: Cell::new(false),
             phase: Cell::new(0),
             stopped: Cell::new(false),
@@ -139,6 +141,31 @@ pub(super) fn init_event(
         }),
     )?;
     Ok(object)
+}
+
+fn reinitialize_event(
+    vm: &mut Vm,
+    object: Value,
+    args: &[Value],
+    operation: &str,
+) -> Result<bool, JsError> {
+    event(vm, &object)?;
+    webidl::required(args, 1, operation)?;
+    let event_type = kind(vm, &args[0])?;
+    let data = event(vm, &object)?;
+    if data.active.get() {
+        return Ok(false);
+    }
+    if vm.host_slot(&object, EVENT_TARGET_SLOT).is_some() {
+        vm.set_host_slot(object.clone(), EVENT_TARGET_SLOT, Value::Null)?;
+    }
+    let flags = [
+        arg(args, 1).is_truthy(),
+        arg(args, 2).is_truthy(),
+        data.composed,
+    ];
+    init_event(vm, object, event_type, flags, false)?;
+    Ok(true)
 }
 
 pub(super) fn kind(vm: &mut Vm, value: &Value) -> Result<JsString, JsError> {
@@ -227,6 +254,10 @@ fn update_abort_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Resu
 }
 
 impl Events {
+    pub(super) fn without_document(self) -> Self {
+        Self { dom: None, ..self }
+    }
+
     fn receiver(&self, this: Value) -> Value {
         if this.is_nullish()
             && let Some(dom) = &self.dom
@@ -678,12 +709,12 @@ pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsErro
         }
         webidl::required(args, 1, "dispatchEvent")?;
         let info = event(vm, &args[0])?;
-        if info.active.get() {
+        if info.active.get() || !info.initialized.get() {
             return Err(abort::dom_exception_error(
                 vm,
                 dispatch.exception.clone(),
                 "InvalidStateError",
-                "The event is already being dispatched",
+                "The event is uninitialized or already being dispatched",
             )?);
         }
         info.trusted.set(false);
@@ -764,6 +795,10 @@ pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsErro
         };
         vm.try_new_array(&targets)
     })?;
+    webidl::operation(vm, proto.clone(), "initEvent", 1, |vm, this, args| {
+        reinitialize_event(vm, this, args, "initEvent")?;
+        Ok(Value::Undefined)
+    })?;
     for name in ["cancelBubble", "returnValue"] {
         let get = vm.new_native_function(&format!("get {name}"), move |vm, this, _| {
             let data = event(vm, &this)?;
@@ -833,10 +868,70 @@ pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsErro
         },
     )?;
     vm.call(set_prototype, Value::Undefined, &[custom, constructor])?;
-    getter(vm, custom_proto, "detail", |vm, this, _| {
+    getter(vm, custom_proto.clone(), "detail", |vm, this, _| {
         event(vm, &this)?;
         vm.host_slot(&this, CUSTOM_DETAIL_SLOT)
             .ok_or_else(|| JsError::type_error("Illegal CustomEvent receiver"))
     })?;
+    webidl::operation(
+        vm,
+        custom_proto.clone(),
+        "initCustomEvent",
+        1,
+        |vm, this, args| {
+            if vm.host_slot(&this, CUSTOM_DETAIL_SLOT).is_none() {
+                return Err(JsError::type_error("Illegal CustomEvent receiver"));
+            }
+            if reinitialize_event(vm, this.clone(), args, "initCustomEvent")? {
+                let detail = match arg(args, 3) {
+                    Value::Undefined => Value::Null,
+                    value => value,
+                };
+                vm.set_host_slot(this, CUSTOM_DETAIL_SLOT, detail)?;
+            }
+            Ok(Value::Undefined)
+        },
+    )?;
+    if let Some(dom) = &events.dom {
+        let root = dom.state.borrow().document.root;
+        let document = super::wrap(vm, &dom.state, Some(root))?;
+        let state = dom.state.clone();
+        let create = events.clone();
+        vm.root(custom_proto.clone());
+        webidl::operation(vm, document, "createEvent", 1, move |vm, this, args| {
+            if super::node(&state, &this)? != root {
+                return Err(JsError::type_error("Illegal Document receiver"));
+            }
+            webidl::required(args, 1, "createEvent")?;
+            let interface = vm.to_string(&args[0])?;
+            // The supported names are all ASCII and at most eleven code units.
+            let name = if interface.len() <= 11 {
+                interface.to_string_lossy().to_ascii_lowercase()
+            } else {
+                String::new()
+            };
+            let object = match name.as_str() {
+                "event" | "events" | "htmlevents" => {
+                    vm.new_object_with_prototype(create.event_proto.clone())?
+                }
+                "customevent" => {
+                    let object = vm.new_object_with_prototype(custom_proto.clone())?;
+                    vm.set_host_slot(object.clone(), CUSTOM_DETAIL_SLOT, Value::Null)?;
+                    object
+                }
+                _ => {
+                    return Err(abort::dom_exception_error(
+                        vm,
+                        create.exception.clone(),
+                        "NotSupportedError",
+                        "Unknown legacy event interface",
+                    )?);
+                }
+            };
+            let object = init_event(vm, object, JsString::default(), [false; 3], false)?;
+            event(vm, &object)?.initialized.set(false);
+            Ok(object)
+        })?;
+    }
     Ok(events)
 }

@@ -262,21 +262,16 @@ impl Op {
     }
 }
 
-pub(crate) fn compile(source: &str) -> Result<Rc<Chunk>, JsError> {
-    compile_with_strict(source, false)
-}
-pub(crate) fn compile_with_strict(
-    source: &str,
-    inherited_strict: bool,
-) -> Result<Rc<Chunk>, JsError> {
-    compile_eval(source, inherited_strict, parser::EvalContext::default())
+pub(crate) fn compile(source: &str, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
+    compile_eval(source, false, parser::EvalContext::default(), compilation_bytes)
 }
 pub(crate) fn compile_eval(
     source: &str,
     inherited_strict: bool,
     context: parser::EvalContext,
+    compilation_bytes: usize,
 ) -> Result<Rc<Chunk>, JsError> {
-    let body = parser::parse_script(source, context)?;
+    let body = parser::parse_script(source, context, compilation_bytes)?;
     let strict = inherited_strict || parser::has_strict_directive(&body);
     block(&body, true, strict)
 }

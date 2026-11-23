@@ -3,6 +3,31 @@ use super::*;
 const PAGE: &str = "https://example.test/path/index.html";
 
 #[test]
+fn parser_script_sees_navigation_and_response_timing() {
+    let src = r#"<!doctype html><title>Timing</title><script>
+        var timing = window.performance.timing;
+        var responseDelay = timing.responseStart - timing.navigationStart;
+        var validTiming = timing === performance.timing &&
+            timing instanceof PerformanceTiming &&
+            timing.navigationStart === Math.floor(performance.timeOrigin) &&
+            responseDelay === 25 &&
+            timing.responseStart <= performance.timeOrigin + performance.now();
+    </script>"#;
+    let started = Instant::now() - Duration::from_millis(50);
+    let (mut page, mut session) = DocumentSession::start(OpenedPage {
+        page: LoadedPage::from_html(PAGE, ""),
+        input: DocumentInput::Html(src.into()),
+        started,
+        response_start: started + Duration::from_millis(25),
+    })
+    .unwrap();
+    let mut runtime = None;
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert_eq!(evaluate(&mut runtime, "validTiming"), Value::Bool(true));
+    assert!(runtime.unwrap().diagnostics().is_empty());
+}
+
+#[test]
 fn parser_records_are_visible_before_preparing_the_following_script() {
     let (_, session, mut runtime) = start(
         r#"<!doctype html><body><script>
@@ -54,10 +79,12 @@ trace.push(document.body.getAttribute('data-existing')+'|'+document.body.getAttr
 }
 
 fn start(source: &str) -> (LoadedPage, DocumentSession, Option<ScriptRuntime>) {
+    let started = Instant::now();
     let (mut page, mut session) = DocumentSession::start(OpenedPage {
         page: LoadedPage::from_html(PAGE, ""),
         input: DocumentInput::Html(source.into()),
-        started: Instant::now(),
+        started,
+        response_start: started,
     })
     .unwrap();
     let mut runtime = None;

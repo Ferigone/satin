@@ -1,0 +1,95 @@
+<style>
+  #stream-player { display: block; width: 100%; max-width: 560px; height: 315px; background: #102029; }
+  #stream-actions { margin: 14px 0 8px; }
+  #stream-actions button { margin: 0 6px 6px 0; padding: 9px 12px; border: 1px solid #146c58; background: white; color: #146c58; font-size: 16px; }
+</style>
+<h1>Segmented playback</h1>
+<p>Audio and video arrive in separate segments. The final pair is added once playback starts.</p>
+<video id="stream-player" width="560" height="315" muted></video>
+<div id="stream-actions">
+  <button type="button" id="stream-play">Play stream</button>
+  <button type="button" id="stream-mute">Unmute</button>
+</div>
+<p id="stream-status" aria-live="polite">Ready to open the stream.</p>
+<p><a href="about:home">Home</a> · <a href="about:media">Progressive MP4</a></p>
+<script>
+  const video = document.getElementById("stream-player");
+  const status = document.getElementById("stream-status");
+  const play = document.getElementById("stream-play");
+  const mute = document.getElementById("stream-mute");
+  const tracks = [
+    {
+      type: 'video/mp4; codecs="avc1.42C01E"',
+      data: "data:application/octet-stream;base64,{{STREAM_VIDEO}}",
+      cuts: [0, 772, 5680, 10220, 15234, 19817, 23575]
+    },
+    {
+      type: 'audio/mp4; codecs="mp4a.40.2"',
+      data: "data:application/octet-stream;base64,{{STREAM_AUDIO}}",
+      cuts: [0, 728, 7359, 13758, 20221, 26674, 31549]
+    }
+  ];
+  function append(track, index) {
+    const buffer = track.buffer;
+    return new Promise((resolve, reject) => {
+      const clear = () => { buffer.onupdateend = null; buffer.onerror = null; };
+      buffer.onupdateend = () => { clear(); resolve(); };
+      buffer.onerror = () => { clear(); reject(new Error("A media segment could not be appended.")); };
+      buffer.appendBuffer(new Uint8Array(track.payload, track.cuts[index],
+        track.cuts[index + 1] - track.cuts[index]));
+    });
+  }
+  function waitForPicture() {
+    return new Promise((resolve, reject) => {
+      const changed = () => {
+        if (video.currentTime > 0.25 && video.videoWidth > 0) {
+          clearTimeout(timer);
+          video.removeEventListener("timeupdate", changed);
+          resolve();
+        }
+      };
+      const timer = setTimeout(() => {
+        video.removeEventListener("timeupdate", changed);
+        reject(new Error("Playback did not start."));
+      }, 8000);
+      video.addEventListener("timeupdate", changed);
+      changed();
+    });
+  }
+  async function begin() {
+    play.disabled = true;
+    status.textContent = "Opening separate audio and video tracks…";
+    const source = new MediaSource();
+    const opened = new Promise(resolve => source.addEventListener("sourceopen", resolve, {once: true}));
+    const address = URL.createObjectURL(source);
+    video.src = address;
+    await opened;
+    URL.revokeObjectURL(address);
+    for (const track of tracks) {
+      track.buffer = source.addSourceBuffer(track.type);
+      const response = await fetch(track.data);
+      track.payload = await response.arrayBuffer();
+    }
+    for (let index = 0; index < 5; index++) {
+      await Promise.all(tracks.map(track => append(track, index)));
+    }
+    await video.play();
+    await waitForPicture();
+    status.setAttribute("data-started-before-end", "yes");
+    status.textContent = "Playback began before the final segments arrived.";
+    await Promise.all(tracks.map(track => append(track, 5)));
+    source.endOfStream();
+    status.setAttribute("data-complete", "yes");
+    document.title = "Satin stream OK";
+  }
+  play.addEventListener("click", () => {
+    begin().catch(error => {
+      status.textContent = error.message;
+      document.title = "Stream error";
+    });
+  });
+  mute.addEventListener("click", () => {
+    video.muted = !video.muted;
+    mute.textContent = video.muted ? "Unmute" : "Mute";
+  });
+</script>

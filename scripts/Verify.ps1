@@ -39,6 +39,7 @@ if ($formsRun.ExitCode -ne 0) { throw $formsRun.Stderr }
 $forms = $formsRun.Stdout | ConvertFrom-Json
 if ($forms.title -ne 'Formularz: OK' -or $forms.javascript.diagnostics.Count -ne 0 -or $forms.javascript.pending_requests -ne 0) { throw 'The forms, Promise.all, and JSON check failed.' }
 $media = Invoke-SatinMediaSmoke -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'media profile') -OutputDirectory $qaDirectory -LogDirectory $logs
+$streaming = Invoke-SatinMediaSmoke -Segmented -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'streaming profile') -OutputDirectory $qaDirectory -LogDirectory $logs
 if ($Network) {
     $positive = Invoke-BrowserProcess -Executable $binary -Arguments @('--headless','--url','https://example.com','--screenshot',(Join-Path $qaDirectory 'https-example.png')) -LogDirectory $logs
     if ($positive.ExitCode -ne 0) { throw ('The valid HTTPS request failed. ' + $positive.Stderr) }
@@ -51,6 +52,6 @@ if ($Network) {
         $networkCases += [pscustomobject]@{url=$bad;result='rejected';error=$negative.Stderr.Trim()}
     }
 }
-$report = [ordered]@{version=$version.Stdout.Trim();document=$document;nativeWindow=$native;javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed';network=$networkCases;media=$media}
+$report = [ordered]@{version=$version.Stdout.Trim();document=$document;nativeWindow=$native;javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed';network=$networkCases;media=$media;streaming=$streaming}
 [IO.File]::WriteAllText((Join-Path $qaDirectory 'report.json'),($report | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
 $report | ConvertTo-Json -Depth 10

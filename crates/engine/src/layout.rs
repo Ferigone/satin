@@ -237,10 +237,23 @@ impl Layout {
     pub(crate) fn build_for_viewport(
         page: &LoadedPage,
         fonts: &Fonts,
-        mut viewport: Viewport,
+        viewport: Viewport,
         scroll: &HashMap<NodeId, ScrollOffset>,
         observe_intersections: bool,
     ) -> Self {
+        Self::build_checked_for_viewport(page, fonts, viewport, scroll, observe_intersections, |_| {
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+    pub(crate) fn build_checked_for_viewport<E>(
+        page: &LoadedPage,
+        fonts: &Fonts,
+        mut viewport: Viewport,
+        scroll: &HashMap<NodeId, ScrollOffset>,
+        observe_intersections: bool,
+        check_text: impl FnOnce(&[Style]) -> Result<(), E>,
+    ) -> Result<Self, E> {
         let width = viewport.width;
         let width = if width.is_finite() {
             width.max(1.)
@@ -297,6 +310,7 @@ impl Layout {
             }
             stack.extend(n.children.iter().rev().copied());
         }
+        check_text(&styles)?;
         let background = page
             .document
             .elements("html")
@@ -339,7 +353,7 @@ impl Layout {
             .elements
             .iter()
             .fold(line.y, |h, e| h.max(e.rect.y + e.rect.height));
-        b.finish_visual(height.max(1.), background, scroll, observe_intersections)
+        Ok(b.finish_visual(height.max(1.), background, scroll, observe_intersections))
     }
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
         let node = self.element_at(x, y)?;

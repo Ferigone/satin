@@ -169,12 +169,9 @@ impl Vm {
         }
     }
     pub fn parse_module(&mut self, source: &str, identifier: &str) -> Result<ModuleId, JsError> {
-        self.check_source(source)?;
         self.ensure_string_allocation(identifier.encode_utf16().count())?;
-        self.code_bytes = self
-            .code_bytes
-            .saturating_add(Self::source_allocation(source.len()));
-        let code = compile_module(source)?;
+        let code = compile_module(source, self.compilation_budget(source)?)?;
+        self.retain_compiled_chunk(&code.body)?;
         let identifier = JsString::from(identifier);
         self.account_value(Value::String(identifier.clone()))?;
         self.ensure_allocation(
@@ -207,8 +204,11 @@ impl Vm {
         Ok(ModuleId(object, self.module_realm))
     }
     pub fn check_module_syntax(&mut self, source: &str) -> Result<(), JsError> {
-        self.check_source(source)?;
-        compile_module(source).map(|_| ())
+        let code = compile_module(source, self.compilation_budget(source)?)?;
+        self.ensure_allocation(bytecode::retained_size_with_chunks(
+            Vec::new(),
+            vec![code.body.clone()],
+        ))
     }
     pub fn module_identifier(&self, id: ModuleId) -> Result<JsString, JsError> {
         Ok(self.module_data(id)?.identifier.clone())
@@ -659,8 +659,8 @@ impl Vm {
     }
 }
 
-fn compile_module(source: &str) -> Result<Rc<ModuleCode>, JsError> {
-    let parsed = parser::modules::parse(source)?;
+fn compile_module(source: &str, compilation_bytes: usize) -> Result<Rc<ModuleCode>, JsError> {
+    let parsed = parser::modules::parse(source, compilation_bytes)?;
     let body = bytecode::compile_module_body(&parsed.body)?;
     let mut locals = BTreeSet::new();
     locals.extend(body.scope.vars.iter().cloned());

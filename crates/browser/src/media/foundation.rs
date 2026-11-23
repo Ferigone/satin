@@ -12,6 +12,7 @@ use std::{
 
 const MAX_PLAYERS: usize = 16;
 const MAX_COMMANDS: usize = 128;
+const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_NATIVE_EVENTS: usize = 256;
 const MAX_UPDATES: usize = 512;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
@@ -36,7 +37,7 @@ impl Backend {
 
     pub(crate) fn submit(&mut self, command: Command) -> Result<(), String> {
         if self.worker.is_none() {
-            if !matches!(&command, Command::Open { .. }) {
+            if !matches!(&command, Command::Open { .. } | Command::OpenStream { .. }) {
                 return Ok(());
             }
             let shared = self.shared.clone();
@@ -67,6 +68,13 @@ impl Drop for Backend {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Signal {
+    StreamOpened,
+    StreamEnded,
+    BufferComplete {
+        buffer: u64,
+        operation: u64,
+        status: i32,
+    },
     Metadata,
     Loaded,
     FirstFrame,
@@ -77,7 +85,10 @@ enum Signal {
     Seeked,
     Time,
     Ended,
-    Error { code: usize, detail: u32 },
+    Error {
+        code: usize,
+        detail: u32,
+    },
 }
 
 enum Work {
@@ -120,14 +131,18 @@ impl Shared {
                 Work::Native(key, _) => !contains(*key),
                 Work::Tick => true,
             });
-        } else if input
-            .work
-            .iter()
-            .filter(|work| matches!(work, Work::Command(_)))
-            .count()
-            >= MAX_COMMANDS
-        {
-            return Err("The media command queue is full".into());
+        } else {
+            let mut bytes = command.input_size();
+            let mut count = 0;
+            for work in &input.work {
+                if let Work::Command(queued) = work {
+                    bytes = bytes.saturating_add(queued.input_size());
+                    count += 1;
+                }
+            }
+            if count >= MAX_COMMANDS || bytes > MAX_INPUT_BYTES {
+                return Err("The media command queue is full".into());
+            }
         }
         input.work.push_back(Work::Command(command));
         self.ready.notify_one();
@@ -156,7 +171,8 @@ impl Shared {
                     input
                         .work
                         .iter()
-                        .position(|work| matches!(work, Work::Native(..)))
+                        .position(|work| matches!(work, Work::Native(_, signal)
+                            if !matches!(signal, Signal::StreamOpened | Signal::StreamEnded | Signal::BufferComplete { .. })))
                 });
             if let Some(index) = oldest {
                 input.work.remove(index);
@@ -232,7 +248,8 @@ fn run(shared: &Arc<Shared>) {
             .then_some(next_frame),
     ) {
         match work {
-            Work::Command(Command::Open { key, bytes }) => {
+            Work::Command(command @ (Command::Open { .. } | Command::OpenStream { .. })) => {
+                let key = command.player_key().unwrap();
                 let same_element = |candidate: Key| {
                     candidate.tab == key.tab
                         && candidate.navigation == key.navigation
@@ -247,9 +264,16 @@ fn run(shared: &Arc<Shared>) {
                         .as_ref()
                         .map_err(ToString::to_string)
                         .and_then(|interop| {
-                            interop
-                                .open(key, &bytes, shared.clone())
-                                .map_err(|error| error.to_string())
+                            match command {
+                                Command::Open { bytes, .. } => {
+                                    interop.open(key, &bytes, shared.clone())
+                                }
+                                Command::OpenStream { .. } => {
+                                    interop.open_stream(key, shared.clone())
+                                }
+                                _ => unreachable!(),
+                            }
+                            .map_err(|error| error.to_string())
                         })
                 };
                 match result {
@@ -293,7 +317,7 @@ fn run(shared: &Arc<Shared>) {
                 if !player.needs_frame() {
                     return true;
                 }
-                match player.frame(false) {
+                match player.frame(false, shared, *key) {
                     Ok(Some(frame)) => shared.publish(*key, EventKind::Frame(frame)),
                     Ok(None) => {}
                     Err(error) => {

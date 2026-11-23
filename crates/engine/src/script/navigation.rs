@@ -169,6 +169,7 @@ pub struct DocumentSession {
     phase: Phase,
     client: Arc<Url>,
     started: Instant,
+    response_start: Instant,
     resources: ResourceQueue,
     fonts: FontLoads,
     modules: ModuleGraph,
@@ -213,6 +214,7 @@ impl DocumentSession {
             page,
             input,
             started,
+            response_start,
         } = opened;
         let client = Arc::new(Url::parse(&page.url).map_err(|e| e.to_string())?);
         history.commit_address((*client).clone());
@@ -236,6 +238,7 @@ impl DocumentSession {
                 phase: Phase::Parsing,
                 client,
                 started,
+                response_start,
                 resources: ResourceQueue::new(),
                 fonts: FontLoads::default(),
                 modules: ModuleGraph::default(),
@@ -396,7 +399,11 @@ impl DocumentSession {
             ScriptRuntime::new_for_history(page, self.history.clone(), &self.storage, self.started)
                 .map_err(|e| e.to_string())?
         };
-        realm.state.borrow_mut().navigation_attached = true;
+        {
+            let mut state = realm.state.borrow_mut();
+            state.navigation_attached = true;
+            state.scheduler.note_response_start(self.response_start);
+        }
         realm.set_viewport(viewport);
         // This case is used when a late resource handler is the first caller.
         if self.phase != Phase::Parsing {

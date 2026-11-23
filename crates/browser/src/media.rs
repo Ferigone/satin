@@ -13,20 +13,82 @@ pub(crate) struct Key {
 }
 
 pub(crate) enum Command {
-    Open { key: Key, bytes: Arc<[u8]> },
+    Open {
+        key: Key,
+        bytes: Arc<[u8]>,
+    },
+    OpenStream {
+        key: Key,
+    },
+    AddBuffer {
+        key: Key,
+        buffer: u64,
+        mime: String,
+    },
+    Append {
+        key: Key,
+        buffer: u64,
+        operation: u64,
+        bytes: Arc<[u8]>,
+        timestamp_offset: f64,
+        append_window: (f64, f64),
+    },
+    RemoveRange {
+        key: Key,
+        buffer: u64,
+        operation: u64,
+        start: f64,
+        end: f64,
+    },
+    RemoveBuffer {
+        key: Key,
+        buffer: u64,
+    },
+    AbortBuffer {
+        key: Key,
+        buffer: u64,
+    },
+    SetDuration {
+        key: Key,
+        duration: f64,
+    },
+    EndStream {
+        key: Key,
+        error: Option<&'static str>,
+    },
     Play(Key),
     Pause(Key),
-    Seek { key: Key, time: f64 },
-    Volume { key: Key, value: f64 },
-    Muted { key: Key, muted: bool },
+    Seek {
+        key: Key,
+        time: f64,
+    },
+    Volume {
+        key: Key,
+        value: f64,
+    },
+    Muted {
+        key: Key,
+        muted: bool,
+    },
     Close(Key),
-    ClosePage { tab: u64, navigation: u64 },
+    ClosePage {
+        tab: u64,
+        navigation: u64,
+    },
 }
 
 impl Command {
     fn player_key(&self) -> Option<Key> {
         match *self {
             Self::Open { key, .. }
+            | Self::OpenStream { key }
+            | Self::AddBuffer { key, .. }
+            | Self::Append { key, .. }
+            | Self::RemoveRange { key, .. }
+            | Self::RemoveBuffer { key, .. }
+            | Self::AbortBuffer { key, .. }
+            | Self::SetDuration { key, .. }
+            | Self::EndStream { key, .. }
             | Self::Play(key)
             | Self::Pause(key)
             | Self::Seek { key, .. }
@@ -34,6 +96,14 @@ impl Command {
             | Self::Muted { key, .. }
             | Self::Close(key) => Some(key),
             Self::ClosePage { .. } => None,
+        }
+    }
+
+    #[cfg(windows)]
+    fn input_size(&self) -> usize {
+        match self {
+            Self::Open { bytes, .. } | Self::Append { bytes, .. } => bytes.len(),
+            _ => 0,
         }
     }
 }
@@ -44,6 +114,12 @@ pub(crate) struct Event {
 }
 
 pub(crate) enum EventKind {
+    StreamOpened,
+    BufferUpdated {
+        buffer: u64,
+        operation: u64,
+        result: Result<Vec<(f64, f64)>, String>,
+    },
     Metadata {
         width: u32,
         height: u32,
@@ -79,7 +155,7 @@ impl Backend {
 
     pub(crate) fn submit(&mut self, command: Command) -> Result<(), String> {
         match command {
-            Command::Open { .. } => {
+            Command::Open { .. } | Command::OpenStream { .. } => {
                 Err("Native media playback is unavailable on this platform".into())
             }
             _ => Ok(()),

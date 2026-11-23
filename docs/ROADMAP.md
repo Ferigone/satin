@@ -4,6 +4,16 @@ Satin is building an independent web engine in Rust for modern sites and applica
 
 The current compatibility priority is daily use of popular sites, starting with YouTube and Twitch. Verification covers page startup, usable controls, and actual playback as separate milestones.
 
+## Alpha.16
+
+The new tab has an address and search field and saves custom site shortcuts in the profile.
+
+Satin plays fragmented MP4 on Windows through Media Source Extensions. It can buffer separate H.264 and AAC tracks and start playback before the final segment. Try `about:streaming`. The JavaScript engine handles larger data-heavy scripts within its existing memory budget. Pages can read classic response timing and create and initialize legacy DOM events. YouTube startup progresses further, with player compatibility still in development. [Release verification](VERIFICATION.md)
+
+## Alpha.15
+
+Satin adds progressive H.264/AAC playback on Windows, with pause and seek. Windows builds are distributed through GitHub Releases. Installed copies check for newer releases, verify the payload, and activate it at the next launch. The local Satin Preview shortcut opens a build from the current checkout with a separate profile.
+
 ## Alpha.13
 
 `MessageChannel` and `MessagePort` pass cloned data and transfer ports within a document. Windows opens a file picker for file inputs, and `FileList` and `FormData` preserve user-selected `File` objects. `ImageBitmap` decodes, scales, paints, clones, and transfers images. Fetch sends a streamed request body over HTTP/2. Try `about:messages` and `about:files`. [Message ports](MESSAGE_PORTS.md) · [Structured clone](STRUCTURED_CLONE.md)

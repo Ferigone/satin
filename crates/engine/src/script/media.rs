@@ -1,7 +1,9 @@
-//! Progressive media element state. The application supplies decoded frames and
-//! playback events from its platform backend. Downloads use DocumentSession.
+//! Media element state. The application supplies decoded frames and playback
+//! events from its platform backend. Downloads use DocumentSession.
+mod mse;
+
 use super::{
-    ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, diagnostic, dispatch_checked,
+    ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, blobs, diagnostic, dispatch_checked,
     document_base, drain_microtask_queue, getter, mark_dirty, node, set_attribute, webidl,
 };
 use crate::{
@@ -21,7 +23,7 @@ const MAX_ELEMENTS: usize = 12;
 const MAX_PENDING_PLAYS: usize = 32;
 const MAX_COMMANDS: usize = 128;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MediaKey {
     pub node: NodeId,
     pub generation: u64,
@@ -32,6 +34,45 @@ pub enum MediaCommand {
         key: MediaKey,
         url: String,
         bytes: Arc<[u8]>,
+    },
+    OpenStream {
+        key: MediaKey,
+    },
+    AddBuffer {
+        key: MediaKey,
+        buffer: u64,
+        mime: String,
+    },
+    Append {
+        key: MediaKey,
+        buffer: u64,
+        operation: u64,
+        bytes: Arc<[u8]>,
+        timestamp_offset: f64,
+        append_window: (f64, f64),
+    },
+    RemoveRange {
+        key: MediaKey,
+        buffer: u64,
+        operation: u64,
+        start: f64,
+        end: f64,
+    },
+    RemoveBuffer {
+        key: MediaKey,
+        buffer: u64,
+    },
+    AbortBuffer {
+        key: MediaKey,
+        buffer: u64,
+    },
+    SetDuration {
+        key: MediaKey,
+        duration: f64,
+    },
+    EndStream {
+        key: MediaKey,
+        error: Option<&'static str>,
     },
     Play(MediaKey),
     Pause(MediaKey),
@@ -57,6 +98,12 @@ pub enum MediaUpdate {
         duration: f64,
     },
     Ready,
+    StreamOpened,
+    BufferUpdated {
+        buffer: u64,
+        operation: u64,
+        result: Result<Vec<(f64, f64)>, String>,
+    },
     Playing,
     Paused,
     Waiting,
@@ -122,6 +169,7 @@ pub(super) struct Store {
     exception: Value,
     loads: VecDeque<(MediaKey, ResourceRequest)>,
     commands: VecDeque<MediaCommand>,
+    mse: mse::Store,
 }
 
 impl Store {
@@ -139,6 +187,9 @@ impl Store {
     }
     pub(super) fn has_commands(&self) -> bool {
         !self.commands.is_empty()
+    }
+    pub(super) fn has_stream_tasks(&self) -> bool {
+        self.mse.has_tasks()
     }
 
     fn check_command_room(&self, count: usize) -> Result<(), JsError> {
@@ -251,7 +302,7 @@ fn source(state: &super::State, id: NodeId) -> Option<url::Url> {
         return None;
     }
     let url = document_base(state).join(raw).ok()?;
-    matches!(url.scheme(), "https" | "http" | "file" | "data").then_some(url)
+    matches!(url.scheme(), "https" | "http" | "file" | "data" | "blob").then_some(url)
 }
 
 fn can_play_type(input: &str) -> &'static str {
@@ -319,6 +370,9 @@ fn load(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<bool, JsError> {
     let Some(url) = source(&state, id) else {
         return Ok(false);
     };
+    if url.scheme() == "blob" {
+        return attach_object_url(vm, &mut state, id, url);
+    }
     let client = Arc::new(state.url.clone());
     let cors = state.document.attr(id, "crossorigin").map(|value| {
         if value.eq_ignore_ascii_case("use-credentials") {
@@ -350,6 +404,65 @@ fn load(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<bool, JsError> {
     Ok(true)
 }
 
+fn attach_object_url(
+    vm: &mut Vm,
+    state: &mut super::State,
+    id: NodeId,
+    url: url::Url,
+) -> Result<bool, JsError> {
+    let track = ensure_track(state, id)?;
+    if track.network != 0 {
+        return Ok(track.error.is_none());
+    }
+    let Some(object) = state.media.mse.resolve_url(vm, &url) else {
+        return Ok(false);
+    };
+    let track = state.media.tracks.get(&id).expect("track already exists");
+    let key = MediaKey {
+        generation: track.key.generation.wrapping_add(1),
+        node: id,
+    };
+    state.media.check_command_room(3)?;
+    let command = if let Some(blob) = vm.host_data::<blobs::Blob>(&object) {
+        vm.charge_work(blob.bytes().len().div_ceil(64))?;
+        MediaCommand::Open {
+            key,
+            url: url.as_str().into(),
+            bytes: Arc::from(blob.bytes()),
+        }
+    } else if state.media.mse.attach(vm, object, key) {
+        MediaCommand::OpenStream { key }
+    } else {
+        return Ok(false);
+    };
+    let track = state
+        .media
+        .tracks
+        .get_mut(&id)
+        .expect("track already exists");
+    track.key = key;
+    track.url = url.into();
+    track.network = 2;
+    track.opened = true;
+    let volume = track.volume;
+    let muted = track.muted;
+    state.media.commands.extend([
+        command,
+        MediaCommand::Volume { key, value: volume },
+        MediaCommand::Muted { key, muted },
+    ]);
+    Ok(true)
+}
+
+pub(super) fn source_changed(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsError> {
+    reset(vm, state, id)?;
+    let object_url = source(&state.borrow(), id).is_some_and(|url| url.scheme() == "blob");
+    if object_url {
+        load(vm, state, id)?;
+    }
+    Ok(())
+}
+
 pub(super) fn reset(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsError> {
     let promises = {
         let mut state = state.borrow_mut();
@@ -371,6 +484,7 @@ pub(super) fn reset(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsErr
             .insert(id, fresh)
             .expect("track already exists");
         state.media.loads.retain(|(key, _)| *key != old_key);
+        state.media.mse.detach(vm, old_key)?;
         state.canvases.frames.update(std::iter::once((id, None)));
         mark_dirty(&mut state);
         prior.plays
@@ -730,6 +844,61 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
     )
 }
 
+pub(super) fn install_streaming(
+    vm: &mut Vm,
+    state: &Shared,
+    events: super::event_target::Events,
+) -> Result<(), JsError> {
+    mse::install(vm, state, events)?;
+    let prototype = state.borrow().media_prototypes.media.clone();
+    for (name, seekable) in [("buffered", false), ("seekable", true)] {
+        let host = state.clone();
+        getter(vm, prototype.clone(), name, move |vm, this, _| {
+            let id = receiver(&host, &this)?;
+            let (key, duration) = {
+                let realm = host.borrow();
+                realm
+                    .media
+                    .tracks
+                    .get(&id)
+                    .map_or((None, f64::NAN), |track| {
+                        let duration = if seekable || track.ready >= 2 {
+                            track.duration
+                        } else {
+                            f64::NAN
+                        };
+                        (Some(track.key), duration)
+                    })
+            };
+            mse::element_ranges(vm, &host, key, seekable, duration)
+        })?;
+    }
+    Ok(())
+}
+
+pub(super) fn run_stream_tasks(vm: &mut Vm, state: &Shared) {
+    if !state.borrow().media.has_stream_tasks() {
+        return;
+    }
+    for _ in 0..32 {
+        let result = vm.with_task(|vm| {
+            if !mse::run_next(vm, state)? {
+                return Ok(false);
+            }
+            drain_microtask_queue(vm, state)?;
+            Ok(true)
+        });
+        match result {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                diagnostic(state, format!("Media Source: {error}"));
+                break;
+            }
+        }
+    }
+}
+
 pub(super) fn default_click(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsError> {
     let action = {
         let state = state.borrow();
@@ -807,8 +976,26 @@ impl super::ScriptRuntime {
     }
 
     pub fn update_media(&mut self, key: MediaKey, update: MediaUpdate) -> bool {
+        let update = match update {
+            MediaUpdate::StreamOpened => {
+                return self.queue_stream_update(|store| store.enqueue_opened(key));
+            }
+            MediaUpdate::BufferUpdated {
+                buffer,
+                operation,
+                result,
+            } => {
+                return self.queue_stream_update(|store| {
+                    store.enqueue_result(key, buffer, operation, result)
+                });
+            }
+            update => update,
+        };
         let id = key.node;
         let mut state = self.state.borrow_mut();
+        if let MediaUpdate::Metadata { duration, .. } = &update {
+            state.media.mse.metadata(&self.vm, key, *duration);
+        }
         let Some(track) = state
             .media
             .tracks
@@ -828,11 +1015,21 @@ impl super::ScriptRuntime {
                 height,
                 duration,
             } => {
+                let first = track.ready == 0;
+                let resized = (track.width, track.height) != (width, height);
+                let duration_changed =
+                    duration != track.duration && !(duration.is_nan() && track.duration.is_nan());
                 track.width = width;
                 track.height = height;
                 track.duration = duration;
                 track.ready = track.ready.max(1);
-                events = &["durationchange", "loadedmetadata"];
+                events = match (first, resized, duration_changed) {
+                    (true, _, _) => &["durationchange", "loadedmetadata"],
+                    (false, true, true) => &["durationchange", "resize"],
+                    (false, true, false) => &["resize"],
+                    (false, false, true) => &["durationchange"],
+                    (false, false, false) => &[],
+                };
             }
             MediaUpdate::Ready => {
                 track.ready = 4;
@@ -887,6 +1084,9 @@ impl super::ScriptRuntime {
                 rejected = Some(error);
                 events = &["error"];
             }
+            MediaUpdate::StreamOpened | MediaUpdate::BufferUpdated { .. } => {
+                unreachable!("media source updates are queued separately")
+            }
         }
         if relayout {
             mark_dirty(&mut state);
@@ -897,6 +1097,9 @@ impl super::ScriptRuntime {
         }
         let state = &self.state;
         if let Err(error) = self.vm.with_task(|vm| {
+            if rejected.is_some() {
+                state.borrow_mut().media.mse.detach(vm, key)?;
+            }
             if !plays.is_empty() {
                 let cause = rejected
                     .as_deref()
@@ -910,6 +1113,17 @@ impl super::ScriptRuntime {
             drain_microtask_queue(vm, state)
         }) {
             diagnostic(state, format!("Media element: {error}"));
+        }
+        true
+    }
+
+    fn queue_stream_update(
+        &mut self,
+        enqueue: impl FnOnce(&mut mse::Store) -> Result<(), JsError>,
+    ) -> bool {
+        let result = enqueue(&mut self.state.borrow_mut().media.mse);
+        if let Err(error) = result {
+            diagnostic(&self.state, error.to_string());
         }
         true
     }

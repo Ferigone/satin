@@ -1,5 +1,5 @@
 use rust_browser_engine::{LoadedPage, layout::Viewport, script::ScriptRuntime};
-use rust_browser_javascript::Value;
+use rust_browser_javascript::{ErrorKind, Value};
 use std::sync::Arc;
 
 fn runtime(source: &str) -> ScriptRuntime {
@@ -21,6 +21,20 @@ fn check(runtime: &mut ScriptRuntime, source: &str) {
         "{source}"
     );
 }
+#[test]
+fn geometry_charges_displayed_text_and_allows_large_inert_data_blocks() {
+    let html = format!(
+        "<!doctype html><body><script id='data' type='application/json'>\"{}\"</script><p>Page</p>",
+        "x".repeat(1_100_000),
+    );
+    let mut r = runtime(&html);
+    check(&mut r, "document.body.clientWidth > 0");
+    let error = r
+        .eval("document.getElementById('data').style.display='block'; document.body.clientWidth")
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+}
+
 #[test]
 fn geometry_uses_border_boxes_but_offsets_ignore_transforms() {
     let mut r = runtime(

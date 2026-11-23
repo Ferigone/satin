@@ -1,5 +1,8 @@
 use super::{Command, EventKind, Key, Shared, Signal};
-use std::{ptr, sync::Arc};
+use std::{cell::Cell, ptr, rc::Rc, sync::Arc};
+mod stream;
+
+use stream::{SOURCE_URL, Stream};
 use windows::{
     Win32::{
         Foundation::{E_FAIL, E_INVALIDARG, E_OUTOFMEMORY, RECT, S_FALSE},
@@ -12,14 +15,15 @@ use windows::{
         },
         Media::MediaFoundation::{
             CLSID_MFMediaEngineClassFactory, IMFByteStream, IMFMediaEngine,
-            IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineNotify,
-            IMFMediaEngineNotify_Impl, MF_E_INVALID_FILE_FORMAT, MF_MEDIA_ENGINE_CALLBACK,
-            MF_MEDIA_ENGINE_EVENT, MF_MEDIA_ENGINE_EVENT_CANPLAY, MF_MEDIA_ENGINE_EVENT_ENDED,
-            MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_EVENT_FIRSTFRAMEREADY,
-            MF_MEDIA_ENGINE_EVENT_LOADEDDATA, MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA,
-            MF_MEDIA_ENGINE_EVENT_PAUSE, MF_MEDIA_ENGINE_EVENT_PLAYING,
-            MF_MEDIA_ENGINE_EVENT_SEEKED, MF_MEDIA_ENGINE_EVENT_SEEKING,
-            MF_MEDIA_ENGINE_EVENT_TIMEUPDATE, MF_MEDIA_ENGINE_EVENT_WAITING,
+            IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineExtension,
+            IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, MF_E_INVALID_FILE_FORMAT,
+            MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_EVENT, MF_MEDIA_ENGINE_EVENT_CANPLAY,
+            MF_MEDIA_ENGINE_EVENT_ENDED, MF_MEDIA_ENGINE_EVENT_ERROR,
+            MF_MEDIA_ENGINE_EVENT_FIRSTFRAMEREADY, MF_MEDIA_ENGINE_EVENT_LOADEDDATA,
+            MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA, MF_MEDIA_ENGINE_EVENT_PAUSE,
+            MF_MEDIA_ENGINE_EVENT_PLAYING, MF_MEDIA_ENGINE_EVENT_SEEKED,
+            MF_MEDIA_ENGINE_EVENT_SEEKING, MF_MEDIA_ENGINE_EVENT_TIMEUPDATE,
+            MF_MEDIA_ENGINE_EVENT_WAITING, MF_MEDIA_ENGINE_EXTENSION,
             MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFARGB, MFCreateAttributes,
             MFCreateMFByteStreamOnStream, MFShutdown, MFStartup,
         },
@@ -52,6 +56,7 @@ impl Drop for MediaFoundation {
 pub(super) struct Interop {
     engine: IMFMediaEngineClassFactory,
     imaging: IWICImagingFactory,
+    outstanding_stream_bytes: Rc<Cell<usize>>,
     // Drop COM objects before shutting down their platform and apartment.
     _foundation: MediaFoundation,
     _com: Com,
@@ -71,6 +76,7 @@ impl Interop {
         Ok(Self {
             engine,
             imaging,
+            outstanding_stream_bytes: Rc::default(),
             _foundation: foundation,
             _com: com,
         })
@@ -87,42 +93,84 @@ impl Interop {
         if !(16..=bytes.len()).contains(&size) || !size.is_multiple_of(4) {
             return Err(Error::from_hresult(MF_E_INVALID_FILE_FORMAT));
         }
+        let stream = unsafe {
+            // SHCreateMemStream owns a copy. Media Foundation sees only this byte stream.
+            let memory =
+                SHCreateMemStream(Some(bytes)).ok_or_else(|| Error::from_hresult(E_OUTOFMEMORY))?;
+            MFCreateMFByteStreamOnStream(&memory)?
+        };
+        let engine = self.create_engine(key, shared, None)?;
+        let player = Player::new(
+            engine,
+            self.imaging.clone(),
+            Input::File {
+                _bytes: stream.clone(),
+            },
+        );
+        let source = player.engine.cast::<IMFMediaEngineEx>()?;
+        // Select the MP4 byte-stream handler without exposing the document's URL.
+        unsafe { source.SetSourceFromByteStream(&stream, &BSTR::from("satin-media.mp4"))? };
+        Ok(player)
+    }
+
+    pub(super) fn open_stream(&self, key: Key, shared: Arc<Shared>) -> Result<Player> {
+        let stream = Stream::new(
+            &self.engine,
+            key,
+            shared.clone(),
+            self.outstanding_stream_bytes.clone(),
+        )?;
+        let resolver = stream.resolver()?;
+        let engine = self.create_engine(key, shared, Some(&resolver))?;
+        let player = Player::new(engine, self.imaging.clone(), Input::Stream(stream));
+        unsafe { player.engine.SetSource(&BSTR::from(SOURCE_URL))? };
+        Ok(player)
+    }
+
+    fn create_engine(
+        &self,
+        key: Key,
+        shared: Arc<Shared>,
+        resolver: Option<&IMFMediaEngineExtension>,
+    ) -> Result<IMFMediaEngine> {
         let notify: IMFMediaEngineNotify = Notify { key, shared }.into();
-        let mut attributes = None;
-        unsafe { MFCreateAttributes(&mut attributes, 2)? };
-        let attributes = attributes.ok_or_else(|| Error::from_hresult(E_FAIL))?;
-        let (engine, stream) = unsafe {
+        unsafe {
+            let mut attributes = None;
+            MFCreateAttributes(&mut attributes, 2 + u32::from(resolver.is_some()))?;
+            let attributes = attributes.ok_or_else(|| Error::from_hresult(E_FAIL))?;
             attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify)?;
             attributes.SetUINT32(
                 &MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
                 DXGI_FORMAT_B8G8R8A8_UNORM.0 as u32,
             )?;
-            // SHCreateMemStream owns a copy. Media Foundation sees only this byte stream.
-            let memory =
-                SHCreateMemStream(Some(bytes)).ok_or_else(|| Error::from_hresult(E_OUTOFMEMORY))?;
-            let stream = MFCreateMFByteStreamOnStream(&memory)?;
-            let engine = self.engine.CreateInstance(0, &attributes)?;
-            let source = engine.cast::<IMFMediaEngineEx>()?;
-            // Select the MP4 byte-stream handler without exposing the document's URL.
-            if let Err(error) =
-                source.SetSourceFromByteStream(&stream, &BSTR::from("satin-media.mp4"))
-            {
-                let _ = engine.Shutdown();
-                return Err(error);
+            if let Some(resolver) = resolver {
+                attributes.SetUnknown(&MF_MEDIA_ENGINE_EXTENSION, resolver)?;
             }
-            (engine, stream)
-        };
-        Ok(Player {
+            self.engine.CreateInstance(0, &attributes)
+        }
+    }
+}
+
+enum Input {
+    File { _bytes: IMFByteStream },
+    Stream(Stream),
+}
+
+impl Player {
+    fn new(engine: IMFMediaEngine, imaging: IWICImagingFactory, input: Input) -> Self {
+        Self {
             engine,
-            imaging: self.imaging.clone(),
-            _stream: stream,
+            imaging,
+            input,
             surface: None,
             native_size: None,
             pending_seek: None,
             ready: false,
             playing: false,
             seeking: false,
-        })
+            ended: false,
+            play_after_stream_end: false,
+        }
     }
 }
 
@@ -159,13 +207,15 @@ impl IMFMediaEngineNotify_Impl for Notify_Impl {
 pub(super) struct Player {
     engine: IMFMediaEngine,
     imaging: IWICImagingFactory,
-    _stream: IMFByteStream,
+    input: Input,
     surface: Option<WicSurface>,
     native_size: Option<(u32, u32)>,
     pending_seek: Option<f64>,
     ready: bool,
     playing: bool,
     seeking: bool,
+    ended: bool,
+    play_after_stream_end: bool,
 }
 
 impl Drop for Player {
@@ -179,8 +229,21 @@ impl Player {
         // Each operation runs on the same apartment that owns the engine.
         unsafe {
             match command {
-                Command::Play(_) => self.engine.Play(),
-                Command::Pause(_) => self.engine.Pause(),
+                Command::Play(_) => {
+                    if matches!(&self.input, Input::Stream(stream) if stream.ending()) {
+                        self.play_after_stream_end = true;
+                        return Ok(());
+                    }
+                    if self.ended && matches!(self.input, Input::Stream(_)) {
+                        self.engine.SetCurrentTime(0.)?;
+                    }
+                    self.ended = false;
+                    self.engine.Play()
+                }
+                Command::Pause(_) => {
+                    self.play_after_stream_end = false;
+                    self.engine.Pause()
+                }
                 Command::Seek { time, .. } if !time.is_finite() => {
                     Err(Error::from_hresult(E_INVALIDARG))
                 }
@@ -188,12 +251,28 @@ impl Player {
                     self.pending_seek = Some(time.max(0.));
                     Ok(())
                 }
-                Command::Seek { time, .. } => self.engine.SetCurrentTime(time.max(0.)),
+                Command::Seek { time, .. } => {
+                    self.ended = false;
+                    self.engine.SetCurrentTime(time.max(0.))
+                }
                 Command::Volume { value, .. } if (0. ..=1.).contains(&value) => {
                     self.engine.SetVolume(value)
                 }
                 Command::Volume { .. } => Err(Error::from_hresult(E_INVALIDARG)),
                 Command::Muted { muted, .. } => self.engine.SetMuted(muted),
+                streaming @ (Command::AddBuffer { .. }
+                | Command::Append { .. }
+                | Command::RemoveRange { .. }
+                | Command::RemoveBuffer { .. }
+                | Command::AbortBuffer { .. }
+                | Command::SetDuration { .. }
+                | Command::EndStream { .. }) => {
+                    if let Input::Stream(stream) = &mut self.input {
+                        stream.command(streaming)
+                    } else {
+                        Err(Error::from_hresult(E_INVALIDARG))
+                    }
+                }
                 _ => unreachable!("only player controls are passed to a native player"),
             }
         }
@@ -203,29 +282,38 @@ impl Player {
         if self.native_size.is_some() {
             return Ok(());
         }
+        let size = self.video_size()?;
+        self.publish_metadata(size, output, key);
+        if let Some(time) = self.pending_seek.take() {
+            unsafe { self.engine.SetCurrentTime(time)? };
+        }
+        Ok(())
+    }
+
+    fn video_size(&self) -> Result<(u32, u32)> {
         let (mut width, mut height) = (0, 0);
-        let duration = unsafe {
+        unsafe {
             if self.engine.HasVideo().as_bool() {
                 self.engine
                     .GetNativeVideoSize(Some(&mut width), Some(&mut height))?;
             }
-            self.engine.GetDuration()
-        };
+        }
+        Ok((width, height))
+    }
+
+    fn publish_metadata(&mut self, (width, height): (u32, u32), output: &Shared, key: Key) {
         self.native_size = Some((width, height));
+        self.surface = None;
         output.publish(
             key,
             EventKind::Metadata {
                 width,
                 height,
-                duration,
+                duration: unsafe { self.engine.GetDuration() },
                 #[cfg(test)]
                 has_audio: unsafe { self.engine.HasAudio().as_bool() },
             },
         );
-        if let Some(time) = self.pending_seek.take() {
-            unsafe { self.engine.SetCurrentTime(time)? };
-        }
-        Ok(())
     }
 
     pub(super) fn notification(
@@ -236,6 +324,33 @@ impl Player {
     ) -> std::result::Result<(), String> {
         let mut capture = false;
         let kind = match signal {
+            Signal::StreamOpened => {
+                if let Input::Stream(stream) = &mut self.input {
+                    stream.reopened();
+                }
+                self.ended = false;
+                EventKind::StreamOpened
+            }
+            Signal::StreamEnded => {
+                if let Input::Stream(stream) = &mut self.input {
+                    stream.ended();
+                }
+                if std::mem::take(&mut self.play_after_stream_end) {
+                    self.control(Command::Play(key))
+                        .map_err(|error| error.to_string())?;
+                }
+                return Ok(());
+            }
+            Signal::BufferComplete {
+                buffer,
+                operation,
+                status,
+            } => {
+                if let Input::Stream(stream) = &mut self.input {
+                    stream.complete(buffer, operation, status);
+                }
+                return Ok(());
+            }
             Signal::Metadata => {
                 self.metadata(output, key)
                     .map_err(|error| error.to_string())?;
@@ -250,7 +365,10 @@ impl Player {
             }
             Signal::Loaded => return Ok(()),
             Signal::FirstFrame => {
-                if let Some(frame) = self.frame(true).map_err(|error| error.to_string())? {
+                if let Some(frame) = self
+                    .frame(true, output, key)
+                    .map_err(|error| error.to_string())?
+                {
                     output.publish(key, EventKind::Frame(frame));
                 }
                 return Ok(());
@@ -261,6 +379,9 @@ impl Player {
             }
             Signal::Paused => {
                 self.playing = false;
+                if self.ended {
+                    return Ok(());
+                }
                 output.publish(key, EventKind::Time(self.time()));
                 EventKind::Paused
             }
@@ -277,17 +398,33 @@ impl Player {
                 capture = self.ready;
                 EventKind::Seeked(self.time())
             }
-            Signal::Time => EventKind::Time(self.time()),
+            Signal::Time => {
+                if self.ended {
+                    return Ok(());
+                }
+                let time = self.time();
+                if self.playing && !self.seeking && self.stream_end_time() == Some(time) {
+                    // Media Foundation can keep running its clock after an MSE seek
+                    // has consumed all the data in an explicitly completed stream.
+                    unsafe { self.engine.Pause() }.map_err(|error| error.to_string())?;
+                    self.finish(output, key);
+                    return Ok(());
+                }
+                EventKind::Time(time)
+            }
             Signal::Ended => {
-                self.playing = false;
-                output.publish(key, EventKind::Time(self.time()));
-                EventKind::Ended
+                self.finish(output, key);
+                return Ok(());
             }
             Signal::Error { code, detail } => {
                 return Err(format!("Windows media error {code} (0x{detail:08X})"));
             }
         };
-        if capture && let Some(frame) = self.frame(true).map_err(|error| error.to_string())? {
+        if capture
+            && let Some(frame) = self
+                .frame(true, output, key)
+                .map_err(|error| error.to_string())?
+        {
             output.publish(key, EventKind::Frame(frame));
         }
         output.publish(key, kind);
@@ -296,22 +433,50 @@ impl Player {
 
     pub(super) fn needs_frame(&self) -> bool {
         (self.playing || self.seeking)
-            && self
-                .native_size
-                .is_some_and(|(width, height)| width > 0 && height > 0)
+            && match self.input {
+                Input::Stream(_) => unsafe { self.engine.HasVideo().as_bool() },
+                Input::File { .. } => self
+                    .native_size
+                    .is_some_and(|(width, height)| width > 0 && height > 0),
+            }
     }
 
     fn time(&self) -> f64 {
-        unsafe { self.engine.GetCurrentTime() }
+        let current = unsafe { self.engine.GetCurrentTime() };
+        self.stream_end_time()
+            .map_or(current, |end| current.min(end))
     }
 
-    pub(super) fn frame(&mut self, force: bool) -> Result<Option<Arc<image::RgbaImage>>> {
-        let Some((width, height)) = self
-            .native_size
-            .filter(|(width, height)| *width > 0 && *height > 0)
-        else {
+    fn stream_end_time(&self) -> Option<f64> {
+        match &self.input {
+            Input::Stream(stream) => stream.end_time(),
+            Input::File { .. } => None,
+        }
+    }
+
+    fn finish(&mut self, output: &Shared, key: Key) {
+        self.playing = false;
+        if !std::mem::replace(&mut self.ended, true) {
+            output.publish(key, EventKind::Time(self.time()));
+            output.publish(key, EventKind::Ended);
+        }
+    }
+
+    pub(super) fn frame(
+        &mut self,
+        force: bool,
+        output: &Shared,
+        key: Key,
+    ) -> Result<Option<Arc<image::RgbaImage>>> {
+        let stream = matches!(self.input, Input::Stream(_));
+        if (stream && !unsafe { self.engine.HasVideo().as_bool() })
+            || (!stream
+                && self
+                    .native_size
+                    .is_none_or(|(width, height)| width == 0 || height == 0))
+        {
             return Ok(None);
-        };
+        }
         let mut pts = 0;
         // The generated Result wrapper treats S_FALSE as success and loses the no-new-frame signal.
         let status = unsafe {
@@ -321,9 +486,23 @@ impl Player {
             )
         };
         status.ok()?;
-        if status == S_FALSE && !force {
+        if status == S_FALSE && (!force || (stream && self.surface.is_none())) {
             return Ok(None);
         }
+        if stream {
+            // The media engine can publish provisional dimensions before decoding an
+            // MSE frame. It can also change dimensions during a bitrate switch.
+            let size = self.video_size()?;
+            if Some(size) != self.native_size {
+                self.publish_metadata(size, output, key);
+            }
+        }
+        let Some((width, height)) = self
+            .native_size
+            .filter(|(width, height)| *width > 0 && *height > 0)
+        else {
+            return Ok(None);
+        };
         if self.surface.is_none() {
             self.surface = Some(WicSurface::new(&self.imaging, width, height)?);
         }

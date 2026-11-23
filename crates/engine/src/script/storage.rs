@@ -283,8 +283,12 @@ impl StorageHost {
         let prototype = vm.root(prototype);
         let exception = vm.get_global("DOMException")?;
         let exception = vm.root(exception);
-        let origin =
-            matches!(url.scheme(), "http" | "https").then(|| url.origin().ascii_serialization());
+        let origin = match url.scheme() {
+            "http" | "https" => Some(url.origin().ascii_serialization()),
+            // The built-in start page stores its shortcuts in this profile.
+            "about" if url.as_str() == "about:home" => Some("about:home".into()),
+            _ => None,
+        };
         let inbox = Rc::new(Inbox::default());
         let areas = [false, true].map(|session| {
             origin.as_ref().map(|origin| {
@@ -344,5 +348,57 @@ impl StorageHost {
         let event = populated_event(vm, object, "storage".into(), [false; 3], values, true)?;
         dispatch_prepared(vm, state, None, event, &[])?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{loader::LoadedPage, script::ScriptRuntime, web_storage::StorageProfile};
+
+    #[test]
+    fn home_shortcut_storage_is_private_to_the_exact_builtin_page() {
+        let profile = StorageProfile::default();
+        let open = |url| {
+            ScriptRuntime::with_storage(
+                &LoadedPage::from_html(url, "<!doctype html><title>Storage</title>"),
+                &TabStorage::new(profile.clone()),
+            )
+            .unwrap()
+        };
+        let mut home = open("about:home");
+        home.eval("localStorage.setItem('satin.home.shortcuts', 'home only')")
+            .unwrap();
+        drop(home);
+
+        let mut web = open("https://example.test/");
+        assert_eq!(
+            web.eval("localStorage.getItem('satin.home.shortcuts') === null")
+                .unwrap(),
+            Value::Bool(true)
+        );
+        web.eval("localStorage.setItem('satin.home.shortcuts', 'web only')")
+            .unwrap();
+        assert_eq!(
+            open("about:home")
+                .eval("localStorage.getItem('satin.home.shortcuts') === 'home only'")
+                .unwrap(),
+            Value::Bool(true)
+        );
+
+        for url in [
+            "about:version",
+            "about:home?other",
+            "about:home#other",
+            "data:text/html,opaque",
+        ] {
+            assert_eq!(
+                open(url)
+                    .eval("(function() { try { void localStorage; } catch (error) { return error.name === 'SecurityError'; } return false; })()")
+                    .unwrap(),
+                Value::Bool(true),
+                "{url}"
+            );
+        }
     }
 }

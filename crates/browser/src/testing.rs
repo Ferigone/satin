@@ -8,6 +8,10 @@ pub enum SmokeAction {
     Click {
         id: String,
     },
+    ClickAt {
+        x: f32,
+        y: f32,
+    },
     Text {
         value: String,
     },

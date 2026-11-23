@@ -67,6 +67,55 @@ impl Data {
             self.events.push(node);
         }
     }
+
+    fn build_layout(&self, vm: Option<&mut Vm>) -> Result<Layout, JsError> {
+        let document = &self.page.document;
+        let fonts = self.fonts.as_ref().expect("layout fonts");
+        if let Some(vm) = vm {
+            let source_work = self.page.stylesheets.iter().map(|sheet| sheet.len()).sum::<usize>()
+                + self.page.svg_images.values().map(|image| image.retained_bytes()).sum::<usize>();
+            let attributes = document.nodes.iter().filter_map(|node| match &node.kind {
+                NodeKind::Element { attrs, .. } => Some(attrs),
+                _ => None,
+            }).flat_map(|attrs| attrs.iter())
+              .map(|(name, value)| name.len() + value.len()).sum::<usize>();
+            vm.charge_work(document.nodes.len().saturating_mul(32)
+                .saturating_add(source_work)
+                .saturating_add(attributes))?;
+            return Layout::build_checked_for_viewport(
+                &self.page,
+                fonts,
+                self.viewport,
+                &self.offsets,
+                self.observe_intersections,
+                |styles| {
+                    // Style resolution determines whether an element's text
+                    // enters the formatter. Even script text may be visible
+                    // if the author has overridden its default display.
+                    let mut stack = vec![document.root];
+                    let mut work = 0usize;
+                    while let Some(id) = stack.pop() {
+                        if styles[id.0].display == css::Display::None {
+                            continue;
+                        }
+                        let node = &document.nodes[id.0];
+                        if let NodeKind::Text(text) = &node.kind {
+                            work = work.saturating_add(text.len());
+                        }
+                        stack.extend(node.children.iter().copied());
+                    }
+                    vm.charge_work(work)
+                },
+            );
+        }
+        Ok(Layout::build_for_viewport(
+            &self.page,
+            fonts,
+            self.viewport,
+            &self.offsets,
+            self.observe_intersections,
+        ))
+    }
 }
 impl LayoutHost {
     pub(super) fn with_canvas_fonts<T>(
@@ -178,50 +227,20 @@ impl LayoutHost {
         {
             return Ok(layout.clone());
         }
-        // Charge native work before copying DOM data, CSS parsing or shaping.
-        let source_work = d
-            .page
-            .stylesheets
-            .iter()
-            .map(|sheet| sheet.len())
-            .sum::<usize>()
-            .saturating_add(
-                d.page
-                    .linked_stylesheets
-                    .values()
-                    .map(|sheet| sheet.len())
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                d.page
-                    .svg_images
-                    .values()
-                    .map(|a| a.retained_bytes())
-                    .sum::<usize>(),
-            );
         if let Some(vm) = vm.as_deref_mut() {
             let state = d.dom.borrow();
-            vm.charge_work(
-                state
-                    .document
-                    .nodes
-                    .len()
-                    .saturating_mul(32)
-                    .saturating_add(state.dom_bytes)
-                    .saturating_add(source_work),
-            )?;
+            if state.snapshot_revision != revision {
+                // The snapshot copies strings without decoding their contents.
+                // Charge by machine words here and by text bytes if that
+                // content actually has to be laid out.
+                vm.charge_work(state.dom_bytes.div_ceil(std::mem::size_of::<usize>()))?;
+            }
         }
         d.sync_page();
         if d.fonts.is_none() {
             d.fonts = Some(Fonts::new().map_err(|m| JsError::new(ErrorKind::InternalError, m))?);
         }
-        let mut layout = Arc::new(Layout::build_for_viewport(
-            &d.page,
-            d.fonts.as_ref().unwrap(),
-            d.viewport,
-            &d.offsets,
-            d.observe_intersections,
-        ));
+        let mut layout = Arc::new(d.build_layout(vm.as_deref_mut())?);
         let mut native_svg_work = svg_work(&layout);
         let x = d
             .viewport
@@ -238,19 +257,7 @@ impl LayoutHost {
             d.root_request = Some(ScrollOffset { x, y });
             d.event(None);
             if rebuild {
-                if let Some(vm) = vm.as_deref_mut() {
-                    vm.charge_work(
-                        source_work
-                            .saturating_add(d.dom.borrow().document.nodes.len().saturating_mul(32)),
-                    )?;
-                }
-                layout = Arc::new(Layout::build_for_viewport(
-                    &d.page,
-                    d.fonts.as_ref().unwrap(),
-                    d.viewport,
-                    &d.offsets,
-                    d.observe_intersections,
-                ));
+                layout = Arc::new(d.build_layout(vm.as_deref_mut())?);
                 native_svg_work = native_svg_work.saturating_add(svg_work(&layout));
             }
         }

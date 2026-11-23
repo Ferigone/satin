@@ -14,10 +14,13 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+mod home_assets;
 mod html_encoding;
 mod resources;
 mod svg_image;
 pub(crate) mod transport;
+pub(crate) use home_assets::is_home_image;
+pub use home_assets::built_in_site_icon;
 pub(crate) use resources::decode_oriented_bitmap;
 pub use resources::{DocumentResource, ResourceBody, ResourceKind, ResourceRequest};
 pub use svg_image::SvgImage;
@@ -309,6 +312,7 @@ pub struct OpenedPage {
     pub(crate) page: LoadedPage,
     pub(crate) input: DocumentInput,
     pub(crate) started: Instant,
+    pub(crate) response_start: Instant,
 }
 pub(crate) enum DocumentInput {
     Html(String),
@@ -472,6 +476,7 @@ impl Loader {
             page,
             input,
             started,
+            response_start: main.response_start,
         })
     }
 
@@ -532,7 +537,7 @@ impl Loader {
                 .await
                 .map_err(interrupted_navigation)?;
         }
-        let (mut response, context, origin_clean) =
+        let (mut response, context, origin_clean, response_start) =
             self.fetch_navigation_http(request, control).await?;
         if response
             .content_length()
@@ -559,6 +564,7 @@ impl Loader {
                         context,
                         nosniff: false,
                         origin_clean,
+                        response_start,
                     },
                     started,
                     control,
@@ -575,6 +581,7 @@ impl Loader {
             page,
             input: DocumentInput::Streaming,
             started,
+            response_start,
         };
         control
             .wait(send(NavigationPart::Open(Box::new(opened))))
@@ -912,7 +919,7 @@ impl Loader {
         &self,
         original: &NavigationRequest,
         control: &RequestControl<'_>,
-    ) -> Result<(reqwest::Response, CookieContext, bool), String> {
+    ) -> Result<(reqwest::Response, CookieContext, bool, Instant), String> {
         let mut request = original.clone();
         request.context.redirect_to(&request.url, &request.method);
         if request
@@ -976,6 +983,7 @@ impl Loader {
                 .await
                 .map_err(interrupted_navigation)?
                 .map_err(error_chain)?;
+            let response_start = Instant::now();
             control.check().map_err(interrupted_navigation)?;
             for value in response.headers().get_all(reqwest::header::SET_COOKIE) {
                 self.cookies
@@ -1038,7 +1046,7 @@ impl Loader {
                     return Err("Serwer nie zwrócił dokumentu.".into());
                 }
             }
-            return Ok((response, request.context, origin_clean));
+            return Ok((response, request.context, origin_clean, response_start));
         }
         unreachable!()
     }
@@ -1073,10 +1081,11 @@ impl Loader {
                     nosniff: false,
                     origin_clean: true,
                     context: request.context.clone(),
+                    response_start: Instant::now(),
                 }
             }
             "http" | "https" => {
-                let (response, context, origin_clean) =
+                let (response, context, origin_clean, response_start) =
                     self.fetch_navigation_http(request, control).await?;
                 if response.content_length().is_some_and(|n| n > limit as u64) {
                     return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
@@ -1102,6 +1111,7 @@ impl Loader {
                     bytes,
                     context,
                     origin_clean,
+                    response_start,
                 }
             }
             "file" => {
@@ -1134,6 +1144,7 @@ impl Loader {
                     bytes,
                     context: request.context.clone(),
                     origin_clean: false,
+                    response_start: Instant::now(),
                 }
             }
             _ => {
@@ -1218,6 +1229,7 @@ struct Response {
     nosniff: bool,
     context: CookieContext,
     origin_clean: bool,
+    response_start: Instant,
 }
 impl Response {
     fn resource(self) -> Result<Self, String> {
@@ -1366,9 +1378,10 @@ fn text_encoding(bytes: &[u8], content_type: &str) -> (&'static encoding_rs::Enc
 }
 
 const BASE_STYLE: &str = "body{margin:0;background:#f8fafc;color:#172936;font-family:sans-serif}main{max-width:820px;margin:48px auto;padding:28px}h1{font-size:42px;line-height:1.15;margin:16px 0 24px}p{font-size:18px;line-height:1.6}h2{font-size:23px;margin-top:32px}.eyebrow{font-size:13px;font-weight:bold;color:#16836a}a{color:#126f5e}.card{display:block;padding:18px;margin:12px 0;background:white;border:1px solid #dde5e8;text-decoration:none}.muted{color:#62727f;font-size:15px}pre{font-size:14px;padding:18px;background:#edf1f5}li{margin:10px 0}code{color:#13725d}";
-fn builtin_source(name: &str) -> String {
+fn builtin_source(name: &str) -> (String, bool) {
     let (title, body) = match name {
         "media" => ("Video playback", include_str!("../data/pages/media.html")),
+        "streaming" => ("Segmented playback", include_str!("../data/pages/streaming.html")),
         "time" => ("Zegar i układ", include_str!("../data/pages/time.html")),
         "canvas" => ("Płótno 2D", include_str!("../data/pages/canvas.html")),
         "numbers" => (
@@ -1417,26 +1430,31 @@ fn builtin_source(name: &str) -> String {
         _ => ("New Tab", include_str!("../data/pages/home.html")),
     };
     let body = body.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")).replace("RUST BROWSER", "SATIN");
-    let body = if name == "media" {
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        let sample = STANDARD.encode(include_bytes!("../data/pages/media-demo.mp4"));
-        body.replace("{{MEDIA_SAMPLE}}", &sample)
-    } else {
-        body
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let body = match name {
+        "media" => body.replace("{{MEDIA_SAMPLE}}", &STANDARD.encode(include_bytes!("../data/pages/media-demo.mp4"))),
+        "streaming" => body
+            .replace("{{STREAM_VIDEO}}", &STANDARD.encode(include_bytes!("../data/pages/mse-video.mp4")))
+            .replace("{{STREAM_AUDIO}}", &STANDARD.encode(include_bytes!("../data/pages/mse-audio.mp4"))),
+        _ => body,
     };
-    let lang = if matches!(name, "media" | "version") || title == "New Tab" {
+    let home = title == "New Tab";
+    let lang = if matches!(name, "media" | "streaming" | "version") || home {
         "en"
     } else {
         "pl"
     };
-    format!(
+    let source = format!(
         "<!doctype html><html lang='{lang}'><head><meta charset='utf-8'><title>{title}</title><style>{BASE_STYLE}</style></head><body><main>{}</main></body></html>",
         body
-    )
+    );
+    (source, home)
 }
 
-fn builtin_images(page: &mut LoadedPage, name: &str) {
-    if name == "demo" {
+fn builtin_images(page: &mut LoadedPage, name: &str, home: bool) {
+    if home {
+        home_assets::add_to(page);
+    } else if name == "demo" {
         let mut bitmap = image::RgbaImage::new(400, 160);
         for (x, y, p) in bitmap.enumerate_pixels_mut() {
             let grid = (x / 24 + y / 24) % 2;
@@ -1454,25 +1472,28 @@ fn builtin_images(page: &mut LoadedPage, name: &str) {
 
 impl OpenedPage {
     pub fn internal(url: &Url, cookies: CookieStore) -> Self {
-        let source = builtin_source(url.path());
+        let started = Instant::now();
+        let (source, home) = builtin_source(url.path());
         let mut page = LoadedPage::empty(
             url.clone(),
             cookies,
             CookieContext::navigation(None, url, "GET"),
         );
         page.stats.bytes = source.len();
-        builtin_images(&mut page, url.path());
+        builtin_images(&mut page, url.path(), home);
         Self {
             page,
             input: DocumentInput::Html(source),
-            started: Instant::now(),
+            started,
+            response_start: started,
         }
     }
 }
 
 pub fn builtin(name: &str) -> LoadedPage {
-    let mut page = LoadedPage::from_html(&format!("about:{name}"), &builtin_source(name));
-    builtin_images(&mut page, name);
+    let (source, home) = builtin_source(name);
+    let mut page = LoadedPage::from_html(&format!("about:{name}"), &source);
+    builtin_images(&mut page, name, home);
     page
 }
 

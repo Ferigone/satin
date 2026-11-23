@@ -488,6 +488,28 @@ fn unsupported_grammar_cannot_pass_negative_syntax_tests() {
     );
 }
 #[test]
+fn compilation_budget_charges_syntax_density_and_retains_large_literals() {
+    let mut vm = Vm::new();
+    let source = format!(
+        "var config = {{ payload: '{}', values: [2, 4, 8] }}; config.payload.length;",
+        "x".repeat(800_000)
+    );
+    assert_eq!(vm.eval(&source).unwrap(), Value::from(800_000));
+    vm.collect_garbage();
+    assert_eq!(vm.eval("config.values.join(',')").unwrap(), "2,4,8".into());
+
+    let mut bounded = Vm::with_limits(VmLimits {
+        max_heap_bytes: vm.estimated_heap_bytes() + 4 * 1024 * 1024,
+        ..VmLimits::default()
+    });
+    // These statements are cheap to execute but expensive to represent in
+    // parser/bytecode buffers. Reject them during compilation.
+    let dense = ";".repeat(20_000);
+    assert_eq!(bounded.check_syntax(&dense).unwrap_err().kind, ErrorKind::HeapLimit);
+    assert_eq!(bounded.eval("1 + 2").unwrap(), Value::from(3));
+}
+
+#[test]
 fn aggregate_retained_strings_stop_at_a_small_byte_budget() {
     let mut vm = Vm::with_limits(VmLimits {
         max_heap_bytes: 1024 * 1024,

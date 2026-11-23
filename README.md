@@ -20,7 +20,7 @@ Satin brings tabs, browsing history, zoom, and a persistent profile to a desktop
 | Browse | HTTP and HTTPS pages, tabs, history, and zoom |
 | Interact | Links, forms, JavaScript events, and DOM updates |
 | Render | Text and images, CSS Flexbox and Grid, SVG, and Canvas 2D |
-| Play media | Progressive MP4 playback on Windows, with pause and seek |
+| Play media | Progressive and segmented H.264/AAC MP4 playback on Windows |
 
 Website compatibility is partial. YouTube and Twitch playback remains in development.
 
@@ -40,6 +40,7 @@ Enter an address below in Satin.
 | --- | --- |
 | `about:home` | Open the start page and choose a demo |
 | `about:media` | Play, pause, or seek within an MP4 sample |
+| `about:streaming` | Play separate audio and video segments as they arrive |
 | `about:javascript` | Run a script and interact with the page |
 | `about:graphics` | Explore layout, SVG, and scrolling |
 | `about:canvas` | Draw on a canvas and inspect the result |

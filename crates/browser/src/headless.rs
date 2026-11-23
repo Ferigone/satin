@@ -30,6 +30,7 @@ impl Network {
     fn new(cookies: CookieStore, address: url::Url, storage: StorageProfile) -> Self {
         let (tx, rx) = mpsc::channel(16);
         let media_tx = tx.clone();
+        let headless_thread = std::thread::current();
         Self {
             cookies,
             tx,
@@ -41,6 +42,7 @@ impl Network {
                     navigation: 0,
                     payload: Payload::MediaWake,
                 });
+                headless_thread.unpark();
             }),
             document_session: None,
             history: SessionHistory::new(address),
@@ -166,10 +168,18 @@ impl Network {
     }
     fn receive_until(&mut self, deadline: Instant) -> Option<Message> {
         if let Some(workers) = &self.workers {
-            workers.receive_until(&mut self.rx, deadline)
-        } else {
-            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-            None
+            return workers.receive_until(&mut self.rx, deadline);
+        }
+        // Local media can start before the browser has needed any network workers.
+        loop {
+            if let Ok(message) = self.rx.try_recv() {
+                return Some(message);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            std::thread::park_timeout(remaining);
         }
     }
     fn dispatch_fetch(&mut self, realm: &mut ScriptRuntime) -> Result<(), String> {

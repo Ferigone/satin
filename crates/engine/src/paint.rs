@@ -310,7 +310,7 @@ impl Canvas {
         // Content exhaustion must not prevent drawing the address bar and tabs.
         self.work_left = ui_work;
     }
-    fn image(&mut self, rect: Rect, image: &image::RgbaImage) {
+    pub fn image(&mut self, rect: Rect, image: &image::RgbaImage) {
         if !valid_rect(rect) || image.width() == 0 || image.height() == 0 {
             return;
         }

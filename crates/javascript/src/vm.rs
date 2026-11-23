@@ -336,18 +336,32 @@ impl Vm {
         &self.limits
     }
     pub fn check_syntax(&mut self, source: &str) -> Result<(), JsError> {
-        self.check_source(source)?;
-        bytecode::compile(source).map(|_| ())
+        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+        self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
-    pub(crate) fn check_source(&self, source: &str) -> Result<(), JsError> {
+    pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
         if source.len() > self.limits.max_source_bytes {
-            Err(JsError::new(
+            return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Script source exceeds configured byte limit",
-            ))
-        } else {
-            self.ensure_allocation(Self::source_allocation(source.len()))
+            ));
         }
+        // UTF-32 lexer input and decoded character data, including temporary
+        // UTF-16 buffers during literal conversion. The lexer accounts for
+        // per-token structural allocations as it consumes the source.
+        let input_bytes = source.len().saturating_mul(16).saturating_add(4096);
+        self.ensure_allocation(input_bytes)?;
+        Ok(self
+            .limits
+            .max_heap_bytes
+            .saturating_sub(self.estimated_heap_bytes())
+            .saturating_sub(input_bytes))
+    }
+    pub(crate) fn retain_compiled_chunk(&mut self, chunk: &Rc<Chunk>) -> Result<(), JsError> {
+        let bytes = bytecode::retained_size_with_chunks(Vec::new(), vec![chunk.clone()]);
+        self.ensure_allocation(bytes)?;
+        self.code_bytes = self.code_bytes.saturating_add(bytes);
+        Ok(())
     }
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
         self.eval_with_referrer(source, None)
@@ -373,11 +387,8 @@ impl Vm {
         source: &str,
         referrer: Option<SourceReferrer>,
     ) -> Result<Value, JsError> {
-        self.check_source(source)?;
-        self.code_bytes = self
-            .code_bytes
-            .saturating_add(Self::source_allocation(source.len()));
-        let chunk = bytecode::compile(source)?;
+        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+        self.retain_compiled_chunk(&chunk)?;
         if self.active == 0 {
             self.remaining = self.limits.max_instructions;
         }
@@ -2611,11 +2622,13 @@ impl Vm {
                 "Eval source containing isolated surrogate code units is not implemented",
             )
         })?;
-        self.check_source(&source)?;
-        self.code_bytes = self
-            .code_bytes
-            .saturating_add(Self::source_allocation(source.len()));
-        let chunk = bytecode::compile_eval(&source, strict, self.eval_context(env)?)?;
+        let chunk = bytecode::compile_eval(
+            &source,
+            strict,
+            self.eval_context(env)?,
+            self.compilation_budget(&source)?,
+        )?;
+        self.retain_compiled_chunk(&chunk)?;
         if !self.can_enter_call() {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,

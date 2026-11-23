@@ -385,7 +385,7 @@ fn set_attribute(
         image_element::attribute_changed(&mut state, id, &key);
         drop(state);
         if key == "src" && media::is_media(&host.borrow().document, id) {
-            media::reset(vm, host, id)?;
+            media::source_changed(vm, host, id)?;
         }
         mutation_observers::schedule(vm, host);
         dynamic_scripts::attribute_changed(vm, host, id, &key, present)
@@ -806,6 +806,7 @@ impl ScriptRuntime {
         let event_constructor = vm.get_global("Event")?;
         state.borrow_mut().event_prototype = vm.get_property(event_constructor, "prototype")?;
         media::install(&mut vm, &state)?;
+        media::install_streaming(&mut vm, &state, events.clone())?;
         let url = state.borrow().url.clone();
         let storage = storage::StorageHost::install(&mut vm, &state, tab_storage, &url)?;
         scheduler::install_performance(&mut vm, &state)?;
@@ -1180,6 +1181,7 @@ impl ScriptRuntime {
             || self.messages.has_tasks()
             || state.media.has_loads()
             || state.media.has_commands()
+            || state.media.has_stream_tasks()
             || state.routing.has_events()
             || state.routing.has_commands()
             || self.forms.has_submissions()
@@ -1202,6 +1204,7 @@ impl ScriptRuntime {
     }
     pub fn pump(&mut self) {
         self.drain_microtasks();
+        media::run_stream_tasks(&mut self.vm, &self.state);
         if self.messages.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {

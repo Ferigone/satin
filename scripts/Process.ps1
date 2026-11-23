@@ -97,41 +97,62 @@ function Invoke-SatinMediaSmoke {
         [Parameter(Mandatory=$true)][string]$Executable,
         [Parameter(Mandatory=$true)][string]$ProfileDirectory,
         [Parameter(Mandatory=$true)][string]$OutputDirectory,
-        [Parameter(Mandatory=$true)][string]$LogDirectory
+        [Parameter(Mandatory=$true)][string]$LogDirectory,
+        [switch]$Segmented
     )
 
-    $title = 'Satin MP4 OK'
-    $dom = Join-Path $OutputDirectory 'media.html'
-    $image = Join-Path $OutputDirectory 'media.png'
-    $headless = Invoke-BrowserProcess -Executable $Executable -LogDirectory $LogDirectory -TimeoutMilliseconds 15000 -Arguments @(
-        '--headless', '--url', 'about:media', '--click-id', 'media-play',
-        '--run-for-ms', '3000', '--dump-dom', $dom, '--screenshot', $image, '--profile', $ProfileDirectory
+    $check = if ($Segmented) {
+        @{
+            name = 'streaming'
+            url = 'about:streaming'
+            button = 'stream-play'
+            title = 'Satin stream OK'
+            progress = '<p\b(?=[^>]*\bid="stream-status")(?=[^>]*\bdata-started-before-end="yes")(?=[^>]*\bdata-complete="yes")[^>]*>'
+            runFor = '11000'
+            wait = 15000
+        }
+    } else {
+        @{
+            name = 'media'
+            url = 'about:media'
+            button = 'media-play'
+            title = 'Satin MP4 OK'
+            progress = '<p\b(?=[^>]*\bid="media-status")(?=[^>]*\bdata-progress="yes")[^>]*>'
+            runFor = '3000'
+            wait = 8000
+        }
+    }
+    $dom = Join-Path $OutputDirectory ($check.name + '.html')
+    $image = Join-Path $OutputDirectory ($check.name + '.png')
+    $headless = Invoke-BrowserProcess -Executable $Executable -LogDirectory $LogDirectory -TimeoutMilliseconds 20000 -Arguments @(
+        '--headless', '--url', $check.url, '--click-id', $check.button,
+        '--run-for-ms', $check.runFor, '--dump-dom', $dom, '--screenshot', $image, '--profile', $ProfileDirectory
     )
-    if ($headless.ExitCode -ne 0) { throw "The headless MP4 check failed. See $($headless.StderrPath)." }
+    if ($headless.ExitCode -ne 0) { throw "The headless $($check.name) check failed. See $($headless.StderrPath)." }
     $headlessResult = $headless.Stdout | ConvertFrom-Json
     $html = Get-Content -LiteralPath $dom -Raw -Encoding UTF8
-    if ($headlessResult.title -cne $title -or $headlessResult.javascript.diagnostics.Count -ne 0 -or
-        $html -notmatch '<p\b(?=[^>]*\bid="media-status")(?=[^>]*\bdata-progress="yes")[^>]*>' -or
+    if ($headlessResult.title -cne $check.title -or $headlessResult.javascript.diagnostics.Count -ne 0 -or
+        $html -notmatch $check.progress -or
         -not (Test-Path -LiteralPath $image -PathType Leaf)) {
-        throw "The headless MP4 check did not record playback progress. See $dom and $($headless.StdoutPath)."
+        throw "The headless $($check.name) check did not record playback progress. See $dom and $($headless.StdoutPath)."
     }
 
-    $windowImage = Join-Path $OutputDirectory 'media-window.png'
-    $actions = Join-Path $LogDirectory 'media-actions.json'
+    $windowImage = Join-Path $OutputDirectory ($check.name + '-window.png')
+    $actions = Join-Path $LogDirectory ($check.name + '-actions.json')
     $steps = @(
-        @{action='click'; id='media-play'},
-        @{action='wait_title'; value=$title; timeout_ms=8000}
+        @{action='click'; id=$check.button},
+        @{action='wait_title'; value=$check.title; timeout_ms=$check.wait}
     )
     [IO.File]::WriteAllText($actions, (ConvertTo-Json -InputObject $steps -Compress), [Text.UTF8Encoding]::new($false))
-    $native = Invoke-BrowserProcess -Executable $Executable -LogDirectory $LogDirectory -TimeoutMilliseconds 20000 -Arguments @(
-        '--smoke-window', $windowImage, '--smoke-actions', $actions, '--url', 'about:media', '--profile', $ProfileDirectory
+    $native = Invoke-BrowserProcess -Executable $Executable -LogDirectory $LogDirectory -TimeoutMilliseconds 25000 -Arguments @(
+        '--smoke-window', $windowImage, '--smoke-actions', $actions, '--url', $check.url, '--profile', $ProfileDirectory
     )
-    if ($native.ExitCode -ne 0) { throw "The native MP4 check failed. See $($native.StderrPath)." }
+    if ($native.ExitCode -ne 0) { throw "The native $($check.name) check failed. See $($native.StderrPath)." }
     $nativeResult = $native.Stdout | ConvertFrom-Json
     if (-not $nativeResult.window_smoke -or $nativeResult.frames_presented -lt 1 -or
-        $nativeResult.title -cne $title -or $nativeResult.javascript.diagnostics.Count -ne 0 -or
+        $nativeResult.title -cne $check.title -or $nativeResult.javascript.diagnostics.Count -ne 0 -or
         $nativeResult.layout_limited -or $nativeResult.paint_limited -or -not (Test-Path -LiteralPath $windowImage -PathType Leaf)) {
-        throw "The native MP4 check did not present a playback frame. See $($native.StdoutPath)."
+        throw "The native $($check.name) check did not present a playback frame. See $($native.StdoutPath)."
     }
 
     [pscustomobject]@{

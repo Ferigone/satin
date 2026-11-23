@@ -41,7 +41,7 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--help") {
         println!(
-            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --width 1280 --height 800 --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID --smoke-actions JSON_FILE] [--file-picker-responses JSON_FILE]"
+            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID --smoke-actions JSON_FILE] [--width PX --height PX] [--file-picker-responses JSON_FILE]"
         );
         return Ok(());
     }
@@ -177,12 +177,24 @@ fn run() -> Result<(), String> {
     }) {
         updater::start_for_installed_launch();
     }
+    let smoke_output = value("--smoke-window").map(PathBuf::from);
+    let smoke_size = smoke_output.as_ref().and_then(|_| {
+        let width = value("--width").and_then(|width| width.parse::<u32>().ok());
+        let height = value("--height").and_then(|height| height.parse::<u32>().ok());
+        (width.is_some() || height.is_some()).then(|| {
+            winit::dpi::PhysicalSize::new(
+                width.unwrap_or(1180).clamp(640, 4096),
+                height.unwrap_or(840).clamp(400, 4096),
+            )
+        })
+    });
     app::run(
         profile,
         url,
-        value("--smoke-window").map(PathBuf::from),
+        smoke_output,
         value("--smoke-click-id"),
         value("--smoke-actions").map(PathBuf::from),
         file_picker_responses,
+        smoke_size,
     )
 }

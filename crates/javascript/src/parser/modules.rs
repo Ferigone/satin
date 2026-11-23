@@ -43,10 +43,10 @@ impl ExportEntry {
         }
     }
 }
-pub(crate) fn parse(source: &str) -> Result<Module, JsError> {
+pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, JsError> {
     let mut p = Parser {
         tokens: Vec::new(),
-        lexer: Lexer::new(source),
+        lexer: Lexer::new(source, compilation_bytes),
         pos: 0,
         function_depth: 0,
         loop_depth: 0,

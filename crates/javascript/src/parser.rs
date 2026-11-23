@@ -231,12 +231,18 @@ pub(crate) struct EvalContext {
     pub private_names: BTreeSet<JsString>,
 }
 pub(crate) fn parse(source: &str) -> Result<Vec<Stmt>, JsError> {
-    parse_script(source, EvalContext::default())
+    // Function constructor callers reserve the combined wrapped sources before
+    // parsing their separate parameter and body goals.
+    parse_script(source, EvalContext::default(), usize::MAX)
 }
-pub(crate) fn parse_script(source: &str, context: EvalContext) -> Result<Vec<Stmt>, JsError> {
+pub(crate) fn parse_script(
+    source: &str,
+    context: EvalContext,
+    compilation_bytes: usize,
+) -> Result<Vec<Stmt>, JsError> {
     let mut p = Parser {
         tokens: Vec::new(),
-        lexer: Lexer::new(source),
+        lexer: Lexer::new(source, compilation_bytes),
         pos: 0,
         function_depth: 0,
         loop_depth: 0,
