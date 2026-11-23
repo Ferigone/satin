@@ -44,6 +44,31 @@ entry of the `v0.1.0-alpha.17` installer ZIP (SHA-256
 This measures one small local content load, not multi-tab residency, network
 navigation, video playback, or support for the Twitch and YouTube players.
 
+### Alpha.18 candidate comparison
+
+The comparison uses the public alpha.17 executable pinned above and the
+alpha.18 Windows x64 Release candidate from commit
+`4daf9467e47f3aa3b13aa6daa2319e73f3e3f17e`, SHA-256
+`9acb0041fd927709e526cac6db86a49f845fbdcbe8fe117a0944eef6532a3358`.
+The common fixture SHA-256 is
+`30d3bc8cb022d1e33be8b421ea35e4130238d0a4f8f60e486fcb803ca9409acd`.
+Both binaries ran on Windows build 26200 (Core i7-7700K), with a
+1586 × 992 px client area at 96 DPI (100% scale).
+
+| November 23, 2026 series (five-run medians) | To window (ms) | To ready title (ms) | Working set (MiB) | Private bytes (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| Public alpha.17, original baseline | 115.04 | 394.23 | 44.64 | 27.02 |
+| Release alpha.18 candidate | 72.34 | 278.23 | 44.91 | 27.24 |
+| Public alpha.17, repeated immediately after candidate | 73.80 | 286.00 | 44.71 | 27.40 |
+
+Against the same-session baseline, the candidate's median working set was
+0.20 MiB higher and its private bytes were 0.16 MiB lower. The timing ranges
+overlapped: 247–301 ms to the ready title for alpha.18 and 257–342 ms for
+the alpha.17 repeat. Other builds were active, and host CPU snapshots around the
+back-to-back series read 39–45%. The large difference from the original
+baseline did not hold on the repeat; these runs do not establish a startup
+speedup or a meaningful memory change beyond this fixture.
+
 ## Package and promotion gates
 
 - `cargo metadata --format-version 1 --no-deps --locked` must report one
