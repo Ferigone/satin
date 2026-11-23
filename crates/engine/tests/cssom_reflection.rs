@@ -73,3 +73,43 @@ fn inline_opacity_serializes_specified_numbers_and_preserves_valid_values() {
         "#,
     );
 }
+
+#[test]
+fn padding_left_enables_the_jquery_ready_box_model_probe() {
+    check(
+        r#"
+        var s = document;
+        var k = s.createElement("div");
+        var initiallyEmpty = k.style.paddingLeft === "";
+        // Chained assignment and geometry check from the published ready callback.
+        k.style.width = k.style.paddingLeft = "1px";
+        s.body.appendChild(k);
+        var boxModel = k.offsetWidth === 2;
+        var reflected = k.style.getPropertyValue("padding-left") === "1px" &&
+            k.style.getPropertyValue("width") === "1px";
+        s.body.removeChild(k).style.display = "none";
+        initiallyEmpty && boxModel && reflected;
+        "#,
+    );
+}
+
+#[test]
+fn padding_left_reflects_the_inline_longhand() {
+    check(
+        r#"
+        var node = document.createElement("div");
+        var style = node.style;
+        node.setAttribute("style", "padding-left:7px");
+        var authored = style.paddingLeft === "7px" && style["padding-left"] === "7px";
+        style["padding-left"] = "3px";
+        style.paddingLeft = "-1px";
+        var edited = style.paddingLeft === "3px" &&
+            style.getPropertyValue("padding-left") === "3px";
+        style.setProperty("padding-left", "5px", "important");
+        var fromMethod = style.paddingLeft === "5px" &&
+            style.getPropertyPriority("padding-left") === "important";
+        var removed = style.removeProperty("padding-left") === "5px" && style.paddingLeft === "";
+        authored && edited && fromMethod && removed;
+        "#,
+    );
+}

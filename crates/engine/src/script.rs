@@ -1871,7 +1871,11 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(&[("cssFloat", "float"), ("opacity", "opacity")])
+        .chain(&[
+            ("cssFloat", "float"),
+            ("opacity", "opacity"),
+            ("paddingLeft", "padding-left"),
+        ])
     {
         let get_state = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {
