@@ -1,5 +1,5 @@
-# Weryfikacja Satin
+# Satin verification
 
-Źródła odtworzono z zachowanej kopii roboczej zawierającej kod alfy.13 oraz późniejsze prace nad CSS i IntersectionObserver. Na Windows oddzielna instalacja alfy.14 służyła do porównań po odzyskaniu projektu.
+The source was recovered from a surviving worktree containing the alpha.13 code and subsequent work on CSS and IntersectionObserver. The existing Windows alpha.14 binary supplied a reference point after recovery.
 
-Pełny zestaw Rust uruchamia polecenie `cargo test --workspace --locked`. Skrypty w katalogu `tools` zawierają scenariusze porównawcze z Chrome przez REA i testy przypiętych rewizji WPT oraz Test262.
+Run `cargo test --workspace --locked` to verify the Rust workspace. The `tools` directory contains reference scenarios for Chrome through REA and runners for pinned WPT and Test262 revisions.
