@@ -2097,7 +2097,6 @@ dependencies = [
 name = "rust-browser-javascript"
 version = "0.1.0-alpha.19"
 dependencies = [
- "icu_properties",
  "num-bigint",
  "num-traits",
  "windows-sys 0.59.0",

@@ -1371,12 +1371,23 @@ fn append_units(vm: &mut Vm, out: &mut Vec<u16>, units: &[u16]) -> Result<(), Js
     Ok(())
 }
 
-fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> {
-    use icu_properties::{
-        CodePointSetData,
-        props::{CaseIgnorable, Cased},
-    };
+// None is Case_Ignorable; otherwise the result records whether the point is Cased.
+fn sigma_context(c: char) -> Option<bool> {
+    // Match the Unicode version of Rust 1.99.1's scalar case mappings.
+    // Each entry packs a range's starting code point and its two-bit state.
+    const RANGES: &[[u8; 4]] = include_bytes!("string_case_data/context-17.0.0.bin")
+        .as_chunks::<4>()
+        .0;
+    let after = RANGES.partition_point(|entry| (u32::from_le_bytes(*entry) >> 2) <= c as u32);
+    match u32::from_le_bytes(RANGES[after - 1]) & 3 {
+        0 => Some(false),
+        1 => Some(true),
+        2 => None,
+        _ => unreachable!("invalid generated casing context"),
+    }
+}
 
+fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> {
     if this.is_nullish() {
         return Err(JsError::type_error(
             "String method called on null or undefined",
@@ -1386,8 +1397,6 @@ fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> 
     let mut units = Vec::new();
     let mut previous_cased = false;
     let mut pending_final_sigma = None;
-    let case_ignorable = CodePointSetData::new::<CaseIgnorable>();
-    let cased = CodePointSetData::new::<Cased>();
     for decoded in char::decode_utf16(s.as_utf16().iter().copied()) {
         vm.tick()?;
         let c = match decoded {
@@ -1410,8 +1419,8 @@ fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> 
             // side in the original string. Keep a candidate in the output
             // until its right context is known, without rescanning the input.
             let preceded_by_cased = previous_cased;
-            if !case_ignorable.contains(c) {
-                previous_cased = cased.contains(c);
+            if let Some(current_cased) = sigma_context(c) {
+                previous_cased = current_cased;
                 if let Some(index) = pending_final_sigma.take()
                     && previous_cased
                 {
@@ -1711,7 +1720,8 @@ fn install_string(vm: &mut Vm) {
         }
         vm.finish_string(units)
     });
-    // Without Intl, use the Unicode default mappings as the locale fallback.
+    // Satin's non-Intl casing locale uses the Unicode default mappings.
+    // The locale argument positions are reserved by ECMA-262.
     for (name, upper) in [
         ("toLowerCase", false),
         ("toUpperCase", true),

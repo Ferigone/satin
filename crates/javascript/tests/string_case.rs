@@ -22,6 +22,49 @@ fn lowercases_sigma_in_the_context_of_the_original_code_points() {
 }
 
 #[test]
+fn sigma_context_matches_the_unicode_version_of_scalar_case_mappings() {
+    assert_eq!(char::UNICODE_VERSION, (17, 0, 0));
+    let mut vm = Vm::new();
+    for method in ["toLowerCase", "toLocaleLowerCase"] {
+        // U+A7DD and U+1ADE have no contextual properties in Unicode 17.
+        // U+A7DC is already cased in Unicode 17 and lowercases to U+019B.
+        for (input, expected) in [
+            (r"\uA7DD\u03A3", "\u{a7dd}σ"),
+            (r"A\u03A3\u1ADEB", "aς\u{1ade}b"),
+            (r"\uA7DC\u03A3", "\u{019b}ς"),
+        ] {
+            assert_eq!(
+                vm.eval(&format!("'{input}'.{method}()")).unwrap(),
+                Value::from(expected),
+                "{method}: {input}",
+            );
+        }
+    }
+}
+
+#[test]
+fn locale_case_uses_the_default_mapping_without_reading_reserved_arguments() {
+    let mut vm = Vm::new();
+    let result = vm
+        .eval(
+            r#"
+            String.prototype.toLowerCase = String.prototype.toUpperCase =
+                function () { throw 'unexpected public method lookup'; };
+            const unused = { get length() { throw 'unexpected locale lookup'; } };
+            [
+                'I\u0130'.toLocaleLowerCase('tr'),
+                'i\u0131'.toLocaleUpperCase('tr'),
+                'I\u0301'.toLocaleLowerCase('lt'),
+                'I'.toLocaleLowerCase(unused, unused),
+                'i'.toLocaleUpperCase(unused, unused)
+            ].join('|')
+            "#,
+        )
+        .unwrap();
+    assert_eq!(result, Value::from("ii\u{307}|II|i\u{301}|i|I"));
+}
+
+#[test]
 fn case_mapping_expands_scalars_and_preserves_lone_utf16_units() {
     let mut vm = Vm::new();
     for method in ["toLowerCase", "toLocaleLowerCase"] {
