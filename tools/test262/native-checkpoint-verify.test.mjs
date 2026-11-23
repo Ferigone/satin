@@ -250,6 +250,23 @@ test('website CLI imports a manifest without spawning a browser or scoring missi
   assert.equal(verified.code, 0);
   assert.equal(verified.run.websiteRun, 'complete');
 
+  // An exit record and surviving sidecars do not replace missing outputs.
+  for (const [file, kind, bytes, error] of [
+    [reviewedFiles.png, 'png', input.png, /Missing or invalid final PNG/],
+    [input.manifest.files.stdout, 'summary', JSON.stringify(input.summary), /Missing successful native frame summary/],
+  ]) {
+    await rm(join(dir, file));
+    const missing = await invoke();
+    assert.equal(missing.code, 1);
+    assert.equal(missing.run.artifactStates[kind], 'missing');
+    assert.equal(missing.run.firstFailedStage, 'native-artifacts');
+    assert.equal(missing.run.websiteRun, 'unverified');
+    assert.match(missing.run.error, error);
+    assert.equal(missing.run.nativeEvidence.observed.run.ran.value, 55);
+    assert.equal(missing.run.snapshots, undefined);
+    await writeFile(join(dir, file), bytes);
+  }
+
   // Replace only the selection evidence with another valid 1x1 PNG.
   // Coordinates, final Results frame and visual review stay untouched.
   const replacement = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64');
