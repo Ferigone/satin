@@ -23,6 +23,9 @@ External parser resources use bounded worker queues and are associated with
 the current tab navigation. Normal classic scripts wait for the relevant
 preceding stylesheets; async scripts can run when their source is available.
 Classic defer and default module scripts preserve parser order after EOF.
+Queued resources have a bounded waiting period. A resource starts its transfer
+deadline when it is dispatched. Backpressure keeps the original queue deadline
+when the worker rejects a submission.
 `interactive` precedes deferred execution. `DOMContentLoaded` follows the
 deferred script start sequence. `complete` and window `load` wait for pending
 script fetches and the applicable sheet and image loads. Module evaluation

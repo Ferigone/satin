@@ -310,7 +310,6 @@ impl Player {
                 width,
                 height,
                 duration: unsafe { self.engine.GetDuration() },
-                #[cfg(test)]
                 has_audio: unsafe { self.engine.HasAudio().as_bool() },
             },
         );

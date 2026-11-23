@@ -35,10 +35,12 @@ const DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const CLASSIC_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const STYLESHEET_BYTES: usize = 8 * 1024 * 1024;
 const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(18);
+const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(36);
 
 pub struct ResourceLoad {
     pub id: u64,
     pub request: ResourceRequest,
+    queue_deadline: Instant,
 }
 
 enum Consumer {
@@ -51,7 +53,6 @@ enum Consumer {
 }
 
 struct ResourceQueue {
-    initial_deadline: Option<Instant>,
     next: u64,
     url_bytes: usize,
     waiting: VecDeque<ResourceLoad>,
@@ -62,7 +63,6 @@ struct ResourceQueue {
 impl ResourceQueue {
     fn new() -> Self {
         Self {
-            initial_deadline: Some(Instant::now() + DOCUMENT_RESOURCE_TIMEOUT),
             next: 1,
             url_bytes: 0,
             waiting: VecDeque::new(),
@@ -71,9 +71,8 @@ impl ResourceQueue {
             retry_at: None,
         }
     }
-    fn deadline(&self) -> Instant {
-        self.initial_deadline
-            .unwrap_or_else(|| Instant::now() + DOCUMENT_RESOURCE_TIMEOUT)
+    fn queue_deadline() -> Instant {
+        Instant::now() + DOCUMENT_RESOURCE_QUEUE_TIMEOUT
     }
     fn next_deadline(&self) -> Option<Instant> {
         self.pending
@@ -92,32 +91,51 @@ impl ResourceQueue {
             .as_str()
             .len()
             .saturating_add(request.integrity.as_ref().map_or(0, |source| source.len()));
-        if self.next > RESOURCE_COUNT as u64
-            || self.url_bytes.saturating_add(size) > RESOURCE_URL_BYTES
-            || Instant::now() >= request.deadline
-        {
-            return Err("Document resource count, URL bytes or time limit exceeded".into());
+        if self.next > RESOURCE_COUNT as u64 {
+            return Err("Document resource count limit exceeded".into());
+        }
+        if self.url_bytes.saturating_add(size) > RESOURCE_URL_BYTES {
+            return Err("Document resource URL byte limit exceeded".into());
+        }
+        let queue_deadline = request.deadline;
+        if Instant::now() >= queue_deadline {
+            return Err("Document resource queue deadline exceeded".into());
         }
         let id = self.next;
         self.next += 1;
         self.url_bytes += size;
-        self.pending.insert(id, (consumer, request.deadline));
-        self.waiting.push_back(ResourceLoad { id, request });
+        self.pending.insert(id, (consumer, queue_deadline));
+        self.waiting.push_back(ResourceLoad {
+            id,
+            request,
+            queue_deadline,
+        });
         Ok(())
     }
-    fn take(&mut self) -> Option<ResourceLoad> {
+    fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
         if self.active.len() >= CONCURRENT_RESOURCES
-            || self.retry_at.is_some_and(|next| next > Instant::now())
+            || self.retry_at.is_some_and(|next| next > now)
         {
             return None;
         }
         self.retry_at = None;
-        let load = self.waiting.pop_front()?;
+        if now >= self.waiting.front()?.queue_deadline {
+            // Leave expired work for advance(), which delivers its failure.
+            return None;
+        }
+        let mut load = self.waiting.pop_front()?;
+        let (_, deadline) = self.pending.get_mut(&load.id).expect("queued resource exists");
+        *deadline = now + DOCUMENT_RESOURCE_TIMEOUT;
+        load.request.deadline = *deadline;
         self.active.insert(load.id);
         Some(load)
     }
-    fn retry(&mut self, load: ResourceLoad) {
-        if self.active.remove(&load.id) && self.pending.contains_key(&load.id) {
+    fn retry(&mut self, mut load: ResourceLoad) {
+        if self.active.remove(&load.id)
+            && let Some((_, deadline)) = self.pending.get_mut(&load.id)
+        {
+            *deadline = load.queue_deadline;
+            load.request.deadline = load.queue_deadline;
             self.waiting.push_front(load);
             self.retry_at = Some(Instant::now() + Duration::from_millis(8));
         }
@@ -289,7 +307,7 @@ impl DocumentSession {
             .is_some_and(|next| next <= Instant::now())
     }
     pub fn next_resource(&mut self) -> Option<ResourceLoad> {
-        self.resources.take()
+        self.resources.take(Instant::now())
     }
     pub fn stop(&mut self, page: &mut LoadedPage, mut runtime: Option<&mut ScriptRuntime>) {
         if let Some(realm) = runtime.as_deref_mut() {
@@ -329,7 +347,6 @@ impl DocumentSession {
                 _ => {}
             }
         }
-        self.resources.initial_deadline = None;
         self.resources.waiting.clear();
         self.resources.active.clear();
         self.resources.retry_at = None;
@@ -440,11 +457,16 @@ impl DocumentSession {
             expired.sort_unstable();
             self.resources
                 .waiting
-                .retain(|load| now < load.request.deadline);
+                .retain(|load| now < load.queue_deadline);
             for id in expired {
+                let reason = if self.resources.active.contains(&id) {
+                    "Document resource transfer deadline exceeded"
+                } else {
+                    "Document resource queue deadline exceeded"
+                };
                 self.complete_resource(
                     id,
-                    Err("Document resource deadline exceeded".into()),
+                    Err(reason.into()),
                     page,
                     runtime,
                     viewport,
@@ -584,7 +606,6 @@ impl DocumentSession {
                     && !self.resources.blocks_load()
                 {
                     self.phase = Phase::Complete;
-                    self.resources.initial_deadline = None;
                     self.dirty = true;
                     page.stats.elapsed_ms = self.started.elapsed().as_millis();
                     if let Some(realm) = runtime {
@@ -771,7 +792,7 @@ impl DocumentSession {
                         ResourceKind::Stylesheet,
                         cors,
                         integrity,
-                        self.resources.deadline(),
+                        ResourceQueue::queue_deadline(),
                     );
                     if let Err(message) = self
                         .resources
@@ -893,7 +914,7 @@ impl DocumentSession {
                             ResourceKind::ClassicScript,
                             tag.cors,
                             tag.integrity,
-                            self.resources.deadline(),
+                            ResourceQueue::queue_deadline(),
                         );
                         self.resources.queue(request, Consumer::Classic(node))
                     });
@@ -1029,7 +1050,7 @@ impl DocumentSession {
             ResourceKind::Image,
             cors,
             None,
-            self.resources.deadline(),
+            ResourceQueue::queue_deadline(),
         );
         match self.resources.queue(request, Consumer::Image(key.clone())) {
             Ok(()) => {

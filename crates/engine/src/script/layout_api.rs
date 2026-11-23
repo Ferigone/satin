@@ -648,6 +648,8 @@ impl LayoutHost {
         }
         let h = host.clone();
         let s = state.clone();
+        let logical_prototype = logical_computed_style_prototype(vm, &h)?;
+        vm.root(logical_prototype.clone());
         method(vm, window, "getComputedStyle", move |vm, _, args| {
             let id = element(&s, &arg(args, 0))?;
             if !arg(args, 1).is_nullish() && !text(vm, arg(args, 1))?.is_empty() {
@@ -656,7 +658,7 @@ impl LayoutHost {
                 ));
             }
             h.layout(Some(vm))?;
-            computed_style(vm, h.clone(), id)
+            computed_style(vm, h.clone(), id, logical_prototype.clone())
         })?;
         Ok(host)
     }
@@ -901,9 +903,40 @@ const PROPERTIES: &[(&str, &str)] = &[
     ("borderBottomWidth", "border-bottom-width"),
     ("borderLeftWidth", "border-left-width"),
 ];
-fn computed_style(vm: &mut Vm, host: LayoutHost, id: NodeId) -> Result<Value, JsError> {
-    let object = vm.new_object();
+struct ComputedStyleNode(NodeId);
+
+fn logical_computed_style_prototype(vm: &mut Vm, host: &LayoutHost) -> Result<Value, JsError> {
+    let prototype = vm.new_object();
+    for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
+        .iter()
+        .chain(css::LOGICAL_BOX_SHORTHANDS)
+    {
+        for name in [property, css_name] {
+            let host = host.clone();
+            getter(vm, prototype.clone(), name, move |vm, this, _| {
+                let id = vm
+                    .host_data::<ComputedStyleNode>(&this)
+                    .ok_or_else(|| JsError::type_error("Expected a computed CSS style"))?
+                    .0;
+                computed_value(vm, &host, id, css_name)
+            })?;
+            if property == css_name {
+                break;
+            }
+        }
+    }
+    Ok(prototype)
+}
+
+fn computed_style(
+    vm: &mut Vm,
+    host: LayoutHost,
+    id: NodeId,
+    logical_prototype: Value,
+) -> Result<Value, JsError> {
+    let object = vm.new_object_with_prototype(logical_prototype)?;
     host_tag(vm, object.clone(), "CSSStyleProperties")?;
+    vm.set_host_data(object.clone(), Rc::new(ComputedStyleNode(id)))?;
     for (property, css_name) in PROPERTIES {
         for name in [*property, *css_name] {
             let h = host.clone();
@@ -949,12 +982,12 @@ fn computed_style(vm: &mut Vm, host: LayoutHost, id: NodeId) -> Result<Value, Js
     vm.define_data_property(
         object.clone(),
         "length",
-        PROPERTIES.len().into(),
+        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len()).into(),
         false,
         false,
         true,
     )?;
-    for (i, (_, name)) in PROPERTIES.iter().enumerate() {
+    for (i, (_, name)) in PROPERTIES.iter().chain(css::LOGICAL_BOX_LONGHANDS).enumerate() {
         vm.define_data_property(
             object.clone(),
             &i.to_string(),
@@ -1045,6 +1078,58 @@ fn transform(style: &Style, rect: Rect) -> Affine2D {
         })
     })
 }
+fn physical_css_name(name: &str, rtl: bool) -> &str {
+    match (name, rtl) {
+        ("inline-size", _) => "width",
+        ("block-size", _) => "height",
+        ("min-inline-size", _) => "min-width",
+        ("min-block-size", _) => "min-height",
+        ("max-inline-size", _) => "max-width",
+        ("max-block-size", _) => "max-height",
+        ("margin-block-start", _) => "margin-top",
+        ("margin-block-end", _) => "margin-bottom",
+        ("margin-inline-start", false) | ("margin-inline-end", true) => "margin-left",
+        ("margin-inline-start", true) | ("margin-inline-end", false) => "margin-right",
+        ("padding-block-start", _) => "padding-top",
+        ("padding-block-end", _) => "padding-bottom",
+        ("padding-inline-start", false) | ("padding-inline-end", true) => "padding-left",
+        ("padding-inline-start", true) | ("padding-inline-end", false) => "padding-right",
+        ("inset-block-start", _) => "top",
+        ("inset-block-end", _) => "bottom",
+        ("inset-inline-start", false) | ("inset-inline-end", true) => "left",
+        ("inset-inline-start", true) | ("inset-inline-end", false) => "right",
+        _ => name,
+    }
+}
+
+fn computed_inset(
+    style: &Style,
+    layout: &Layout,
+    id: NodeId,
+    containing: Rect,
+    side: usize,
+) -> String {
+    let inset = style.inset[side];
+    let axis = usize::from(side % 2 == 0);
+    if style.position == Position::Sticky {
+        if let Some(sizes) = layout.sticky_inset_sizes.get(&id) {
+            length(inset, sizes[axis], style.font_size)
+        } else {
+            unresolved_percentage(inset).unwrap_or_else(|| length(inset, 0., style.font_size))
+        }
+    } else if style.position == Position::Static
+        && let Some(value) = unresolved_percentage(inset)
+    {
+        value
+    } else {
+        length(
+            inset,
+            [containing.width, containing.height][axis],
+            style.font_size,
+        )
+    }
+}
+
 fn computed_value(
     vm: &mut Vm,
     host: &LayoutHost,
@@ -1062,6 +1147,7 @@ fn computed_value(
         return Ok("".into());
     }
     let style = &layout.computed_styles[id.0];
+    let name = physical_css_name(name, style.rtl);
     let rect = layout.flow_rect_for(id);
     let containing = containing_box(doc, &layout, id, d.viewport);
     let parent_width = containing.width;
@@ -1078,6 +1164,7 @@ fn computed_value(
             .replace("inlineflex", "inline-flex")
             .replace("inlinegrid", "inline-grid"),
         "position" => format!("{:?}", style.position).to_ascii_lowercase(),
+        "direction" => if style.rtl { "rtl" } else { "ltr" }.into(),
         "color" => color(style.color),
         "background-color" => color(style.background.unwrap_or(css::Color(0, 0, 0, 0))),
         "font-size" => px(style.font_size),
@@ -1139,30 +1226,32 @@ fn computed_value(
                 length(size, base, style.font_size)
             }
         }
-        "top" | "right" | "bottom" | "left" => {
-            let i = ["top", "right", "bottom", "left"]
-                .iter()
-                .position(|k| *k == name)
-                .unwrap();
-            let inset = style.inset[i];
-            let axis = usize::from(i % 2 == 0);
-            if style.position == Position::Sticky {
-                if let Some(sizes) = layout.sticky_inset_sizes.get(&id) {
-                    length(inset, sizes[axis], style.font_size)
-                } else {
-                    unresolved_percentage(inset)
-                        .unwrap_or_else(|| length(inset, 0., style.font_size))
-                }
-            } else if style.position == Position::Static
-                && let Some(value) = unresolved_percentage(inset)
-            {
-                value
+        "top" => computed_inset(style, &layout, id, containing, 0),
+        "right" => computed_inset(style, &layout, id, containing, 1),
+        "bottom" => computed_inset(style, &layout, id, containing, 2),
+        "left" => computed_inset(style, &layout, id, containing, 3),
+        "margin-block" | "margin-inline" | "padding-block" | "padding-inline" | "inset-block"
+        | "inset-inline" => {
+            let sides = if name.ends_with("-block") {
+                [0, 2]
+            } else if style.rtl {
+                [1, 3]
             } else {
-                length(
-                    inset,
-                    [containing.width, containing.height][axis],
-                    style.font_size,
-                )
+                [3, 1]
+            };
+            let [start, end] = sides.map(|side| {
+                if name.starts_with("margin-") {
+                    length(style.margin[side], parent_width, style.font_size)
+                } else if name.starts_with("padding-") {
+                    px(padding[side])
+                } else {
+                    computed_inset(style, &layout, id, containing, side)
+                }
+            });
+            if start == end {
+                start
+            } else {
+                format!("{start} {end}")
             }
         }
         "transform" => {

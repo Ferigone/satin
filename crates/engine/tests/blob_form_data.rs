@@ -14,6 +14,116 @@ fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
 }
 
 #[test]
+fn blob_fetch_captures_requests_and_enforces_document_scope() {
+    let mut runtime = realm("<!doctype html>");
+    let url = runtime
+        .eval(
+            r##"
+            var url = URL.createObjectURL(new Blob(["XabcdefY"]).slice(1,7,"text/plain"));
+            var held = new Request(url + "#held"), log = [], receipt = {};
+            async function read(key, input, options) {
+                try {
+                    const response = await fetch(input, options);
+                    receipt[key] = [response.url, response.type, response.status,
+                        response.headers.get("content-type"), response.headers.get("content-length"),
+                        await response.text()].join("|");
+                    log.push(key);
+                } catch (error) {
+                    receipt[key] = error.name;
+                }
+            }
+            read("query", url + "?test");
+            read("head", url, {method:"HEAD"});
+            const controller = new AbortController();
+            read("cancelled", url, {signal:controller.signal});
+            controller.abort();
+            URL.revokeObjectURL(url + "#no-effect");
+            read("alreadyStarted", url + "#part");
+            Promise.resolve().then(function(){ log.push("microtask"); });
+            url;
+            "##,
+        )
+        .unwrap();
+    let mut other = ScriptRuntime::new(&LoadedPage::from_html(
+        "https://other.test/",
+        "<!doctype html>",
+    ))
+    .unwrap();
+    let address = serde_json::to_string(&url.as_string().unwrap().to_string_lossy()).unwrap();
+    other
+        .eval(&format!(
+            "var outcome; fetch({address}).catch(function(error) {{ outcome = error.name; }});"
+        ))
+        .unwrap();
+    other.pump();
+    js(&mut other, "outcome", "TypeError");
+    assert!(other.take_network_jobs().is_empty());
+    runtime
+        .eval(
+            r#"
+            URL.revokeObjectURL(url);
+            read("fresh", url);
+            read("held", held);
+            "#,
+        )
+        .unwrap();
+    runtime.pump();
+    js(
+        &mut runtime,
+        r##"
+        var full = url + "|basic|200|text/plain|6|abcdef";
+        held.url === url + "#held" && log[0] === "microtask" &&
+            receipt.alreadyStarted === full && receipt.held === full &&
+            receipt.query === "TypeError" && receipt.head === "TypeError" &&
+            receipt.fresh === "TypeError" && receipt.cancelled === "AbortError"
+        "##,
+        true,
+    );
+    assert!(runtime.take_network_jobs().is_empty());
+    assert!(runtime.diagnostics().is_empty());
+}
+
+#[test]
+fn blob_fetch_ranges_use_offsets_into_the_existing_slice() {
+    let mut runtime = realm("<!doctype html>");
+    runtime
+        .eval(
+            r#"
+            var url = URL.createObjectURL(new Blob(["XabcdefY"]).slice(1,7));
+            var ranges = {};
+            async function read(key, range) {
+                try {
+                    const response = await fetch(url, {headers:{Range:range}});
+                    ranges[key] = [response.status, response.statusText,
+                        response.headers.get("content-length"), response.headers.get("content-range"),
+                        await response.text()].join("|");
+                } catch (error) {
+                    ranges[key] = error.name;
+                }
+            }
+            read("pair", "bytes = 1 - 3");
+            read("suffix", "bytes=-2");
+            read("open", "bytes=4-");
+            read("clamp", "bytes=4-200");
+            read("multiple", "bytes=0-1,4-5");
+            read("beyond", "bytes=6-");
+            "#,
+        )
+        .unwrap();
+    runtime.pump();
+    js(
+        &mut runtime,
+        r#"
+        ranges.pair === "206|Partial Content|3|bytes 1-3/6|bcd" &&
+            ranges.suffix === "206|Partial Content|2|bytes 4-5/6|ef" &&
+            ranges.open === ranges.suffix && ranges.clamp === ranges.suffix &&
+            ranges.multiple === "TypeError" && ranges.beyond === "TypeError"
+        "#,
+        true,
+    );
+}
+
+#[test]
 fn blob_snapshots_view_bytes_after_options_and_reads_independent_results() {
     let mut runtime = realm("<!doctype html>");
     js(

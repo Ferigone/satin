@@ -236,11 +236,12 @@ impl Bridge {
                 width,
                 height,
                 duration,
-                ..
+                has_audio,
             } => MediaUpdate::Metadata {
                 width,
                 height,
                 duration,
+                has_audio,
             },
             EventKind::Ready => MediaUpdate::Ready,
             EventKind::Playing => MediaUpdate::Playing,

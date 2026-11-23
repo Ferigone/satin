@@ -1,15 +1,16 @@
 use rust_browser_engine::{Fonts, Layout, LoadedPage, Rect, dom::NodeId};
 use std::sync::{Mutex, OnceLock};
 fn layout(body: &str, width: f32) -> (LoadedPage, Layout) {
+    let html = format!("<!doctype html><style>body{{margin:0}}</style>{body}");
+    layout_document(&html, width)
+}
+fn layout_document(html: &str, width: f32) -> (LoadedPage, Layout) {
     static FONTS: OnceLock<Mutex<Fonts>> = OnceLock::new();
     let fonts = FONTS
         .get_or_init(|| Mutex::new(Fonts::new().unwrap()))
         .lock()
         .unwrap();
-    let page = LoadedPage::from_html(
-        "https://example.test/",
-        &format!("<!doctype html><style>body{{margin:0}}</style>{body}"),
-    );
+    let page = LoadedPage::from_html("https://example.test/", html);
     let layout = Layout::build(&page, &fonts, width);
     (page, layout)
 }
@@ -121,6 +122,38 @@ fn column_flex_grows_in_definite_height() {
     close(rect(&p, &l, "b").height, 580. / 3.);
     close(rect(&p, &l, "b").y, 290. / 3. + 10.);
     close(rect(&p, &l, "b").width, 200.);
+}
+#[test]
+fn flex_auto_minimum_uses_computed_main_axis_overflow() {
+    let (p, l) = layout_document(
+        include_str!("fixtures/css_flex_overflow_minimum.html"),
+        800.,
+    );
+    // REA Chrome 157.0.8103.79 at 800 × 700 CSS px and device scale 1.
+    let expected = [
+        ("hidden-caption", [160., 0., 120., 40.]),
+        ("paired-caption", [160., 46., 220., 40.]),
+        ("visible-caption", [160., 92., 220., 40.]),
+        ("clipped-caption", [160., 138., 220., 40.]),
+        ("fixed-min-caption", [160., 184., 164., 40.]),
+        ("scrolling-messages", [0., 230., 240., 84.]),
+        ("scrolling-composer", [0., 322., 240., 28.]),
+        ("clipped-messages", [0., 356., 240., 160.]),
+        ("clipped-composer", [0., 524., 240., 28.]),
+        ("fixed-min-messages", [0., 482., 240., 100.]),
+        ("fixed-min-composer", [0., 590., 240., 28.]),
+    ];
+    for (name, expected) in expected {
+        let r = rect(&p, &l, name);
+        let actual = [r.x, r.y, r.width, r.height];
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 0.05),
+            "{name}: expected {expected:?}, got {actual:?}"
+        );
+    }
 }
 #[test]
 fn inline_fragment_geometry_has_innermost_hits_and_block_padding_links() {

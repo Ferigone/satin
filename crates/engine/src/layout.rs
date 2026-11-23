@@ -2066,7 +2066,14 @@ impl Builder<'_> {
                     s.min_width
                         .resolve(width, s.font_size)
                         .map(to_border)
-                        .unwrap_or(min_content.min(specified.unwrap_or(f32::INFINITY)))
+                        .unwrap_or_else(|| {
+                            if s.overflow[0].scrollable() {
+                                // The automatic content-box minimum is zero.
+                                extra
+                            } else {
+                                min_content.min(specified.unwrap_or(f32::INFINITY))
+                            }
+                        })
                 }
                 .max(extra);
                 let max = if text {
@@ -2134,7 +2141,13 @@ impl Builder<'_> {
                     s.min_height
                         .resolve(height.unwrap_or(0.), s.font_size)
                         .map(to_border)
-                        .unwrap_or(natural.min(specified.unwrap_or(f32::INFINITY)))
+                        .unwrap_or_else(|| {
+                            if s.overflow[1].scrollable() {
+                                extra
+                            } else {
+                                natural.min(specified.unwrap_or(f32::INFINITY))
+                            }
+                        })
                 }
                 .max(extra);
                 let max = if text {

@@ -96,3 +96,79 @@ fn frame_callbacks_share_timestamps_cancel_within_batches_and_wait_for_foregroun
     assert!(runtime.next_deadline().is_none());
     assert!(runtime.diagnostics().is_empty());
 }
+
+#[test]
+fn user_timing_marks_measures_and_clears_ordered_entries() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+            const before = performance.now();
+            const boot = performance.mark('boot');
+            const source = { nested: { count: 1 } };
+            const first = performance.mark('checkpoint', { startTime: 8, detail: source });
+            const early = performance.mark('checkpoint', { startTime: 2 });
+            const last = performance.mark('ready', { startTime: 14 });
+            const standalone = new PerformanceMark('standalone', { startTime: 5 });
+            source.nested.count = 99;
+            const elapsed = performance.measure('elapsed', 'checkpoint', 'ready');
+            const ranged = performance.measure('ranged', { end: 16, duration: 4 });
+            const navigation = performance.measure('navigation', 'navigationStart');
+            let found = performance.getEntriesByName('checkpoint', 'mark');
+            const ordered = performance.getEntries().every((item, index, entries) =>
+                index === 0 || item.startTime >= entries[index - 1].startTime);
+            performance.clearMarks('checkpoint');
+            performance.clearMeasures('elapsed');
+            ordered && boot.startTime >= before && boot.startTime <= performance.now() &&
+                first instanceof PerformanceMark && first instanceof PerformanceEntry &&
+                elapsed instanceof PerformanceMeasure && elapsed instanceof PerformanceEntry &&
+                Object.getPrototypeOf(PerformanceMark) === PerformanceEntry &&
+                Object.getPrototypeOf(PerformanceMeasure) === PerformanceEntry &&
+                standalone.detail === null && standalone.duration === 0 &&
+                performance.getEntriesByName('standalone').length === 0 &&
+                found.length === 2 && found[0] === early && found[1] === first &&
+                first.detail !== source && first.detail.nested.count === 1 &&
+                first.toJSON().entryType === 'mark' && first.toJSON().startTime === 8 &&
+                elapsed.name === 'elapsed' && elapsed.startTime === 8 && elapsed.duration === 6 &&
+                ranged.startTime === 12 && ranged.duration === 4 && navigation.startTime === 0 &&
+                performance.getEntriesByName('checkpoint').length === 0 &&
+                performance.getEntriesByType('mark').length === 2 &&
+                performance.getEntriesByType('measure').length === 2 && last.detail === null
+        "#
+            )
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn user_timing_validates_operations_and_uses_the_intrinsic_clone() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime.eval(r#"
+            function throws(fn, name) {
+                try { fn(); } catch (error) { return error.name === name; }
+                return false;
+            }
+            structuredClone = null;
+            const original = { mutable: 1 };
+            const measurement = performance.measure('measure', { start: 0, end: 1, detail: original });
+            const mark = performance.mark('reentrant', { detail: {
+                get value() { performance.clearMeasures(); return 20; }
+            } });
+            measurement.detail.mutable === 1 && measurement.detail !== original &&
+                mark.detail.value === 20 && performance.getEntriesByType('measure').length === 0 &&
+                throws(() => performance.mark('navigationStart'), 'SyntaxError') &&
+                throws(() => performance.mark('negative', { startTime: -1 }), 'TypeError') &&
+                throws(() => performance.mark('function', { detail: () => {} }), 'DataCloneError') &&
+                throws(() => performance.measure('missing', 'not-marked'), 'SyntaxError') &&
+                throws(() => performance.measure('invalid', { duration: 3 }), 'TypeError') &&
+                throws(() => performance.measure('invalid', { start: 0, end: 7, duration: 3 }), 'TypeError') &&
+                throws(() => Performance.prototype.mark.call({}, 'bad receiver'), 'TypeError') &&
+                throws(() => new PerformanceMeasure(), 'TypeError') &&
+                performance.getEntriesByType('mark').length === 1
+        "#).unwrap(),
+        Value::Bool(true)
+    );
+}

@@ -124,7 +124,6 @@ pub(crate) enum EventKind {
         width: u32,
         height: u32,
         duration: f64,
-        #[cfg(test)]
         has_audio: bool,
     },
     Ready,

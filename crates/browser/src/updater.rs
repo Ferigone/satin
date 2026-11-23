@@ -1,7 +1,7 @@
 //! Background updates for the per-user Windows installation.
 #![cfg(all(windows, target_arch = "x86_64"))]
 
-use reqwest::{Client, Response, Url, header};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
 use ring::digest::{Context, SHA256};
 use rustls_platform_verifier::BuilderVerifierExt;
 use semver::Version;
@@ -21,6 +21,7 @@ const ASSET_NAME: &str = "satin-windows-x64.exe";
 const BINARY_NAME: &str = "rust-browser.exe";
 const INSTALL_PRODUCT: &str = "RustBrowser";
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const RELEASE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(8)];
 const RELEASES_PER_PAGE: usize = 50;
 const RELEASE_PAGE_LIMIT: usize = 10;
 const METADATA_LIMIT: usize = 4 * 1024 * 1024;
@@ -287,15 +288,18 @@ fn publish(root: &Path, prior: &[u8], manifest: &Manifest) -> Result<(), String>
 async fn newest(client: &Client, current: &Version) -> Result<Option<Candidate>, String> {
     let mut best: Option<Candidate> = None;
     for page in 1..=RELEASE_PAGE_LIMIT {
-        let response = client
-            .get(RELEASES)
-            .query(&[("per_page", RELEASES_PER_PAGE), ("page", page)])
-            .header(header::ACCEPT, "application/vnd.github+json")
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(http_error)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let response = request_release_page(
+            || {
+                client
+                    .get(RELEASES)
+                    .query(&[("per_page", RELEASES_PER_PAGE), ("page", page)])
+                    .header(header::ACCEPT, "application/vnd.github+json")
+                    .timeout(Duration::from_secs(20))
+            },
+            RELEASE_RETRY_DELAYS,
+        )
+        .await?;
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let releases: Vec<Release> = serde_json::from_slice(&metadata(response).await?)
@@ -315,6 +319,34 @@ async fn newest(client: &Client, current: &Version) -> Result<Option<Candidate>,
         }
     }
     Err("GitHub release list exceeded its pagination budget".into())
+}
+
+async fn request_release_page(
+    request: impl Fn() -> RequestBuilder,
+    retry_delays: [Duration; 2],
+) -> Result<Response, String> {
+    let mut result = request().send().await;
+    for delay in retry_delays {
+        let retry = match &result {
+            Ok(response) => {
+                matches!(
+                    response.status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                        | StatusCode::BAD_GATEWAY
+                        | StatusCode::SERVICE_UNAVAILABLE
+                        | StatusCode::GATEWAY_TIMEOUT
+                ) && !response.headers().contains_key(header::RETRY_AFTER)
+            }
+            Err(error) => error.is_connect() || error.is_timeout(),
+        };
+        if !retry {
+            break;
+        }
+        drop(result);
+        tokio::time::sleep(delay).await;
+        result = request().send().await;
+    }
+    result.map_err(http_error)
 }
 
 async fn metadata(mut response: Response) -> Result<Vec<u8>, String> {
@@ -567,6 +599,41 @@ mod tests {
                 ),
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn a_gateway_timeout_does_not_end_the_release_check() {
+        use std::{io::BufRead, net::TcpListener};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/releases", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for reply in [
+                "HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+            ] {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                for line in std::io::BufReader::new(&mut connection).lines() {
+                    if line.unwrap().is_empty() {
+                        break;
+                    }
+                }
+                connection.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = request_release_page(|| client.get(&url), [Duration::ZERO; 2])
+            .await
+            .unwrap();
+        assert_eq!(metadata(response).await.unwrap(), b"[]");
+        server.join().unwrap();
     }
 
     #[test]

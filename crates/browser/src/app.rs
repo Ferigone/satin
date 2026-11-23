@@ -256,9 +256,22 @@ pub fn run(
         app.smoke_result
             .take()
             .ok_or("Window check did not finish")??;
+        let tab = &app.tabs[app.active];
         println!(
             "{}",
-            serde_json::json!({"window_smoke":true,"version":env!("CARGO_PKG_VERSION"),"frames_presented":app.presented_frames,"url":app.tabs[app.active].url,"title":app.tabs[app.active].title,"layout_limited":app.tabs[app.active].layout.as_ref().is_some_and(|l|l.limited),"paint_limited":app.canvas.as_ref().is_some_and(|c|c.limited),"javascript":{"diagnostics":app.tabs[app.active].runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()}})
+            serde_json::json!({
+                "window_smoke": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "frames_presented": app.presented_frames,
+                "url": tab.url,
+                "title": tab.title,
+                "layout_limited": tab.layout.as_ref().is_some_and(|layout| layout.limited),
+                "paint_limited": app.canvas.as_ref().is_some_and(|canvas| canvas.limited),
+                "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
+                "javascript": {
+                    "diagnostics": tab.runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()
+                }
+            })
         );
     }
     Ok(())

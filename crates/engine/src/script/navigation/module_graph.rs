@@ -109,7 +109,7 @@ impl ModuleGraph {
             kind: ResourceKind::ModuleScript,
             cors: Some(credentials),
             integrity,
-            deadline: resources.deadline(),
+            deadline: ResourceQueue::queue_deadline(),
         };
         self.requests.insert(Arc::new(url), key);
         if !matches!(request.url.scheme(), "http" | "https" | "data") {

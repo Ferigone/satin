@@ -12,6 +12,7 @@ use crate::fonts::{
     UnicodeRange,
 };
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
@@ -345,6 +346,8 @@ pub struct Style {
     pub justify_self: Align,
     pub align_content: Align,
     pub svg_overrides: Arc<HashMap<Arc<str>, Arc<str>>>,
+    /// Inherited inline direction for logical box edges in horizontal writing.
+    pub(crate) rtl: bool,
     custom: Arc<HashMap<Arc<str>, Arc<str>>>,
 }
 impl Default for Style {
@@ -421,6 +424,7 @@ impl Default for Style {
             justify_self: Align::Auto,
             align_content: Align::Stretch,
             svg_overrides: EMPTY.get_or_init(|| Arc::new(HashMap::new())).clone(),
+            rtl: false,
             custom: EMPTY.get_or_init(|| Arc::new(HashMap::new())).clone(),
         }
     }
@@ -2071,7 +2075,15 @@ enum Property {
     OverflowY,
     Transform,
     TransformOrigin,
+    Direction,
+    MarginInlineStart,
+    MarginInlineEnd,
+    PaddingInlineStart,
+    PaddingInlineEnd,
+    InsetInlineStart,
+    InsetInlineEnd,
 }
+// Direction is resolved separately, then logical inline edges join this cascade.
 const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::FontSize,
     Property::Color,
@@ -2147,6 +2159,59 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::Transform,
     Property::TransformOrigin,
 ];
+const PROPERTY_COUNT: usize = Property::InsetInlineEnd as usize + 1;
+const LOGICAL_INLINE_EDGES: [Property; 6] = [
+    Property::MarginInlineStart,
+    Property::MarginInlineEnd,
+    Property::PaddingInlineStart,
+    Property::PaddingInlineEnd,
+    Property::InsetInlineStart,
+    Property::InsetInlineEnd,
+];
+pub(crate) const LOGICAL_BOX_LONGHANDS: &[(&str, &str)] = &[
+    ("direction", "direction"),
+    ("inlineSize", "inline-size"),
+    ("blockSize", "block-size"),
+    ("minInlineSize", "min-inline-size"),
+    ("minBlockSize", "min-block-size"),
+    ("maxInlineSize", "max-inline-size"),
+    ("maxBlockSize", "max-block-size"),
+    ("marginBlockStart", "margin-block-start"),
+    ("marginBlockEnd", "margin-block-end"),
+    ("marginInlineStart", "margin-inline-start"),
+    ("marginInlineEnd", "margin-inline-end"),
+    ("paddingBlockStart", "padding-block-start"),
+    ("paddingBlockEnd", "padding-block-end"),
+    ("paddingInlineStart", "padding-inline-start"),
+    ("paddingInlineEnd", "padding-inline-end"),
+    ("insetBlockStart", "inset-block-start"),
+    ("insetBlockEnd", "inset-block-end"),
+    ("insetInlineStart", "inset-inline-start"),
+    ("insetInlineEnd", "inset-inline-end"),
+];
+pub(crate) const LOGICAL_BOX_SHORTHANDS: &[(&str, &str)] = &[
+    ("marginBlock", "margin-block"),
+    ("marginInline", "margin-inline"),
+    ("paddingBlock", "padding-block"),
+    ("paddingInline", "padding-inline"),
+    ("insetBlock", "inset-block"),
+    ("insetInline", "inset-inline"),
+];
+
+impl Property {
+    fn physical(self, rtl: bool) -> Self {
+        use Property::*;
+        match (self, rtl) {
+            (MarginInlineStart, false) | (MarginInlineEnd, true) => MarginLeft,
+            (MarginInlineStart, true) | (MarginInlineEnd, false) => MarginRight,
+            (PaddingInlineStart, false) | (PaddingInlineEnd, true) => PaddingLeft,
+            (PaddingInlineStart, true) | (PaddingInlineEnd, false) => PaddingRight,
+            (InsetInlineStart, false) | (InsetInlineEnd, true) => Left,
+            (InsetInlineStart, true) | (InsetInlineEnd, false) => Right,
+            _ => self,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 enum Value {
     Initial,
@@ -2263,8 +2328,27 @@ struct Priority {
 }
 #[derive(Clone, Copy)]
 struct Winner<'a> {
-    value: &'a Value,
+    declaration: &'a CompiledDeclaration,
     priority: Priority,
+}
+impl<'a> Winner<'a> {
+    fn value(self, custom: &HashMap<Arc<str>, Arc<str>>) -> Cow<'a, Value> {
+        let Value::Deferred { name, source } = &self.declaration.value else {
+            return Cow::Borrowed(&self.declaration.value);
+        };
+        let resolved = resolve_variables(source, custom, 0)
+            .and_then(|source| {
+                parse_assignment(name, &source)
+                    .into_iter()
+                    .find(|(property, _)| *property == self.declaration.property)
+                    .map(|(_, value)| value)
+            })
+            .unwrap_or(Value::Unset);
+        Cow::Owned(match resolved {
+            Value::Deferred { .. } => Value::Unset,
+            value => value,
+        })
+    }
 }
 
 /// Compiled author stylesheet with one rightmost-selector bucket per rule.
@@ -2387,7 +2471,7 @@ impl Stylesheet {
         };
         let mut svg_winners = HashMap::new();
         let inline_declarations = compile_declarations(&inline);
-        let mut winners: [Option<Winner<'_>>; PROPERTIES.len()] = [None; PROPERTIES.len()];
+        let mut winners: [Option<Winner<'_>>; PROPERTY_COUNT] = [None; PROPERTY_COUNT];
         let mut custom: HashMap<&str, (&Declaration, Priority)> = HashMap::new();
         // Candidate processing order is irrelevant: source order is in Priority.
         self.candidates(doc, id, |index| {
@@ -2469,32 +2553,35 @@ impl Stylesheet {
             }
             style.custom = Arc::new(compute_custom(raw));
         }
+        if let Some(winner) = winners[Property::Direction as usize] {
+            style.rtl = match winner.value(&style.custom).as_ref() {
+                Value::Bool(rtl) => *rtl,
+                Value::Initial => false,
+                _ => parent.rtl,
+            };
+        }
+        // Physical declarations and their mapped logical counterparts share one cascade.
+        for property in LOGICAL_INLINE_EDGES {
+            if let Some(winner) = winners[property as usize] {
+                let target = &mut winners[property.physical(style.rtl) as usize];
+                if target.is_none_or(|old| winner.priority > old.priority) {
+                    *target = Some(winner);
+                }
+            }
+        }
         let initial = Style::default();
         for property in PROPERTIES {
             let Some(winner) = winners[property as usize] else {
                 continue;
             };
-            let mut resolved;
-            let value = if let Value::Deferred { name, source } = winner.value {
-                resolved = resolve_variables(source, &style.custom, 0)
-                    .and_then(|v| {
-                        parse_assignment(name, &v)
-                            .into_iter()
-                            .find(|(p, _)| *p == property)
-                            .map(|(_, v)| v)
-                    })
-                    .unwrap_or(Value::Unset);
-                // CSS-wide keywords substituted via var() are valid at computed-value time.
-                if matches!(resolved, Value::Deferred { .. }) {
-                    resolved = Value::Unset;
-                }
-                &resolved
-            } else {
-                winner.value
-            };
-            match value {
-                Value::Initial => copy_property(&mut style, &initial, property),
-                Value::Inherit => copy_property(&mut style, parent, property),
+            match winner.value(&style.custom).as_ref() {
+                Value::Initial => copy_property(&mut style, &initial, property, property),
+                Value::Inherit => copy_property(
+                    &mut style,
+                    parent,
+                    property,
+                    winner.declaration.property.physical(parent.rtl),
+                ),
                 Value::Unset => copy_property(
                     &mut style,
                     if inherited(property) {
@@ -2503,8 +2590,9 @@ impl Stylesheet {
                         &initial
                     },
                     property,
+                    property,
                 ),
-                _ => {
+                value => {
                     let root_font = if is_root && property != Property::FontSize {
                         style.font_size
                     } else {
@@ -2595,7 +2683,7 @@ fn choose_svg<'a>(
     }
 }
 fn choose<'a>(
-    winners: &mut [Option<Winner<'a>>; PROPERTIES.len()],
+    winners: &mut [Option<Winner<'a>>; PROPERTY_COUNT],
     declaration: &'a CompiledDeclaration,
     inline: bool,
     specificity: Specificity,
@@ -2611,7 +2699,7 @@ fn choose<'a>(
     let target = &mut winners[declaration.property as usize];
     if target.is_none_or(|w| priority >= w.priority) {
         *target = Some(Winner {
-            value: &declaration.value,
+            declaration,
             priority,
         });
     }
@@ -2665,9 +2753,18 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
     let mut style = Style::default();
     for property in PROPERTIES {
         if inherited(property) {
-            copy_property(&mut style, parent, property);
+            copy_property(&mut style, parent, property, property);
         }
     }
+    style.rtl = doc
+        .attr(id, "dir")
+        .filter(|_| doc.namespace(id) == crate::dom::Namespace::Html)
+        .and_then(|direction| match direction {
+            value if value.eq_ignore_ascii_case("rtl") => Some(true),
+            value if value.eq_ignore_ascii_case("ltr") => Some(false),
+            _ => None,
+        })
+        .unwrap_or(parent.rtl);
     style.custom = parent.custom.clone();
     // Decoration propagates to descendant inline text in this renderer.
     style.underline = parent.underline;
@@ -2825,7 +2922,7 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
     }
     style
 }
-fn copy_property(s: &mut Style, from: &Style, p: Property) {
+fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
     use Property::*;
     match p {
         FontSize => s.font_size = from.font_size,
@@ -2833,7 +2930,7 @@ fn copy_property(s: &mut Style, from: &Style, p: Property) {
         Display => s.display = from.display,
         Position => s.position = from.position,
         Top | Right | Bottom | Left => {
-            s.inset[p as usize - Top as usize] = from.inset[p as usize - Top as usize]
+            s.inset[p as usize - Top as usize] = from.inset[source as usize - Top as usize]
         }
         ZIndex => s.z_index = from.z_index,
         OverflowX | OverflowY => {
@@ -2866,12 +2963,12 @@ fn copy_property(s: &mut Style, from: &Style, p: Property) {
             s.line_height_absolute = from.line_height_absolute
         }
         MarginTop | MarginRight | MarginBottom | MarginLeft => {
-            let i = p as usize - MarginTop as usize;
-            s.margin[i] = from.margin[i]
+            s.margin[p as usize - MarginTop as usize] =
+                from.margin[source as usize - MarginTop as usize]
         }
         PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => {
-            let i = p as usize - PaddingTop as usize;
-            s.padding[i] = from.padding[i]
+            s.padding[p as usize - PaddingTop as usize] =
+                from.padding[source as usize - PaddingTop as usize]
         }
         BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => {
             let i = p as usize - BorderTopWidth as usize;
@@ -2920,6 +3017,8 @@ fn copy_property(s: &mut Style, from: &Style, p: Property) {
         JustifyItems => s.justify_items = from.justify_items,
         JustifySelf => s.justify_self = from.justify_self,
         AlignContent => s.align_content = from.align_content,
+        Direction | MarginInlineStart | MarginInlineEnd | PaddingInlineStart | PaddingInlineEnd
+        | InsetInlineStart | InsetInlineEnd => unreachable!("only physical properties are copied"),
     }
 }
 fn apply_value(
@@ -3094,16 +3193,25 @@ fn targets(name: &str) -> Vec<Property> {
         "white-space" => vec![WhiteSpace],
         "text-align" => vec![TextAlign],
         "line-height" => vec![LineHeight],
+        "direction" => vec![Direction],
         "margin" => vec![MarginTop, MarginRight, MarginBottom, MarginLeft],
         "padding" => vec![PaddingTop, PaddingRight, PaddingBottom, PaddingLeft],
-        "margin-top" => vec![MarginTop],
+        "margin-block" => vec![MarginTop, MarginBottom],
+        "margin-inline" => vec![MarginInlineStart, MarginInlineEnd],
+        "margin-top" | "margin-block-start" => vec![MarginTop],
         "margin-right" => vec![MarginRight],
-        "margin-bottom" => vec![MarginBottom],
+        "margin-bottom" | "margin-block-end" => vec![MarginBottom],
         "margin-left" => vec![MarginLeft],
-        "padding-top" => vec![PaddingTop],
+        "margin-inline-start" => vec![MarginInlineStart],
+        "margin-inline-end" => vec![MarginInlineEnd],
+        "padding-block" => vec![PaddingTop, PaddingBottom],
+        "padding-inline" => vec![PaddingInlineStart, PaddingInlineEnd],
+        "padding-top" | "padding-block-start" => vec![PaddingTop],
         "padding-right" => vec![PaddingRight],
-        "padding-bottom" => vec![PaddingBottom],
+        "padding-bottom" | "padding-block-end" => vec![PaddingBottom],
         "padding-left" => vec![PaddingLeft],
+        "padding-inline-start" => vec![PaddingInlineStart],
+        "padding-inline-end" => vec![PaddingInlineEnd],
         "border-width" => vec![
             BorderTopWidth,
             BorderRightWidth,
@@ -3153,23 +3261,27 @@ fn targets(name: &str) -> Vec<Property> {
         "border-bottom-color" => vec![BorderBottomColor],
         "border-left-color" => vec![BorderLeftColor],
         "position" => vec![Position],
-        "top" => vec![Top],
+        "top" | "inset-block-start" => vec![Top],
         "right" => vec![Right],
-        "bottom" => vec![Bottom],
+        "bottom" | "inset-block-end" => vec![Bottom],
         "left" => vec![Left],
         "inset" => vec![Top, Right, Bottom, Left],
+        "inset-block" => vec![Top, Bottom],
+        "inset-inline" => vec![InsetInlineStart, InsetInlineEnd],
+        "inset-inline-start" => vec![InsetInlineStart],
+        "inset-inline-end" => vec![InsetInlineEnd],
         "z-index" => vec![ZIndex],
         "overflow" => vec![OverflowX, OverflowY],
         "overflow-x" => vec![OverflowX],
         "overflow-y" => vec![OverflowY],
         "transform" => vec![Transform],
         "transform-origin" => vec![TransformOrigin],
-        "width" => vec![Width],
-        "height" => vec![Height],
-        "min-width" => vec![MinWidth],
-        "max-width" => vec![MaxWidth],
-        "min-height" => vec![MinHeight],
-        "max-height" => vec![MaxHeight],
+        "width" | "inline-size" => vec![Width],
+        "height" | "block-size" => vec![Height],
+        "min-width" | "min-inline-size" => vec![MinWidth],
+        "max-width" | "max-inline-size" => vec![MaxWidth],
+        "min-height" | "min-block-size" => vec![MinHeight],
+        "max-height" | "max-block-size" => vec![MaxHeight],
         "box-sizing" => vec![BoxSizing],
         "flex-direction" => vec![FlexDirection],
         "flex-wrap" => vec![FlexWrap],
@@ -3384,7 +3496,18 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
         };
         return vec![(Property::OverflowX, x), (Property::OverflowY, y)];
     }
-    if matches!(name, "place-items" | "place-self" | "place-content") {
+    if matches!(
+        name,
+        "place-items"
+            | "place-self"
+            | "place-content"
+            | "margin-block"
+            | "margin-inline"
+            | "padding-block"
+            | "padding-inline"
+            | "inset-block"
+            | "inset-inline"
+    ) {
         let tokens = whitespace_tokens(value);
         if tokens.is_empty() || tokens.len() > 2 {
             return vec![];
@@ -3637,9 +3760,17 @@ fn parse_font_shorthand(source: &str) -> Vec<(Property, Value)> {
 }
 fn parse_value(p: Property, value: &str) -> Option<Value> {
     use Property::*;
+    let p = p.physical(false);
     let lower = trim_boundary(value).to_ascii_lowercase();
     let v = lower.as_str();
     match p {
+        Direction => Some(Value::Bool(match v {
+            "ltr" => false,
+            "rtl" => true,
+            _ => return None,
+        })),
+        MarginInlineStart | MarginInlineEnd | PaddingInlineStart | PaddingInlineEnd
+        | InsetInlineStart | InsetInlineEnd => unreachable!("logical properties are mapped first"),
         Position => Some(Value::Position(match v {
             "static" => crate::css::Position::Static,
             "relative" => crate::css::Position::Relative,
@@ -3816,8 +3947,12 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             }))
         }
         Width | Height | MinWidth | MinHeight | MaxWidth | MaxHeight | FlexBasis => {
-            if v == "none" && matches!(p, MaxWidth | MaxHeight) {
-                Some(Value::Length(Length::Auto.into()))
+            if matches!(p, MaxWidth | MaxHeight) {
+                if v == "none" {
+                    Some(Value::Length(Length::Auto.into()))
+                } else {
+                    nonnegative_length(v, false).map(Value::Length)
+                }
             } else {
                 nonnegative_length(v, true).map(Value::Length)
             }

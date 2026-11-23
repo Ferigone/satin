@@ -1,4 +1,6 @@
 //! Window tasks and foreground rendering callbacks.
+mod user_timing;
+
 use super::{
     Shared, arg, diagnostic, drain_microtask_queue, event_target, fatal, getter, unsupported,
     webidl,
@@ -71,6 +73,17 @@ impl Clock {
 struct NavigationTiming {
     clock: Clock,
     response_start: Cell<Option<Instant>>,
+}
+
+impl NavigationTiming {
+    fn timestamp(&self, name: &str) -> f64 {
+        let instant = match name {
+            "navigationStart" => Some(self.clock.origin),
+            "responseStart" => self.response_start.get(),
+            _ => None,
+        };
+        instant.map_or(0., |instant| self.clock.epoch_at(instant))
+    }
 }
 
 pub(super) struct Scheduler {
@@ -424,23 +437,26 @@ fn clock(vm: &Vm, receiver: &Value) -> Result<Clock, JsError> {
 
 fn install_navigation_timing(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
     let prototype = vm.new_object();
-    webidl::interface(vm, prototype.clone(), "PerformanceTiming", 0, |_, _, _, _| {
-        Err(JsError::type_error("Illegal PerformanceTiming constructor"))
-    })?;
+    webidl::interface(
+        vm,
+        prototype.clone(),
+        "PerformanceTiming",
+        0,
+        |_, _, _, _| Err(JsError::type_error("Illegal PerformanceTiming constructor")),
+    )?;
     for name in ["navigationStart", "responseStart"] {
         getter(vm, prototype.clone(), name, move |vm, this, _| {
             let timing = vm
                 .host_data::<NavigationTiming>(&this)
                 .ok_or_else(|| JsError::type_error("Illegal PerformanceTiming receiver"))?;
-            let instant = match name {
-                "navigationStart" => Some(timing.clock.origin),
-                _ => timing.response_start.get(),
-            };
-            Ok(instant.map_or(0., |instant| timing.clock.epoch_at(instant)).into())
+            Ok(timing.timestamp(name).into())
         })?;
     }
     let timing = vm.new_object_with_prototype(prototype)?;
-    vm.set_host_data(timing.clone(), state.borrow().scheduler.navigation_timing.clone())?;
+    vm.set_host_data(
+        timing.clone(),
+        state.borrow().scheduler.navigation_timing.clone(),
+    )?;
     Ok(timing)
 }
 
@@ -464,7 +480,9 @@ pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsE
     let timing_root = vm.root(timing);
     getter(vm, proto.clone(), "timing", move |vm, this, _| {
         clock(vm, &this)?;
-        Ok(vm.root_value(timing_root).expect("rooted navigation timing object"))
+        Ok(vm
+            .root_value(timing_root)
+            .expect("rooted navigation timing object"))
     })?;
     webidl::operation(vm, proto.clone(), "toJSON", 0, |vm, this, _| {
         let time_origin = clock(vm, &this)?.epoch_ms;
@@ -472,6 +490,11 @@ pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsE
         vm.set_property(result.clone(), "timeOrigin", time_origin.into())?;
         Ok(result)
     })?;
+    user_timing::install(
+        vm,
+        &proto,
+        state.borrow().scheduler.navigation_timing.clone(),
+    )?;
     let result = vm.new_object_with_prototype(proto)?;
     event_target::attach(vm, result.clone())?;
     vm.set_host_data(

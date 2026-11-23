@@ -67,7 +67,6 @@ fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
             std::iter::repeat_n("true", 4096)
                 .collect::<Vec<_>>()
                 .join("&&"),
-            std::iter::repeat_n("1", 4096).collect::<Vec<_>>().join(","),
             format!("obj{}", ".property".repeat(4096)),
             format!("obj{}", "[0]".repeat(4096)),
             format!("f{}", "()".repeat(4096)),
@@ -88,6 +87,59 @@ fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
                 ErrorKind::ExecutionLimit
             );
         }
+    });
+}
+
+#[test]
+fn long_comma_sequences_preserve_effects_and_return_the_last_value() {
+    small_stack(|| {
+        let terms = std::iter::repeat_n("total += 1", 180)
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+            let total = 0;
+            const state = {{ get current() {{ return ++total; }}, label: 'present' }};
+            function initialize() {{ return {terms}, state.current, total; }}
+            const first = initialize();
+            const second = ({terms}, state.current, total);
+            const removed = delete (state.current, state.label);
+            try {{ state.current, (() => {{ throw 'stop'; }})(), total += 100; }} catch {{}}
+            first === 181 && second === 362 && total === 364 && removed && state.label === 'present';
+            "#
+        );
+        assert_eq!(Vm::new().eval(&source).unwrap(), Value::Bool(true));
+    });
+}
+
+#[test]
+fn simple_assignment_chains_keep_reference_order_and_the_right_hand_value() {
+    small_stack(|| {
+        let targets = (0..28)
+            .map(|index| format!("options.option{index}"))
+            .collect::<Vec<_>>()
+            .join(" = ");
+        let source = format!(
+            r#"
+            const options = {{}};
+            const log = [];
+            function setValue(tag) {{
+                log.push(tag);
+                return {{ set value(value) {{ log.push(tag + value); }} }};
+            }}
+            function value() {{ log.push('rhs'); return 8; }}
+            let a, b, c = 3, d;
+            const shared = ({targets} = setValue('first').value = (setValue('second').value) = value());
+            const mixed = a = c += b = 2;
+            const record = d = {{ value: b }} = {{ value: 6 }};
+            const extracted = b;
+            a = b = function() {{}};
+            shared === 8 && Object.keys(options).length === 28 && options.option0 === 8 &&
+                options.option27 === 8 && log.join(',') === 'first,second,rhs,second8,first8' &&
+                mixed === 5 && c === 5 && record === d && extracted === 6 && a === b && b.name === 'b';
+            "#
+        );
+        assert_eq!(Vm::new().eval(&source).unwrap(), Value::Bool(true));
     });
 }
 

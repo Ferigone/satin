@@ -96,6 +96,7 @@ pub enum MediaUpdate {
         width: u32,
         height: u32,
         duration: f64,
+        has_audio: bool,
     },
     Ready,
     StreamOpened,
@@ -115,6 +116,19 @@ pub enum MediaUpdate {
     Error(String),
 }
 
+#[derive(serde::Serialize)]
+pub struct MediaStatus {
+    pub node: usize,
+    pub current_time: f64,
+    pub ready_state: u8,
+    pub video_width: u32,
+    pub video_height: u32,
+    pub has_audio: bool,
+    pub decoded_frames: u64,
+    pub paused: bool,
+    pub ended: bool,
+}
+
 struct Track {
     key: MediaKey,
     url: String,
@@ -131,6 +145,8 @@ struct Track {
     muted: bool,
     volume: f64,
     last_event_time: f64,
+    has_audio: bool,
+    decoded_frames: u64,
     error: Option<String>,
     plays: Vec<(RootId, RootId)>,
 }
@@ -156,6 +172,8 @@ impl Track {
             muted,
             volume: 1.,
             last_event_time: 0.,
+            has_audio: false,
+            decoded_frames: 0,
             error: None,
             plays: Vec::new(),
         }
@@ -190,6 +208,10 @@ impl Store {
     }
     pub(super) fn has_stream_tasks(&self) -> bool {
         self.mse.has_tasks()
+    }
+
+    pub(super) fn resolve_blob(&self, vm: &Vm, url: &url::Url) -> Option<std::rc::Rc<blobs::Blob>> {
+        blobs::get(vm, &self.mse.resolve_url(vm, url)?)
     }
 
     fn check_command_room(&self, count: usize) -> Result<(), JsError> {
@@ -916,6 +938,29 @@ pub(super) fn default_click(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(
 }
 
 impl super::ScriptRuntime {
+    pub fn media_status(&self) -> Vec<MediaStatus> {
+        let mut statuses: Vec<_> = self
+            .state
+            .borrow()
+            .media
+            .tracks
+            .values()
+            .map(|track| MediaStatus {
+                node: track.key.node.0,
+                current_time: track.time,
+                ready_state: track.ready,
+                video_width: track.width,
+                video_height: track.height,
+                has_audio: track.has_audio,
+                decoded_frames: track.decoded_frames,
+                paused: track.paused,
+                ended: track.ended,
+            })
+            .collect();
+        statuses.sort_unstable_by_key(|status| status.node);
+        statuses
+    }
+
     pub fn take_media_commands(&mut self) -> Vec<MediaCommand> {
         self.state.borrow_mut().media.take_commands()
     }
@@ -1014,6 +1059,7 @@ impl super::ScriptRuntime {
                 width,
                 height,
                 duration,
+                has_audio,
             } => {
                 let first = track.ready == 0;
                 let resized = (track.width, track.height) != (width, height);
@@ -1021,6 +1067,7 @@ impl super::ScriptRuntime {
                     duration != track.duration && !(duration.is_nan() && track.duration.is_nan());
                 track.width = width;
                 track.height = height;
+                track.has_audio = has_audio;
                 track.duration = duration;
                 track.ready = track.ready.max(1);
                 events = match (first, resized, duration_changed) {
@@ -1068,6 +1115,7 @@ impl super::ScriptRuntime {
             }
             MediaUpdate::Frame(frame) => {
                 frame_updated = true;
+                track.decoded_frames = track.decoded_frames.saturating_add(1);
                 let frames = &state.canvases.frames;
                 relayout = match frames.get(id) {
                     Some(Frame::Bitmap(prior)) => prior.dimensions() != frame.dimensions(),

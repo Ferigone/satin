@@ -32,7 +32,7 @@ pub use forms::{
     MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, OptionSnapshot, SelectedFile,
 };
 pub use navigation::{DocumentSession, ResourceLoad};
-pub use media::{MediaCommand, MediaKey, MediaUpdate};
+pub use media::{MediaCommand, MediaKey, MediaStatus, MediaUpdate};
 
 pub(crate) fn initial_control_snapshots(document: &Document) -> HashMap<NodeId, ControlSnapshot> {
     forms::initial_snapshots(document)
@@ -809,7 +809,6 @@ impl ScriptRuntime {
         media::install_streaming(&mut vm, &state, events.clone())?;
         let url = state.borrow().url.clone();
         let storage = storage::StorageHost::install(&mut vm, &state, tab_storage, &url)?;
-        scheduler::install_performance(&mut vm, &state)?;
         let form_data = form_data::install(&mut vm, &forms, &blobs)?;
         fetch.set_form_data(form_data);
         let layout = layout_api::LayoutHost::install(&mut vm, &state, forms.clone(), page)?;
@@ -820,9 +819,11 @@ impl ScriptRuntime {
             structured_clone::CloneHost::new(&mut vm, blobs, image_data, image_bitmap, file_lists)?;
         let messages = message_ports::install(&mut vm, events, cloning.clone())?;
         cloning.install(&mut vm, window, messages.clone())?;
+        scheduler::install_performance(&mut vm, &state)?;
         history_api::install(&mut vm, &state, document, &layout)?;
         let base_state = state.clone();
         fetch.set_base_resolver(Rc::new(move || document_base(&base_state.borrow())));
+        fetch.set_document(&state);
         let next_stream_collection = vm.estimated_heap_bytes() + 1024 * 1024;
         Ok(Self {
             vm,
@@ -1695,15 +1696,69 @@ fn install_character_data(
     Ok(())
 }
 
+struct InlineStyleNode(NodeId);
+
+fn inline_style_value(state: &Shared, id: NodeId, name: &str) -> String {
+    let state = state.borrow();
+    css::declarations(state.document.attr(id, "style").unwrap_or(""))
+        .into_iter()
+        .rev()
+        .find(|d| d.name == name)
+        .map(|d| d.value)
+        .unwrap_or_default()
+}
+
+fn inline_style_node(vm: &Vm, style: &Value) -> Result<NodeId, JsError> {
+    vm.host_data::<InlineStyleNode>(style)
+        .map(|node| node.0)
+        .ok_or_else(|| JsError::type_error("Expected an inline CSS style"))
+}
+
 fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
+    // Each document shares one set of logical CSS accessors across its inline styles.
+    let style_prototype = vm.new_object();
+    for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
+        .iter()
+        .chain(css::LOGICAL_BOX_SHORTHANDS)
+    {
+        let get_state = state.clone();
+        let get = vm.new_native_function(property, move |vm, this, _| {
+            let id = inline_style_node(vm, &this)?;
+            Ok(inline_style_value(&get_state, id, css_name).into())
+        });
+        let set_state = state.clone();
+        let set = vm.new_native_function(property, move |vm, this, args| {
+            let id = inline_style_node(vm, &this)?;
+            let value = text(vm, arg(args, 0))?;
+            update_style(vm, &set_state, id, css_name, &value)?;
+            Ok(Value::Undefined)
+        });
+        vm.define_accessor(style_prototype.clone(), property, Some(get), Some(set))?;
+    }
+    let get_state = state.clone();
+    method(
+        vm,
+        style_prototype.clone(),
+        "getPropertyValue",
+        move |vm, this, args| {
+            let id = inline_style_node(vm, &this)?;
+            let mut name = text(vm, arg(args, 0))?;
+            if !name.starts_with("--") {
+                name.make_ascii_lowercase();
+            }
+            Ok(inline_style_value(&get_state, id, &name).into())
+        },
+    )?;
+    vm.root(style_prototype.clone());
     let state = state.clone();
     getter(vm, prototype, "style", move |vm, this, _| {
         let id = element(&state, &this)?;
         if let Some(style) = state.borrow().styles.get(&id) {
             return Ok(style.clone());
         }
-        let style = vm.new_object();
+        let style = vm.new_object_with_prototype(style_prototype.clone())?;
         vm.mark_platform_object(&style)?;
+        vm.set_host_data(style.clone(), Rc::new(InlineStyleNode(id)))?;
         for (property, css_name) in [
             ("backgroundColor", "background-color"),
             ("background", "background"),
@@ -1731,16 +1786,7 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
         ] {
             let get_state = state.clone();
             let get = vm.new_native_function(property, move |_, _, _| {
-                let state = get_state.borrow();
-                let declarations =
-                    css::declarations(state.document.attr(id, "style").unwrap_or(""));
-                Ok(declarations
-                    .iter()
-                    .rev()
-                    .find(|d| d.name == css_name)
-                    .map(|d| d.value.clone())
-                    .unwrap_or_default()
-                    .into())
+                Ok(inline_style_value(&get_state, id, css_name).into())
             });
             let set_state = state.clone();
             let set = vm.new_native_function(property, move |vm, _, args| {

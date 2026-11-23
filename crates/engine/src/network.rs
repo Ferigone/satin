@@ -107,6 +107,10 @@ impl WebRequest {
     }
     pub fn validate(&mut self) -> Result<(), FetchError> {
         validate_url(&self.url)?;
+        self.validate_metadata()
+    }
+
+    pub(crate) fn validate_metadata(&mut self) -> Result<(), FetchError> {
         self.method = normalize_method(&self.method)?;
         if matches!(self.method.as_str(), "GET" | "HEAD") && self.body.is_some() {
             return Err(FetchError::invalid("GET/HEAD cannot have a request body"));

@@ -29,6 +29,23 @@ fn literal_lexical_goal_and_cover_grammar_preserve_division_and_delimiters() {
 }
 
 #[test]
+fn async_arrow_lookahead_preserves_template_and_slash_positions() {
+    let mut vm = Vm::new();
+    vm.eval(
+        r#"
+        let result;
+        const format = async value => `${/[}]/.test('}')}:${value / 2}`;
+        let value = 12;
+        value /= 3;
+        format(value).then(text => result = text);
+        "#,
+    )
+    .unwrap();
+    vm.drain_jobs(10).unwrap();
+    assert_eq!(vm.eval("result").unwrap(), "true:2".into());
+}
+
+#[test]
 fn regex_literal_syntax_is_checked_even_in_dead_code() {
     let mut vm = Vm::new();
     for source in [

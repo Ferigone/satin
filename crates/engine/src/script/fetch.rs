@@ -1,4 +1,5 @@
 //! Fetch objects use traced host slots for streams, headers, and signals.
+mod blob_url;
 mod upload;
 use super::{
     abort, arg, blobs, fatal, form_data, getter, method, streams::StreamHost, text, unsupported,
@@ -7,8 +8,8 @@ use super::{
 use crate::{
     loader::LoadedPage,
     network::{
-        self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT, FetchError,
-        FetchErrorKind, FetchJob, HeaderList, RedirectMode, RequestMode, ResponseType,
+        self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT, FetchBody,
+        FetchError, FetchErrorKind, FetchJob, HeaderList, RedirectMode, RequestMode, ResponseType,
         StreamingResponse, WebRequest, WebResponse,
     },
 };
@@ -16,6 +17,7 @@ use rust_browser_javascript::{ErrorKind, JsError, JsString, RootId, Value, Vm};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
     rc::{Rc, Weak},
     sync::{Arc, Weak as ArcWeak},
 };
@@ -44,12 +46,20 @@ struct RequestData {
     request: WebRequest,
     headers: Rc<RefCell<HeadersData>>,
     streaming: bool,
+    blob: Option<Rc<blobs::Blob>>,
 }
 
 enum RequestBody {
     Buffered(Option<Value>),
     Stream { value: Value, inherited: bool },
 }
+
+enum ResponseBody {
+    Network(FetchBody),
+    Buffered(Option<Arc<Vec<u8>>>),
+    Blob(Rc<blobs::Blob>, Range<usize>),
+}
+
 #[derive(Clone)]
 struct ResponseData {
     response: WebResponse,
@@ -64,11 +74,13 @@ struct Pending {
     _abort: abort::Subscription,
     metadata: usize,
     upload: Option<upload::Upload>,
+    blob: Option<Result<(WebResponse, ResponseBody), FetchError>>,
 }
 struct State {
     byte_limit: usize,
     base: Url,
     base_resolver: Option<Rc<dyn Fn() -> Url>>,
+    document: Weak<RefCell<super::State>>,
     client: Url,
     headers_proto: RootId,
     request_proto: RootId,
@@ -87,6 +99,15 @@ struct State {
 }
 pub(super) struct FetchHost {
     state: Shared,
+}
+
+fn validate_request(request: &mut WebRequest) -> Result<(), JsError> {
+    if request.url.scheme() == "blob" {
+        request.validate_metadata()
+    } else {
+        request.validate()
+    }
+    .map_err(map_error)
 }
 
 fn typed<T: 'static>(vm: &Vm, value: &Value, name: &str) -> Result<Rc<RefCell<T>>, JsError> {
@@ -501,7 +522,9 @@ fn request_init(
             client,
         )
     };
-    request.url.set_fragment(None);
+    if request.url.scheme() != "blob" {
+        request.url.set_fragment(None);
+    }
     let method = field(vm, &init, "method")?;
     if !method.is_undefined() {
         request.method = network::normalize_method(&byte_string(vm, method)?).map_err(map_error)?;
@@ -597,7 +620,7 @@ fn request_init(
             inherited => RequestBody::Buffered(inherited),
         }
     };
-    request.validate().map_err(map_error)?;
+    validate_request(&mut request)?;
     let streaming = matches!(body, RequestBody::Stream { .. });
     if streaming {
         request.validate_streaming_upload().map_err(map_error)?;
@@ -610,11 +633,25 @@ fn request_init(
     let headers = headers_data(vm, state, request.headers.clone(), guard)?;
     let abort = state.borrow().abort.clone();
     let signal = abort.dependent(vm, source_signal.as_slice())?;
+    // Parsing a URL captures the current entry. A Request can continue to use
+    // that Blob after revocation, while a fresh parse must look it up again.
+    let blob = if let Some(original) = original {
+        original.borrow().blob.clone()
+    } else if request.url.scheme() == "blob" {
+        state
+            .borrow()
+            .document
+            .upgrade()
+            .and_then(|document| document.borrow().media.resolve_blob(vm, &request.url))
+    } else {
+        None
+    };
     Ok((
         RequestData {
             request,
             headers,
             streaming,
+            blob,
         },
         signal,
         body,
@@ -712,6 +749,10 @@ fn reject(vm: &mut Vm, reject: Value, error: JsError) -> Result<(), JsError> {
     Ok(())
 }
 impl FetchHost {
+    pub(super) fn set_document(&self, document: &super::Shared) {
+        self.state.borrow_mut().document = Rc::downgrade(document);
+    }
+
     pub(super) fn set_base_resolver(&self, resolver: Rc<dyn Fn() -> Url>) {
         self.state.borrow_mut().base_resolver = Some(resolver);
     }
@@ -733,6 +774,7 @@ impl FetchHost {
             byte_limit: LIVE_BYTES,
             base: page.base.clone(),
             base_resolver: None,
+            document: Weak::new(),
             client: Url::parse(&page.url).unwrap_or_else(|_| page.base.clone()),
             headers_proto: vm.root(hp.clone()),
             request_proto: vm.root(rp.clone()),
@@ -780,7 +822,7 @@ impl FetchHost {
                 }
                 let mut request = data.request;
                 request.headers = data.headers.borrow().list.clone();
-                request.validate().map_err(map_error)?;
+                validate_request(&mut request)?;
                 let metadata = bytes(&request.headers)
                     + request.url.as_str().len()
                     + request.client_url.as_str().len()
@@ -809,7 +851,9 @@ impl FetchHost {
                     Ok(())
                 })?;
                 let (upload, transport) = match body {
-                    RequestBody::Stream { value, inherited } if request.url.scheme() != "data" => {
+                    RequestBody::Stream { value, inherited }
+                        if !matches!(request.url.scheme(), "data" | "blob") =>
+                    {
                         let (upload, transport) =
                             upload::Upload::start(vm, &streams, value, inherited)?;
                         (Some(upload), Some(transport))
@@ -823,6 +867,19 @@ impl FetchHost {
                     }
                     _ => (None, None),
                 };
+                let (job, blob) = if request.url.scheme() == "blob" {
+                    blob_url::queue(vm, &shared, id)?;
+                    (None, Some(blob_url::response(&request, data.blob)))
+                } else {
+                    (
+                        Some(FetchJob {
+                            id,
+                            request,
+                            upload: transport,
+                        }),
+                        None,
+                    )
+                };
                 let mut state = shared.borrow_mut();
                 state.pending.insert(
                     id,
@@ -835,13 +892,12 @@ impl FetchHost {
                         _abort: subscription,
                         metadata,
                         upload,
+                        blob,
                     },
                 );
-                state.ready.push(FetchJob {
-                    id,
-                    request,
-                    upload: transport,
-                });
+                if let Some(job) = job {
+                    state.ready.push(job);
+                }
                 Ok(())
             })();
             if let Err(error) = result {
@@ -909,6 +965,27 @@ impl FetchHost {
         id: u64,
         result: Result<StreamingResponse, FetchError>,
     ) -> Result<(), JsError> {
+        let result = result.map(
+            |StreamingResponse {
+                 mut metadata,
+                 transfer,
+             }| {
+                let body = match transfer {
+                    Some(transfer) => ResponseBody::Network(transfer),
+                    None => ResponseBody::Buffered(metadata.body.take()),
+                };
+                (metadata, body)
+            },
+        );
+        self.complete_response(vm, id, result)
+    }
+
+    fn complete_response(
+        &self,
+        vm: &mut Vm,
+        id: u64,
+        result: Result<(WebResponse, ResponseBody), FetchError>,
+    ) -> Result<(), JsError> {
         let Some(mut pending) = self.state.borrow_mut().pending.remove(&id) else {
             return Ok(());
         };
@@ -920,10 +997,7 @@ impl FetchHost {
                 .root_value(pending.reject)
                 .ok_or_else(|| JsError::type_error("Fetch rejecting function is missing"))?;
             match result {
-                Ok(StreamingResponse {
-                    metadata: mut response,
-                    transfer,
-                }) => {
+                Ok((mut response, body)) => {
                     response.headers.retain(|(name, _)| {
                         !matches!(
                             name.to_ascii_lowercase().as_str(),
@@ -939,7 +1013,10 @@ impl FetchHost {
                                 "Fetch response metadata exceeds alpha limit",
                             ));
                         }
-                        if let Some(body) = &response.body {
+                        // Keep the existing Fetch budget for network buffers.
+                        // Local Blob backings are bounded by the Blob and
+                        // ReadableStream stores and need no buffered copy.
+                        if let ResponseBody::Buffered(Some(body)) = &body {
                             if body.len() > FETCH_BODY_LIMIT {
                                 return Err(JsError::type_error(
                                     "Fetch response body exceeds 4 MiB",
@@ -968,20 +1045,34 @@ impl FetchHost {
                         )?;
                         let streams = self.state.borrow().streams.clone();
                         let signal = vm.root_value(pending.signal).unwrap();
-                        let body = if let Some(transfer) = transfer {
-                            streams.network_stream(
+                        let body = match body {
+                            ResponseBody::Network(transfer) => streams.network_stream(
                                 vm,
                                 id,
                                 transfer,
                                 signal,
                                 pending.cancel.clone(),
-                            )?
-                        } else {
-                            let body = memory_stream(vm, &streams, response.body.take())?;
-                            if !body.is_nullish() {
-                                streams.watch_abort(vm, &body, signal, pending.cancel.clone())?;
+                            )?,
+                            ResponseBody::Buffered(bytes) => {
+                                let body = memory_stream(vm, &streams, bytes)?;
+                                if !body.is_nullish() {
+                                    streams.watch_abort(
+                                        vm,
+                                        &body,
+                                        signal,
+                                        pending.cancel.clone(),
+                                    )?;
+                                }
+                                body
                             }
-                            body
+                            ResponseBody::Blob(blob, range) => {
+                                let (bytes, backing) = blob.shared_bytes();
+                                let start = backing.start;
+                                let range = start + range.start..start + range.end;
+                                let body = streams.memory_stream(vm, bytes, range)?;
+                                streams.watch_abort(vm, &body, signal, pending.cancel.clone())?;
+                                body
+                            }
                         };
                         response_object(vm, &self.state, ResponseData { response, headers }, body)
                     })();

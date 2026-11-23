@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Flex item overflow minimums</title>
+<style>
+body { margin: 0; }
+.preview { display: flex; width: 280px; height: 40px; gap: 16px; margin-bottom: 6px; }
+.cover { flex: 0 0 144px; }
+.caption { display: flex; flex: 0 1 50%; flex-direction: column; }
+.caption > div { width: 220px; height: 20px; }
+.chat { display: flex; flex-direction: column; width: 240px; height: 120px; gap: 8px; margin-bottom: 6px; }
+.messages { flex: 1 1 auto; }
+.messages > div { height: 160px; }
+.composer { flex: 0 0 28px; }
+</style>
+<div class="preview">
+    <div class="cover"></div>
+    <div id="hidden-caption" class="caption" style="overflow-x:hidden"><div></div></div>
+</div>
+<div class="preview">
+    <div class="cover"></div>
+    <div id="paired-caption" class="caption" style="overflow-x:clip;overflow-y:auto"><div></div></div>
+</div>
+<div class="preview">
+    <div class="cover"></div>
+    <div id="visible-caption" class="caption"><div></div></div>
+</div>
+<div class="preview">
+    <div class="cover"></div>
+    <div id="clipped-caption" class="caption" style="overflow:clip"><div></div></div>
+</div>
+<div class="preview">
+    <div class="cover"></div>
+    <div id="fixed-min-caption" class="caption" style="overflow:hidden;min-inline-size:150px;padding-inline:5px;border:2px solid"><div></div></div>
+</div>
+<div class="chat">
+    <div id="scrolling-messages" class="messages" style="overflow-y:auto"><div></div></div>
+    <div id="scrolling-composer" class="composer"></div>
+</div>
+<div class="chat">
+    <div id="clipped-messages" class="messages" style="overflow:clip"><div></div></div>
+    <div id="clipped-composer" class="composer"></div>
+</div>
+<div class="chat">
+    <div id="fixed-min-messages" class="messages" style="overflow:scroll;min-block-size:100px"><div></div></div>
+    <div id="fixed-min-composer" class="composer"></div>
+</div>
+<pre id="result"></pre>
+<script>
+const receipt = {};
+for (const box of document.querySelectorAll('.caption, .messages, [id].composer')) {
+    const rect = box.getBoundingClientRect();
+    receipt[box.id] = [rect.x, rect.y, rect.width, rect.height];
+}
+document.getElementById('result').textContent = JSON.stringify(receipt);
+</script>

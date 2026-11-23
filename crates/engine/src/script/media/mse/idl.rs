@@ -80,11 +80,10 @@ fn install_object_urls(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
     webidl::operation(vm, url, "revokeObjectURL", 1, move |vm, _, args| {
         webidl::required(args, 1, "URL.revokeObjectURL")?;
         let raw = webidl::usv_string(vm, &arg(args, 0), 256 * 1024)?;
-        if let Ok(mut url) = Url::parse(&raw) {
-            url.set_fragment(None);
-            if let Some(root) = host.borrow_mut().media.mse.urls.remove(url.as_str()) {
-                vm.unroot(root);
-            }
+        if let Ok(url) = Url::parse(&raw)
+            && let Some(root) = host.borrow_mut().media.mse.urls.remove(url.as_str())
+        {
+            vm.unroot(root);
         }
         Ok(Value::Undefined)
     })?;

@@ -164,8 +164,7 @@ impl Parser {
             let mut is_static = false;
             if self.at("static")
                 && self
-                    .tokens
-                    .get(self.pos + 1)
+                    .lookahead(1)
                     .is_some_and(|t| !matches!(t.kind, TokenKind::Punct("(" | "=" | ";" | "}")))
             {
                 self.advance(1);

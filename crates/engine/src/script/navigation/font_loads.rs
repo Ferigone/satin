@@ -119,7 +119,7 @@ impl FontLoads {
                 kind,
                 Some(CredentialsMode::SameOrigin),
                 None,
-                resources.deadline(),
+                ResourceQueue::queue_deadline(),
             );
             if resources
                 .queue(request, Consumer::Font(key.clone()))

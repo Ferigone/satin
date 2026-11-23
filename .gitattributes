@@ -9,3 +9,4 @@ crates/engine/tests/fixtures/wpt-canvas-pixels/canvas-tests.js -text
 crates/engine/tests/fixtures/wpt-canvas-pixels/LICENSE.md -text
 crates/engine/tests/fixtures/wpt-sticky/upstream/** -text
 crates/engine/tests/fixtures/wpt-intersection-observer/upstream/** -text
+crates/engine/tests/fixtures/wpt-logical/*.html -text

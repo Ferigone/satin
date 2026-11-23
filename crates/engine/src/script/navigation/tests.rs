@@ -250,6 +250,38 @@ document.body.appendChild(t.content.cloneNode(true));
 }
 
 #[test]
+fn resource_transfer_gets_a_fresh_deadline_without_resetting_queue_wait() {
+    let mut queue = ResourceQueue::new();
+    let queued_at = Instant::now();
+    let queue_deadline = queued_at + DOCUMENT_RESOURCE_QUEUE_TIMEOUT;
+    let client = Arc::new(Url::parse("https://example.test/").unwrap());
+    let request = resource_request(
+        client.join("app.js").unwrap(),
+        &client,
+        ResourceKind::ClassicScript,
+        None,
+        None,
+        queue_deadline,
+    );
+    queue.queue(request, Consumer::Classic(NodeId(1))).unwrap();
+    assert_eq!(queue.next_deadline(), Some(queue_deadline));
+
+    let dispatch_at = queued_at + Duration::from_secs(20);
+    let load = queue.take(dispatch_at).expect("still eligible after queueing");
+    let transfer_deadline = dispatch_at + DOCUMENT_RESOURCE_TIMEOUT;
+    assert_eq!(load.request.deadline, transfer_deadline);
+    assert_eq!(queue.next_deadline(), Some(transfer_deadline));
+
+    queue.retry(load);
+    let retry_at = dispatch_at + Duration::from_secs(1);
+    let load = queue.take(retry_at).expect("retry before original cutoff");
+    assert_eq!(load.request.deadline, retry_at + DOCUMENT_RESOURCE_TIMEOUT);
+    queue.retry(load);
+    assert!(queue.take(queue_deadline).is_none());
+    assert_eq!(queue.pending.get(&1).unwrap().1, queue_deadline);
+}
+
+#[test]
 fn async_default_bypasses_ordered_scripts_and_failure_releases_the_front() {
     let (mut page, mut session, mut runtime) = start(
         r#"<!doctype html><script>
@@ -259,8 +291,7 @@ window.addEventListener('load', function () { log.push('window-load'); });
 </script><body></body>"#,
     );
     assert!(session.done());
-    // The initial navigation deadline has expired when the user triggers this.
-    assert!(session.resources.initial_deadline.is_none());
+    assert!(session.next_deadline().is_none());
     let old_deadline = Instant::now() - Duration::from_secs(30);
     session.started = old_deadline;
     evaluate(

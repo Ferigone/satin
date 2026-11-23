@@ -45,9 +45,8 @@ impl ExportEntry {
 }
 pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, JsError> {
     let mut p = Parser {
-        tokens: Vec::new(),
+        tokens: VecDeque::with_capacity(TOKEN_WINDOW),
         lexer: Lexer::new(source, compilation_bytes),
-        pos: 0,
         function_depth: 0,
         loop_depth: 0,
         switch_depth: 0,
@@ -79,8 +78,7 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
     while !p.is_eof() {
         if p.at("import")
             && !p
-                .tokens
-                .get(p.pos + 1)
+                .lookahead(1)
                 .is_some_and(|t| matches!(t.kind, TokenKind::Punct("." | "(")))
         {
             p.advance(1);
@@ -132,8 +130,7 @@ impl Parser {
         if self.at("with")
             || (self.at("assert")
                 && self
-                    .tokens
-                    .get(self.pos + 1)
+                    .lookahead(1)
                     .is_some_and(|token| token.kind == TokenKind::Punct("{")))
         {
             return Err(self.error("Import attributes are not implemented"));
@@ -145,7 +142,7 @@ impl Parser {
     }
     fn import_declaration(&mut self, module: &mut Module) -> Result<(), JsError> {
         if (self.at("source") || self.at("defer"))
-            && self.tokens.get(self.pos + 1).is_some_and(|token| {
+            && self.lookahead(1).is_some_and(|token| {
                 matches!(&token.kind,TokenKind::Word(word) if word!="from")
                     || token.kind == TokenKind::Punct("*")
             })

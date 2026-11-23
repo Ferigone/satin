@@ -4,7 +4,7 @@ use crate::{
     ErrorKind, JsError, JsString, Value,
     lexer::{Lexer, Token, TokenKind},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 // These are independent budgets: recursive grammar calls and the resulting AST
 // can have different depths (e.g. a flat left-associative operator chain). Keep
@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // verified together with compilation and destruction on a 1 MiB native stack.
 const MAX_PARSER_DEPTH: usize = 24;
 const MAX_AST_DEPTH: usize = 64;
+const TOKEN_WINDOW: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum VarKind {
@@ -190,7 +191,7 @@ pub(crate) enum Expr {
     Assign(&'static str, Box<Expr>, Box<Expr>),
     Update(&'static str, Box<Expr>, bool),
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
-    Sequence(Box<Expr>, Box<Expr>),
+    Sequence(Vec<Expr>),
 }
 pub(crate) type LabelId = std::num::NonZeroU32;
 
@@ -241,9 +242,8 @@ pub(crate) fn parse_script(
     compilation_bytes: usize,
 ) -> Result<Vec<Stmt>, JsError> {
     let mut p = Parser {
-        tokens: Vec::new(),
+        tokens: VecDeque::with_capacity(TOKEN_WINDOW),
         lexer: Lexer::new(source, compilation_bytes),
-        pos: 0,
         function_depth: 0,
         loop_depth: 0,
         switch_depth: 0,
@@ -311,9 +311,9 @@ struct ActiveLabel {
 }
 
 struct Parser {
-    tokens: Vec<Token>,
+    // Current token followed by up to two lookahead tokens.
+    tokens: VecDeque<Token>,
     lexer: Lexer,
-    pos: usize,
     function_depth: usize,
     loop_depth: usize,
     switch_depth: usize,
@@ -339,36 +339,32 @@ struct Parser {
 }
 impl Parser {
     fn fill(&mut self) {
-        while self.tokens.len() <= self.pos + 2 {
-            if self
-                .tokens
-                .last()
-                .is_some_and(|t| matches!(t.kind, TokenKind::Eof | TokenKind::Invalid))
-            {
-                break;
-            }
+        while self.tokens.len() < TOKEN_WINDOW {
             // The parser chooses the lexical goal at a slash before lexing past it.
             // Otherwise apparent comments or strings inside a pattern could scan
             // arbitrarily far ahead, then be rescanned from the slash.
-            if self.tokens.len() > self.pos
-                && self
-                    .tokens
-                    .last()
-                    .is_some_and(|t| matches!(t.kind, TokenKind::Punct("/" | "/=")))
-            {
+            if self.tokens.back().is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Eof | TokenKind::Invalid | TokenKind::Punct("/" | "/=")
+                )
+            }) {
                 break;
             }
-            self.tokens.push(self.lexer.next());
+            self.tokens.push_back(self.lexer.next());
         }
     }
 
     fn advance(&mut self, count: usize) {
-        self.pos += count;
+        drop(self.tokens.drain(..count));
         self.fill();
     }
 
     fn current(&self) -> &Token {
-        &self.tokens[self.pos]
+        &self.tokens[0]
+    }
+    fn lookahead(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(offset)
     }
     fn is_eof(&self) -> bool {
         self.current().kind == TokenKind::Eof
@@ -382,14 +378,11 @@ impl Parser {
     }
     fn let_declaration(&self) -> bool {
         self.at("let")
-            && self
-                .tokens
-                .get(self.pos + 1)
-                .is_some_and(|token| match &token.kind {
-                    TokenKind::Word(word) | TokenKind::EscapedWord(word) => !reserved(word),
-                    TokenKind::Punct("[" | "{") => true,
-                    _ => false,
-                })
+            && self.lookahead(1).is_some_and(|token| match &token.kind {
+                TokenKind::Word(word) | TokenKind::EscapedWord(word) => !reserved(word),
+                TokenKind::Punct("[" | "{") => true,
+                _ => false,
+            })
     }
     fn eat(&mut self, s: &str) -> bool {
         if self.at(s) {
@@ -666,8 +659,7 @@ impl Parser {
             && (self.at("export")
                 || (self.at("import")
                     && !self
-                        .tokens
-                        .get(self.pos + 1)
+                        .lookahead(1)
                         .is_some_and(|t| matches!(t.kind, TokenKind::Punct("." | "(")))))
         {
             return Err(self.error("Module declaration outside module top level"));
@@ -687,8 +679,7 @@ impl Parser {
             self.current().kind,
             TokenKind::Word(_) | TokenKind::EscapedWord(_)
         ) && self
-            .tokens
-            .get(self.pos + 1)
+            .lookahead(1)
             .is_some_and(|token| token.kind == TokenKind::Punct(":"))
     }
 
@@ -819,7 +810,7 @@ impl Parser {
         let disallowed_of_target = self.at("let")
             || (!asynchronous
                 && self.at("async")
-                && self.tokens.get(self.pos + 1).is_some_and(
+                && self.lookahead(1).is_some_and(
                     |token| matches!(&token.kind, TokenKind::Word(word) if word == "of"),
                 ));
         let previous = self.allow_in;
@@ -914,8 +905,7 @@ impl Parser {
         // It cannot consume a lexical declaration from a surrounding statement list.
         if self.at("let") {
             if self
-                .tokens
-                .get(self.pos + 1)
+                .lookahead(1)
                 .is_some_and(|t| t.kind == TokenKind::Punct("["))
             {
                 return Err(self.error("let [ cannot start a for-await body statement"));
@@ -1062,13 +1052,12 @@ impl Parser {
             method: false,
         })
     }
-    fn identifier_arrow_at(&self, at: usize) -> bool {
-        self.tokens.get(at).is_some_and(|token| {
+    fn identifier_arrow_at(&self, offset: usize) -> bool {
+        self.lookahead(offset).is_some_and(|token| {
             matches!(&token.kind,
                 TokenKind::Word(word) | TokenKind::EscapedWord(word) if !reserved(word))
         }) && self
-            .tokens
-            .get(at + 1)
+            .lookahead(offset + 1)
             .is_some_and(|token| token.kind == TokenKind::Punct("=>") && !token.newline)
     }
 
@@ -1275,12 +1264,21 @@ impl Parser {
         }
         Ok(pattern)
     }
+    #[inline(always)]
     fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
+        self.expression_with_assignment_boundary(min, false)
+    }
+
+    fn expression_with_assignment_boundary(
+        &mut self,
+        min: u8,
+        stop_before_simple_assignment: bool,
+    ) -> Result<Expr, JsError> {
         if self.depth >= MAX_PARSER_DEPTH {
             return Err(self.error("Expression nesting limit exceeded"));
         }
         self.depth += 1;
-        let result = self.expression_inner(min);
+        let result = self.expression_inner(min, stop_before_simple_assignment);
         self.depth -= 1;
         self.checked_expression(result?)
     }
@@ -1295,15 +1293,15 @@ impl Parser {
         self.check_ast(Ast::Expression(&expression))?;
         Ok(expression)
     }
-    fn expression_inner(&mut self, min: u8) -> Result<Expr, JsError> {
-        let async_prefix = min <= 2
-            && self.at("async")
-            && self
-                .tokens
-                .get(self.pos + 1)
-                .is_some_and(|next| !next.newline);
-        let async_word_arrow = async_prefix && self.identifier_arrow_at(self.pos + 1);
-        if min <= 2 && (async_word_arrow || self.identifier_arrow_at(self.pos)) {
+    fn expression_inner(
+        &mut self,
+        min: u8,
+        stop_before_simple_assignment: bool,
+    ) -> Result<Expr, JsError> {
+        let async_prefix =
+            min <= 2 && self.at("async") && self.lookahead(1).is_some_and(|next| !next.newline);
+        let async_word_arrow = async_prefix && self.identifier_arrow_at(1);
+        if min <= 2 && (async_word_arrow || self.identifier_arrow_at(0)) {
             if async_word_arrow {
                 self.advance(1);
             }
@@ -1314,8 +1312,7 @@ impl Parser {
 
         let async_parens = async_prefix
             && self
-                .tokens
-                .get(self.pos + 1)
+                .lookahead(1)
                 .is_some_and(|next| next.kind == TokenKind::Punct("("));
         let mut left = if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
             if min > 10 || !self.allow_in {
@@ -1331,7 +1328,7 @@ impl Parser {
             self.advance(if async_parens { 2 } else { 1 });
             let awaits = self.await_count;
             let yields = self.yield_count;
-            let (parts, trailing) = self.cover()?;
+            let (mut parts, trailing) = self.cover()?;
             if self.at("=>") && !self.current().newline {
                 if self.yield_count != yields {
                     return Err(self.error("yield is not allowed in arrow parameters"));
@@ -1353,12 +1350,11 @@ impl Parser {
                 {
                     return Err(self.error("Invalid parenthesized expression"));
                 }
-                let mut parts = parts.into_iter();
-                let mut inner = parts.next().unwrap();
-                for part in parts {
-                    inner =
-                        self.checked_expression(Expr::Sequence(Box::new(inner), Box::new(part)))?;
-                }
+                let inner = if parts.len() == 1 {
+                    parts.pop().unwrap()
+                } else {
+                    self.checked_expression(Expr::Sequence(parts))?
+                };
                 Expr::Group(Box::new(inner))
             };
             self.finish_unary(self.checked_expression(primary)?)?
@@ -1383,12 +1379,55 @@ impl Parser {
             if prec < min || matches!(left, Expr::Yield { .. }) && op != "," {
                 break;
             }
+            let simple_assignment = op == "=" && assignable(&left);
+            if simple_assignment && stop_before_simple_assignment {
+                break;
+            }
             if op == "**" && matches!(left, Expr::Await(_)) {
                 return Err(
                     self.error("Await on the left side of exponentiation requires parentheses")
                 );
             }
             self.advance(1);
+            if prec == 1 {
+                // Commas separate assignment expressions. Keep the list flat so
+                // its length does not consume AST depth.
+                let mut terms = vec![left];
+                loop {
+                    terms.push(self.expression(2)?);
+                    if !self.eat(",") {
+                        break;
+                    }
+                }
+                return Ok(Expr::Sequence(terms));
+            }
+            if simple_assignment {
+                // A chain of ordinary '=' assignments is right associative.
+                // Scan the targets at one parser depth, then rebuild the usual
+                // bounded assignment tree for reference and name semantics.
+                let mut targets = Vec::new();
+                let mut value = loop {
+                    let right = self.expression_with_assignment_boundary(2, true)?;
+                    if !self.at("=") || !assignable(&right) {
+                        break right;
+                    }
+                    if targets.len() + 2 >= MAX_AST_DEPTH {
+                        return Err(self.error("AST nesting limit exceeded"));
+                    }
+                    targets.push(left);
+                    left = right;
+                    self.advance(1);
+                };
+                for target in targets.into_iter().chain(std::iter::once(left)).rev() {
+                    value = self.checked_expression(Expr::Assign(
+                        "=",
+                        Box::new(target),
+                        Box::new(value),
+                    ))?;
+                }
+                left = value;
+                continue;
+            }
             let right = self.expression(if right_assoc { prec } else { prec + 1 })?;
             let mixing = |value: &Expr, operators: &[&str]| matches!(value,Expr::Binary(operator,..)if operators.contains(operator));
             if (op == "??" && (mixing(&left, &["&&", "||"]) || mixing(&right, &["&&", "||"])))
@@ -1399,9 +1438,7 @@ impl Parser {
                     "Nullish coalescing cannot mix with logical operators without parentheses",
                 ));
             }
-            left = self.checked_expression(if prec == 1 {
-                Expr::Sequence(Box::new(left), Box::new(right))
-            } else if prec == 2 {
+            left = self.checked_expression(if prec == 2 {
                 if op == "=" && matches!(left, Expr::Array(..) | Expr::Object(..)) {
                     let pattern = self.pattern(left, false)?;
                     Expr::Destructure(pattern, Box::new(right))
@@ -1653,14 +1690,14 @@ impl Parser {
     }
     fn async_function_ahead(&self) -> bool {
         self.at("async")
-            && self.tokens.get(self.pos + 1).is_some_and(|next| {
+            && self.lookahead(1).is_some_and(|next| {
                 !next.newline && matches!(&next.kind, TokenKind::Word(word) if word == "function")
             })
     }
 
     fn async_method_ahead(&self) -> bool {
         self.at("async")
-            && self.tokens.get(self.pos + 1).is_some_and(|next| {
+            && self.lookahead(1).is_some_and(|next| {
                 !next.newline
                     && matches!(
                         next.kind,
@@ -1683,7 +1720,7 @@ impl Parser {
         } else {
             return None;
         };
-        match &self.tokens.get(self.pos + 1)?.kind {
+        match &self.lookahead(1)?.kind {
             TokenKind::Word(_)
             | TokenKind::EscapedWord(_)
             | TokenKind::String(_)
@@ -1712,14 +1749,14 @@ impl Parser {
             return self.template(None);
         }
         if self.at("/") || self.at("/=") {
-            let slash = &self.tokens[self.pos];
+            let slash = &self.tokens[0];
             let (source, flags) = self.lexer.read_regexp(slash)?;
             let program = crate::regexp::compile(source, flags).map_err(|mut error| {
                 error.line = Some(slash.line);
                 error.column = Some(slash.column);
                 error
             })?;
-            self.tokens.truncate(self.pos);
+            self.tokens.clear();
             self.fill();
             return Ok(Expr::RegExp(program));
         }
@@ -1753,7 +1790,7 @@ impl Parser {
                 self.expect(")")?;
                 return self.checked_expression(Expr::DynamicImport(Box::new(specifier)));
             }
-            if self.at(".") && self.tokens.get(self.pos + 1).is_some_and(|token| {
+            if self.at(".") && self.lookahead(1).is_some_and(|token| {
                 matches!(&token.kind, TokenKind::Word(phase) if phase == "defer" || phase == "source")
             }) {
                 return Err(self.error("Deferred and source-phase dynamic imports are not implemented"));
@@ -2067,12 +2104,12 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                             .map(|p| (Ast::Pattern(&p.pattern), child_depth)),
                     );
                 }
-                Expr::Member(a, b)
-                | Expr::Binary(_, a, b)
-                | Expr::Assign(_, a, b)
-                | Expr::Sequence(a, b) => {
+                Expr::Member(a, b) | Expr::Binary(_, a, b) | Expr::Assign(_, a, b) => {
                     pending.push((Ast::Expression(a), child_depth));
                     pending.push((Ast::Expression(b), child_depth));
+                }
+                Expr::Sequence(terms) => {
+                    pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
                 Expr::Call(target, args) | Expr::New(target, args) => {
                     pending.push((Ast::Expression(target), child_depth));

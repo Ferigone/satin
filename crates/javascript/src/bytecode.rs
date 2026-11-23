@@ -1096,6 +1096,7 @@ enum Emit<'a> {
     Named(&'a Expr, &'a JsString),
     Reference(&'a Expr, bool),
     Instruction(Op),
+    Sequence(&'a [Expr]),
     ShortCircuit(&'static str, &'a Expr),
     Patch(usize, &'static str),
     Conditional(&'a Expr, &'a Expr),
@@ -1160,6 +1161,13 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 }
             }
             I(op) => out.push(op),
+            Emit::Sequence(terms) => {
+                let (first, rest) = terms.split_first().expect("comma expression has operands");
+                if !rest.is_empty() {
+                    pending.extend([Emit::Sequence(rest), I(Op::Pop)]);
+                }
+                pending.push(E(first));
+            }
             Emit::Patch(index, kind) => {
                 out[index] = match kind {
                     "&&" => Op::JumpFalse(out.len()),
@@ -1516,7 +1524,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Conditional(test, yes, no) => {
                     pending.extend([Emit::Conditional(yes, no), E(test)])
                 }
-                Expr::Sequence(a, b) => pending.extend([E(b), I(Op::Pop), E(a)]),
+                Expr::Sequence(terms) => pending.push(Emit::Sequence(terms)),
             },
         }
     }

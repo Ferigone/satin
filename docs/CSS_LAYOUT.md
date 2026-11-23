@@ -48,6 +48,16 @@ A link URL resolves once per element and is shared across text fragments. Link m
 
 This stage covers a subset of horizontal left-to-right layout. Sticky positioning, logical insets, right-to-left layout and writing modes, full static positions for absolute boxes in Flexbox and Grid, positioned fragmentation, 3D transforms and perspective, masks, CSS `clip-path`, rounded clips, and native scrollbars remain open. [CSS Positioned Layout Level 3](https://www.w3.org/TR/css-position-3/) · [CSS Transforms Level 1](https://www.w3.org/TR/css-transforms-1/) · [CSS Overflow Level 3](https://www.w3.org/TR/css-overflow-3/)
 
+## Logical box properties
+
+For horizontal writing, Satin maps logical dimensions, margins, padding, and insets onto the equivalent physical properties. Physical and logical declarations compete in the same cascade, including source order and `!important`. Inline start and end follow each element's computed `direction`, including inherited direction and HTML `dir`. Inline styles and computed styles expose the corresponding logical properties. CSSOM serialization across mixed shorthand and longhand declarations is partial. Vertical writing modes and bidirectional text layout remain open. [CSS Logical Properties and Values Level 1](https://www.w3.org/TR/css-logical-1/#box)
+
+The channel-toolbar fixture matches Chrome 157.0.8103.79 for geometry and live CSSOM updates. The pinned Web Platform Tests fixture covers specified and computed values with custom properties. [Toolbar fixture](../crates/engine/tests/fixtures/css_logical.html) · [Web Platform Tests source](https://github.com/web-platform-tests/wpt/blob/9e1907a13cbbc338975302097a4bafcbc4d12dc5/css/css-logical/logicalprops-with-variables.html) · [License](../crates/engine/tests/fixtures/wpt-url/LICENSE.md)
+
+## Flex item minimums
+
+Computed scrollable overflow on a flex item's main axis gives it a zero automatic content-box minimum. This lets the viewport of a scrolling pane shrink to its assigned space while preserving border, padding, and explicit minimum sizes. A main axis with visible or clipped overflow keeps a content-based minimum. The preview-caption and chat-pane fixture matches 44 rectangle coordinates in Chrome 157.0.8103.79. [CSS Flexible Box Layout Level 1](https://drafts.csswg.org/css-flexbox-1/#min-size-auto) · [Reference fixture](../crates/engine/tests/fixtures/css_flex_overflow_minimum.html)
+
 ## Other limits at alpha.6
 
 At alpha.6, remaining Grid features included named lines and areas, `grid-template-areas`, `auto-fit`, `auto-fill`, `fit-content()`, subgrid and masonry, baseline alignment, vertical writing modes, fragmentation, and replaced-element sizing with aspect ratios and constraints on both axes. The Grid feature notes describe subsequent additions. CSS Syntax, Selectors, CSSOM, and Flexbox have partial coverage. Parent-child margin collapsing, full bidirectional and Unicode text support, broader font matching, and the CSS Font Loading API remain open at this stage. [Grid](GRID.md) · [CSSOM View](CSSOM_VIEW.md) · [Fonts](FONTS.md)

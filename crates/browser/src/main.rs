@@ -157,7 +157,31 @@ fn run() -> Result<(), String> {
         }
         println!(
             "{}",
-            serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"url":page.url,"title":page.title(),"nodes":page.document.nodes.len(),"commands":layout.commands.len(),"links":layout.links.len(),"document_height":layout.height,"layout_limited":layout.limited,"paint_limited":paint_limited,"svg":{"scenes":svg_scenes,"unsupported":svg_unsupported},"resources":page.stats.resources,"bytes":page.stats.bytes,"skipped_resources":page.stats.skipped_resources,"load_ms":page.stats.elapsed_ms,"glyph_cache_bytes":fonts.cache_bytes(),"background":[layout.background.0,layout.background.1,layout.background.2],"javascript":{"realm":runtime.is_some(),"executed_scripts":runtime.as_ref().map_or(0, ScriptRuntime::executed_scripts),"pending_requests":runtime.as_ref().map_or(0,ScriptRuntime::pending_network),"diagnostics":runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()}})
+            serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "url": page.url,
+                "title": page.title(),
+                "nodes": page.document.nodes.len(),
+                "commands": layout.commands.len(),
+                "links": layout.links.len(),
+                "document_height": layout.height,
+                "layout_limited": layout.limited,
+                "paint_limited": paint_limited,
+                "svg": { "scenes": svg_scenes, "unsupported": svg_unsupported },
+                "resources": page.stats.resources,
+                "bytes": page.stats.bytes,
+                "skipped_resources": page.stats.skipped_resources,
+                "load_ms": page.stats.elapsed_ms,
+                "glyph_cache_bytes": fonts.cache_bytes(),
+                "background": [layout.background.0, layout.background.1, layout.background.2],
+                "media": runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
+                "javascript": {
+                    "realm": runtime.is_some(),
+                    "executed_scripts": runtime.as_ref().map_or(0, ScriptRuntime::executed_scripts),
+                    "pending_requests": runtime.as_ref().map_or(0, ScriptRuntime::pending_network),
+                    "diagnostics": runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()
+                }
+            })
         );
         return Ok(());
     }
