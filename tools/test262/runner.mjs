@@ -26,9 +26,12 @@ export function metadata(source) {
     parsed[key] ??= [];
   }
   if (parsed.flags.includes('noStrict') && parsed.flags.includes('onlyStrict')) throw new Error('conflicting strictness flags');
-  if (parsed.flags.includes('raw') && (parsed.flags.includes('onlyStrict') || parsed.includes.length)) throw new Error('raw test cannot use includes/onlyStrict');
-  if (parsed.negative) {
-    if (!['parse', 'early', 'runtime', 'resolution'].includes(parsed.negative.phase) || typeof parsed.negative.type !== 'string') {
+  if (parsed.flags.includes('raw') && (parsed.flags.includes('onlyStrict') || parsed.includes.length)) {
+    throw new Error('raw test cannot use includes or onlyStrict');
+  }
+  if (Object.hasOwn(parsed, 'negative')) {
+    if (!parsed.negative || !['parse', 'early', 'runtime', 'resolution'].includes(parsed.negative.phase) ||
+        typeof parsed.negative.type !== 'string' || !parsed.negative.type) {
       throw new Error('unsupported negative-test metadata shape');
     }
   }
@@ -236,7 +239,13 @@ async function moduleGraph(worker, rootPath, request, readCanonical) {
   return { module_files: files, module_edges: edges };
 }
 
+const isTestScript = path => path.endsWith('.js') && !posix.basename(path).includes('_FIXTURE');
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
 export async function run(options) {
+  const workerPath = resolve(options.worker);
+  const workerSha256 = sha256(await readFile(workerPath));
+  const runnerSha256 = sha256(await readFile(new URL(import.meta.url)));
   const root = resolve(options.test262);
   const revision = git(root, ['rev-parse', 'HEAD']).trim();
   if (revision !== PINNED_REVISION) throw new Error(`expected Test262 ${PINNED_REVISION}, got ${revision}`);
@@ -259,10 +268,11 @@ export async function run(options) {
     under(resolve(root, 'test'), path);
     if (name.endsWith('.js')) {
       if (!hashes.has(rel)) throw new Error(`missing test: ${rel}`);
+      if (!isTestScript(rel)) throw new Error(`module fixtures are not standalone tests: ${rel}`);
       selected.add(rel);
     } else {
       const prefix = `${rel.replace(/\/$/, '')}/`;
-      const found = [...hashes.keys()].filter(file => file.startsWith(prefix) && file.endsWith('.js') && !file.split('/').at(-1).includes('_FIXTURE'));
+      const found = [...hashes.keys()].filter(file => file.startsWith(prefix) && isTestScript(file));
       if (!found.length) throw new Error(`empty/missing test scope: ${rel}`);
       for (const file of found) selected.add(file);
     }
@@ -296,7 +306,7 @@ export async function run(options) {
     }
     return dynamicBundleCache.get(prefix);
   };
-  const worker = new Worker(resolve(options.worker), options.timeoutMs);
+  const worker = new Worker(workerPath, options.timeoutMs);
   const results = [];
   const start = Date.now();
   try {
@@ -311,13 +321,13 @@ export async function run(options) {
         const unsupported = unsupportedReason(meta, variant);
         if (unsupported) { results.push({ ...base, status: 'unsupported', reason: unsupported }); continue; }
         const parseOnly = ['parse', 'early'].includes(meta.negative?.phase);
-        const setup = [];
-        if (!parseOnly && variant !== 'raw') {
-          const names = ['sta.js', 'assert.js', ...(meta.flags.includes('async') ? ['doneprintHandle.js'] : []), ...meta.includes];
-          for (const name of names) setup.push(await setupFile(name));
-        }
-        const request = { id: `${path}#${variant}`, source, setup, strict: variant === 'strict', parse_only: parseOnly, async_test: meta.flags.includes('async'), max_instructions: options.maxInstructions };
         try {
+          const setup = [];
+          if (!parseOnly && !meta.flags.includes('raw')) {
+            const names = ['assert.js', 'sta.js', ...(meta.flags.includes('async') ? ['doneprintHandle.js'] : []), ...meta.includes];
+            for (const name of names) setup.push(await setupFile(name));
+          }
+          const request = { id: `${path}#${variant}`, source, setup, strict: variant === 'strict', parse_only: parseOnly, async_test: meta.flags.includes('async'), max_instructions: options.maxInstructions };
           if (variant === 'module') {
             request.module_goal = true;
             request.link_only = meta.negative?.phase === 'resolution';
@@ -342,13 +352,16 @@ export async function run(options) {
   } finally { worker.stop(); blobs.close(); }
   const counts = {};
   for (const result of results) counts[result.status] = (counts[result.status] ?? 0) + 1;
-  const workerBytes = await readFile(resolve(options.worker));
+  if (sha256(await readFile(workerPath)) !== workerSha256) {
+    throw new Error('worker binary changed during the run; no report written');
+  }
   const report = {
     schema: 1, engine: 'independent Rust Browser JavaScript VM',
     test262Revision: revision, fixtureBytesVerifiedAgainstGit: true, fixtureSource: 'immutable Git blobs; checkout EOL settings ignored',
-    workerSha256: createHash('sha256').update(workerBytes).digest('hex'),
+    workerSha256, runnerSha256,
     timestampUtc: new Date().toISOString(), durationMs: Date.now() - start,
     selection: { paths: options.paths, offset: options.offset, limit: options.limit, availableFiles: allFiles.length, testedFiles: files.length },
+    limits: { timeoutMs: options.timeoutMs, maxInstructions: options.maxInstructions },
     units: 'test variants; default scripts run sloppy and strict, modules run once',
     counts, totalVariants: results.length,
     // All selected variants stay in the denominator, including missing features and harness failures.
@@ -380,6 +393,8 @@ export function parseArgs(args) {
   for (const key of ['offset', 'timeoutMs', 'maxInstructions']) {
     if (!Number.isSafeInteger(options[key]) || options[key] < (key === 'offset' ? 0 : 1)) throw new Error(`invalid ${key}`);
   }
+  if (options.timeoutMs > 2_147_483_647) throw new Error('invalid timeoutMs: exceeds Node timer range');
+  if (options.maxInstructions > 100_000_000) throw new Error('invalid maxInstructions: exceeds worker limit');
   if (options.limit !== null && (!Number.isSafeInteger(options.limit) || options.limit < 1)) throw new Error('invalid limit');
   return options;
 }

@@ -14,7 +14,7 @@ npm --prefix tools/test262 ci --ignore-scripts --no-audit --no-fund
 node tools/test262/runner.mjs --test262 PATH_TO_TEST262 --worker target/release/rb-js.exe --path language/expressions/addition --path language/expressions/multiplication --path language/expressions/subtraction --path language/expressions/strict-equals --path language/statements/if --output target/test262/report.json
 ```
 
-The runner prepares sloppy and strict variants according to the `noStrict`, `onlyStrict`, `raw`, and `module` flags. Non-raw variants load upstream `sta.js`, `assert.js`, and the requested `includes`. Non-raw `async` variants also load upstream `doneprintHandle.js`. Parse and early errors are checked before execution. The harness must succeed before a negative runtime test can count its expected error.
+The runner prepares sloppy and strict variants according to the `noStrict`, `onlyStrict`, `raw`, and `module` flags. A `module, raw` test still uses the module grammar but loads no harness scripts. Non-raw variants load upstream `assert.js`, then `sta.js`, followed by the requested `includes`. Non-raw `async` variants also load upstream `doneprintHandle.js` before `includes`. Parse and early errors are checked before execution. The harness must succeed before a negative runtime test can count its expected error.
 
 ## Modules
 
@@ -36,9 +36,9 @@ Timers and external worker or agent hosts are unsupported. Unsupported language 
 
 ## Reports and limits
 
-The report records the pinned revision, worker SHA-256, selection, results per variant, and resource limits. Pass rates apply to the selected paths. Exit code 1 indicates at least one non-passing result. Exit code 2 indicates a configuration or runner failure.
+The report records the pinned revision, worker and runner SHA-256, selection, results per variant, and configured timeout and instruction limits. Pass rates apply to the selected paths. Exit code 1 indicates at least one non-passing result. Exit code 2 indicates a configuration or runner failure.
 
-Repeat `--path` to select paths relative to the Test262 `test` directory. Use `--limit` and `--offset` to select a subset. The default `--timeout-ms` is 3,000 and the default `--instructions` is 1,000,000. Fixture files are excluded from the test selection.
+Repeat `--path` to select paths relative to the Test262 `test` directory. Use `--limit` and `--offset` to select a subset. The default `--timeout-ms` is 3,000 and the default `--instructions` is 1,000,000. `_FIXTURE` files are excluded from directory selections and cannot be requested as standalone tests.
 
 The runner sends at most one request at a time. JSONL requests are capped at 16 MiB. The worker bounds the execution budget to 1–100,000,000 instructions, charges native work and string copies, and limits each checkpoint to 10,000 jobs. The VM queue defaults to 4,096 jobs. Reaction and unhandled-rejection limits also apply. The log holds up to 64 entries, each with up to 2,048 UTF-16 units of preview.
 
@@ -52,7 +52,7 @@ From the repository root, pass the baseline report first:
 node tools/test262/delta.mjs target/test262/baseline.json target/test262/candidate.json
 ```
 
-The comparator needs only Node and the two schema-1 JSON reports. It rejects different Test262 revisions, `--path` filters, offsets, or limits; path filter order and duplicate filters do not matter. Other spellings of a path must be kept identical between runs. The JSON delta records the revision, filters, and both worker hashes (if present). Schema-1 reports do not record `--timeout-ms` or `--instructions`, so run both workers with the same values. The comparator cannot check those budgets.
+The comparator needs only Node and the two schema-1 JSON reports. It rejects different Test262 revisions, `--path` filters, offsets, or selection limits; path filter order and duplicate filters do not matter. Other spellings of a path must be kept identical between runs. The JSON delta records the revision, filters, and worker and runner hashes (if present). It also rejects unequal `--timeout-ms` or `--instructions` values when both reports record them. Comparisons involving legacy reports without budgets are marked `limits.verified: false`.
 
 The delta compares statuses for each `(path, variant)` pair, including a `null` variant for invalid metadata. It ignores test order, timings, and diagnostic text.
 

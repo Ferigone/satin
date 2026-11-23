@@ -68,6 +68,21 @@ test('revision, path, offset and limit mismatches are named in the rejection', (
   }
 });
 
+test('budget changes are refused and comparisons to legacy reports flag unverified limits', () => {
+  const limits = { timeoutMs: 3000, maxInstructions: 1_000_000 };
+  const measured = { ...baseline, limits, runnerSha256: 'a'.repeat(64) };
+  assert.deepEqual(compareReports(measured, { ...candidate, limits }).limits, {
+    baseline: limits, candidate: limits, verified: true,
+  });
+  const legacy = compareReports(measured, candidate);
+  assert.deepEqual(legacy.limits, { baseline: limits, candidate: null, verified: false });
+  assert.deepEqual(legacy.runnerSha256, { baseline: 'a'.repeat(64), candidate: null });
+  assert.throws(() => compareReports(measured, {
+    ...candidate, limits: { timeoutMs: 1, maxInstructions: 2000 },
+  }), /scope mismatch:\ntimeoutMs: baseline 3000, candidate 1\nmaxInstructions: baseline 1000000, candidate 2000/);
+  assert.throws(() => compareReports(measured, { ...candidate, limits: null }), /candidate: invalid limits/);
+});
+
 test('malformed reports and duplicate keys are rejected rather than silently merged', () => {
   assert.throws(() => compareReports({ ...baseline, schema: 2 }, candidate), /baseline: expected report schema 1/);
   assert.throws(() => compareReports(baseline, { ...candidate, selection: {} }), /candidate: invalid selection/);
