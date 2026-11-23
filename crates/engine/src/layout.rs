@@ -9,6 +9,7 @@ use crate::{
 };
 use std::{collections::HashMap, sync::Arc};
 mod controls;
+mod floats;
 mod grid_template;
 mod intersections;
 mod positioning;
@@ -338,6 +339,14 @@ impl Layout {
             anchors: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             grid_text: HashMap::new(),
+            floats: floats::FloatContext::default(),
+            float_work_remaining: page
+                .document
+                .nodes
+                .len()
+                .saturating_mul(64)
+                .saturating_add(512)
+                .min(1_000_000),
             recursion: 0,
             work_remaining: page
                 .document
@@ -608,6 +617,8 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     intrinsic: Vec<Option<(f32, f32)>>,
     grid_text: HashMap<NodeId, GridText>,
+    floats: floats::FloatContext,
+    float_work_remaining: usize,
     recursion: usize,
     work_remaining: usize,
     limited: bool,
@@ -2547,12 +2558,23 @@ impl Builder<'_> {
         } else {
             href
         };
+        // Flex/grid items are laid out by their own formatter, not this
+        // normal-flow child path.
+        if s.float != css::Float::None && doc.nodes[id.0].parent != Some(doc.root) {
+            self.place_float(id, line, href);
+            return;
+        }
         if matches!(s.display, Display::Block | Display::Flex | Display::Grid) {
             self.flush(line, false);
             let top = s.margin[0].resolve(line.width, s.font_size).unwrap_or(0.);
-            if let Some(previous) = line.previous_margin {
-                line.y -= previous + top - collapse_margins(previous, top);
-            }
+            let hypothetical = line.y
+                - line.previous_margin.map_or(0., |previous| {
+                    previous + top - collapse_margins(previous, top)
+                });
+            line.y = match self.floats.clearance(s.clear.sides(line.parent.rtl)) {
+                Some(bottom) if hypothetical + top < bottom => bottom - top,
+                _ => hypothetical,
+            };
             line.y += self.block(
                 id,
                 line.x,
@@ -2652,6 +2674,36 @@ impl Builder<'_> {
         self.recursion -= 1;
         height
     }
+    fn replaced_auto_border_width(
+        &self,
+        id: NodeId,
+        available: f32,
+        c: Constraints,
+        m: BoxMetrics,
+    ) -> Option<f32> {
+        let s = &self.styles[id.0];
+        let width = if self.is_replaced_image(id) {
+            let (nw, nh) = self.image_size(id);
+            s.height
+                .resolve_with_basis(c.containing_height, s.font_size)
+                .filter(|_| !self.is_canvas(id) || nh > 0.)
+                .map(|h| to_content(h, m.extra_y(), s.box_sizing) * nw / nh.max(1.))
+                .unwrap_or(nw)
+        } else if self.is_replaced_control(id) {
+            self.control_intrinsic(id).0
+        } else {
+            return None;
+        };
+        let extra = m.extra_x();
+        let mut width = width.max(0.);
+        if let Some(max) = s.max_width.resolve(available, s.font_size) {
+            width = width.min(to_content(max, extra, s.box_sizing));
+        }
+        if let Some(min) = s.min_width.resolve(available, s.font_size) {
+            width = width.max(to_content(min, extra, s.box_sizing));
+        }
+        Some(width + extra)
+    }
     fn block_inner(
         &mut self,
         id: NodeId,
@@ -2678,36 +2730,7 @@ impl Builder<'_> {
             && s.width == Length::Auto
         {
             let m = BoxMetrics::new(s, available, c);
-            let (nw, nh) = if replaced_image {
-                self.image_size(id)
-            } else {
-                self.control_intrinsic(id)
-            };
-            let content = if replaced_image {
-                s.height
-                    .resolve_with_basis(c.containing_height, s.font_size)
-                    .filter(|_| !self.is_canvas(id) || nh > 0.)
-                    .map(|h| to_content(h, m.extra_y(), s.box_sizing) * nw / nh.max(1.))
-                    .unwrap_or(nw)
-            } else {
-                nw
-            };
-            let mut w = content + m.extra_x();
-            if let Some(max) = s.max_width.resolve(available, s.font_size) {
-                w = w.min(if s.box_sizing == BoxSizing::BorderBox {
-                    max
-                } else {
-                    max + m.extra_x()
-                });
-            }
-            if let Some(min) = s.min_width.resolve(available, s.font_size) {
-                w = w.max(if s.box_sizing == BoxSizing::BorderBox {
-                    min
-                } else {
-                    min + m.extra_x()
-                });
-            }
-            c.width = Some(w);
+            c.width = self.replaced_auto_border_width(id, available, c, m);
         }
         let m = BoxMetrics::new(s, available, c);
         let ox = x + m.left;
@@ -2820,6 +2843,12 @@ impl Builder<'_> {
             };
             self.grid(id, cx, cy, m.width, [block, inline], href.clone())
         } else {
+            let independent = c.flex_item
+                || s.position.out_of_flow()
+                || s.float != css::Float::None
+                || s.overflow.iter().any(|o| o.scrollable())
+                || self.page.document.nodes[id.0].parent == Some(self.page.document.root);
+            let outer = independent.then(|| std::mem::take(&mut self.floats));
             let mut line = Line::new(cx, cy, m.width, s, explicit);
             if matches!(tag, "input" | "button" | "select" | "textarea")
                 && let Some(label) = self
@@ -2834,6 +2863,12 @@ impl Builder<'_> {
                 self.child(child, &mut line, href.clone());
             }
             self.flush(&mut line, false);
+            if let Some(outer) = outer {
+                if let Some(bottom) = self.floats.clearance([true, true]) {
+                    line.y = line.y.max(bottom);
+                }
+                self.floats = outer;
+            }
             (line.y - cy).max(0.)
         };
         let mut content = explicit.unwrap_or(natural);
@@ -2877,6 +2912,7 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
             commands: std::mem::take(&mut self.commands),
             positioned: std::mem::take(&mut self.positioned),
@@ -2904,6 +2940,7 @@ impl Builder<'_> {
         } else {
             self.block(id, 0., 0., available, href, c)
         };
+        self.floats = outer_floats;
         let width = if text {
             c.width.unwrap_or(available)
         } else {
@@ -2970,9 +3007,13 @@ impl Builder<'_> {
         } else {
             0.
         };
-        if s.wrap && line.used + space + f.width > line.width && !line.items.is_empty() {
+        if s.wrap
+            && !line.items.is_empty()
+            && line.used + space + f.width > self.float_interval(line).width()
+        {
             self.flush(line, false);
         }
+        self.fit_empty_line(line, f.width);
         self.pending_space(s, line, None, node);
         line.previous_margin = None;
         line.used += f.width;
@@ -3491,12 +3532,13 @@ impl Builder<'_> {
             if !line.items.is_empty() {
                 self.flush(line, false);
             }
+            let width = self.float_interval(line).width();
             let runs = self.fonts.break_word_text(
                 word,
                 s.font_size,
                 &s.font_request(),
                 &self.page.fonts,
-                line.width,
+                width,
             );
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
@@ -3516,16 +3558,21 @@ impl Builder<'_> {
         } else {
             0.
         };
-        if wrap && line.used + space + run.advance > line.width && !line.items.is_empty() {
+        if wrap
+            && !line.items.is_empty()
+            && line.used + space + run.advance > self.float_interval(line).width()
+        {
             self.flush(line, false);
         }
-        if wrap && s.break_words && run.advance > line.width && word.chars().nth(1).is_some() {
+        self.fit_empty_line(line, run.advance);
+        let width = self.float_interval(line).width();
+        if wrap && s.break_words && run.advance > width && word.chars().nth(1).is_some() {
             let runs = self.fonts.break_word_text(
                 word,
                 s.font_size,
                 &s.font_request(),
                 &self.page.fonts,
-                line.width,
+                width,
             );
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
@@ -3579,8 +3626,9 @@ impl Builder<'_> {
         }
         let height = (ascent + descent).max(0.);
         let baseline = line.y + ascent;
-        let extra = (line.width - line.used).max(0.);
-        let mut x = line.x
+        let slot = self.float_interval(line);
+        let extra = (slot.width() - line.used).max(0.);
+        let mut x = slot.left
             + match line.parent.align.as_str() {
                 "center" => extra / 2.,
                 "right" => extra,

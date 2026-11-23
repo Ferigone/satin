@@ -881,6 +881,8 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 
 const PROPERTIES: &[(&str, &str)] = &[
     ("display", "display"),
+    ("cssFloat", "float"),
+    ("clear", "clear"),
     ("position", "position"),
     ("top", "top"),
     ("right", "right"),
@@ -1178,6 +1180,8 @@ fn computed_value(
             .replace("inlineblock", "inline-block")
             .replace("inlineflex", "inline-flex")
             .replace("inlinegrid", "inline-grid"),
+        "float" => style.float.as_css().to_owned(),
+        "clear" => style.clear.as_css().to_owned(),
         "position" => format!("{:?}", style.position).to_ascii_lowercase(),
         "direction" => if style.rtl { "rtl" } else { "ltr" }.into(),
         "color" => color(style.color),

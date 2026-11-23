@@ -178,6 +178,66 @@ pub enum Display {
     Grid,
     InlineGrid,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Float {
+    #[default]
+    None,
+    Left,
+    Right,
+    InlineStart,
+    InlineEnd,
+}
+impl Float {
+    pub(crate) fn as_css(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::InlineStart => "inline-start",
+            Self::InlineEnd => "inline-end",
+        }
+    }
+    pub(crate) fn is_right(self, rtl: bool) -> bool {
+        match self {
+            Self::None | Self::Left => false,
+            Self::Right => true,
+            Self::InlineStart => rtl,
+            Self::InlineEnd => !rtl,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Clear {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+    InlineStart,
+    InlineEnd,
+}
+impl Clear {
+    pub(crate) fn as_css(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Both => "both",
+            Self::InlineStart => "inline-start",
+            Self::InlineEnd => "inline-end",
+        }
+    }
+    pub(crate) fn sides(self, rtl: bool) -> [bool; 2] {
+        match self {
+            Self::None => [false, false],
+            Self::Both => [true, true],
+            Self::Left => [true, false],
+            Self::Right => [false, true],
+            Self::InlineStart => [!rtl, rtl],
+            Self::InlineEnd => [rtl, !rtl],
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoxSizing {
     ContentBox,
@@ -286,6 +346,8 @@ pub enum GridAutoFlow {
 #[derive(Clone, Debug)]
 pub struct Style {
     pub display: Display,
+    pub float: Float,
+    pub clear: Clear,
     pub position: Position,
     pub inset: [Length; 4],
     pub z_index: Option<i32>,
@@ -360,6 +422,8 @@ impl Default for Style {
         static DEFAULT_FAMILIES: OnceLock<Arc<[FontFamily]>> = OnceLock::new();
         Self {
             display: Display::Inline,
+            float: Float::None,
+            clear: Clear::None,
             position: Position::Static,
             inset: [Length::Auto; 4],
             z_index: None,
@@ -2172,6 +2236,8 @@ enum Property {
     FontSize,
     Color,
     Display,
+    Float,
+    Clear,
     Background,
     Bold,
     Italic,
@@ -2255,6 +2321,8 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::FontSize,
     Property::Color,
     Property::Display,
+    Property::Float,
+    Property::Clear,
     Property::Background,
     Property::Bold,
     Property::Italic,
@@ -2393,6 +2461,8 @@ enum Value {
     FontStyle(FontStyle),
     Families(Arc<[FontFamily]>),
     Display(Display),
+    Float(Float),
+    Clear(Clear),
     Position(Position),
     Overflow(Overflow),
     ZIndex(Option<i32>),
@@ -2804,6 +2874,9 @@ impl Stylesheet {
             style.svg_overrides = Arc::new(values);
         }
         if style.position.out_of_flow() {
+            style.float = Float::None;
+        }
+        if style.position.out_of_flow() || style.float != Float::None {
             style.display = match style.display {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
@@ -3098,6 +3171,8 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
         FontSize => s.font_size = from.font_size,
         Color => s.color = from.color,
         Display => s.display = from.display,
+        Float => s.float = from.float,
+        Clear => s.clear = from.clear,
         Position => s.position = from.position,
         Top | Right | Bottom | Left => {
             s.inset[p as usize - Top as usize] = from.inset[source as usize - Top as usize]
@@ -3216,6 +3291,8 @@ fn apply_value(
         (Color, Value::Color(color)) => s.color = color.unwrap_or(parent.color),
         (Background, Value::Color(color)) => s.background = Some(color.unwrap_or(s.color)),
         (Display, Value::Display(v)) => s.display = *v,
+        (Float, Value::Float(v)) => s.float = *v,
+        (Clear, Value::Clear(v)) => s.clear = *v,
         (Position, Value::Position(v)) => s.position = *v,
         (Top | Right | Bottom | Left, Value::Length(v)) => {
             s.inset[p as usize - Top as usize] = l(v)
@@ -3354,6 +3431,8 @@ fn targets(name: &str) -> Vec<Property> {
         "color" => vec![Color],
         "background" | "background-color" => vec![Background],
         "display" => vec![Display],
+        "float" => vec![Float],
+        "clear" => vec![Clear],
         "font-size" => vec![FontSize],
         "font-weight" => vec![Bold],
         "font-style" => vec![Italic],
@@ -3996,6 +4075,23 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 None
             }
         }
+        Float => Some(Value::Float(match v {
+            "none" => crate::css::Float::None,
+            "left" => crate::css::Float::Left,
+            "right" => crate::css::Float::Right,
+            "inline-start" => crate::css::Float::InlineStart,
+            "inline-end" => crate::css::Float::InlineEnd,
+            _ => return None,
+        })),
+        Clear => Some(Value::Clear(match v {
+            "none" => crate::css::Clear::None,
+            "left" => crate::css::Clear::Left,
+            "right" => crate::css::Clear::Right,
+            "both" => crate::css::Clear::Both,
+            "inline-start" => crate::css::Clear::InlineStart,
+            "inline-end" => crate::css::Clear::InlineEnd,
+            _ => return None,
+        })),
         Display => Some(Value::Display(match v {
             "none" => crate::css::Display::None,
             "block" | "list-item" | "table" => crate::css::Display::Block,
