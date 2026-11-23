@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Waiting for document stream control</title>
+<p id="before">Old tree</p>
+<script>
+var trace = [];
+function recordResult() {
+    document.title = trace.join('|');
+}
+function rewrite() {
+    var oldRoot = document.documentElement;
+    var oldDocument = document;
+    trace.push('open:' + typeof document.open);
+    recordResult();
+    if (document.open() !== oldDocument || oldRoot.parentNode !== null) {
+        trace.push('bad-open');
+    }
+    trace.push('opened:' + document.readyState);
+    document.write('<!doctype html><title>Replacement</title><p id="new');
+    trace.push(document.getElementById('new') === null ? 'split-tag' : 'bad-tag');
+    document.write('">A &cop');
+    document.writeln('y;</p>');
+    trace.push(document.getElementById('new').textContent === 'A \u00a9' ? 'split-entity' : 'bad-entity');
+    document.writeln('<script id="written" type="text/javascript">');
+    document.writeln("trace.push('script:' + document.readyState + ':' + (document.currentScript.id === 'written'));");
+    trace.push('before-end');
+    document.writeln('</scr' + 'ipt>');
+    trace.push('after-end:' + (document.currentScript === null));
+    document.addEventListener('readystatechange', function () {
+        trace.push('ready:' + document.readyState);
+        if (document.readyState === 'interactive') {
+            queueMicrotask(function () { trace.push('ready-job'); });
+        }
+    });
+    document.addEventListener('readystatechange', function () {
+        trace.push('second-ready:' + document.readyState);
+    });
+    document.addEventListener('DOMContentLoaded', function () {
+        trace.push('dcl:' + document.readyState);
+    });
+    window.addEventListener('load', function (event) {
+        trace.push('load:' + document.readyState + ':' + (event.target === document));
+        setTimeout(recordResult, 0);
+    });
+    document.close();
+    trace.push('close-return:' + document.readyState);
+}
+window.addEventListener('load', function () {
+    setTimeout(rewrite, 0);
+}, {once: true});
+</script>
