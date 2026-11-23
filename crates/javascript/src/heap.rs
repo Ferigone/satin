@@ -38,6 +38,7 @@ impl Property {
 }
 pub(crate) enum ObjectKind {
     Ordinary,
+    RawJson(JsString),
     Array {
         length: u32,
         length_writable: bool,

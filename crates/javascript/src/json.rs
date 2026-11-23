@@ -314,6 +314,35 @@ fn parse(vm: &mut Vm, source: &JsString, reviver: Value) -> Result<Value, JsErro
         source,
     )
 }
+fn raw_json(vm: &mut Vm, value: &Value) -> Result<Value, JsError> {
+    let source = vm.to_string(value)?;
+    let units = source.as_utf16();
+    // Only a primitive JSON value is allowed, with no surrounding whitespace.
+    if !matches!(units.first(), Some(0x61..=0x7a | 0x30..=0x39 | 0x22 | 0x2d)) {
+        return Err(syntax(0, "invalid start of raw JSON"));
+    }
+    if !matches!(units.last(), Some(0x61..=0x7a | 0x30..=0x39 | 0x22)) {
+        return Err(syntax(units.len() - 1, "invalid end of raw JSON"));
+    }
+    parse(vm, &source, Value::Undefined)?;
+
+    vm.ensure_allocation(256)?;
+    let raw = vm.new_object_with_prototype(Value::Null)?;
+    vm.define_data_property(
+        raw.clone(),
+        "rawJSON",
+        Value::String(source.clone()),
+        false,
+        true,
+        false,
+    )?;
+    // The object is fresh and unexposed: install the internal brand and finish
+    // freezing it. Keep the validated original spelling, not the parsed value.
+    let object = vm.heap.object_mut(raw.as_object().unwrap())?;
+    object.kind = ObjectKind::RawJson(source);
+    object.extensible = false;
+    Ok(raw)
+}
 fn internalize(
     vm: &mut Vm,
     reviver: &Value,
@@ -578,6 +607,10 @@ impl Serializer {
             Value::String(string) => self.quote(vm, &string),
             Value::BigInt(_) => Err(JsError::type_error("Cannot stringify a BigInt value")),
             Value::Object(id) => {
+                if let ObjectKind::RawJson(source) = &vm.heap.object(id)?.kind {
+                    let source = source.clone();
+                    return self.emit(vm, source.as_utf16());
+                }
                 if self.ancestors.contains(&id) {
                     return Err(JsError::type_error("Cannot stringify a cyclic object"));
                 }
@@ -743,6 +776,17 @@ pub(crate) fn install(vm: &mut Vm) {
     method(vm, json.clone(), "parse", 2, |vm, _, args| {
         let source = vm.to_string(&args.first().cloned().unwrap_or_default())?;
         parse(vm, &source, args.get(1).cloned().unwrap_or_default())
+    });
+    method(vm, json.clone(), "rawJSON", 1, |vm, _, args| {
+        raw_json(vm, args.first().unwrap_or(&Value::Undefined))
+    });
+    method(vm, json.clone(), "isRawJSON", 1, |vm, _, args| {
+        Ok(Value::Bool(
+            args.first()
+                .and_then(Value::as_object)
+                .and_then(|id| vm.heap.object(id).ok())
+                .is_some_and(|object| matches!(object.kind, ObjectKind::RawJson(_))),
+        ))
     });
     method(vm, json, "stringify", 3, |vm, _, args| {
         let result = stringify(

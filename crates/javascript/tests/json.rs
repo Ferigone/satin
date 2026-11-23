@@ -7,13 +7,11 @@ fn run(source: &str) -> Value {
 #[test]
 fn json_has_the_standard_to_string_tag() {
     assert_eq!(
-        run(
-            r#"
+        run(r#"
             var desc = Object.getOwnPropertyDescriptor(JSON, Symbol.toStringTag);
             desc.value === "JSON" && !desc.writable && !desc.enumerable &&
                 desc.configurable && Object.prototype.toString.call(JSON) === "[object JSON]"
-            "#
-        ),
+            "#),
         Value::Bool(true)
     );
 }
@@ -200,6 +198,84 @@ fn reviver_context_is_empty_for_mutated_values() {
             r#"var text;JSON.parse('{"a":1,"b":2}',function(k,v,c){if(k==='a')this.b=3;if(k==='b')text=typeof c.source;return v;});text"#
         ),
         Value::from("undefined")
+    );
+}
+#[test]
+fn raw_json_is_branded_frozen_and_emitted_after_the_replacer() {
+    assert_eq!(
+        run(r#"
+            var observedHint;
+            var raw = JSON.rawJSON({
+                [Symbol.toPrimitive]: function(hint) {
+                    observedHint = hint;
+                    return "9007199254740993";
+                }
+            });
+            var desc = Object.getOwnPropertyDescriptor(raw, "rawJSON");
+            observedHint === "string" && JSON.isRawJSON(raw) &&
+                !JSON.isRawJSON(Object.create(raw)) &&
+                !JSON.isRawJSON({ rawJSON: raw.rawJSON }) &&
+                Object.getPrototypeOf(raw) === null && !Object.isExtensible(raw) &&
+                desc.value === "9007199254740993" &&
+                desc.enumerable && !desc.writable && !desc.configurable &&
+                JSON.stringify({ toJSON: function() { return raw; } }, function(key, value) {
+                    return value === raw ? "seen" : value;
+                }) === '"seen"' &&
+                JSON.stringify([{}, raw], function(key, value) {
+                    return key === "0" ? JSON.rawJSON("-0") : value;
+                }) === "[-0,9007199254740993]"
+            "#),
+        Value::Bool(true)
+    );
+}
+#[test]
+fn raw_json_uses_the_primitive_grammar_and_keeps_exact_utf16() {
+    let mut vm = Vm::new();
+    for text in ["", "1 ", "\t1", "[]", "{}", "+1", "01", "1e+", "1 2"] {
+        vm.set_global("text", Value::from(text)).unwrap();
+        assert_eq!(
+            vm.eval("JSON.rawJSON(text)").unwrap_err().kind,
+            ErrorKind::SyntaxError,
+            "{text:?}"
+        );
+    }
+    assert_eq!(
+        vm.eval("JSON.rawJSON({toString: function() { throw 42; }})")
+            .unwrap_err()
+            .thrown,
+        Some(Value::from(42))
+    );
+    let value = run(r#"JSON.stringify([JSON.rawJSON('"\ud800"'), JSON.rawJSON('"\\uDFFF"')])"#);
+    let mut expected = vec![91, 34, 0xd800, 34, 44];
+    expected.extend(r#""\uDFFF"]"#.encode_utf16());
+    assert_eq!(value.as_string().unwrap().as_utf16(), expected);
+}
+#[test]
+fn raw_json_preserves_the_parser_work_and_serializer_output_caps() {
+    let source = Value::from(format!("\"{}\"", "x".repeat(200)));
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 100,
+        ..VmLimits::default()
+    });
+    vm.set_global("text", source.clone()).unwrap();
+    assert_eq!(
+        vm.eval("JSON.rawJSON(text)").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
+    );
+
+    let mut vm = Vm::with_limits(VmLimits {
+        max_string_units: 300,
+        ..VmLimits::default()
+    });
+    vm.set_global("text", source).unwrap();
+    assert_eq!(
+        vm.eval("var raw = JSON.rawJSON(text); JSON.stringify(raw).length")
+            .unwrap(),
+        Value::from(202)
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify([raw, raw])").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
     );
 }
 #[test]
