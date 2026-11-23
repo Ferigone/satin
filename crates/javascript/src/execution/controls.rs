@@ -396,7 +396,15 @@ impl LoopState {
             return completed.map(Advance::Finish);
         }
         match self.phase {
-            Phase::Initial | Phase::Update => {
+            Phase::Initial => {
+                completed?;
+                let Op::For { lexical, .. } = op else {
+                    unreachable!()
+                };
+                self.scope = vm.next_for_iteration(env, self.scope, lexical)?;
+                self.test(vm, op)
+            }
+            Phase::Update => {
                 completed?;
                 self.test(vm, op)
             }
@@ -417,18 +425,7 @@ impl LoopState {
                     lexical, update, ..
                 } = op
                 {
-                    if !lexical.is_empty() {
-                        let scope = new_scope(vm, env)?;
-                        let bindings = &vm.heap.environment(self.scope).bindings;
-                        let bytes: usize = bindings.keys().map(|key| 192 + key.len() * 2).sum();
-                        vm.ensure_allocation(bytes)?;
-                        let bindings = vm.heap.environment(self.scope).bindings.clone();
-                        for name in bindings.keys() {
-                            vm.reserve_binding(name)?;
-                        }
-                        vm.heap.environment_mut(scope).bindings = bindings;
-                        self.scope = scope;
-                    }
+                    self.scope = vm.next_for_iteration(env, self.scope, lexical)?;
                     if let Some(update) = update {
                         self.phase = Phase::Update;
                         return Ok(Advance::child(update, self.scope, Resume::Loop(self)));

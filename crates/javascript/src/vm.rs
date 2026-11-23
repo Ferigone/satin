@@ -3316,6 +3316,29 @@ impl Vm {
         })
     }
 
+    pub(crate) fn next_for_iteration(
+        &mut self,
+        outer: EnvId,
+        current: EnvId,
+        lexical: &[(JsString, bool)],
+    ) -> Result<EnvId, JsError> {
+        // Only a `let` initializer creates per-iteration bindings. Keep its
+        // own environment (captured by closures in the initializer) separate.
+        if !lexical.iter().any(|(_, mutable)| *mutable) {
+            return Ok(current);
+        }
+        let bindings = &self.heap.environment(current).bindings;
+        let bytes: usize = bindings.keys().map(|key| 192 + key.len() * 2).sum();
+        self.ensure_allocation(384 + bytes)?;
+        let bindings = bindings.clone();
+        for key in bindings.keys() {
+            self.reserve_binding(key)?;
+        }
+        let mut next = Environment::new(Some(outer), EnvKind::Block, None);
+        next.bindings = bindings;
+        Ok(self.heap.allocate_env(next))
+    }
+
     // Keep control-flow temporaries off the recursive expression-dispatch frame.
     pub(crate) fn run_control_op(
         &mut self,
@@ -3423,6 +3446,7 @@ impl Vm {
                 if let Some(init) = initial {
                     self.run_chunk(init, iteration)?;
                 }
+                iteration = self.next_for_iteration(env, iteration, lexical)?;
                 loop {
                     self.tick()?;
                     if let Some(test) = test
@@ -3436,19 +3460,7 @@ impl Vm {
                     {
                         return Ok(completion);
                     }
-                    if !lexical.is_empty() {
-                        let bindings = self.heap.environment(iteration).bindings.clone();
-                        for key in bindings.keys() {
-                            self.reserve_binding(key)?;
-                        }
-                        let next = self.heap.allocate_env(Environment::new(
-                            Some(env),
-                            EnvKind::Block,
-                            None,
-                        ));
-                        self.heap.environment_mut(next).bindings = bindings;
-                        iteration = next;
-                    }
+                    iteration = self.next_for_iteration(env, iteration, lexical)?;
                     if let Some(update) = update {
                         self.expression_value(update, iteration)?;
                     }
