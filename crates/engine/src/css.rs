@@ -833,9 +833,9 @@ fn font_face_rule(body: &str) -> Option<FontFaceRule> {
                 if (1..=2).contains(&parts.len())
                     && let Some(a) = absolute_weight(parts[0])
                     && let Some(b) = absolute_weight(parts.get(1).copied().unwrap_or(parts[0]))
-                    && a <= b
                 {
-                    weight = [a, b];
+                    // CSS Fonts normalizes descending descriptor ranges before matching.
+                    weight = [a.min(b), a.max(b)];
                 }
             }
             "unicode-range" => {

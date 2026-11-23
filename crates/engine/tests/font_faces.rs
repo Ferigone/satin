@@ -264,6 +264,31 @@ fn variable_weight_uses_same_coordinates_for_advance_and_outline() {
 }
 
 #[test]
+fn font_weight_descriptor_normalizes_descending_variable_ranges() {
+    let fonts = Fonts::new().unwrap();
+    let request = rust_browser_engine::fonts::FontRequest {
+        families: Arc::from([FontFamily::Named("Audit".into())]),
+        weight: 550,
+        style: FontStyle::Normal,
+    };
+    for descriptor in [
+        "400 700",
+        "700 400",
+        "bold normal",
+        "400 700; font-weight: 700 0",
+    ] {
+        let set = font_set(
+            &format!("@font-face{{font-family:Audit;src:url(face);font-weight:{descriptor}}}"),
+            &[VARIABLE],
+        );
+        assert_eq!(set.entries()[0].rule.weight, [400, 700], "{descriptor}");
+        let run = fonts.shape_text("A", 40., &request, &set);
+        assert_close(run.advance, 24.);
+        assert_eq!(run.faces()[0].variation_weight(), Some(550), "{descriptor}");
+    }
+}
+
+#[test]
 fn decoder_rejects_truncation_and_declared_expansion_before_codec_work() {
     for bytes in [WOFF, WOFF2] {
         assert!(FontFace::decode(&bytes[..bytes.len() - 3]).is_err());
