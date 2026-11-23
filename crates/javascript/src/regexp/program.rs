@@ -40,6 +40,11 @@ enum Op {
         greedy: bool,
         exit: usize,
     },
+    DisjointClassRepeat {
+        minimum: usize,
+        maximum: Option<usize>,
+        exit: usize,
+    },
     BeginRepeat(usize, Range<usize>),
     EndRepeat(usize, usize, usize),
     Look {
@@ -71,6 +76,7 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
     };
     compiler.emit(pattern.body, flags, false);
     compiler.code.push(Op::Match);
+    specialize_disjoint_class_repeats(&mut compiler.code);
     let mut program = Program {
         source,
         flags,
@@ -83,6 +89,112 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
     };
     program.bytes = program.storage_size();
     program
+}
+
+fn specialize_disjoint_class_repeats(code: &mut [Op]) {
+    let mut pc = 0;
+    while pc < code.len() {
+        if let Op::Look { after, .. } = &code[pc] {
+            // Do not specialize forward or backward assertion bodies.
+            pc = *after;
+            continue;
+        }
+        if let Some(op) = disjoint_class_repeat_at(code, pc) {
+            code[pc] = op;
+        }
+        pc += 1;
+    }
+}
+
+fn disjoint_class_repeat_at(code: &[Op], pc: usize) -> Option<Op> {
+    let Op::ChooseRepeat {
+        minimum,
+        maximum,
+        greedy: true,
+        exit,
+        ..
+    } = &code[pc]
+    else {
+        return None;
+    };
+    let [
+        Op::BeginRepeat(_, captures),
+        Op::Class(members, negative, flags, ..),
+        Op::EndRepeat(..),
+    ] = code.get(pc + 1..*exit)?
+    else {
+        return None;
+    };
+    let Op::Character(Member::Point(delimiter), delimiter_flags) = code.get(*exit)? else {
+        return None;
+    };
+    let unsupported = Flags::IGNORE_CASE | Flags::UNICODE_SETS;
+    if !captures.is_empty()
+        || members.is_empty()
+        || *delimiter >= 128
+        || flags.has(unsupported)
+        || delimiter_flags.has(unsupported)
+        || flags.unicode() != delimiter_flags.unicode()
+    {
+        return None;
+    }
+    // For every shorter endpoint, the class accepted the next point and
+    // the mandatory literal would reject it. Unknown members prevent proof.
+    let class = members.iter().try_fold(0, |mask, &member| {
+        Some(mask | prefix::ascii_member(member)?)
+    })?;
+    let contains = class & (1u128 << *delimiter) != 0;
+    if contains != *negative {
+        return None;
+    }
+    Some(Op::DisjointClassRepeat {
+        minimum: *minimum,
+        maximum: *maximum,
+        exit: *exit,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Op;
+    use crate::JsString;
+
+    #[test]
+    fn disjoint_specialization_guards() {
+        let cases = [
+            (r"[^!]*!", "", true),
+            (r"[a-z]{2,9}!(?=z)", "u", true),
+            (r"(?<body>[^!]*!)", "", true),
+            (r"(?<=x)[^!]*!", "u", true),
+            (r"(?=[^!]*!)", "", false),
+            (r"(?![^!]*!)", "", false),
+            (r"(?<=![^!]+)", "u", false),
+            (r"(?<last>[ab])+!", "", false),
+            (r"([ab]?)*!", "", false),
+            (r"(?:[ab]|x?)*!", "", false),
+            (r"[^!]*!?", "", false),
+            (r"[ab]+a", "", false),
+            (r"(?i:x(?-i:[^a])*a)", "", false),
+            (r"[^!]*!", "i", false),
+            (r"[]*!", "", false),
+            (r".*!", "", false),
+            (r"[^!]*?!", "", false),
+            (r"[^é]*é", "u", false),
+            (r"[^!]*$", "", false),
+        ];
+        for (pattern, flags, expected) in cases {
+            let program =
+                super::super::compile(JsString::from(pattern), JsString::from(flags)).unwrap();
+            assert_eq!(
+                program
+                    .code
+                    .iter()
+                    .any(|op| matches!(op, Op::DisjointClassRepeat { .. })),
+                expected,
+                "/{pattern}/{flags}"
+            );
+        }
+    }
 }
 
 impl Compiler<'_> {
@@ -357,22 +469,7 @@ impl Matcher<'_> {
                 Op::Character(member, flags) => {
                     self.read(*flags, |ch| Ok(member_matches(*member, ch, *flags)))?
                 }
-                Op::Class(members, negative, flags, ascii) => self.read(*flags, |ch| {
-                    if ch < 128
-                        && let Some(mask) = ascii
-                    {
-                        // One exact lookup replaces the member tests below.
-                        vm.consume_work(1)?;
-                        return Ok(**mask & (1u128 << ch) != 0);
-                    }
-                    for member in members {
-                        vm.consume_work(1)?;
-                        if member_matches(*member, ch, *flags) {
-                            return Ok(!*negative);
-                        }
-                    }
-                    Ok(*negative)
-                })?,
+                Op::Class(..) => self.read_class(vm, op)?,
                 Op::Any(flags) => self.read(*flags, |ch| {
                     Ok(flags.has(Flags::DOT_ALL) || !line_terminator(ch))
                 })?,
@@ -439,6 +536,26 @@ impl Matcher<'_> {
                     }
                     true
                 }
+                Op::DisjointClassRepeat {
+                    minimum,
+                    maximum,
+                    exit,
+                } => {
+                    // pc is at BeginRepeat. No choices or capture/repeat
+                    // state are needed within this single consuming atom.
+                    let class = &self.program.code[self.pc + 1];
+                    let mut count = 0;
+                    while maximum.is_none_or(|maximum| count < maximum) {
+                        // Keep the ordinary atom-dispatch and member charges.
+                        vm.consume_work(1)?;
+                        if !self.read_class(vm, class)? {
+                            break;
+                        }
+                        count += 1;
+                    }
+                    self.pc = *exit;
+                    count >= *minimum
+                }
                 Op::BeginRepeat(slot, captures) => {
                     vm.consume_work(captures.len())?;
                     for index in captures.clone() {
@@ -504,6 +621,28 @@ impl Matcher<'_> {
         } else {
             Ok(false)
         }
+    }
+
+    fn read_class(&mut self, vm: &mut Vm, class: &Op) -> Result<bool, JsError> {
+        let Op::Class(members, negative, flags, ascii) = class else {
+            unreachable!("class read requires a class opcode");
+        };
+        self.read(*flags, |ch| {
+            if ch < 128
+                && let Some(mask) = ascii
+            {
+                // One exact lookup replaces the member tests below.
+                vm.consume_work(1)?;
+                return Ok(**mask & (1u128 << ch) != 0);
+            }
+            for member in members {
+                vm.consume_work(1)?;
+                if member_matches(*member, ch, *flags) {
+                    return Ok(!*negative);
+                }
+            }
+            Ok(*negative)
+        })
     }
 
     fn assert(&self, assertion: Assertion, flags: Flags) -> bool {

@@ -105,7 +105,7 @@ pub(super) fn class_ascii(members: &[Member], negated: bool, flags: Flags) -> Op
     Some(if negated { !mask } else { mask })
 }
 
-fn ascii_member(member: Member) -> Option<u128> {
+pub(super) fn ascii_member(member: Member) -> Option<u128> {
     let mask = match member {
         Member::Point(point) => range(point, point),
         Member::Range(first, last) => range(first, last),
