@@ -1872,6 +1872,21 @@ fn install_string(vm: &mut Vm) {
             vm.copy_string(&units[start..end])
         });
     }
+    method(vm, proto.clone(), "localeCompare", 1, |vm, this, args| {
+        if this.is_nullish() {
+            return Err(JsError::type_error(
+                "String method called on null or undefined",
+            ));
+        }
+        let lhs = vm.to_string(&this)?;
+        let rhs = vm.to_string(&arg(args, 0))?;
+        let order = crate::string_collation::compare(vm, lhs.as_utf16(), rhs.as_utf16())?;
+        Ok(Value::Number(match order {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        }))
+    });
     method(vm, proto.clone(), "repeat", 1, |vm, this, a| {
         let s = string_this(vm, this)?;
         let count = integer(vm, arg(a, 0))?;

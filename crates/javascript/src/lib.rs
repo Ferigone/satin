@@ -25,6 +25,7 @@ mod patterns;
 mod private;
 mod promise;
 mod regexp;
+mod string_collation;
 mod structured_clone;
 mod symbol;
 mod syntax;

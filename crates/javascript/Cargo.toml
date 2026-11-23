@@ -9,8 +9,9 @@ name = "rust_browser_javascript"
 path = "src/lib.rs"
 
 [dependencies]
+icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 num-bigint = "=0.4.6"
 num-traits = "0.2.19"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_Time"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Threading", "Win32_System_Time"] }
