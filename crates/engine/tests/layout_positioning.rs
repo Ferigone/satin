@@ -216,6 +216,20 @@ fn absolute_sides_stretch_auto_margins_and_out_of_flow_flex_grid() {
     close(r(&p, &l, "g").height, 30.);
     close(r(&p, &l, "grid").x, 0.);
 }
+
+#[test]
+fn absolute_auto_margins_distribute_negative_space_by_axis() {
+    let page = LoadedPage::from_html(
+        "https://position.test/",
+        include_str!("fixtures/css_abspos_auto_margins.html"),
+    );
+    let fonts = Fonts::new().unwrap();
+    let layout = Layout::build_with_viewport(&page, &fonts, Viewport::default());
+    assert!(!layout.limited);
+    rect(r(&page, &layout, "inline"), [50., 160., 120., 10.]);
+    rect(r(&page, &layout, "block"), [50., 30., 20., 80.]);
+}
+
 #[test]
 fn fixed_viewport_geometry_tracks_scroll_without_increasing_document_height() {
     let (p, l) = with_layout(
