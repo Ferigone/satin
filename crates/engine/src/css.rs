@@ -1857,35 +1857,76 @@ fn unescape_string(source: &str) -> Option<String> {
     Some(result)
 }
 fn nth_expression(source: &str) -> Option<(i32, i32)> {
-    if source.as_bytes().windows(3).any(|part| {
-        part[1] == 0
-            && (part[0].is_ascii_alphanumeric() || part[0] == b'-')
-            && (part[2].is_ascii_alphanumeric() || part[2] == b'-')
-    }) {
+    // CSS Syntax §6.2 distinguishes an integer dimension (2n), an ident
+    // (n-3), and a sign followed by an unsigned integer (n + 3). Preserve
+    // token boundaries: whitespace/comments cannot make `2 n` a dimension
+    // or supply the missing sign in `n 3`.
+    let source = trim_boundary(source);
+    let sign_len = usize::from(source.starts_with(['+', '-']));
+    let number_end = sign_len
+        + source.as_bytes()[sign_len..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    let (mut a, explicit_plus, ident_source) = if number_end > sign_len {
+        let number = source[..number_end].parse().ok()?;
+        let rest = &source[number_end..];
+        if trim_boundary(rest).is_empty() {
+            return Some((0, number));
+        }
+        if rest.starts_with('\0') {
+            return None;
+        }
+        (number, false, rest)
+    } else if let Some(rest) = source.strip_prefix('+') {
+        // A '+' delimiter can precede n, but not with a whitespace token.
+        (1, true, rest.trim_start_matches('\0'))
+    } else {
+        (1, false, source)
+    };
+    let mut offset = 0;
+    let ident = identifier(ident_source, &mut offset)?.to_ascii_lowercase();
+    let rest = trim_boundary(&ident_source[offset..]);
+    let ident_only = number_end == sign_len && !explicit_plus;
+    if ident_only && rest.is_empty() {
+        match ident.as_str() {
+            "odd" => return Some((2, 1)),
+            "even" => return Some((2, 0)),
+            _ => {}
+        }
+    }
+    let n = if ident_only && let Some(n) = ident.strip_prefix('-') {
+        a = -1;
+        n
+    } else {
+        &ident
+    };
+    let suffix = n.strip_prefix('n')?;
+    let b = if let Some(digits) = suffix.strip_prefix('-') {
+        if digits.is_empty() {
+            nth_offset(rest, true)?
+        } else if rest.is_empty() {
+            nth_offset(digits, true)?
+        } else {
+            return None;
+        }
+    } else if !suffix.is_empty() {
+        return None;
+    } else if rest.is_empty() {
+        0
+    } else {
+        let negative = rest.starts_with('-');
+        nth_offset(trim_boundary(rest.strip_prefix(['+', '-'])?), negative)?
+    };
+    Some((a, b))
+}
+
+fn nth_offset(digits: &str, negative: bool) -> Option<i32> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let s: String = source
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace() && *c != '\0')
-        .flat_map(char::to_lowercase)
-        .collect();
-    if s == "odd" {
-        return Some((2, 1));
-    }
-    if s == "even" {
-        return Some((2, 0));
-    }
-    if let Some((a, b)) = s.split_once('n') {
-        let a = match a {
-            "" | "+" => 1,
-            "-" => -1,
-            _ => a.parse().ok()?,
-        };
-        let b = if b.is_empty() { 0 } else { b.parse().ok()? };
-        Some((a, b))
-    } else {
-        Some((0, s.parse().ok()?))
-    }
+    let magnitude: i64 = digits.parse().ok()?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
 pub fn matches_selector(doc: &Document, id: NodeId, source: &str) -> bool {
     let clean = without_comments(source);
