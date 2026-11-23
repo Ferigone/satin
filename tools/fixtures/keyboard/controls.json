@@ -1,0 +1,17 @@
+[
+  {"action":"title","value":"Controls ready"},
+  {"action":"key","value":"Tab"},
+  {"action":"title","value":"Controls focus: first"},
+  {"action":"key","value":"Tab"},
+  {"action":"title","value":"Controls focus: second"},
+  {"action":"key","value":"Tab"},
+  {"action":"title","value":"Controls focus: run"},
+  {"action":"key","value":"Tab"},
+  {"action":"title","value":"Controls focus: tail"},
+  {"action":"key","value":"Tab","shift":true},
+  {"action":"title","value":"Controls focus: run"},
+  {"action":"key","value":"Enter"},
+  {"action":"title","value":"Controls Enter canceled"},
+  {"action":"key","value":"Enter"},
+  {"action":"title","value":"Controls button activated once"}
+]

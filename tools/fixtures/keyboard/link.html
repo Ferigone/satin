@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Link pending</title>
+<h1>Keyboard link</h1>
+<p>Use Tab to reach the link, then follow it with Enter.</p>
+<input id="before" aria-label="First field">
+<a id="placeholder">Placeholder without an href</a>
+<a href="destination.html" hidden>Hidden link</a>
+<a id="destination" href="destination.html">Visit the destination</a>
+<button id="after" type="button">Next control</button>
+<script>
+  const link = document.getElementById('destination');
+  let clicks = 0;
+  document.addEventListener('focusin', function (event) {
+    document.title = document.activeElement === event.target
+      ? 'Link focus: ' + event.target.id
+      : 'Link focus mismatch';
+  });
+  link.addEventListener('click', function (event) {
+    ++clicks;
+    if (event.target !== link || document.activeElement !== link || clicks > 2) {
+      event.preventDefault();
+      document.title = 'Link activation mismatch';
+    } else if (clicks === 1) {
+      event.preventDefault();
+      document.title = 'Link click canceled';
+    }
+  });
+  document.title = 'Link ready';
+</script>

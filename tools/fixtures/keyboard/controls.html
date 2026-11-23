@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Controls pending</title>
+<h1>Keyboard controls</h1>
+<p>Tab through the form controls and activate the default-order button.</p>
+<button id="run" type="button">Run</button>
+<button id="disabled" type="button" disabled>Disabled</button>
+<input type="hidden" id="hidden-input">
+<div style="display:none"><button id="hidden-child" type="button">Hidden</button></div>
+<button id="not-sequential" type="button" tabindex="-1">Not in the tab order</button>
+<input id="tail" aria-label="Last field">
+<button id="second" type="button" tabindex="2">Second</button>
+<input id="first" tabindex="1" aria-label="First field">
+<script>
+  const run = document.getElementById('run');
+  let enterCount = 0;
+  let clicks = 0;
+  document.addEventListener('focusin', function (event) {
+    document.title = document.activeElement === event.target
+      ? 'Controls focus: ' + event.target.id
+      : 'Controls focus mismatch';
+  });
+  run.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && ++enterCount === 1) {
+      event.preventDefault();
+      document.title = document.activeElement === run && clicks === 0
+        ? 'Controls Enter canceled'
+        : 'Controls cancellation mismatch';
+    }
+  });
+  run.addEventListener('click', function (event) {
+    document.title = ++clicks === 1 && enterCount === 2
+        && event.target === run && document.activeElement === run
+      ? 'Controls button activated once'
+      : 'Controls activation mismatch';
+  });
+  document.title = document.activeElement === document.body
+    ? 'Controls ready'
+    : 'Controls initial focus mismatch';
+</script>
