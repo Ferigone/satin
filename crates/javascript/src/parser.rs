@@ -463,6 +463,15 @@ impl Parser {
             _ => Err(self.error("Expected a property name")),
         }
     }
+    fn member_name(&mut self) -> Result<JsString, JsError> {
+        match self.current().kind.clone() {
+            TokenKind::Word(name) | TokenKind::EscapedWord(name) => {
+                self.advance(1);
+                Ok(name.into())
+            }
+            _ => Err(self.error("Expected an identifier name after '.'")),
+        }
+    }
     fn semi(&mut self) -> Result<(), JsError> {
         if self.eat(";") || self.at("}") || self.is_eof() || self.current().newline {
             Ok(())
@@ -1620,7 +1629,7 @@ impl Parser {
                 } else if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
                     ChainLink::PrivateMember(self.private_use()?, true)
                 } else {
-                    ChainLink::Member(Expr::Literal(Value::String(self.property_name()?)), true)
+                    ChainLink::Member(Expr::Literal(Value::String(self.member_name()?)), true)
                 };
                 e = self.chain_link(e, link)?;
             } else if matches!(self.current().kind, TokenKind::Template { head: true, .. }) {
@@ -1640,7 +1649,7 @@ impl Parser {
                         self.checked_expression(Expr::PrivateMember(Box::new(e), name))?
                     }
                 } else {
-                    let key = Expr::Literal(Value::String(self.property_name()?));
+                    let key = Expr::Literal(Value::String(self.member_name()?));
                     if matches!(e, Expr::Chain(..)) {
                         self.chain_link(e, ChainLink::Member(key, false))?
                     } else {

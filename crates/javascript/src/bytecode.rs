@@ -1470,7 +1470,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
                         let name = if anonymous(right) {
-                            if let Expr::Identifier(name) = ungroup(left) {
+                            if let Expr::Identifier(name) = left.as_ref() {
                                 Some(name)
                             } else {
                                 None
@@ -1484,7 +1484,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.push(I(Op::Set));
                     let right_evaluation = if *op == "="
                         && anonymous(right)
-                        && let Expr::Identifier(name) = ungroup(left)
+                        && let Expr::Identifier(name) = left.as_ref()
                     {
                         Emit::Named(right, name)
                     } else {

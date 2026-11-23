@@ -1968,7 +1968,11 @@ impl Vm {
         }
         Ok(())
     }
-    fn property_reference_key(&mut self, base: &Value, key: &Value) -> Result<PropertyKey, JsError> {
+    fn property_reference_key(
+        &mut self,
+        base: &Value,
+        key: &Value,
+    ) -> Result<PropertyKey, JsError> {
         if base.is_nullish() {
             return Err(JsError::type_error(
                 "Cannot access a property of null or undefined",

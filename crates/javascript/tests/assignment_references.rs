@@ -1,4 +1,4 @@
-use rust_browser_javascript::{Value, Vm};
+use rust_browser_javascript::{ErrorKind, Value, Vm};
 
 fn assert_script(source: &str) {
     let result = Vm::new()
@@ -119,5 +119,37 @@ fn suspended_assignment_keeps_the_uncoerced_key_alive() {
         vm.eval("iterator.next(7).done && called && object.x === 7")
             .unwrap(),
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn anonymous_assignment_names_require_an_ungrouped_identifier_target() {
+    assert_script(
+        r#"
+        let f, C, g, D;
+        (f) = function () {};
+        (C) ??= class {};
+        g = (function () {});
+        D ??= (class {});
+        f.name === "" && C.name === "" && g.name === "g" && D.name === "D";
+        "#,
+    );
+}
+
+#[test]
+fn dot_and_optional_dot_require_identifier_names() {
+    let mut vm = Vm::new();
+    for source in ["object.\"x\"", "object?.\"x\"", "object. 1", "object?. 1"] {
+        assert_eq!(
+            vm.check_syntax(source).unwrap_err().kind,
+            ErrorKind::SyntaxError,
+            "{source}"
+        );
+    }
+    assert_script(
+        r#"
+        const target = { "default": 1, 2: 3 };
+        target.default === 1 && target?.\u0064efault === 1 && target[2] === 3;
+        "#,
     );
 }
