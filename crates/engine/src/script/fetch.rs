@@ -768,15 +768,27 @@ impl FetchHost {
         streams: StreamHost,
         blobs: blobs::BlobFactory,
     ) -> Result<Self, JsError> {
+        let client = Url::parse(&page.url).unwrap_or_else(|_| page.base.clone());
+        Self::install_with_urls(vm, page.base.clone(), client, abort, streams, blobs)
+    }
+
+    pub(super) fn install_with_urls(
+        vm: &mut Vm,
+        base: Url,
+        client: Url,
+        abort: abort::AbortHost,
+        streams: StreamHost,
+        blobs: blobs::BlobFactory,
+    ) -> Result<Self, JsError> {
         let hp = vm.new_object();
         let rp = vm.new_object();
         let sp = vm.new_object();
         let state = Rc::new(RefCell::new(State {
             byte_limit: LIVE_BYTES,
-            base: page.base.clone(),
+            base,
             base_resolver: None,
             document: Weak::new(),
-            client: Url::parse(&page.url).unwrap_or_else(|_| page.base.clone()),
+            client,
             headers_proto: vm.root(hp.clone()),
             request_proto: vm.root(rp.clone()),
             response_proto: vm.root(sp.clone()),
@@ -927,6 +939,9 @@ impl FetchHost {
     }
     pub(super) fn has_queued_requests(&self) -> bool {
         !self.state.borrow().ready.is_empty()
+    }
+    pub(super) fn has_pending_request(&self, id: u64) -> bool {
+        self.state.borrow().pending.contains_key(&id)
     }
     pub(super) fn pending_count(&self) -> usize {
         let state = self.state.borrow();

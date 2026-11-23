@@ -92,6 +92,39 @@ document.write('<meta http-equiv="Content-Security-Policy" content="worker-src &
 }
 
 #[test]
+fn worker_connect_policy_is_snapshotted_at_the_parser_position() {
+    let (_, _, mut runtime) = start(
+        r#"<!doctype html><head><script>
+        var results = [];
+        var url = URL.createObjectURL(new Blob([`
+            fetch("data:text/plain,ok").then(response => response.text())
+                .then(text => postMessage(text), error => postMessage(error.message))
+                .finally(() => close());
+        `]));
+        function probe(label) {
+            var thread = new Worker(url);
+            thread.onmessage = event => results.push(label + ":" + event.data);
+        }
+        probe("before");
+        document.write('<meta id="policy" http-equiv="Content-Security-Policy" '
+            + 'content="connect-src &#39;none&#39;">'
+            + '<script>probe("written");</scr' + 'ipt>');
+        </script><script>
+        document.getElementById("policy").remove();
+        probe("after");
+        </script></head><body></body>"#,
+    );
+    let realm = runtime.as_mut().unwrap();
+    realm.eval("probe('after parsing')").unwrap();
+    wait_for_worker_probes(&mut runtime);
+    let blocked = "Content Security Policy blocked this Fetch connection";
+    assert_eq!(
+        evaluate(&mut runtime, "results.sort().join('|')"),
+        format!("after parsing:{blocked}|after:{blocked}|before:ok|written:{blocked}").into(),
+    );
+}
+
+#[test]
 fn parser_script_sees_navigation_and_response_timing() {
     let src = r#"<!doctype html><title>Timing</title><script>
         var timing = window.performance.timing;

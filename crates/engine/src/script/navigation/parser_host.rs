@@ -93,6 +93,7 @@ pub(in crate::script) struct ParserHost {
     pub discarded: usize,
     pub wants_realm: bool,
     meta_policy: DocumentPolicy,
+    connect_policy: crate::loader::ConnectPolicy,
     client: Arc<Url>,
     base: Arc<Url>,
     base_node: Option<NodeId>,
@@ -112,6 +113,7 @@ impl ParserHost {
             discarded: 0,
             wants_realm: false,
             meta_policy: DocumentPolicy::default(),
+            connect_policy: crate::loader::ConnectPolicy::default(),
             base: client.clone(),
             client,
             base_node: None,
@@ -124,6 +126,10 @@ impl ParserHost {
 
     pub(super) fn meta_policy(&self) -> DocumentPolicy {
         self.meta_policy
+    }
+
+    pub(in crate::script) fn connect_policy(&self) -> &crate::loader::ConnectPolicy {
+        &self.connect_policy
     }
 
     /// Advance several tokens, or stop at a point where the embedding must
@@ -282,6 +288,11 @@ impl ParserHost {
                 continue;
             }
             let tag = doc.tag(id);
+            if tag == "meta"
+                && let Some(content) = crate::loader::ConnectPolicy::meta_content(doc, id)
+            {
+                self.connect_policy.add_meta(content);
+            }
             if doc.nodes[index].parent.is_some()
                 && (matches!(tag, "input" | "button" | "select" | "textarea")
                     || media::has_controls(doc, id)

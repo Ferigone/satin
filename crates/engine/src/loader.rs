@@ -14,12 +14,14 @@ use std::{
     time::{Duration, Instant},
 };
 use url::Url;
+mod connect_policy;
 mod home_assets;
 mod html_encoding;
 mod resources;
 mod svg_image;
 pub(crate) mod transport;
 mod worker_policy;
+pub(crate) use connect_policy::ConnectPolicy;
 pub use home_assets::built_in_site_icon;
 pub(crate) use home_assets::is_home_image;
 pub(crate) use resources::decode_oriented_bitmap;
@@ -72,6 +74,9 @@ pub struct LoadedPage {
     pub(crate) canvas_frames: crate::canvas::Frames,
     pub stats: LoadStats,
     pub cookies: CookieStore,
+    pub(crate) fetch_loader: Option<Loader>,
+    pub(crate) connect_policy: ConnectPolicy,
+    pub(crate) meta_connect_policy: ConnectPolicy,
     pub navigation_context: CookieContext,
     pub(crate) document_policy: DocumentPolicy,
     pub form_controls: Arc<HashMap<NodeId, Arc<crate::script::ControlSnapshot>>>,
@@ -115,6 +120,9 @@ impl LoadedPage {
                 ..LoadStats::default()
             },
             cookies,
+            fetch_loader: None,
+            connect_policy: ConnectPolicy::default(),
+            meta_connect_policy: ConnectPolicy::default(),
             navigation_context,
             document_policy: DocumentPolicy::default(),
             form_controls: Arc::default(),
@@ -151,6 +159,7 @@ impl LoadedPage {
                 document_policy.restrict(policy);
             }
         }
+        let meta_connect_policy = ConnectPolicy::from_document(&document);
         let mut base = Url::parse(url).unwrap_or_else(|_| Url::parse("about:home").unwrap());
         if let Some(href) = document
             .html_elements("base")
@@ -218,6 +227,9 @@ impl LoadedPage {
             canvas_frames: Default::default(),
             stats,
             cookies: CookieStore::new(),
+            fetch_loader: None,
+            connect_policy: ConnectPolicy::default(),
+            meta_connect_policy,
             navigation_context: CookieContext::navigation(
                 None,
                 &Url::parse(url).unwrap_or_else(|_| Url::parse("about:home").unwrap()),
@@ -311,7 +323,7 @@ pub(crate) fn image_asset_key(url: &str, cors: Option<crate::network::Credential
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Loader {
     pub(crate) fetch_client: reqwest::Client,
     reactor: &'static tokio::runtime::Runtime,
@@ -456,6 +468,8 @@ impl Loader {
         let mime = crate::mime::MimeType::parse(&main.content_type);
         let mut page = LoadedPage::empty(url, self.cookies.clone(), main.context);
         page.document_policy = main.document_policy;
+        page.fetch_loader = Some(self.clone());
+        page.connect_policy = main.connect_policy;
         let input = if svg_mime(&main.content_type) {
             let source = decode_text(&main.bytes, "image/svg+xml; charset=utf-8");
             let svg = LoadedPage::from_svg(&page.url, &source)?;
@@ -561,6 +575,7 @@ impl Loader {
         }
         let content_type = response_content_type(response.headers(), true);
         let document_policy = DocumentPolicy::from_headers(response.headers());
+        let connect_policy = ConnectPolicy::from_headers(response.headers());
         let mime = crate::mime::MimeType::parse(&content_type);
         if mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
             let status = response.status().as_u16();
@@ -580,6 +595,7 @@ impl Loader {
                         origin_clean,
                         response_start,
                         document_policy,
+                        connect_policy,
                     },
                     started,
                     control,
@@ -593,6 +609,8 @@ impl Loader {
 
         let mut page = LoadedPage::empty(url, self.cookies.clone(), context);
         page.document_policy = document_policy;
+        page.fetch_loader = Some(self.clone());
+        page.connect_policy = connect_policy;
         let opened = OpenedPage {
             page,
             input: DocumentInput::Streaming,
@@ -726,6 +744,7 @@ impl Loader {
             p.url = parsed.to_string();
             p.base = parsed;
             p.cookies = self.cookies.clone();
+            p.fetch_loader = Some(self.clone());
             p.navigation_context = request.context.clone();
             return Ok(p);
         }
@@ -751,6 +770,8 @@ impl Loader {
             LoadedPage::from_html(&main.url, &source)
         };
         page.cookies = self.cookies.clone();
+        page.fetch_loader = Some(self.clone());
+        page.connect_policy = main.connect_policy;
         page.navigation_context = main.context;
         page.document_policy.restrict(main.document_policy);
         if page.document.truncated {
@@ -1106,6 +1127,7 @@ impl Loader {
                     context: request.context.clone(),
                     response_start: Instant::now(),
                     document_policy: DocumentPolicy::default(),
+                    connect_policy: ConnectPolicy::default(),
                 }
             }
             "http" | "https" => {
@@ -1116,6 +1138,11 @@ impl Loader {
                 }
                 let content_type =
                     response_content_type(response.headers(), request.context.top_level_navigation);
+                let connect_policy = if request.context.top_level_navigation {
+                    ConnectPolicy::from_headers(response.headers())
+                } else {
+                    ConnectPolicy::default()
+                };
                 let document_policy = if request.context.top_level_navigation {
                     DocumentPolicy::from_headers(response.headers())
                 } else {
@@ -1141,6 +1168,7 @@ impl Loader {
                     origin_clean,
                     response_start,
                     document_policy,
+                    connect_policy,
                 }
             }
             "file" => {
@@ -1175,6 +1203,7 @@ impl Loader {
                     origin_clean: false,
                     response_start: Instant::now(),
                     document_policy: DocumentPolicy::default(),
+                    connect_policy: ConnectPolicy::default(),
                 }
             }
             _ => {
@@ -1261,6 +1290,7 @@ struct Response {
     origin_clean: bool,
     response_start: Instant,
     document_policy: DocumentPolicy,
+    connect_policy: ConnectPolicy,
 }
 impl Response {
     fn resource(self) -> Result<Self, String> {
