@@ -580,3 +580,63 @@ fn response_xml_preserves_long_qualified_names_and_traces_retained_child_lists()
     );
     server.join().unwrap();
 }
+
+#[test]
+fn response_xml_and_default_text_follow_xml_mime_encoding_precedence() {
+    let cases = [
+        (
+            "text/xml",
+            "<Root>é</Root>".as_bytes(),
+            "text/xml|UTF-8|é|é",
+        ),
+        (
+            "application/xml",
+            b"<?xml version='1.0' encoding='windows-1252'?><Root>\xe9</Root>",
+            "application/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml; charset=windows-1252",
+            b"<?xml version='1.0' encoding='utf-8'?><Root>\xe9</Root>",
+            "application/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml; charset=windows-1252",
+            "\u{FEFF}<Root>é</Root>".as_bytes(),
+            "application/xml|UTF-8|é|é",
+        ),
+        (
+            r#"text/plain; charset=windows-1252; note="x, y", application/xml"#,
+            "<Root>é</Root>".as_bytes(),
+            "application/xml|UTF-8|é|é",
+        ),
+        (
+            r#"text/xml; charset=windows-1252, text/xml; note="x, y""#,
+            b"<Root>\xe9</Root>",
+            "text/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml, text/plain",
+            "<Root>é</Root>".as_bytes(),
+            "null|é",
+        ),
+        ("application/xml", b"<Root>\xff</Root>", "null|�"),
+    ];
+    for (mime, body, expected) in cases {
+        let (address, server) = serve(move |_| xml_reply(Some(mime), body));
+        let mut runtime = realm(&format!("http://{address}/page"), "");
+        assert_eq!(
+            runtime.eval(r#"
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/payload', false);
+                xhr.send();
+                var doc = xhr.responseXML;
+                var text = xhr.responseText.slice(-8, -7);
+                doc === null ? 'null|' + text :
+                    [doc.contentType, doc.characterSet, doc.documentElement.textContent, text].join('|');
+            "#).unwrap(),
+            Value::from(expected),
+            "{mime}",
+        );
+        server.join().unwrap();
+    }
+}

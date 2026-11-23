@@ -7,7 +7,7 @@ use roxmltree::{Node, NodeType};
 use rust_browser_javascript::{HostIndexedProperties, JsError, Value, Vm};
 use std::rc::Rc;
 
-pub(super) use source::Source;
+pub(super) use source::{Source, fallback_text_encoding};
 
 const NAME: u32 = 0;
 const KIND: u32 = 1;

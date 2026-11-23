@@ -213,16 +213,7 @@ fn response_text(vm: &mut Vm, response: &WebResponse, body: &[u8]) -> Result<Val
     }
     vm.charge_work(body.len())?;
     vm.ensure_string_allocation(body.len())?;
-    let encoding = response
-        .headers
-        .iter()
-        .find(|(name, _)| name == "content-type")
-        .and_then(|(_, value)| crate::mime::MimeType::parse(value))
-        .and_then(|mime| {
-            mime.parameter("charset")
-                .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
-        })
-        .unwrap_or(encoding_rs::UTF_8);
+    let encoding = xml_document::fallback_text_encoding(response, body);
     let (text, _, _) = encoding.decode(body);
     vm.finish_string(text.encode_utf16().collect())
 }
