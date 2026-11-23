@@ -1,6 +1,7 @@
 //! A process boundary for conformance tests. Every request gets a fresh Rust VM.
 //! Node/Python orchestrators must never evaluate the test source themselves.
 mod dynamic_host;
+mod missing_host;
 mod module_host;
 
 use dynamic_host::DynamicHost;
@@ -56,8 +57,12 @@ struct AsyncStatus {
 }
 
 fn error_json(error: &JsError) -> Json {
-    json!({"kind":error.kind.name(), "message":error.message,
-        "line":error.line,"column":error.column})
+    let mut details = json!({"kind":error.kind.name(), "message":error.message,
+        "line":error.line,"column":error.column});
+    if let Some(facility) = missing_host::facility(error) {
+        details["unsupported_host"] = json!(facility);
+    }
+    details
 }
 
 fn value_json(value: &Value) -> Json {
@@ -78,8 +83,31 @@ fn value_json(value: &Value) -> Json {
     }
 }
 
-fn install_test262_host(vm: &mut Vm) -> Result<(), JsError> {
+fn install_test262_host(vm: &mut Vm, identifier: String) -> Result<(), JsError> {
     let host = vm.new_object();
+    let eval_script = vm.new_native_function("evalScript", move |vm, _, args| {
+        let Some(Value::String(source)) = args.first() else {
+            return Err(JsError::type_error("evalScript requires a source string"));
+        };
+        // The worker's source parser takes UTF-8. Do not silently rewrite
+        // unpaired surrogates, or allocate an unbounded conversion buffer.
+        if source.len() > vm.limits().max_source_bytes {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "evalScript source exceeds configured byte limit",
+            ));
+        }
+        vm.charge_work(source.len().saturating_mul(2))?;
+        vm.ensure_string_allocation(source.len())?;
+        let source = String::from_utf16(source.as_utf16()).map_err(|_| {
+            JsError::new(
+                ErrorKind::UnsupportedFeature,
+                "evalScript source containing isolated surrogate code units is not implemented",
+            )
+        })?;
+        // Use ScriptEvaluation (not eval code) in the current VM and task.
+        vm.eval_with_identifier(&source, &identifier)
+    });
     let detach = vm.new_native_function("detachArrayBuffer", |vm, _, args| {
         if args.get(1).is_some_and(|key| !key.is_undefined()) {
             return Err(JsError::type_error(
@@ -89,9 +117,11 @@ fn install_test262_host(vm: &mut Vm) -> Result<(), JsError> {
         vm.detach_array_buffer(args.first().unwrap_or(&Value::Undefined))?;
         Ok(Value::Undefined)
     });
+    vm.define_data_property(host.clone(), "evalScript", eval_script, true, true, true)?;
     vm.define_data_property(host.clone(), "detachArrayBuffer", detach, true, true, true)?;
     vm.define_data_property(host.clone(), "global", vm.global(), true, true, true)?;
-    vm.set_global("$262", host)
+    missing_host::install(vm, &host)?;
+    vm.define_data_property(vm.global(), "$262", host, true, false, true)
 }
 
 fn execute(request: Request) -> Json {
@@ -104,7 +134,7 @@ fn execute(request: Request) -> Json {
         ..VmLimits::default()
     };
     let mut vm = Vm::with_limits(limits);
-    if let Err(error) = install_test262_host(&mut vm) {
+    if let Err(error) = install_test262_host(&mut vm, request.id.clone()) {
         return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
     }
     let logs = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -137,7 +167,7 @@ fn execute(request: Request) -> Json {
         }
         Ok(Value::Undefined)
     });
-    if let Err(error) = vm.set_global("print", print) {
+    if let Err(error) = vm.define_data_property(vm.global(), "print", print, true, false, true) {
         return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
     }
     let original_for_import = request
@@ -395,6 +425,88 @@ mod tests {
             dynamic_files: None,
             link_only: false,
         })
+    }
+    #[test]
+    fn eval_script_runs_global_script_code_and_returns_its_completion() {
+        let result = request(
+            r#"
+            function caller() {
+                "use strict";
+                let hostGlobal = 40;
+                let run = $262.evalScript;
+                return run("var hostGlobal = 2; let hostLexical = 3; this === $262.global");
+            }
+            if (!caller() || hostGlobal !== 2 || hostLexical !== 3) throw "not global script code";
+            if ("hostLexical" in $262.global || delete $262.global.hostGlobal) throw "bad global declaration";
+            if ($262.evalScript("hostGlobal + hostLexical") !== 5) throw "bad completion";
+            if ($262.evalScript("var noResult") !== undefined) throw "bad empty completion";
+            let marker = {};
+            try { $262.evalScript("throw marker"); throw "expected throw"; }
+            catch (e) { if (e !== marker) throw e; }
+            "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+        let result = request("typeof hostLexical;", false);
+        assert_eq!(result["value"], value_json(&Value::from("undefined")));
+    }
+    #[test]
+    fn eval_script_preserves_phase_and_text_and_shares_the_execution_budget() {
+        let result = request(r#"$262.evalScript("let =");"#, false);
+        assert_eq!(result["phase"], "runtime", "{result}");
+        assert_eq!(result["error"]["kind"], "SyntaxError", "{result}");
+        let result = request(r#"$262.evalScript("'\uD800'");"#, false);
+        assert_eq!(result["error"]["kind"], "UnsupportedFeature", "{result}");
+        let result = request(r#"while (true) $262.evalScript("1");"#, false);
+        assert_eq!(result["error"]["kind"], "ExecutionLimit", "{result}");
+    }
+    #[test]
+    fn test262_host_globals_have_the_required_descriptors() {
+        let result = request(
+            r#"
+            for (let name of ["$262", "print"]) {
+                let desc = Object.getOwnPropertyDescriptor($262.global, name);
+                if (!desc.writable || !desc.configurable || desc.enumerable) throw name;
+            }
+            "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+    }
+    #[test]
+    fn unknown_host_operations_expose_no_dummy_result_and_cannot_be_caught() {
+        for property in ["createRealm", "agent", "gc", "AbstractModuleSource"] {
+            let result = request(
+                &format!("try {{ typeof $262.{property}; }} catch (e) {{ 42; }}"),
+                false,
+            );
+            assert_eq!(result["phase"], "runtime", "{result}");
+            assert_eq!(result["error"]["kind"], "UnsupportedFeature", "{result}");
+            assert_eq!(
+                result["error"]["unsupported_host"],
+                format!("$262.{property}")
+            );
+        }
+        let result = request("if (false) $262.createRealm(); 42;", false);
+        assert_eq!(result["value"], value_json(&Value::from(42)));
+    }
+    #[test]
+    fn unsupported_setup_host_is_distinct_from_an_upstream_setup_exception() {
+        for (setup, expected) in [
+            ("$262.agent.getReport.bind($262.agent);", json!("$262.agent")),
+            ("throw new TypeError('$262.agent');", Json::Null),
+        ] {
+            let result = execute(
+                serde_json::from_value(json!({
+                    "id": "setup-host",
+                    "source": "throw new TypeError('runtime');",
+                    "setup": [{"name": "upstream", "source": setup}],
+                }))
+                .unwrap(),
+            );
+            assert_eq!(result["phase"], "setup", "{result}");
+            assert_eq!(result["error"]["unsupported_host"], expected, "{result}");
+        }
     }
     #[test]
     fn async_completion_is_observed_after_jobs_and_logs_cannot_hide_failure() {

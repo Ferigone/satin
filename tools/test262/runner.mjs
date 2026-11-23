@@ -59,8 +59,13 @@ export function unsupportedReason(meta, variant) {
 
 export function classify(meta, response) {
   if (!response || !['ok', 'error'].includes(response.outcome)) return { status: 'harness_error', reason: 'invalid worker response' };
-  if (['protocol', 'host', 'setup'].includes(response.phase)) return { status: 'harness_error', reason: `worker ${response.phase} failed` };
   const kind = response.error?.kind;
+  const unsupportedHost = response.error?.unsupported_host;
+  if (response.outcome === 'error' && ['setup', 'runtime'].includes(response.phase) &&
+      kind === 'UnsupportedFeature' && typeof unsupportedHost === 'string' && unsupportedHost) {
+    return { status: 'unsupported', unsupportedHost, reason: `${unsupportedHost} host facility is not implemented` };
+  }
+  if (['protocol', 'host', 'setup'].includes(response.phase)) return { status: 'harness_error', reason: `worker ${response.phase} failed` };
   if (kind === 'UnsupportedFeature') return { status: 'unsupported', reason: response.error.message };
   if (kind === 'ExecutionLimit' || kind === 'HeapLimit') return { status: 'resource_limit', reason: kind };
   if (kind === 'AsyncIncomplete') return { status: 'async_incomplete', reason: response.error.message };
@@ -371,7 +376,7 @@ export async function run(options) {
     counts, totalVariants: results.length,
     // All selected variants stay in the denominator, including missing features and harness failures.
     passFractionSelected: results.length ? (counts.pass ?? 0) / results.length : 0,
-    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await uses VM jobs. Import attributes and agent hosts remain unsupported. Async completion supports VM jobs; external timers/worker hosts remain missing.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
+    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await and async completion use VM jobs. Import attributes, additional realms, explicit GC during execution, agent hosts, and external timers remain unsupported.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
     results,
   };
   const output = resolve(options.output);

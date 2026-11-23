@@ -36,6 +36,18 @@ test('module goals select one strict execution and async completion failures can
   assert.equal(classify({negative:{phase:'runtime',type:'TypeError'}}, {outcome:'error',phase:'async',error:{kind:'AsyncTestFailure',message:'TypeError'}}).status, 'fail');
 });
 
+test('an encountered host gap stays non-passing, including during upstream setup', () => {
+  const meta = { negative: { phase: 'runtime', type: 'TypeError' } };
+  const diagnostic = { kind: 'UnsupportedFeature', unsupported_host: '$262.agent' };
+  for (const phase of ['setup', 'runtime']) {
+    assert.deepEqual(classify(meta, { outcome: 'error', phase, error: diagnostic }), {
+      status: 'unsupported', unsupportedHost: '$262.agent', reason: '$262.agent host facility is not implemented',
+    });
+  }
+  assert.equal(classify(meta, { outcome: 'error', phase: 'setup', error: { kind: 'UnsupportedFeature' } }).status, 'harness_error');
+  assert.equal(classify(meta, { outcome: 'error', phase: 'host', error: diagnostic }).status, 'harness_error');
+});
+
 test('preflight labels only the explicit unsupported Test262 host requirements', () => {
   assert.match(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), /\$262\.IsHTMLDDA/);
   assert.match(unsupportedReason({ flags: ['CanBlockIsFalse'] }, 'sloppy'), /CanBlockIsFalse/);

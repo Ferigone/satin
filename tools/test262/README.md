@@ -16,6 +16,10 @@ node tools/test262/runner.mjs --test262 PATH_TO_TEST262 --worker target/release/
 
 The runner prepares sloppy and strict variants according to the `noStrict`, `onlyStrict`, `raw`, and `module` flags. A `module, raw` test still uses the module grammar but loads no harness scripts. Non-raw variants load upstream `assert.js`, then `sta.js`, followed by the requested `includes`. Non-raw `async` variants also load upstream `doneprintHandle.js` before `includes`. Parse and early errors are checked before execution. The harness must succeed before a negative runtime test can count its expected error.
 
+`$262.evalScript` executes a classic script in the current realm's global environment, using the caller's remaining task budget. It returns the script completion or propagates the script's exception. The UTF-8 parser does not yet accept source text containing isolated UTF-16 surrogates.
+
+Accessing `$262.createRealm`, `$262.agent`, `$262.gc`, or `$262.AbstractModuleSource` records the missing facility as `unsupported`, whether reached by the test or by its setup. The worker aborts the variant rather than returning a dummy value or a catchable JS error. Other upstream setup failures remain `harness_error`. Separate realms need their own globals and intrinsics in a shared, GC-aware JS heap; `evalScript` is not a substitute for `createRealm`.
+
 ## Modules
 
 Module variants use the separate strict module grammar. The parser supplies import requests in source order with their exact UTF-16 units. The runner reads relative source files from pinned Git blobs and sends a dependency graph to the worker. The VM links and evaluates live bindings, namespace objects, cycles, and `import.meta`. Harness files run as separate scripts in the same VM.
