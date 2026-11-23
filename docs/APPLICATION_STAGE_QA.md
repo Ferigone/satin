@@ -31,3 +31,16 @@ native runs, including persistence and deletion after restart. The unmodified
 probe still fails: navigating to `/beta.html?edition=2#intro` loses `#intro`
 before the bookmark is saved. The full test remains required; the transport
 fix is tracked in the separate compatibility integration branch.
+
+## Combined tab history
+
+Application commit `9a5a010` passed 26 application and shortcut unit tests,
+the native history verifier, and the six-launch settings verifier. History
+verification used a cached engine built from the tab-history task branch to
+provide `SessionHistory::entry_url`; it is still not a Cargo release build
+of all integrated sources.
+
+The native verifier covers mouse and keyboard traversal, a same-document
+history entry with no new network request, forward entries discarded after
+branching, and an empty panel on the next launch. It checks the panel and
+dismissal by sampling native-window pixels.
