@@ -43,6 +43,88 @@ fn for_of_has_fresh_lexical_closures_tdz_and_utf16_iteration() {
         ErrorKind::ReferenceError
     );
 }
+
+#[test]
+fn iteration_assignment_writes_existing_names_and_reevaluates_members() {
+    yes(r#"
+        var config = {data: {}, assign(values) {
+            var key;
+            for (key in values) this.data[key] = values[key];
+            return key;
+        }};
+        var last = config.assign({a: 7, b: 11});
+        var log = [], destination = [], slot = 0;
+        items: for (destination[(log.push('target'), slot++)] of (log.push('source'), [2, 3, 5])) {
+            if (slot === 1) continue items;
+            break items;
+        }
+        last === 'b' && config.data.a === 7 && config.data.b === 11 &&
+        typeof key === 'undefined' && destination.join(',') === '2,3' &&
+        slot === 2 && log.join(',') === 'source,target,target';
+        "#);
+}
+
+#[test]
+fn failing_iteration_assignment_closes_the_iterator_and_keeps_the_original_error() {
+    yes(r#"
+        var closed = 0, caught;
+        var target = {set value(next) { throw next; }};
+        var source = {[Symbol.iterator]() {
+            return {
+                next() { return {value: 23, done: false}; },
+                return() { closed++; throw 42; }
+            };
+        }};
+        try { for (target.value of source) throw 'unreachable'; }
+        catch (error) { caught = error; }
+        caught === 23 && closed === 1;
+        "#);
+}
+
+#[test]
+fn iteration_assignment_in_a_resumable_function_keeps_its_scope() {
+    let mut vm = Vm::new();
+    vm.eval(
+        r#"
+        var result;
+        async function run() {
+            let key, holder = {};
+            for (key in await Promise.resolve({first: 1, second: 2})) {}
+            for await (holder[key] of [7, 13]) {}
+            result = key + ':' + holder.second;
+        }
+        run();
+        "#,
+    )
+    .unwrap();
+    vm.with_task(|vm| {
+        while vm.has_pending_jobs() {
+            vm.drain_jobs(1)?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(vm.eval("result").unwrap(), Value::from("second:13"));
+}
+
+#[test]
+fn iteration_assignment_rejects_invalid_targets() {
+    let mut vm = Vm::new();
+    for source in [
+        "for (a + b in {}) {}",
+        "for (target?.property of []) {}",
+        "for (async of []) {}",
+        "for (let.property of []) {}",
+        "'use strict'; for (arguments in {}) {}",
+    ] {
+        assert_eq!(
+            vm.check_syntax(source).unwrap_err().kind,
+            ErrorKind::SyntaxError,
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn for_of_closes_on_break_return_and_throw_but_not_continue_or_next_error() {
     yes(

@@ -51,6 +51,8 @@ pub(crate) fn parse(source: &str) -> Result<Module, JsError> {
         function_depth: 0,
         loop_depth: 0,
         switch_depth: 0,
+        labels: Vec::new(),
+        next_label: 1,
         depth: 0,
         allow_in: true,
         super_property: false,

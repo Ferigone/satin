@@ -1,4 +1,5 @@
 use crate::jobs::{Job, Message, Payload, Task, Workers};
+use crate::media::Bridge;
 use rust_browser_engine::{
     LoadedPage,
     cookies::{CookieContext, CookieStore},
@@ -17,6 +18,7 @@ pub(crate) struct Network {
     tx: mpsc::Sender<Message>,
     rx: mpsc::Receiver<Message>,
     workers: Option<Workers>,
+    media: Bridge,
     document_session: Option<DocumentSession>,
     history: SessionHistory,
     storage: TabStorage,
@@ -27,11 +29,19 @@ pub(crate) struct Network {
 impl Network {
     fn new(cookies: CookieStore, address: url::Url, storage: StorageProfile) -> Self {
         let (tx, rx) = mpsc::channel(16);
+        let media_tx = tx.clone();
         Self {
             cookies,
             tx,
             rx,
             workers: None,
+            media: Bridge::new(move || {
+                let _ = media_tx.try_send(Message {
+                    tab: 1,
+                    navigation: 0,
+                    payload: Payload::MediaWake,
+                });
+            }),
             document_session: None,
             history: SessionHistory::new(address),
             storage: TabStorage::new(storage),
@@ -52,6 +62,7 @@ impl Network {
         &mut self,
         request: NavigationRequest,
     ) -> Result<Option<(LoadedPage, DocumentSession)>, String> {
+        self.media.close_page(1, self.generation);
         self.cancel.cancel();
         self.cancel = CancelSignal::new();
         self.generation = self.generation.wrapping_add(1);
@@ -173,6 +184,14 @@ impl Network {
         }
         Ok(())
     }
+    fn deliver_media(&mut self, runtime: &mut ScriptRuntime) {
+        for event in self.media.drain() {
+            if event.key.navigation == self.generation {
+                Bridge::apply(runtime, event);
+            }
+        }
+    }
+
     fn dispatch_resources(
         &mut self,
         page: &mut LoadedPage,
@@ -251,6 +270,7 @@ fn load_document(
             }
             network.dispatch_resources(page, session, &mut realm, viewport)?;
             if let Some(runtime) = &mut realm {
+                network.deliver_media(runtime);
                 if let Some(request) = network.next_navigation(runtime)? {
                     document = network.begin(request)?;
                     realm = None;
@@ -264,12 +284,14 @@ fn load_document(
                     runtime.pump();
                 }
                 network.dispatch_fetch(runtime)?;
+                network.media.dispatch(1, network.generation, runtime);
                 if let Some(next) = runtime.next_deadline() {
                     wake = wake.min(next);
                 }
             }
             if session.done()
                 && session.next_deadline().is_none()
+                && !network.media.has_pending(1, network.generation)
                 && !session.needs_advance(realm.as_ref())
                 && !realm
                     .as_ref()
@@ -292,6 +314,7 @@ fn load_document(
             continue;
         }
         match message.payload {
+            Payload::MediaWake => {},
             Payload::Navigation(NavigationPart::Open(opened)) => {
                 document = Some(DocumentSession::start_in_tab(
                     *opened,
@@ -400,6 +423,7 @@ pub(crate) fn run_tasks(
             }
         }
         if let Some(realm) = runtime {
+            network.deliver_media(realm);
             if let Some(request) = network.next_navigation(realm)? {
                 let navigation_viewport = Viewport {
                     scroll_x: 0.,
@@ -425,6 +449,7 @@ pub(crate) fn run_tasks(
                 continue;
             }
             network.dispatch_fetch(realm)?;
+            network.media.dispatch(1, network.generation, realm);
         }
         if session.needs_advance(runtime.as_ref()) {
             session.advance(page, runtime, viewport)?;
@@ -448,7 +473,11 @@ pub(crate) fn run_tasks(
         let observations_pending = runtime
             .as_ref()
             .is_some_and(ScriptRuntime::has_pending_intersection_observations);
-        let wake = if network_pending || !session.done() || observations_pending {
+        let wake = if network_pending
+            || !session.done()
+            || observations_pending
+            || network.media.has_pending(1, network.generation)
+        {
             next.into_iter()
                 .chain(session.next_deadline())
                 .chain(Some(hard_end))
@@ -456,6 +485,8 @@ pub(crate) fn run_tasks(
                 .unwrap()
         } else if let Some(next) = next.filter(|next| *next <= timer_end) {
             next
+        } else if network.media.has_open() && now < timer_end {
+            timer_end
         } else {
             break;
         };

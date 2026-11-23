@@ -14,10 +14,10 @@ Push-Location -LiteralPath $projectDirectory
 try {
     if ($Test) {
         & $cargoCommand test --workspace --locked
-        if ($LASTEXITCODE -ne 0) { throw 'Testy nie przeszły.' }
+        if ($LASTEXITCODE -ne 0) { throw 'The Satin workspace tests failed.' }
     }
     $buildArguments = @('build', '--workspace', '--locked')
     if ($Release) { $buildArguments += '--release' }
     & $cargoCommand @buildArguments
-    if ($LASTEXITCODE -ne 0) { throw 'Kompilacja nie powiodła się.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The Satin build failed.' }
 } finally { Pop-Location }

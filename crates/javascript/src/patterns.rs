@@ -20,6 +20,38 @@ pub(crate) struct Invocation<'a> {
     pub this_initialized: bool,
 }
 impl Vm {
+    pub(crate) fn iteration_scope(
+        &mut self,
+        env: EnvId,
+        kind: Option<VarKind>,
+        pattern: &PatternCode,
+    ) -> Result<EnvId, JsError> {
+        let Some(kind @ (VarKind::Let | VarKind::Const)) = kind else {
+            return Ok(env);
+        };
+        self.ensure_allocation(384)?;
+        let scope = self
+            .heap
+            .allocate_env(Environment::new(Some(env), EnvKind::Block, None));
+        self.declare_pattern(pattern, scope, kind == VarKind::Let, true)?;
+        Ok(scope)
+    }
+
+    pub(crate) fn bind_iteration_value(
+        &mut self,
+        env: EnvId,
+        kind: Option<VarKind>,
+        pattern: &PatternCode,
+        value: Value,
+        strict: bool,
+    ) -> Result<EnvId, JsError> {
+        self.tick()?;
+        let scope = self.iteration_scope(env, kind, pattern)?;
+        let mode = kind.map_or(PatternMode::Assignment, PatternMode::Binding);
+        self.bind_pattern(pattern, value, scope, mode, strict, None)?;
+        Ok(scope)
+    }
+
     // Setup is a separate frame: it must be gone while recursively executing
     // the function body on the Windows 1 MiB main stack.
     pub(crate) fn function_environment(

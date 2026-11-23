@@ -1,40 +1,20 @@
-# Date w silniku JavaScript
+# Date in the JavaScript engine
 
-Obiekt `Date` przechowuje własną wartość czasu UTC w milisekundach. Arytmetyka
-używa proleptycznego kalendarza gregoriańskiego, a `TimeClip` ogranicza wartość do
-±100 milionów dni od epoki Unix. Konstruktor, metody UTC, odczyt i modyfikacja
-składowych oraz serializacja ISO działają bez wywoływania zewnętrznego silnika
-JavaScript. [ECMAScript 21.4](https://tc39.es/ecma262/multipage/numbers-and-dates.html#sec-date-objects)
+`Date` represents time in UTC milliseconds. Calendar arithmetic uses the proleptic Gregorian calendar, and `TimeClip` limits values to ±100 million days from the Unix epoch. The engine implements construction, UTC methods, field getters and setters, and ISO serialization in Rust. [ECMAScript Date objects](https://tc39.es/ecma262/multipage/numbers-and-dates.html#sec-date-objects)
 
-`Date.parse` czyta format ECMAScript, w tym rozszerzone lata, przesunięcia UTC
-i daty bez składowej czasu. Obsługuje też postacie zwracane przez `toString`
-i `toUTCString` oraz wybrane daty z angielskimi nazwami miesięcy i zapisem
-numerycznym. Odczyt jest ograniczony do 512 jednostek UTF-16.
+`Date.parse` accepts the ECMAScript format, including extended years, UTC offsets, and date-only values. It also supports the forms returned by `toString` and `toUTCString`, and selected dates with English month names or numeric components. Parsing accepts up to 512 UTF-16 code units.
 
-## Czas lokalny
+## Local time
 
-Windows dostarcza strefę systemową i reguły czasu letniego dla poszczególnych
-lat. Gdy zegar powtarza godzinę, konstruktor i metody lokalne wybierają
-wcześniejszą chwilę. Gdy zegar pomija godzinę, używają przesunięcia sprzed zmiany.
-Test Windows sprawdza obie sytuacje na regułach strefy Eastern Standard Time
-bez zmiany strefy systemowej. [Konwersja czasu w Win32](https://learn.microsoft.com/windows/win32/api/timezoneapi/nf-timezoneapi-systemtimetotzspecificlocaltimeex)
+Windows provides the current time zone and year-specific daylight saving rules. During a repeated hour, the constructor and local methods choose the earlier instant. During a skipped hour, they use the offset before the transition. A Windows test covers both cases using Eastern Standard Time rules in isolation. [Win32 time zone conversion](https://learn.microsoft.com/windows/win32/api/timezoneapi/nf-timezoneapi-systemtimetotzspecificlocaltimeex)
 
-Przesunięcia historyczne mają dokładność i pokrycie danych Windows. Poza
-zakresem lat 1602–30826 konwersja używa reguł równoważnego roku o takim samym
-układzie dni tygodnia i przestępności. Inne platformy korzystają obecnie z UTC.
-Metody `toLocale*` zwracają podstawowy format tekstowy silnika. Obsługa
-`Intl.DateTimeFormat` i integracja z `Temporal` pozostają otwarte.
+Windows time zone data determines the accuracy and coverage of historical offsets. Outside the year range 1602–30826, conversion uses an equivalent year with the same weekdays and leap-year status. Other platforms currently use UTC. The `toLocale*` methods use the engine's basic text format. `Intl.DateTimeFormat` support and `Temporal` integration remain open.
 
-## Weryfikacja
+## Verification
 
 ```powershell
 node tools/test262/runner.mjs --test262 PATH_TO_TEST262 --worker target/release/rb-js.exe --path built-ins/Date --output target/date-verification/test262.json
 node tools/verify-date.mjs target/release/rust-browser.exe target/date-verification/reference --chrome-reference
 ```
 
-Test262 czyta niezmienione pliki z rewizji
-`48221d7c1f7745dc13e420a2e850a248c0b2afb4`. Porównanie przez REA uruchamia
-osobny Chrome i sprawdza wynik tej samej strony, w tym zimowe i letnie
-przesunięcia strefy systemowej oraz konstruktory w pobliżu zmian czasu. Skrypt
-ustawia w sesji Chrome strefę systemową odczytaną przez Node. Zmienna
-`DATE_REFERENCE_TIMEZONE` pozwala wskazać jej identyfikator IANA.
+The Test262 runner uses unmodified files from revision `48221d7c1f7745dc13e420a2e850a248c0b2afb4`. The optional REA comparison runs the same page in a separate Chrome process and checks winter and summer offsets and constructors near daylight saving transitions. The script uses Node's system time zone for the Chrome session. Set `DATE_REFERENCE_TIMEZONE` to choose an IANA time zone identifier. [Date verifier](../tools/verify-date.mjs)

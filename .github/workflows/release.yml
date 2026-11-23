@@ -1,0 +1,149 @@
+name: Windows build and release
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Ensure Media Foundation is available
+        shell: powershell
+        run: |
+          if (-not (Test-Path -LiteralPath "$env:WINDIR\System32\mfplat.dll")) {
+            $feature = Install-WindowsFeature -Name Server-Media-Foundation -ErrorAction Stop
+            if (-not $feature.Success) { throw 'Media Foundation installation failed.' }
+          }
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Build Windows x64 release
+        run: cargo build --workspace --release --locked
+      - name: Package Windows x64 release
+        id: package
+        run: |
+          $metadata = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to read Cargo workspace metadata.' }
+          $versions = @($metadata.packages.version | Sort-Object -Unique)
+          if ($versions.Count -ne 1) { throw 'All workspace crates must share a release version.' }
+          $version = $versions[0]
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match installed version v$version."
+          }
+          ./scripts/PackageRelease.ps1
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: satin-windows-x64
+          path: |
+            dist/windows-x64/satin-windows-x64.exe
+            dist/windows-x64/Satin-windows-x64.zip
+            dist/windows-x64/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    if: >
+      github.event_name == 'push' &&
+      github.repository == 'Ferigone/satin' &&
+      (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
+    needs: verify
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: satin-github-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: satin-windows-x64
+          path: dist/windows-x64
+      - name: Publish a new workspace version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SATIN_RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          function Invoke-Gh {
+            $result = gh @args
+            if ($LASTEXITCODE -ne 0) { throw "GitHub CLI exited with code $LASTEXITCODE." }
+            $result
+          }
+
+          $repo = $env:GITHUB_REPOSITORY
+          $version = [System.Management.Automation.SemanticVersion]$env:SATIN_RELEASE_VERSION
+          $tag = "v$version"
+          $commit = (git rev-parse HEAD).Trim()
+          $marker = "<!-- satin-release-ci:$commit -->"
+          $releaseApi = "repos/$repo/releases"
+          $pages = Invoke-Gh api "${releaseApi}?per_page=100" --paginate --slurp |
+            ConvertFrom-Json -NoEnumerate
+          $releases = foreach ($page in $pages) { $page }
+          $published = @($releases | Where-Object { -not $_.draft })
+
+          foreach ($release in $published) {
+            $name = [string]$release.tag_name
+            $prior = $null
+            if ($name -cmatch '^v(.+)$' -and
+                [System.Management.Automation.SemanticVersion]::TryParse($Matches[1], [ref]$prior) -and
+                $prior -ge $version) {
+              Write-Host "Published $name already equals or supersedes $tag."
+              return
+            }
+          }
+
+          $tagExists = [bool](git tag --list $tag)
+          if ($tagExists -and (git rev-parse "refs/tags/${tag}^{commit}").Trim() -ne $commit) {
+            throw "Existing tag $tag points to another commit."
+          }
+          $draft = $releases | Where-Object { $_.draft -and $_.tag_name -ceq $tag } | Select-Object -First 1
+          if ($draft) {
+            if (-not ([string]$draft.body).Contains($marker) -or
+                [bool]$draft.prerelease -ne [bool]$version.PreReleaseLabel -or
+                (-not $tagExists -and $draft.target_commitish -ne $commit)) {
+              throw "Existing draft $tag belongs to another release."
+            }
+          } else {
+            $options = @('--repo', $repo, '--draft', '--title', "Satin $version", '--generate-notes', '--notes', $marker)
+            if ($version.PreReleaseLabel) { $options += '--prerelease' }
+            if ($tagExists) { $options += '--verify-tag' } else { $options += @('--target', $commit) }
+            Invoke-Gh release create $tag @options | Write-Host
+            $id = Invoke-Gh release view $tag --repo $repo --json databaseId --jq '.databaseId'
+            $draft = Invoke-Gh api "$releaseApi/$id" | ConvertFrom-Json
+          }
+
+          $files = @('satin-windows-x64.exe', 'Satin-windows-x64.zip', 'SHA256SUMS.txt')
+          foreach ($name in $files) {
+            $path = Join-Path 'dist/windows-x64' $name
+            $file = Get-Item -LiteralPath $path
+            $digest = 'sha256:' + (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $asset = $draft.assets | Where-Object name -CEQ $name
+            if (-not $asset) {
+              Invoke-Gh release upload $tag $path --repo $repo
+              $draft = Invoke-Gh api "$releaseApi/$($draft.id)" | ConvertFrom-Json
+              $asset = $draft.assets | Where-Object name -CEQ $name
+            }
+            if ($asset.state -ne 'uploaded' -or $asset.size -ne $file.Length -or $asset.digest -cne $digest) {
+              throw "GitHub returned a different size or SHA-256 for $name."
+            }
+          }
+          Invoke-Gh release edit $tag --repo $repo --draft=false | Write-Host

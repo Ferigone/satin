@@ -1,4 +1,5 @@
 use crate::jobs::{Job, Message, Payload, Task, Workers};
+use crate::media::Bridge;
 use crate::profile::{Profile, Session};
 use rust_browser_engine::{
     Fonts, Layout, LoadedPage, Rect,
@@ -21,6 +22,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc::{self, Receiver};
 use winit::{
@@ -80,6 +82,7 @@ struct Tab {
     zoom: f32,
     loading: bool,
     navigation: u64,
+    document_navigation: u64,
     cancel: CancelSignal,
 }
 impl Tab {
@@ -92,7 +95,7 @@ impl Tab {
             url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("about:home").unwrap());
         Self {
             id,
-            title: "Nowa karta".into(),
+            title: "New tab".into(),
             url: address.as_str().into(),
             page: None,
             runtime: None,
@@ -107,6 +110,7 @@ impl Tab {
             zoom: 1.,
             loading: false,
             navigation: 0,
+            document_navigation: 0,
             cancel: CancelSignal::new(),
         }
     }
@@ -142,6 +146,10 @@ pub fn run(
     let jobs = Workers::new(profile.cookies(), results, move || {
         let _ = proxy.send_event(());
     })?;
+    let media_proxy = events.create_proxy();
+    let media = Bridge::new(move || {
+        let _ = media_proxy.send_event(());
+    });
     let mut tabs = session
         .tabs
         .into_iter()
@@ -154,7 +162,7 @@ pub fn run(
     }
     let active = session.active.min(tabs.len() - 1);
     if let Some(url) = url {
-        tabs[active].url = normalize_url(&url)?;
+        tabs[active].url = url;
         tabs[active].history =
             SessionHistory::new(url::Url::parse(&tabs[active].url).map_err(|e| e.to_string())?);
     }
@@ -170,6 +178,7 @@ pub fn run(
         active,
         next_id,
         jobs,
+        media,
         incoming,
         mouse: (0., 0.),
         modifiers: ModifiersState::empty(),
@@ -191,6 +200,7 @@ pub fn run(
             .map(crate::testing::read_actions)
             .transpose()?
             .unwrap_or_default(),
+        smoke_wait_deadline: None,
         file_picker_responses,
         smoke_result: None,
         presented_frames: 0,
@@ -213,6 +223,7 @@ struct App {
     smoke_output: Option<PathBuf>,
     smoke_click: Option<String>,
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
+    smoke_wait_deadline: Option<Instant>,
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_result: Option<Result<(), String>>,
     presented_frames: u64,
@@ -226,6 +237,7 @@ struct App {
     active: usize,
     next_id: u64,
     jobs: Workers,
+    media: Bridge,
     incoming: Receiver<Message>,
     mouse: (f32, f32),
     modifiers: ModifiersState,
@@ -273,8 +285,10 @@ impl App {
 
     fn fail_page(&mut self, index: usize, error: &str) {
         let tab = &mut self.tabs[index];
+        self.media.close_page(tab.id, tab.document_navigation);
         tab.cancel.cancel();
         tab.navigation = tab.navigation.wrapping_add(1);
+        tab.document_navigation = tab.navigation;
         let page = LoadedPage::error(&tab.url, error);
         tab.title = page.title();
         tab.page = Some(Arc::new(page));
@@ -373,6 +387,19 @@ impl App {
         }
     }
 
+    fn apply_media_updates(&mut self) -> bool {
+        let mut redraw = false;
+        for update in self.media.drain() {
+            if let Some((index, tab)) = self.tabs.iter_mut().enumerate().find(|(_, tab)| {
+                tab.id == update.key.tab && tab.document_navigation == update.key.navigation
+            }) && let Some(runtime) = &mut tab.runtime
+            {
+                redraw |= Bridge::apply(runtime, update) && index == self.active;
+            }
+        }
+        redraw
+    }
+
     fn sync_runtime(&mut self, index: usize) -> bool {
         let tab = &mut self.tabs[index];
         let mut changed = tab
@@ -462,7 +489,7 @@ impl App {
     fn set_title(&self) {
         if let Some(w) = &self.window {
             w.set_title(&format!(
-                "{} — Rust Browser · Alfa 0.1",
+                "{} — Satin · Alpha 0.1",
                 self.tabs[self.active].title
             ));
         }
@@ -617,6 +644,7 @@ impl App {
             return;
         }
         let tab = &mut self.tabs[index];
+        self.media.close_page(tab.id, tab.document_navigation);
         let mode = if mode == NavigationMode::Push && tab.history.url() == parsed {
             NavigationMode::Reload
         } else {
@@ -629,6 +657,7 @@ impl App {
         tab.runtime = None;
         tab.document_session = None;
         tab.navigation += 1;
+        tab.document_navigation = tab.navigation;
         tab.loading = true;
         tab.scroll = 0.;
         tab.scroll_x = 0.;
@@ -653,8 +682,7 @@ impl App {
             };
             if self.jobs.submit(job).is_err() {
                 tab.loading = false;
-                self.status =
-                    "Wczytywanie innych stron jeszcze trwa. Spróbuj ponownie za chwilę.".into();
+                self.status = "Other pages are still loading. Try again in a moment.".into();
             }
         }
         if index == self.active {
@@ -765,13 +793,14 @@ impl App {
                     t.cancel.cancel();
                     t.cancel = CancelSignal::new();
                     t.navigation += 1;
+                    // Stopping the download retains the document and its active media players.
                     t.loading = false;
                     if let (Some(session), Some(page)) = (&mut t.document_session, &mut t.page) {
-                        session.stop(Arc::make_mut(page), t.runtime.as_ref());
+                        session.stop(Arc::make_mut(page), t.runtime.as_mut());
                         t.title = page.title();
                         t.layout = None;
                     }
-                    self.status = "Wczytywanie zatrzymane".into();
+                    self.status = "Loading stopped".into();
                     if let Some(runtime) = &mut t.runtime
                         && let Err(error) = runtime.cancel_pending_network()
                     {
@@ -790,7 +819,7 @@ impl App {
             Action::Version => self.navigate("about:version".into(), true),
             Action::NewTab => {
                 if self.tabs.len() >= 24 {
-                    self.status = "Wersja alfa obsługuje do 24 kart.".into();
+                    self.status = "The alpha supports up to 24 tabs.".into();
                     self.redraw();
                     return;
                 }
@@ -809,7 +838,9 @@ impl App {
                 if i >= self.tabs.len() {
                     return;
                 }
-                self.tabs[i].cancel.cancel();
+                let tab = &self.tabs[i];
+                self.media.close_page(tab.id, tab.document_navigation);
+                tab.cancel.cancel();
                 self.tabs.remove(i);
                 if self.tabs.is_empty() {
                     self.save();
@@ -1459,13 +1490,13 @@ impl App {
         } else if !self.status.is_empty() {
             self.status.clone()
         } else if self.tabs[self.active].loading {
-            "Ładowanie…".into()
+            "Loading…".into()
         } else if self.tabs[self.active]
             .layout
             .as_ref()
             .is_some_and(|layout| layout.limited)
         {
-            "Limit złożoności: uproszczony układ głęboko zagnieżdżonej strony.".into()
+            "Layout simplified for a deeply nested page.".into()
         } else if let Some(message) = self.tabs[self.active]
             .runtime
             .as_ref()
@@ -1473,7 +1504,7 @@ impl App {
         {
             format!("JavaScript: {message}")
         } else {
-            format!("Rust Browser {}", env!("CARGO_PKG_VERSION"))
+            format!("Satin {}", env!("CARGO_PKG_VERSION"))
         };
         let text = elide(&self.fonts, &text, (width - 100.) * u, 11. * u);
         canvas.label(
@@ -1604,9 +1635,46 @@ impl App {
         self.canvas = Some(canvas);
     }
     fn finish_smoke(&mut self, event_loop: &ActiveEventLoop) {
+        use crate::testing::SmokeAction;
+
+        if self.smoke_output.is_none() {
+            return;
+        }
         let tab = &self.tabs[self.active];
-        if self.smoke_output.is_none()
-            || tab.loading
+        if let Some(SmokeAction::WaitTitle { value, timeout_ms }) = self.smoke_actions.front() {
+            if &tab.title == value {
+                self.smoke_actions.pop_front();
+                self.smoke_wait_deadline = None;
+                event_loop.set_control_flow(ControlFlow::Poll);
+            } else {
+                let now = Instant::now();
+                let deadline = *self.smoke_wait_deadline.get_or_insert_with(|| {
+                    now + Duration::from_millis((*timeout_ms).clamp(1, 30_000))
+                });
+                if now >= deadline {
+                    self.smoke_output = None;
+                    self.smoke_result = Some(Err(format!(
+                        "Timed out waiting for native title {value:?}, got {:?}",
+                        tab.title
+                    )));
+                    event_loop.set_control_flow(ControlFlow::Poll);
+                    event_loop.exit();
+                } else {
+                    match event_loop.control_flow() {
+                        ControlFlow::Wait => {
+                            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                        }
+                        ControlFlow::WaitUntil(next) if deadline < next => {
+                            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return;
+        }
+        if tab.loading
+            || self.media.has_pending(tab.id, tab.document_navigation)
             || tab.document_session.as_ref().is_some_and(|session| {
                 !session.done() || session.needs_advance(tab.runtime.as_ref())
             })
@@ -1739,6 +1807,7 @@ impl App {
                     Err(format!("Expected native title {value:?}, got {actual:?}"))
                 }
             }
+            SmokeAction::WaitTitle { .. } => unreachable!("the event loop handles pending titles"),
             SmokeAction::Key {
                 value,
                 control,
@@ -1995,7 +2064,7 @@ impl App {
         let files = match response {
             Ok(files) => files,
             Err(error) => {
-                self.status = format!("Nie można wybrać plików: {error}");
+                self.status = format!("File selection failed. {error}");
                 None
             }
         };
@@ -2003,7 +2072,7 @@ impl App {
             return false;
         };
         if let Err(error) = runtime.complete_file_picker(&request, files) {
-            self.status = format!("Nie można wybrać plików: {error}");
+            self.status = format!("File selection failed. {error}");
         }
         self.sync_runtime(index);
         index == self.active
@@ -2021,7 +2090,7 @@ impl App {
             .as_ref()
             .and_then(|page| url::Url::parse(&page.url).ok());
         let Ok(url) = url::Url::parse(&submission.url) else {
-            self.status = "Nieprawidłowy adres formularza".into();
+            self.status = "Invalid form address".into();
             return false;
         };
         let request = NavigationRequest {
@@ -2076,7 +2145,7 @@ impl ApplicationHandler<()> for App {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
-        let mut redraw = false;
+        let mut redraw = self.apply_media_updates();
         let mut deadline = None;
         for index in 0..self.tabs.len() {
             let changed = self.advance_page(index) | self.sync_runtime(index);
@@ -2125,6 +2194,12 @@ impl ApplicationHandler<()> for App {
             self.dispatch_history(index);
             self.dispatch_forms(index);
             self.dispatch_fetches(index);
+            let tab = &mut self.tabs[index];
+            if let Some(runtime) = &mut tab.runtime
+                && self.media.dispatch(tab.id, tab.document_navigation, runtime)
+            {
+                redraw |= self.sync_runtime(index) && index == self.active;
+            }
         }
         // A failed submission can synchronously queue a new request through a
         // rejection reaction; retain a wake-up for that outgoing work.
@@ -2144,7 +2219,7 @@ impl ApplicationHandler<()> for App {
         }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if let Err(error) = self.profile.save_storage() {
-            self.status = format!("Nie można zapisać danych witryny: {error}");
+            self.status = format!("Site data could not be saved. {error}");
         }
         if redraw {
             self.ensure_layout();
@@ -2158,13 +2233,13 @@ impl ApplicationHandler<()> for App {
             return;
         }
         let mut attributes = Window::default_attributes()
-            .with_title("Rust Browser · Alfa 0.1")
+            .with_title("Satin · Alpha 0.1")
             .with_inner_size(LogicalSize::new(1180., 840.))
             .with_min_inner_size(LogicalSize::new(640., 400.));
         if self.smoke_output.is_some() {
             attributes = attributes.with_visible(false);
         }
-        if let Ok(img) = image::load_from_memory(include_bytes!("../../../assets/browser.png")) {
+        if let Ok(img) = image::load_from_memory(include_bytes!("../../../assets/satin.png")) {
             let img = img.into_rgba8();
             if let Ok(icon) = Icon::from_rgba(img.as_raw().clone(), img.width(), img.height()) {
                 attributes = attributes.with_window_icon(Some(icon));
@@ -2272,6 +2347,7 @@ impl ApplicationHandler<()> for App {
                     }
                 }
                 Payload::NavigationError(error) => self.fail_page(index, &error),
+                Payload::MediaWake => continue,
             }
             if index == self.active {
                 if !self.address_focus {

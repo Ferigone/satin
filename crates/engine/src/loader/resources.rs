@@ -14,6 +14,7 @@ pub enum ResourceKind {
     ClassicScript,
     ModuleScript,
     Image,
+    Media,
     Font,
     LocalFont(Arc<str>),
 }
@@ -40,6 +41,7 @@ pub struct DocumentResource {
 pub enum ResourceBody {
     Text(String),
     Image(Arc<image::RgbaImage>),
+    Media(Arc<[u8]>),
     Svg(Arc<SvgImage>),
     Font(FontFace),
 }
@@ -86,10 +88,10 @@ impl Loader {
                 origin_clean: true,
             });
         }
-        let limit = if matches!(request.kind, ClassicScript | ModuleScript | Stylesheet) {
-            1024 * 1024
-        } else {
-            RESOURCE_LIMIT
+        let limit = match request.kind {
+            ClassicScript | ModuleScript | Stylesheet => 1024 * 1024,
+            Media => 16 * 1024 * 1024,
+            _ => RESOURCE_LIMIT,
         };
         let cors = request.cors.or(match request.kind {
             ModuleScript | Font => Some(CredentialsMode::SameOrigin),
@@ -253,6 +255,7 @@ fn decode_resource(
             ResourceBody::Svg(Arc::new(SvgImage::from_source(&text)?))
         }
         Image => ResourceBody::Image(Arc::new(decode_bitmap(bytes)?)),
+        Media => ResourceBody::Media(Arc::from(bytes)),
         Font => ResourceBody::Font(FontFace::decode(bytes).map_err(|error| error.to_string())?),
         LocalFont(_) => unreachable!("local font handled above"),
     };

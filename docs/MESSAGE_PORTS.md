@@ -55,4 +55,3 @@ and all three authored cases. The Rust test failure reaches the missing
 `FileReader` API after receiving a Blob. Chrome's failure is the closed-port
 transfer assertion. In the queued-close observation, Rust delivered both
 packets and Chrome delivered the first.
-[Release report](evidence/alpha13/message-ports/report.json)

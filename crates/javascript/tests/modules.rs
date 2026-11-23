@@ -220,6 +220,8 @@ fn import_meta_uses_one_mutable_null_prototype_object_per_record() {
 #[test]
 fn module_early_errors_and_unsupported_productions_are_distinct() {
     let mut vm = Vm::new();
+    vm.check_module_syntax("let item; for await (item of []) {}")
+        .unwrap();
     for source in [
         "export {missing};",
         "export let n;export {n};",
@@ -236,7 +238,7 @@ fn module_early_errors_and_unsupported_productions_are_distinct() {
         );
     }
     for source in [
-        "let item; for await (item of []) {}",
+        "let item; for await ([item] of []) {}",
         "import('./m', {});",
         "import './m' with {type:'json'};",
         "import source m from './m';",

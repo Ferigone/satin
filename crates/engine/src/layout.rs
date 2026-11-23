@@ -2679,7 +2679,7 @@ impl Builder<'_> {
             };
             if self.is_svg_root(id) {
                 self.draw_svg(id, rect);
-            } else if self.is_canvas(id) {
+            } else if self.is_canvas(id) || self.is_video(id) {
                 self.commands.owner = id;
                 self.commands.push(DrawCommand::Canvas { node: id, rect });
             } else {
@@ -2944,8 +2944,12 @@ impl Builder<'_> {
         }
         let d = &self.page.document;
         let uri = self.page.image_asset_key(id);
-        let (nw, nh) = uri
-            .as_ref()
+        let (nw, nh) = if self.is_video(id) {
+            match self.page.canvas_frames.get(id) {
+                Some(crate::canvas::Frame::Bitmap(frame)) => (frame.width() as f32, frame.height() as f32),
+                _ => (300., 150.),
+            }
+        } else { uri.as_ref()
             .and_then(|u| self.page.svg_images.get(u))
             .map(|asset| asset.intrinsic_size())
             .or_else(|| {
@@ -2953,7 +2957,7 @@ impl Builder<'_> {
                     .and_then(|u| self.page.images.get(u))
                     .map(|i| (i.width() as f32, i.height() as f32))
             })
-            .unwrap_or((120., 28.));
+            .unwrap_or((120., 28.)) };
         let w = d
             .attr(id, "width")
             .and_then(|v| v.parse::<f32>().ok())
@@ -2973,7 +2977,11 @@ impl Builder<'_> {
         self.page.document.scripting_enabled && crate::canvas::is_canvas(&self.page.document, id)
     }
     fn is_replaced_image(&self, id: NodeId) -> bool {
-        self.page.document.tag(id) == "img" || self.is_svg_root(id) || self.is_canvas(id)
+        self.page.document.tag(id) == "img" || self.is_svg_root(id) || self.is_canvas(id) || self.is_video(id)
+    }
+    fn is_video(&self, id: NodeId) -> bool {
+        let document = &self.page.document;
+        document.namespace(id) == crate::dom::Namespace::Html && document.tag(id) == "video"
     }
     fn draw_image(&mut self, id: NodeId, rect: Rect, href: Option<Arc<str>>) {
         self.commands.owner = id;
@@ -3140,7 +3148,7 @@ impl Builder<'_> {
                         line.y += outer.height;
                         continue;
                     }
-                    if tag == "img" || self.is_canvas(node) {
+                    if tag == "img" || self.is_canvas(node) || self.is_video(node) {
                         let (nw, nh) = self.image_size(node);
                         let width = s
                             .width
@@ -3169,7 +3177,7 @@ impl Builder<'_> {
                             .image_asset_key(node)
                             .and_then(|u| self.page.images.get(&u))
                             .cloned();
-                        let command = if self.is_canvas(node) {
+                        let command = if self.is_canvas(node) || self.is_video(node) {
                             DrawCommand::Canvas { node, rect }
                         } else if let Some(image) = asset {
                             DrawCommand::Image { rect, image }

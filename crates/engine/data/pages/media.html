@@ -1,0 +1,37 @@
+<style>
+  #media-clip { display: block; width: 100%; max-width: 560px; height: 315px; background: #102029; }
+  #media-actions { margin: 14px 0 8px; }
+  #media-actions button { margin: 0 6px 6px 0; padding: 9px 12px; border: 1px solid #146c58; background: white; color: #146c58; font-size: 16px; }
+  #media-status { min-height: 24px; }
+</style>
+<h1>Video playback</h1>
+<video id="media-clip" width="560" height="315" preload="none" muted src="data:video/mp4;base64,{{MEDIA_SAMPLE}}"></video>
+<div id="media-actions">
+  <button type="button" id="media-play">Play</button>
+  <button type="button" id="media-pause">Pause</button>
+  <button type="button" id="media-seek">Seek to 2 s</button>
+  <button type="button" id="media-sound">Unmute</button>
+</div>
+<p id="media-status" aria-live="polite">The sample is ready to play.</p>
+<p><a href="about:home">Home</a> · <a href="about:version">Features</a></p>
+<script>
+  const clip = document.getElementById("media-clip");
+  const status = document.getElementById("media-status");
+  const sound = document.getElementById("media-sound");
+  document.getElementById("media-play").addEventListener("click", () => {
+    clip.play().catch(error => { status.textContent = error.message; });
+  });
+  document.getElementById("media-pause").addEventListener("click", () => clip.pause());
+  document.getElementById("media-seek").addEventListener("click", () => { clip.currentTime = 2; });
+  sound.addEventListener("click", () => {
+    clip.muted = !clip.muted;
+    sound.textContent = clip.muted ? "Unmute" : "Mute";
+  });
+  clip.addEventListener("timeupdate", () => {
+    status.textContent = "Time " + clip.currentTime.toFixed(1) + " s";
+    if (!clip.paused && clip.currentTime >= 0.25 && clip.videoWidth > 0) {
+      status.setAttribute("data-progress", "yes");
+      document.title = "Satin MP4 OK";
+    }
+  });
+</script>

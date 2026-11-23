@@ -1,67 +1,23 @@
-# Pomiary, przewijanie i wspólny układ — alfa.5
+# CSSOM measurements, scrolling, and shared layout in alpha.5
 
-Host JavaScript korzysta z tego samego Layout, stylów i migawki DOM co renderer.
-Zmiana DOM lub stanu kontrolki zwiększa rewizję. Pierwszy odczyt wymuszający układ
-buduje go synchronicznie; dalsze odczyty tej samej rewizji zwracają zachowany Arc.
-Przekazanie migawki do okna nie kopiuje ponownie całego dokumentu. Fonty mają
-wspólne niezmienne dane krojów, a ograniczone cache kształtowania i glifów należą
-do instancji. Host tworzy Fonts dopiero po rzeczywistym zapotrzebowaniu na układ.
+The JavaScript host and renderer share the layout, computed styles, and DOM snapshot. A DOM or form control state change advances the revision. The first layout-dependent read builds layout synchronously. Subsequent reads at that revision reuse the cached `Arc`. The window receives the snapshot by reference. Font faces share immutable data, with bounded shaping and glyph caches per instance. The host creates `Fonts` on the first layout request.
 
-## Dostępne mechanizmy
+## Supported operations
 
-- getBoundingClientRect i getClientRects zwracają migawki w pikselach CSS
-  względem viewportu, z pozycjonowaniem, przekształceniami i przewijaniem.
-  Przycięcie nie zmniejsza tych prostokątów. Element bez pudełka ma pustą listę
-  i zerowy prostokąt. Wyniki zawierają toJSON; lista ma item i iterator.
-- offsetWidth/Height/Left/Top/Parent używają geometrii bez transformacji i
-  przewinięcia. clientWidth/Height/Left/Top uwzględniają obramowania, a
-  scrollWidth/Height obszar treści także przy overflow:visible/clip.
-- getComputedStyle zwraca żywy obiekt odczytu dla obsługiwanych właściwości:
-  rozmiarów, fontu, koloru, marginesów, paddingu, obramowań, pozycjonowania,
-  overflow, transformacji i zmiennych CSS przez getPropertyValue.
-  Obsługuje nazwy camelCase i CSS; setProperty/removeProperty odrzucają zapis.
-- scrollTop/Left, scroll/scrollTo/scrollBy oraz window.scrollX/Y/pageXOffset/
-  pageYOffset obsługują natychmiastowe przewijanie. Skuteczne przesunięcie
-  zostaje zapisane po ograniczeniu rozmiarem treści; ponowny wzrost nie
-  przywraca odrzuconego przesunięcia. Zmniejszenie dokumentu ogranicza także
-  viewport, łącznie z ponownym układem elementów fixed.
-- Zdarzenia scroll są łączone według celu i odraczane do kolejnego zadania.
-  Przewinięcie dokumentu bąbelkuje do window, a elementu pozostaje przy elemencie.
-  Zmiana rozmiaru viewportu odracza resize. Działają onscroll/onresize i
-  addEventListener. Native wheel przechodzi od trafionego elementu przez
-  przodków i przekazuje niewykorzystane przewinięcie dalej.
+- `getBoundingClientRect` and `getClientRects` return viewport-relative snapshots in CSS pixels, accounting for positioning, transforms, and scrolling. The rectangles keep their unclipped bounds. Elements without a box get an empty list and a zero rectangle. Rectangles implement `toJSON`, and the list implements `item` and iteration.
+- `offsetWidth`, `offsetHeight`, `offsetLeft`, `offsetTop`, and `offsetParent` use the untransformed, unscrolled geometry. The `clientWidth`, `clientHeight`, `clientLeft`, and `clientTop` values use client box sizes and border offsets. `scrollWidth` and `scrollHeight` include the content extent even under `overflow: visible` or `clip`.
+- `getComputedStyle` exposes a live read-only view of supported size, font, color, margin, padding, border, position, overflow, and transform properties. CSS and camelCase names are supported. `getPropertyValue` also reads custom properties. `setProperty` and `removeProperty` reject writes.
+- `scrollTop`, `scrollLeft`, `scroll`, `scrollTo`, `scrollBy`, `window.scrollX`, `window.scrollY`, `pageXOffset`, and `pageYOffset` support instant scrolling. The new position is clamped to the content bounds and saved. Later content growth starts from that clamped position. When a document shrinks, viewport scrolling is clamped and fixed layout is recalculated as needed.
+- `scroll` events are coalesced by target and scheduled as tasks. A document scroll bubbles to the window, and an element scroll stays at the element. Viewport changes schedule `resize`. `onscroll`, `onresize`, and `addEventListener` are supported. Native wheel input starts at the hit element and passes any unused delta up the ancestor chain.
 
-Nie ma pełnych interfejsów/prototypów DOMRect/CSSStyleProperties, wszystkich
-właściwości, skrótów ani kompletu zasad serializacji CSSOM. W szczególności
-normal line-height jest przybliżony przez używaną wysokość linii, nie wszystkie
-insety auto i procenty zależne od nieokreślonego rozmiaru mają kompletną semantykę,
-a pseudoelementy, scrollIntoView, smooth scroll, RTL/pionowe kierunki i pełna
-polityka przewijania viewportu pozostają w rozwoju. SVG geometry DOM ma
-ograniczone mapy obrysów, opisane w SVG.md. Kolekcje innych API DOM nadal są
-migawkami. Zgodność dotyczy opisanego podzbioru.
+Coverage is partial for the DOMRect and CSSStyleProperties interfaces and prototypes, CSS properties and shorthands, and CSSOM serialization. The used line height approximates `line-height: normal`. Some `auto` insets and percentages with indefinite sizes remain incomplete. Pseudo-elements, `scrollIntoView`, smooth scrolling, right-to-left and vertical directions, and viewport scrolling behavior need further work. SVG geometry uses limited bounds maps, and other DOM collections in this stage use snapshots. [SVG](SVG.md)
 
-## Praca i rysowanie
+## Work budgets and painting
 
-Odczyt układu obciąża budżet bieżącego zadania VM przed kopiowaniem dokumentu,
-parsowaniem CSS i obróbką zasobów. Obejmuje źródła zewnętrznych arkuszy; natywna
-praca budowy scen SVG jest rozliczana przed udostępnieniem wyniku. Kolejne
-odczyty z cache nie powtarzają tych operacji. Fatalny limit nie może być
-przechwytywany w nieskończonej pętli przez try/catch.
+A layout read charges the current VM task before copying document data, parsing CSS, or processing resources. That cost includes external stylesheets and work to build native SVG scenes before exposing geometry. Cached reads reuse the results of those operations. The fatal work limit stops execution even inside a `try/catch` loop.
 
-Renderer utrzymuje stos macierzy i klipów; obrócone klipy testuje przez macierz
-odwrotną. Prostokąty osiowe zachowują szybkie wypełnianie wierszy. Niewidoczny
-tekst jest odrzucany przed rasteryzacją glifów; widoczne glify są sprawdzane
-przed alokacją bitmapy. Praca dokumentu ma limit 64 Mi jednostek. Wywołanie
-SVG ma dodatkowy własny limit 16 mln jednostek, więc końcowe wywołanie może
-przekroczyć wspólny limit najwyżej o ten ograniczony koszt. Zewnętrzny test
-klipów ma osobny licznik, co ogranicza także długie łańcuchy klipów. Przekroczenie
-jest jawne w paint_limited; odrębny budżet interfejsu zachowuje pasek adresu i karty.
+The renderer maintains a matrix and clip stack and applies the inverse matrix when testing rotated clips. Axis-aligned rectangles use fast row fills. The renderer culls invisible text before glyph rasterization and checks the budget for visible glyphs before allocating bitmaps. The document is limited to 64 Mi work units. An SVG paint call has a separate cap of 16 million units, so the last call can exceed the shared limit by up to that amount. A separate counter bounds outer clip tests, including long clip chains. `paint_limited` reports exhaustion. A separate browser UI budget keeps the address bar and tabs available.
 
-Testy CSSOM obejmują rzeczywiste pomiary, żywe style, powtórne wykorzystanie
-układu, przewijanie, zdarzenia i budżety. Testy integracji SVG sprawdzają razem
-obraz, obrys, trafienie i linki. tools/verify-graphics.mjs uruchamia własny
-serwer, aplikację bez okna i niewidoczne natywne okno; opcjonalne porównanie
-Chrome przez REA używa osobnego procesu i syntetycznego dokumentu.
+CSSOM tests cover geometry, live styles, layout reuse, scrolling, events, and limits. SVG integration tests cover rendering, bounds, hit testing, and links. `tools/verify-graphics.mjs` starts a local server and runs the same synthetic page in headless mode and a hidden native window. The optional Chrome comparison uses REA in a separate process. [Graphics verification script](../tools/verify-graphics.mjs) · [Reference observations](RESEARCH.md)
 
-Źródła: [CSSOM View](https://drafts.csswg.org/cssom-view/),
-[getComputedStyle i wartości rozstrzygnięte CSSOM](https://drafts.csswg.org/cssom/).
+The underlying geometry and event semantics are defined by CSSOM View. CSSOM defines `getComputedStyle` and resolved values. [CSSOM View](https://drafts.csswg.org/cssom-view/) · [CSSOM](https://drafts.csswg.org/cssom/)

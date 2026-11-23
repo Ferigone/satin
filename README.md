@@ -1,12 +1,15 @@
+<p align="center"><img src="assets/satin.png" alt="Satin app icon" width="96"></p>
 <h1 align="center">Satin</h1>
 
 <p align="center"><strong>A web browser in Rust designed for speed and low memory use.</strong></p>
 <p align="center">Open source · Windows x64 · Alpha</p>
 <p align="center">
-  <a href="https://github.com/Ferigone/satin/releases"><strong>Releases</strong></a> ·
+  <a href="https://github.com/Ferigone/satin/releases"><strong>Download for Windows</strong></a> ·
   <a href="#build-from-source">Build from source</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
+
+<p align="center"><img src="assets/satin-preview.png" alt="Satin on Windows with its address bar, tabs, and start page" width="900"></p>
 
 ## About Satin
 
@@ -17,8 +20,17 @@ Satin brings tabs, browsing history, zoom, and a persistent profile to a desktop
 | Browse | HTTP and HTTPS pages, tabs, history, and zoom |
 | Interact | Links, forms, JavaScript events, and DOM updates |
 | Render | Text and images, CSS Flexbox and Grid, SVG, and Canvas 2D |
+| Play media | Progressive MP4 playback on Windows, with pause and seek |
 
 Website compatibility is partial. YouTube and Twitch playback remains in development.
+
+## Install on Windows
+
+1. Download `Satin-windows-x64.zip`. [GitHub Releases](https://github.com/Ferigone/satin/releases)
+2. Extract the archive and run `Install.cmd`.
+3. Open **Satin** from the desktop.
+
+Satin checks for newer releases in the background. It verifies the downloaded update and uses it the next time you open the browser.
 
 ## Try the built-in pages
 
@@ -27,6 +39,7 @@ Enter an address below in Satin.
 | Address | What to try |
 | --- | --- |
 | `about:home` | Open the start page and choose a demo |
+| `about:media` | Play, pause, or seek within an MP4 sample |
 | `about:javascript` | Run a script and interact with the page |
 | `about:graphics` | Explore layout, SVG, and scrolling |
 | `about:canvas` | Draw on a canvas and inspect the result |
@@ -45,6 +58,8 @@ Open the browser from the desktop shortcut after installation.
 
 <details>
 <summary>Developer resources</summary>
+
+Run `.\scripts\Preview.ps1 -CreateShortcut` to add a **Satin Preview** desktop shortcut. It builds the current checkout when opened and uses a separate profile.
 
 | Crate | Responsibility |
 | --- | --- |

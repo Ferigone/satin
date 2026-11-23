@@ -63,7 +63,7 @@ fn launch() -> Result<(), String> {
     Ok(())
 }
 fn show_error(message: &str) {
-    eprintln!("Rust Browser: {message}");
+    eprintln!("Satin: {message}");
     #[cfg(windows)]
     {
         if std::env::args().any(|a| {
@@ -74,7 +74,7 @@ fn show_error(message: &str) {
         }) {
             return;
         }
-        let title = "Rust Browser\0".encode_utf16().collect::<Vec<_>>();
+        let title = "Satin\0".encode_utf16().collect::<Vec<_>>();
         let text = format!("{message}\0").encode_utf16().collect::<Vec<_>>();
         // This isolated platform call only reports local launcher failures.
         unsafe {

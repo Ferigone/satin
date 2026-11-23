@@ -52,7 +52,7 @@ impl Profile {
             .write(true)
             .open(path.join("profile.lock"))
             .map_err(|e| e.to_string())?;
-        lock.try_lock_exclusive().map_err(|_|"Ten profil jest już otwarty w Rust Browser. Zamknij jego okno przed uruchomieniem nowej wersji.".to_owned())?;
+        lock.try_lock_exclusive().map_err(|_|"Ten profil jest już otwarty w Satin. Zamknij jego okno przed uruchomieniem nowej wersji.".to_owned())?;
         let file = path.join("session.json");
         let session = if file.exists() {
             let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
@@ -252,7 +252,7 @@ fn unprotect_cookies(bytes: &[u8]) -> Result<Vec<u8>, String> {
         Err("Cookie persistence needs a platform credential protector".into())
     }
 }
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = path.with_extension("pending");
     let mut file = File::create(&temp).map_err(|e| e.to_string())?;
     file.write_all(bytes)

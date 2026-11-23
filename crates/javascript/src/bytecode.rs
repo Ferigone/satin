@@ -4,8 +4,8 @@ mod classes;
 use crate::{
     ErrorKind, JsError, JsString, Value,
     parser::{
-        self, ChainLink, Expr, Function, FunctionKind, MethodKind, ObjectEntry, Pattern, Stmt,
-        TemplatePart, VarKind, bound_names, simple_parameter,
+        self, ChainLink, Expr, Function, FunctionKind, LabelId, MethodKind, ObjectEntry, Pattern,
+        Stmt, TemplatePart, VarKind, bound_names, simple_parameter,
     },
 };
 pub(crate) use classes::{ClassCode, ClassElementCode, ClassKeyCode};
@@ -164,21 +164,36 @@ pub(crate) enum Op {
     Evaluate(Rc<Chunk>),
     Initialize(VarKind, Rc<PatternCode>, Option<Rc<Chunk>>),
     Block(Rc<Chunk>),
+    Label(LabelId, Rc<Chunk>),
     Branch(Rc<Chunk>, Rc<Chunk>, Option<Rc<Chunk>>),
-    While(Rc<Chunk>, Rc<Chunk>),
-    DoWhile(Rc<Chunk>, Rc<Chunk>),
+    While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
+    DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     For {
         initial: Option<Rc<Chunk>>,
         test: Option<Rc<Chunk>>,
         update: Option<Rc<Chunk>>,
         body: Rc<Chunk>,
         lexical: Vec<(JsString, bool)>,
+        label: Option<LabelId>,
     },
-    ForIn(VarKind, Rc<PatternCode>, Rc<Chunk>, Rc<Chunk>),
-    ForOf(VarKind, Rc<PatternCode>, Rc<Chunk>, Rc<Chunk>, bool),
+    ForIn(
+        Option<VarKind>,
+        Rc<PatternCode>,
+        Rc<Chunk>,
+        Rc<Chunk>,
+        Option<LabelId>,
+    ),
+    ForOf(
+        Option<VarKind>,
+        Rc<PatternCode>,
+        Rc<Chunk>,
+        Rc<Chunk>,
+        bool,
+        Option<LabelId>,
+    ),
     Return(Option<Rc<Chunk>>),
-    Break,
-    Continue,
+    Break(Option<LabelId>),
+    Continue(Option<LabelId>),
     Throw(Rc<Chunk>),
     Switch(Rc<Chunk>, Vec<(Option<Rc<Chunk>>, Rc<Chunk>)>, ScopePlan),
     Try(
@@ -188,10 +203,24 @@ pub(crate) enum Op {
     ),
 }
 impl Op {
+    pub(crate) fn loop_label(&self) -> Option<LabelId> {
+        match self {
+            Self::While(_, _, label)
+            | Self::DoWhile(_, _, label)
+            | Self::For { label, .. }
+            | Self::ForIn(_, _, _, _, label)
+            | Self::ForOf(_, _, _, _, _, label) => *label,
+            _ => unreachable!("loop opcode expected"),
+        }
+    }
+
     pub(crate) fn can_suspend(&self) -> bool {
         match self {
-            Self::Await | Self::Yield { .. } | Self::ForOf(_, _, _, _, true) => true,
-            Self::Evaluate(chunk) | Self::Throw(chunk) | Self::Block(chunk) => chunk.can_suspend,
+            Self::Await | Self::Yield { .. } | Self::ForOf(_, _, _, _, true, _) => true,
+            Self::Evaluate(chunk)
+            | Self::Throw(chunk)
+            | Self::Block(chunk)
+            | Self::Label(_, chunk) => chunk.can_suspend,
             Self::Initialize(_, _, chunk) | Self::Return(chunk) => {
                 chunk.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
@@ -200,10 +229,10 @@ impl Op {
                     || yes.can_suspend
                     || no.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
-            Self::While(test, body)
-            | Self::DoWhile(body, test)
-            | Self::ForOf(_, _, test, body, false)
-            | Self::ForIn(_, _, test, body) => test.can_suspend || body.can_suspend,
+            Self::While(test, body, _)
+            | Self::DoWhile(body, test, _)
+            | Self::ForOf(_, _, test, body, false, _)
+            | Self::ForIn(_, _, test, body, _) => test.can_suspend || body.can_suspend,
             Self::For {
                 initial,
                 test,
@@ -360,7 +389,9 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                         &mut chunks,
                     ))
                 }
-                Op::Evaluate(c) | Op::Block(c) | Op::Throw(c) => chunks.push(c.clone()),
+                Op::Evaluate(c) | Op::Block(c) | Op::Label(_, c) | Op::Throw(c) => {
+                    chunks.push(c.clone())
+                }
                 Op::Initialize(_, pattern, c) => {
                     bytes = bytes.saturating_add(pattern_retained_size(pattern, &mut chunks));
                     chunks.extend(c.iter().cloned());
@@ -370,7 +401,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     chunks.push(b.clone());
                     chunks.extend(c.iter().cloned());
                 }
-                Op::While(a, b) | Op::DoWhile(a, b) => {
+                Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
                     chunks.push(a.clone());
                     chunks.push(b.clone());
                 }
@@ -389,7 +420,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 Op::Destructure(pattern) => {
                     bytes = bytes.saturating_add(pattern_retained_size(pattern, &mut chunks))
                 }
-                Op::ForIn(_, pattern, a, b) | Op::ForOf(_, pattern, a, b, _) => {
+                Op::ForIn(_, pattern, a, b, _) | Op::ForOf(_, pattern, a, b, _, _) => {
                     bytes = bytes.saturating_add(pattern_retained_size(pattern, &mut chunks));
                     chunks.push(a.clone());
                     chunks.push(b.clone());
@@ -615,7 +646,11 @@ fn block_scope(
     let mut vars = BTreeSet::new();
     collect_vars(stmts, &mut vars);
     for stmt in stmts {
-        match stmt {
+        let declaration = match stmt {
+            Stmt::Label(_, _, item) if matches!(**item, Stmt::Function(_)) => item.as_ref(),
+            _ => stmt,
+        };
+        match declaration {
             Stmt::Variable(kind, decls) if *kind != VarKind::Var => {
                 for name in decls.iter().flat_map(|(pattern, _)| bound_names(pattern)) {
                     if !lexical.insert(name.clone()) {
@@ -775,7 +810,7 @@ fn collect_vars(stmts: &[Stmt], out: &mut BTreeSet<JsString>) {
                     collect_vars(std::slice::from_ref(&**no), out);
                 }
             }
-            Stmt::While(_, b) | Stmt::DoWhile(b, _) => {
+            Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
                 collect_vars(std::slice::from_ref(&**b), out)
             }
             Stmt::For(init, _, _, body) => {
@@ -785,7 +820,7 @@ fn collect_vars(stmts: &[Stmt], out: &mut BTreeSet<JsString>) {
                 collect_vars(std::slice::from_ref(&**body), out);
             }
             Stmt::ForIn(k, n, _, body) | Stmt::ForOf(k, n, _, body, _) => {
-                if *k == VarKind::Var {
+                if *k == Some(VarKind::Var) {
                     out.extend(bound_names(n));
                 }
                 collect_vars(std::slice::from_ref(&**body), out);
@@ -847,6 +882,15 @@ fn named_expression(expr: &Expr, strict: bool, name: &JsString) -> Result<Rc<Chu
     Ok(chunk)
 }
 fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
+    compile_statement(s, out, strict, None)
+}
+
+fn compile_statement(
+    s: &Stmt,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
     match s {
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
         Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
@@ -871,6 +915,23 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
             ));
         }
         Stmt::Block(body) => out.push(Op::Block(block(body, false, strict)?)),
+        Stmt::Label(id, names, item) => {
+            for name in names {
+                check_identifier(name, strict)?;
+            }
+            match item.as_ref() {
+                Stmt::While(..)
+                | Stmt::DoWhile(..)
+                | Stmt::For(..)
+                | Stmt::ForIn(..)
+                | Stmt::ForOf(..) => compile_statement(item, out, strict, Some(*id))?,
+                Stmt::Function(_) if strict => {
+                    return Err(syntax("Labelled function in strict mode"));
+                }
+                Stmt::Function(_) => {}
+                _ => out.push(Op::Label(*id, stmt_chunk(item, strict)?)),
+            }
+        }
         Stmt::Variable(kind, decls) => {
             for (pattern, init) in decls {
                 if strict
@@ -903,10 +964,12 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
         Stmt::While(test, body) => out.push(Op::While(
             expression(test, strict)?,
             stmt_chunk(body, strict)?,
+            label,
         )),
         Stmt::DoWhile(body, test) => out.push(Op::DoWhile(
             stmt_chunk(body, strict)?,
             expression(test, strict)?,
+            label,
         )),
         Stmt::For(initial, test, update, body) => {
             let lexical: Vec<(JsString, bool)> = match initial.as_deref() {
@@ -930,10 +993,11 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 update: update.as_ref().map(|e| expression(e, strict)).transpose()?,
                 body: stmt_chunk(body, strict)?,
                 lexical,
+                label,
             });
         }
         Stmt::ForIn(kind, name, object, body) => {
-            if *kind != VarKind::Var {
+            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
                 check_loop_lexical(bound_names(name), body)?;
             }
             out.push(Op::ForIn(
@@ -941,10 +1005,11 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 compile_pattern(name, strict)?,
                 expression(object, strict)?,
                 stmt_chunk(body, strict)?,
+                label,
             ));
         }
         Stmt::ForOf(kind, name, iterable, body, asynchronous) => {
-            if *kind != VarKind::Var {
+            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
                 check_loop_lexical(bound_names(name), body)?;
             }
             if strict
@@ -960,6 +1025,7 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 expression(iterable, strict)?,
                 stmt_chunk(body, strict)?,
                 *asynchronous,
+                label,
             ));
         }
         Stmt::Switch(test, cases) => {
@@ -987,8 +1053,8 @@ fn statement(s: &Stmt, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
         Stmt::Return(e) => out.push(Op::Return(
             e.as_ref().map(|e| expression(e, strict)).transpose()?,
         )),
-        Stmt::Break => out.push(Op::Break),
-        Stmt::Continue => out.push(Op::Continue),
+        Stmt::Break(target) => out.push(Op::Break(*target)),
+        Stmt::Continue(target) => out.push(Op::Continue(*target)),
         Stmt::Throw(e) => out.push(Op::Throw(expression(e, strict)?)),
         Stmt::Try(body, catch, finally) => out.push(Op::Try(
             stmt_chunk(body, strict)?,

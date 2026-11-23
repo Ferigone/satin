@@ -4,7 +4,6 @@ use crate::{
     bytecode::{Chunk, Op, PatternCode},
     heap::{Binding, EnvId, EnvKind, Environment},
     iterator::IteratorRecord,
-    parser::VarKind,
     patterns::PatternMode,
     vm::Completion,
 };
@@ -12,8 +11,10 @@ use std::{mem::size_of, rc::Rc, vec::IntoIter};
 
 pub(super) enum Resume {
     Pass,
+    Label,
     Initialize,
     Select,
+    BranchBody,
     Return,
     Throw,
     Loop(LoopState),
@@ -91,7 +92,12 @@ impl Resume {
                 state.result.iter().for_each(visit);
             }
             Self::Finally(completion) | Self::EachClose(completion) => match completion {
-                Ok(Completion::Normal(Some(value)) | Completion::Return(value)) => visit(value),
+                Ok(
+                    Completion::Normal(Some(value))
+                    | Completion::Break(_, Some(value))
+                    | Completion::Continue(_, Some(value))
+                    | Completion::Return(value),
+                ) => visit(value),
                 Err(error) => error.thrown.iter().for_each(visit),
                 _ => {}
             },
@@ -129,25 +135,12 @@ fn new_scope(vm: &mut Vm, parent: EnvId) -> Result<EnvId, JsError> {
         .allocate_env(Environment::new(Some(parent), EnvKind::Block, None)))
 }
 
-fn iteration_scope(
-    vm: &mut Vm,
-    env: EnvId,
-    kind: VarKind,
-    pattern: &PatternCode,
-) -> Result<EnvId, JsError> {
-    if kind == VarKind::Var {
-        return Ok(env);
-    }
-    let scope = new_scope(vm, env)?;
-    vm.declare_pattern(pattern, scope, kind != VarKind::Const, true)?;
-    Ok(scope)
-}
-
 pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError> {
     Ok(match op {
         Op::Evaluate(expression) => Advance::child(expression, env, Resume::Pass),
         Op::Initialize(_, _, Some(value)) => Advance::child(value, env, Resume::Initialize),
         Op::Block(body) => Advance::child(body, new_scope(vm, env)?, Resume::Pass),
+        Op::Label(_, body) => Advance::child(body, env, Resume::Label),
         Op::Branch(test, ..) => Advance::child(test, env, Resume::Select),
         Op::While(..) => LoopState::new(env).test(vm, op)?,
         Op::DoWhile(..) => LoopState::new(env).body(vm, op)?,
@@ -180,8 +173,8 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
                 state.test(vm, op)?
             }
         }
-        Op::ForIn(kind, pattern, source, _) | Op::ForOf(kind, pattern, source, _, _) => {
-            let head = iteration_scope(vm, env, *kind, pattern)?;
+        Op::ForIn(kind, pattern, source, _, _) | Op::ForOf(kind, pattern, source, _, _, _) => {
+            let head = vm.iteration_scope(env, *kind, pattern)?;
             Advance::child(source, head, Resume::EachSource)
         }
         Op::Return(Some(value)) => Advance::child(value, env, Resume::Return),
@@ -218,6 +211,12 @@ pub(super) fn after_child(
     }
     match resume {
         Resume::Pass => completed.map(Advance::Finish),
+        Resume::Label => {
+            let Op::Label(label, _) = op else {
+                unreachable!()
+            };
+            Ok(Advance::Finish(completed?.leave_label(*label)))
+        }
         Resume::Initialize => {
             let Op::Initialize(kind, pattern, _) = op else {
                 unreachable!()
@@ -241,17 +240,24 @@ pub(super) fn after_child(
             } else {
                 no.as_ref()
             };
-            Ok(chosen.map_or(Advance::normal(None), |chunk| {
-                Advance::child(chunk, env, Resume::Pass)
-            }))
+            Ok(
+                chosen.map_or(Advance::normal(Some(Value::Undefined)), |chunk| {
+                    Advance::child(chunk, env, Resume::BranchBody)
+                }),
+            )
         }
+        Resume::BranchBody => Ok(Advance::Finish(
+            completed?.update_empty(Some(Value::Undefined)),
+        )),
         Resume::Return => Ok(Advance::Finish(Completion::Return(expression(completed)?))),
         Resume::Throw => Err(vm.thrown_error(expression(completed)?)?),
         Resume::Loop(state) => state.advance(vm, op, env, completed),
         Resume::EachSource => {
             let source = expression(completed)?;
             let items = match op {
-                Op::ForOf(_, _, _, _, true) => Items::AsyncIterator(vm.get_async_iterator(source)?),
+                Op::ForOf(_, _, _, _, true, _) => {
+                    Items::AsyncIterator(vm.get_async_iterator(source)?)
+                }
                 Op::ForOf(..) => Items::Iterator(vm.get_iterator(source)?),
                 _ => {
                     let keys = vm.enumerable_keys(source)?;
@@ -261,7 +267,7 @@ pub(super) fn after_child(
             };
             EachState {
                 items,
-                result: None,
+                result: Some(Value::Undefined),
             }
             .next(vm, op, env, strict)
         }
@@ -305,13 +311,13 @@ pub(super) fn after_child(
             let Op::Switch(_, cases, _) = op else {
                 unreachable!()
             };
-            match completed? {
+            match completed?.update_empty(state.result.take()) {
                 Completion::Normal(value) => {
-                    remember(&mut state.result, value);
+                    state.result = value;
                     state.current += 1;
                     Ok(state.enter(cases))
                 }
-                Completion::Break => Ok(Advance::normal(state.result)),
+                Completion::Break(None, value) => Ok(Advance::normal(value)),
                 abrupt => Ok(Advance::Finish(abrupt)),
             }
         }
@@ -334,30 +340,31 @@ pub(super) fn after_child(
             };
             enter_finally(vm, env, finally.as_ref(), completed)
         }
-        Resume::Finally(previous) => match completed {
-            Ok(Completion::Normal(_)) => previous.map(Advance::Finish),
-            abrupt => abrupt.map(Advance::Finish),
-        },
+        Resume::Finally(previous) => {
+            let result = if matches!(completed, Ok(Completion::Normal(_))) {
+                previous
+            } else {
+                completed
+            };
+            Ok(Advance::Finish(
+                result?.update_empty(Some(Value::Undefined)),
+            ))
+        }
     }
 }
 
-fn remember(result: &mut Option<Value>, value: Option<Value>) {
-    if value.is_some() {
-        *result = value;
-    }
-}
 impl LoopState {
     fn new(scope: EnvId) -> Self {
         Self {
             scope,
             phase: Phase::Initial,
-            result: None,
+            result: Some(Value::Undefined),
         }
     }
 
     fn body(mut self, vm: &mut Vm, op: &Op) -> Result<Advance, JsError> {
         let body = match op {
-            Op::While(_, body) | Op::DoWhile(body, _) => {
+            Op::While(_, body, _) | Op::DoWhile(body, _, _) => {
                 vm.tick()?;
                 body
             }
@@ -370,7 +377,7 @@ impl LoopState {
 
     fn test(mut self, vm: &mut Vm, op: &Op) -> Result<Advance, JsError> {
         let test = match op {
-            Op::While(test, _) | Op::DoWhile(_, test) => Some(test),
+            Op::While(test, _, _) | Op::DoWhile(_, test, _) => Some(test),
             Op::For { test, .. } => {
                 vm.tick()?;
                 test.as_ref()
@@ -408,11 +415,10 @@ impl LoopState {
                 }
             }
             Phase::Body => {
-                match completed? {
-                    Completion::Normal(value) => remember(&mut self.result, value),
-                    Completion::Continue => {}
-                    Completion::Break => return Ok(Advance::normal(self.result)),
-                    abrupt => return Ok(Advance::Finish(abrupt)),
+                if let Some(completion) =
+                    completed?.after_loop_body(op.loop_label(), &mut self.result)
+                {
+                    return Ok(Advance::Finish(completion));
                 }
                 if let Op::For {
                     lexical, update, ..
@@ -479,11 +485,12 @@ impl EachState {
         completed: Flow,
     ) -> Result<Advance, JsError> {
         match completed {
-            Ok(Completion::Normal(value)) => remember(&mut self.result, value),
-            Ok(Completion::Continue) => {}
-            Ok(Completion::Break) => {
-                let result = self.result.take();
-                return self.close(vm, Ok(Completion::Normal(result)));
+            Ok(completion) => {
+                if let Some(completion) =
+                    completion.after_loop_body(op.loop_label(), &mut self.result)
+                {
+                    return self.close(vm, Ok(completion));
+                }
             }
             abrupt => return self.close(vm, abrupt),
         }
@@ -533,25 +540,12 @@ impl EachState {
         value: Value,
     ) -> Result<Advance, JsError> {
         let (kind, pattern, body) = match op {
-            Op::ForIn(kind, pattern, _, body) | Op::ForOf(kind, pattern, _, body, _) => {
+            Op::ForIn(kind, pattern, _, body, _) | Op::ForOf(kind, pattern, _, body, _, _) => {
                 (kind, pattern, body)
             }
             _ => unreachable!(),
         };
-        let scope = (|| {
-            vm.tick()?;
-            let scope = iteration_scope(vm, env, *kind, pattern)?;
-            vm.bind_pattern(
-                pattern,
-                value,
-                scope,
-                PatternMode::Binding(*kind),
-                strict,
-                None,
-            )?;
-            Ok(scope)
-        })();
-        match scope {
+        match vm.bind_iteration_value(env, *kind, pattern, value, strict) {
             Ok(scope) => Ok(Advance::child(body, scope, Resume::Each(self))),
             Err(error) => self.close(vm, Err(error)),
         }
@@ -589,9 +583,11 @@ impl SwitchTest {
             self.default = Some(self.current);
             self.current += 1;
         }
-        Ok(self.default.map_or(Advance::normal(None), |index| {
-            SwitchBody::new(self.scope, index).enter(cases)
-        }))
+        Ok(self
+            .default
+            .map_or(Advance::normal(Some(Value::Undefined)), |index| {
+                SwitchBody::new(self.scope, index).enter(cases)
+            }))
     }
 }
 impl SwitchBody {
@@ -599,7 +595,7 @@ impl SwitchBody {
         Self {
             scope,
             current,
-            result: None,
+            result: Some(Value::Undefined),
         }
     }
     fn enter(self, cases: &Cases) -> Advance {
@@ -645,6 +641,8 @@ fn enter_finally(
         }
         Ok(Advance::child(finally, env, Resume::Finally(completion)))
     } else {
-        completion.map(Advance::Finish)
+        Ok(Advance::Finish(
+            completion?.update_empty(Some(Value::Undefined)),
+        ))
     }
 }

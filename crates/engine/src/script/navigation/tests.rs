@@ -105,6 +105,49 @@ fn evaluate(runtime: &mut Option<ScriptRuntime>, expression: &str) -> Value {
 }
 
 #[test]
+fn detached_images_use_document_requests_and_ignore_replaced_sources() {
+    let (mut page, mut session, mut runtime) = start(
+        r#"<base href="/assets/"><script>
+        var image = new Image();
+        var events = [];
+        image.onload = function() {
+            events.push('load:' + image.naturalWidth + 'x' + image.naturalHeight);
+        };
+        image.onerror = function() { events.push('error'); };
+        image.src = 'first.png';
+        </script>"#,
+    );
+    let first = session.next_resource().expect("detached image request");
+    assert_eq!(first.request.url.as_str(), "https://example.test/assets/first.png");
+    assert_eq!(evaluate(&mut runtime, "image.complete"), Value::Bool(false));
+    evaluate(&mut runtime, "image.src = 'second.png'");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let second = session.next_resource().expect("new image request");
+    assert_eq!(second.request.url.as_str(), "https://example.test/assets/second.png");
+
+    for (request, width) in [(first, 3), (second, 7)] {
+        let id = request.id;
+        session.complete_resource(
+            id,
+            Ok(DocumentResource {
+                url: request.request.url,
+                body: ResourceBody::Image(Arc::new(image::RgbaImage::new(width, 2))),
+                transferred: 12,
+                origin_clean: true,
+            }),
+            &mut page,
+            &mut runtime,
+            Viewport::default(),
+        ).unwrap();
+        advance_ready(&mut page, &mut session, &mut runtime);
+    }
+    assert_eq!(evaluate(&mut runtime, "events.join('|')"), "load:7x2".into());
+    assert_eq!(evaluate(&mut runtime, "image.complete && image.width === 7"), Value::Bool(true));
+    assert_eq!(evaluate(&mut runtime, "image.currentSrc"), "https://example.test/assets/second.png".into());
+    assert!(runtime.unwrap().diagnostics().is_empty());
+}
+
+#[test]
 fn inline_post_connection_is_synchronous_and_preserves_parser_and_fragment_state() {
     let (_, session, mut runtime) = start(
         r#"<!doctype html><template id="template"><script>log.push('parsed-template')</script></template>

@@ -1,21 +1,27 @@
-# Formularze — zakres alfy 0.1.0-alpha.4
+# Forms in 0.1.0-alpha.4
 
-Silnik formularzy jest własnym modułem Rust (`engine/src/script/forms.rs`). Używa istniejącego DOM, tożsamości węzłów i dyspozytora zdarzeń. Stan bieżących wartości pozostaje oddzielony od atrybutów HTML: wpisywanie lub `input.value = ...` nie podmienia `value` w źródle dokumentu. `defaultValue`, `defaultChecked`, `defaultSelected`, reset i klonowanie zachowują ten podział.
+The Rust forms module uses the DOM, node identity, and shared event dispatcher. Current control values are stored separately from HTML attributes. User edits and assignments to `input.value` update current state while the `value` attribute records the default. `defaultValue`, `defaultChecked`, `defaultSelected`, reset, and cloning preserve the distinction. [Forms implementation](../crates/engine/src/script/forms.rs)
 
-Obsługiwany zakres:
+## Supported behavior
 
-- HTML `input`, `textarea`, `select`, `option`, `button`, właściciel `form`, powiązanie przez `form=id`, wyłączone `fieldset` z wyjątkiem pierwszego `legend`, wyłączone grupy opcji.
-- Wartości tekstowe i UTF-16, wybór zakresu, kursor, wstawianie tekstu, usuwanie pełnej pary surogatów, zaznaczanie, wielowierszowe pola i ograniczenie użytkowego `maxlength`. Zmiana programowa wartości nie emituje `input`/`change`.
-- Checkbox/radio z preaktywacją widoczną w `click`, cofnięciem przy anulowaniu, grupami radio oraz zdarzeniami `input` i `change`.
-- Wybór pojedynczy/wielokrotny, aktualne `.value`/`.selectedIndex`, klonowanie stanu, obsługa opcji przez klawiaturę i wskaźnik. Tab i Shift+Tab wysyłają anulowalne `keydown`, a następnie porządkują kontrolki według dodatniego `tabindex` i kolejności drzewa; pomijają wyłączone, `hidden` i ukryte bezpośrednim stylem.
-- `focus`, `blur`, `beforeinput`, `input`, `change`, `submit`, `reset`, anulowanie domyślnych działań i `event.submitter`.
-- `submit()` pomija walidację i zdarzenie `submit`; `requestSubmit()` oraz przyciski przechodzą zwykłą ścieżkę. Bezpośrednie `submit()` wewnątrz anulowanego handlera jest obsługiwane.
-- Udane pola w kolejności drzewa, powtarzające się nazwy, wybrany submitter, wybrane niewyłączone opcje, `_charset_`, normalizacja CRLF i UTF-8. GET zastępuje query adresu akcji; POST zachowuje query i emituje ciało `application/x-www-form-urlencoded`. Wysłanie jest przekazywane do warstwy nawigacji, poza callback JavaScript.
+- `input`, `textarea`, `select`, `option`, and `button`. Form ownership includes the `form` attribute, disabled fieldsets with the first-legend exception, and disabled option groups.
+- UTF-16 text values, selection ranges, caret movement, insertion, full surrogate pair deletion, multiline editing, and user editing limits from `maxlength`. Programmatic value updates are silent.
+- Checkbox and radio pre-activation visible in `click`, rollback on cancellation, radio groups, and `input` and `change` events.
+- Single and multiple selection, live `.value` and `.selectedIndex` reads, state cloning, and keyboard and pointer selection. Tab and Shift+Tab dispatch cancelable `keydown` and then follow positive `tabindex` and tree order. They skip disabled controls, the `hidden` attribute, and controls hidden by inline styles.
+- `focus`, `blur`, `beforeinput`, `input`, `change`, `submit`, `reset`, cancelable default actions, and `event.submitter`.
+- Direct `submit()` bypasses validation and the `submit` event. `requestSubmit()` and submit buttons use the regular path. A direct submission inside a canceled submit handler also works.
+- Successful controls in tree order, repeated field names, the chosen submitter, enabled selected options, `_charset_`, CRLF normalization, and UTF-8. GET replaces the action URL's query. POST preserves the query and sends an `application/x-www-form-urlencoded` body. The browser navigates outside the JavaScript callback.
 
-Walidacja obejmuje brak wymaganej wartości, wymagane checkbox/radio, prostą kontrolę email/URL oraz granice liczb. Nie jest jeszcze pełnym Constraint Validation API: m.in. `pattern`, wszystkie odmiany `step`, kompletne reguły długości, dat i adresów email oraz komunikaty walidacyjne wymagają dalszej implementacji. Brakuje pełnych selektorów CSS stanów kontrolki, wszystkich zdarzeń klawiatury/IME, edycji słów, natywnych pickerów, uploadu plików, `FormData`/`formdata`, multipart/plain POST, dialogów, nazwanych celów i nowego okna. Kolekcje DOM są migawkami, a klasyczne nazwane właściwości `form.foo` pozostają do wykonania. Skomplikowane przejścia `input.type` i wybrane skutki przenoszenia kontrolek między drzewami nie mają jeszcze pełnej zgodności.
+Validation covers missing required values, required checkboxes and radios, basic email and URL checks, and numeric bounds. At this stage the remaining Constraint Validation API work included `pattern`, some `step` cases, full length, date, and email rules, and validation messages. Other gaps included control-state CSS selectors, complete keyboard and IME events, word editing, native pickers, file uploads, `FormData` and `formdata`, multipart and plain-text POST, dialogs, named targets, and opening new windows. DOM collections used snapshots. Named properties such as `form.foo`, complex `input.type` transitions, and some effects of moving controls between trees also remained open. [Later form and file milestones](ROADMAP.md)
 
-Budżety: 1 Mi jednostek UTF-16 na zmienianą wartość, 8 MiB współdzielonych danych wartości, do 4096 wpisów i 4 MiB zakodowanej treści jednego zgłoszenia, osiem oczekujących zgłoszeń. Edycje i operacje DOM zużywają wspólny budżet zadania VM. Migawki renderera indeksują formularze, opcje i grupy radio jednym przejściem; tekst do rysowania ma ograniczenie 8192 jednostek na kontrolkę oraz 1 MiB łącznie (plus bieżąca kontrolka). Pełne API wartości pozostaje oddzielne od tych podglądów. Widoczność z zewnętrznych arkuszy przy programowym fokusie wymaga dalszej integracji obliczonych stylów.
+A mutable value allows up to 1 Mi UTF-16 code units, with 8 MiB of shared value data. Each submission allows up to 4,096 entries and 4 MiB of encoded data, with eight pending submissions. Editing and DOM changes use the same VM task budget. Renderer snapshots index forms, options, and radio groups in one pass. Display text is capped at 8,192 code units per control and 1 MiB total, with a separate allowance for the active control. The full value API is independent of the paint preview. Programmatic focus needs broader computed-style integration to account for visibility from external stylesheets.
 
-Weryfikacja: `cargo test -p rust-browser-engine --test forms --offline`. Zestaw sprawdza faktyczne mutacje, anulowanie i wpisy GET/POST, edycję UTF-16, reentrancję, reset, klonowanie, fokus oraz duży zestaw grup radio. Dodatkowe testy renderera znajdują się w `tests/forms_rendering.rs` i należą do wspólnej weryfikacji wydania.
+## Verification
 
-Punkty odniesienia implementacji: [infrastruktura i wysyłanie formularzy](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html), [input](https://html.spec.whatwg.org/multipage/input.html), [select, option i textarea](https://html.spec.whatwg.org/multipage/form-elements.html). To lista działającego zakresu rozwojowego, nie deklaracja pełnej zgodności HTML Forms.
+```powershell
+cargo test -p rust-browser-engine --test forms --offline
+```
+
+The form tests cover mutations, cancellation, GET and POST entries, UTF-16 editing, reentrancy, reset, cloning, focus, and a large radio group fixture. Rendering tests run with the release checks. [Renderer tests](../crates/engine/tests/forms_rendering.rs)
+
+The implemented subset follows the HTML form algorithms. [Form control infrastructure and submission](https://html.spec.whatwg.org/multipage/form-control-infrastructure.html) · [Input](https://html.spec.whatwg.org/multipage/input.html) · [Select, option, and textarea](https://html.spec.whatwg.org/multipage/form-elements.html)

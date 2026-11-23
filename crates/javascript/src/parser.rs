@@ -192,6 +192,8 @@ pub(crate) enum Expr {
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
     Sequence(Box<Expr>, Box<Expr>),
 }
+pub(crate) type LabelId = std::num::NonZeroU32;
+
 #[derive(Clone, Debug)]
 pub(crate) enum Stmt {
     Empty,
@@ -206,12 +208,13 @@ pub(crate) enum Stmt {
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(VarKind, Pattern, Expr, Box<Stmt>),
-    ForOf(VarKind, Pattern, Expr, Box<Stmt>, bool),
+    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>),
+    ForOf(Option<VarKind>, Pattern, Expr, Box<Stmt>, bool),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
+    Label(LabelId, Vec<JsString>, Box<Stmt>),
     Return(Option<Expr>),
-    Break,
-    Continue,
+    Break(Option<LabelId>),
+    Continue(Option<LabelId>),
     Throw(Expr),
     Try(
         Box<Stmt>,
@@ -238,6 +241,8 @@ pub(crate) fn parse_script(source: &str, context: EvalContext) -> Result<Vec<Stm
         function_depth: 0,
         loop_depth: 0,
         switch_depth: 0,
+        labels: Vec::new(),
+        next_label: 1,
         depth: 0,
         allow_in: true,
         super_property: context.super_property,
@@ -293,6 +298,12 @@ struct PrivateDeclaration {
     setter: bool,
 }
 
+struct ActiveLabel {
+    id: LabelId,
+    names: Vec<JsString>,
+    iteration: bool,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     lexer: Lexer,
@@ -300,6 +311,8 @@ struct Parser {
     function_depth: usize,
     loop_depth: usize,
     switch_depth: usize,
+    labels: Vec<ActiveLabel>,
+    next_label: u32,
     depth: usize,
     allow_in: bool,
     super_property: bool,
@@ -386,10 +399,7 @@ impl Parser {
         }
         let message = message.into();
         let mut error = JsError::syntax(&message, self.current().line, self.current().column);
-        if message.contains("not implemented")
-            || message.contains("unsupported")
-            || message.contains("Labels")
-        {
+        if message.contains("not implemented") || message.contains("unsupported") {
             error.kind = ErrorKind::UnsupportedFeature;
         }
         if message.contains("nesting limit") {
@@ -472,14 +482,8 @@ impl Parser {
         Ok(statement)
     }
     fn statement_inner(&mut self) -> Result<Stmt, JsError> {
-        if (matches!(&self.current().kind, TokenKind::Word(_))
-            || matches!(&self.current().kind, TokenKind::EscapedWord(w) if self.identifier_allowed(w)))
-            && self
-                .tokens
-                .get(self.pos + 1)
-                .is_some_and(|t| t.kind == TokenKind::Punct(":"))
-        {
-            return Err(self.error("Labels are not implemented"));
+        if self.label_ahead() {
+            return self.labelled_statement();
         }
         if self.eat(";") {
             return Ok(Stmt::Empty);
@@ -518,9 +522,9 @@ impl Parser {
             self.expect("(")?;
             let test = self.expression(1)?;
             self.expect(")")?;
-            let yes = Box::new(self.statement()?);
+            let yes = Box::new(self.controlled_statement()?);
             let no = if self.eat("else") {
-                Some(Box::new(self.statement()?))
+                Some(Box::new(self.controlled_statement()?))
             } else {
                 None
             };
@@ -531,13 +535,13 @@ impl Parser {
             let test = self.expression(1)?;
             self.expect(")")?;
             self.loop_depth += 1;
-            let body = self.statement();
+            let body = self.controlled_statement();
             self.loop_depth -= 1;
             return Ok(Stmt::While(test, Box::new(body?)));
         }
         if self.eat("do") {
             self.loop_depth += 1;
-            let body = self.statement();
+            let body = self.controlled_statement();
             self.loop_depth -= 1;
             let body = Box::new(body?);
             self.expect("while")?;
@@ -571,24 +575,14 @@ impl Parser {
             return Ok(Stmt::Return(expr));
         }
         if self.eat("break") {
-            if self.loop_depth == 0 && self.switch_depth == 0 {
-                return Err(self.error("Break outside a loop or switch"));
-            }
-            if !self.current().newline && !self.at(";") && !self.at("}") && !self.is_eof() {
-                return Err(self.error("Labels are not implemented"));
-            }
+            let target = self.jump_target(false)?;
             self.semi()?;
-            return Ok(Stmt::Break);
+            return Ok(Stmt::Break(target));
         }
         if self.eat("continue") {
-            if self.loop_depth == 0 {
-                return Err(self.error("Continue outside a loop"));
-            }
-            if !self.current().newline && !self.at(";") && !self.at("}") && !self.is_eof() {
-                return Err(self.error("Labels are not implemented"));
-            }
+            let target = self.jump_target(true)?;
             self.semi()?;
-            return Ok(Stmt::Continue);
+            return Ok(Stmt::Continue(target));
         }
         if self.eat("throw") {
             if self.current().newline {
@@ -681,6 +675,92 @@ impl Parser {
         self.semi()?;
         Ok(Stmt::Expression(e))
     }
+
+    fn label_ahead(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Word(_) | TokenKind::EscapedWord(_)
+        ) && self
+            .tokens
+            .get(self.pos + 1)
+            .is_some_and(|token| token.kind == TokenKind::Punct(":"))
+    }
+
+    fn labelled_statement(&mut self) -> Result<Stmt, JsError> {
+        let mut names = Vec::new();
+        while self.label_ahead() {
+            if self.depth + names.len() >= MAX_PARSER_DEPTH {
+                return Err(self.error("Parser nesting limit exceeded"));
+            }
+            let name = self.name()?;
+            if names.contains(&name) || self.labels.iter().any(|label| label.names.contains(&name))
+            {
+                return Err(self.error(format!("Duplicate label '{name}'")));
+            }
+            names.push(name);
+            self.expect(":")?;
+        }
+
+        // The lexer token budget is smaller than the label id space.
+        let id = LabelId::new(self.next_label).unwrap();
+        self.next_label += 1;
+        self.labels.push(ActiveLabel {
+            id,
+            names,
+            iteration: self.at("while") || self.at("do") || self.at("for"),
+        });
+        let item = self.statement();
+        let ActiveLabel { names, .. } = self.labels.pop().unwrap();
+        let item = item?;
+        if matches!(
+            item,
+            Stmt::Variable(VarKind::Let | VarKind::Const, _) | Stmt::Class(..)
+        ) || matches!(&item, Stmt::Function(f) if f.kind != FunctionKind::Ordinary)
+        {
+            return Err(self.error("Invalid labelled declaration"));
+        }
+        Ok(Stmt::Label(id, names, Box::new(item)))
+    }
+
+    fn controlled_statement(&mut self) -> Result<Stmt, JsError> {
+        let statement = self.statement()?;
+        if matches!(&statement, Stmt::Label(_, _, item) if matches!(**item, Stmt::Function(_))) {
+            return Err(self.error("Labelled function in a controlled statement"));
+        }
+        Ok(statement)
+    }
+
+    fn jump_target(&mut self, continuing: bool) -> Result<Option<LabelId>, JsError> {
+        if self.current().newline || self.at(";") || self.at("}") || self.is_eof() {
+            if self.loop_depth == 0 && (continuing || self.switch_depth == 0) {
+                return Err(self.error(if continuing {
+                    "Continue outside a loop"
+                } else {
+                    "Break outside a loop or switch"
+                }));
+            }
+            return Ok(None);
+        }
+
+        if !matches!(
+            self.current().kind,
+            TokenKind::Word(_) | TokenKind::EscapedWord(_)
+        ) {
+            return Err(self.error("Expected a label identifier"));
+        }
+        let name = self.name()?;
+        let label = self
+            .labels
+            .iter()
+            .rev()
+            .find(|label| label.names.contains(&name))
+            .ok_or_else(|| self.error(format!("Unknown label '{name}'")))?;
+        if continuing && !label.iteration {
+            return Err(self.error(format!("Continue target '{name}' is not an iteration")));
+        }
+        Ok(Some(label.id))
+    }
+
     fn block_contents(&mut self) -> Result<Vec<Stmt>, JsError> {
         let mut stmts = Vec::new();
         while !self.eat("}") {
@@ -730,6 +810,12 @@ impl Parser {
             return Err(self.error("for await requires an asynchronous body or a module"));
         }
         self.expect("(")?;
+        let disallowed_of_target = self.at("let")
+            || (!asynchronous
+                && self.at("async")
+                && self.tokens.get(self.pos + 1).is_some_and(
+                    |token| matches!(&token.kind, TokenKind::Word(word) if word == "of"),
+                ));
         let previous = self.allow_in;
         self.allow_in = false;
         let kind = if self.eat("var") {
@@ -750,58 +836,51 @@ impl Parser {
             Some(Box::new(Stmt::Expression(self.expression(1)?)))
         };
         self.allow_in = previous;
-        if self.eat("in") {
-            if asynchronous {
+        let enumerate = self.eat("in");
+        if enumerate || self.eat("of") {
+            if enumerate && asynchronous {
                 return Err(self.error("for await requires of"));
             }
-            let Some(stmt) = init else {
-                return Err(self.error("Missing for-in binding"));
-            };
-            let (k, name) = match *stmt {
-                Stmt::Variable(k, mut d) if d.len() == 1 && d[0].1.is_none() => (k, d.remove(0).0),
-                Stmt::Expression(_) => {
-                    return Err(self.error("Assignment targets in for-in are not implemented"));
-                }
-                _ => return Err(self.error("Invalid for-in declaration")),
-            };
-            let object = self.expression(1)?;
-            self.expect(")")?;
-            self.loop_depth += 1;
-            let body = self.statement();
-            self.loop_depth -= 1;
-            return Ok(Stmt::ForIn(k, name, object, Box::new(body?)));
-        }
-        if self.eat("of") {
-            let Some(stmt) = init else {
-                return Err(self.error("Missing for-of binding"));
-            };
-            let (k, name) = match *stmt {
-                Stmt::Variable(k, mut declarations)
+            let (kind, target) = match init.map(|stmt| *stmt) {
+                Some(Stmt::Variable(kind, mut declarations))
                     if declarations.len() == 1 && declarations[0].1.is_none() =>
                 {
-                    (k, declarations.remove(0).0)
+                    (Some(kind), declarations.remove(0).0)
                 }
-                Stmt::Expression(_) => {
-                    return Err(self.error("Assignment targets in for-of are not implemented"));
+                Some(Stmt::Expression(target))
+                    if (enumerate || !disallowed_of_target) && assignable(&target) =>
+                {
+                    (None, self.pattern(target, false)?)
                 }
-                _ => return Err(self.error("Invalid for-of declaration")),
+                Some(Stmt::Expression(Expr::Array(..) | Expr::Object(..)))
+                    if enumerate || !disallowed_of_target =>
+                {
+                    return Err(self.error(
+                        "Destructuring assignment targets in iteration heads are not implemented",
+                    ));
+                }
+                Some(Stmt::Expression(_)) => {
+                    return Err(self.error("Invalid iteration assignment target"));
+                }
+                _ => {
+                    return Err(self.error("Expected a single uninitialized iteration binding"));
+                }
             };
-            let iterable = self.expression(2)?;
+            let source = self.expression(if enumerate { 1 } else { 2 })?;
             self.expect(")")?;
             self.loop_depth += 1;
             let body = if asynchronous {
                 self.for_await_body()
             } else {
-                self.statement()
+                self.controlled_statement()
             };
             self.loop_depth -= 1;
-            return Ok(Stmt::ForOf(
-                k,
-                name,
-                iterable,
-                Box::new(body?),
-                asynchronous,
-            ));
+            let body = Box::new(body?);
+            return Ok(if enumerate {
+                Stmt::ForIn(kind, target, source, body)
+            } else {
+                Stmt::ForOf(kind, target, source, body, asynchronous)
+            });
         }
         if asynchronous {
             return Err(self.error("for await requires of"));
@@ -820,7 +899,7 @@ impl Parser {
         };
         self.expect(")")?;
         self.loop_depth += 1;
-        let body = self.statement();
+        let body = self.controlled_statement();
         self.loop_depth -= 1;
         Ok(Stmt::For(init, test, update, Box::new(body?)))
     }
@@ -846,7 +925,7 @@ impl Parser {
         {
             return Err(self.error("Declaration requires a block in a for-await body"));
         }
-        self.statement()
+        self.controlled_statement()
     }
     fn function_kind(&mut self, is_async: bool) -> FunctionKind {
         match (is_async, self.eat("*")) {
@@ -918,6 +997,7 @@ impl Parser {
     ) -> Result<Function, JsError> {
         let old_loop = self.loop_depth;
         let old_switch = self.switch_depth;
+        let old_labels = std::mem::take(&mut self.labels);
         let old_static_block = self.static_block;
         let old_await_context = self.await_context;
         let old_await_count = self.await_count;
@@ -944,6 +1024,7 @@ impl Parser {
         self.function_depth -= 1;
         self.loop_depth = old_loop;
         self.switch_depth = old_switch;
+        self.labels = old_labels;
         self.static_block = old_static_block;
         self.await_context = old_await_context;
         self.await_count = old_await_count;
@@ -2009,7 +2090,8 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 }
             },
             Ast::Statement(statement) => match statement {
-                Stmt::Empty | Stmt::Break | Stmt::Continue => {}
+                Stmt::Empty | Stmt::Break(_) | Stmt::Continue(_) => {}
+                Stmt::Label(_, _, item) => pending.push((Ast::Statement(item), child_depth)),
                 Stmt::Class(_, class) => push_class_ast(class, child_depth, &mut pending),
                 Stmt::DefaultExport(value) => pending.push((Ast::Expression(value), child_depth)),
                 Stmt::Expression(e) | Stmt::Throw(e) => {

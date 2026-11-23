@@ -32,6 +32,7 @@ pub(crate) struct Job {
     pub cancel: CancelSignal,
 }
 pub(crate) enum Payload {
+    MediaWake,
     Navigation(NavigationPart),
     NavigationError(String),
     Fetch {

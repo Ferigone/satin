@@ -339,7 +339,7 @@ impl Vm {
                 let reason = self.error_reason(error)?;
                 self.settle_promise(promise, reason, true)
             }
-            Ok(Completion::Break | Completion::Continue) => Err(JsError::new(
+            Ok(Completion::Break(..) | Completion::Continue(..)) => Err(JsError::new(
                 ErrorKind::InternalError,
                 "Unexpected async body abrupt completion",
             )),
@@ -420,7 +420,7 @@ impl Vm {
                 }
                 result => {
                     let flow = result.map(|advance| match advance {
-                        Advance::Finish(completion) => completion,
+                        Advance::Finish(completion) => completion.update_empty(frame.result.take()),
                         _ => unreachable!(),
                     });
                     frames.pop();

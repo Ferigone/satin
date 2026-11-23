@@ -1,19 +1,12 @@
-# Przypięte WPT dla CSS `position: sticky`
+# Pinned tests for CSS `position: sticky`
 
-Zestaw zawiera 19 stron i 52 synchroniczne podtesty. Oryginalne strony, współdzielony `sticky-util.js` i oficjalny `testharness.js` zachowują bajty rewizji `9e1907a13cbbc338975302097a4bafcbc4d12dc5`. Manifest zapisuje ich ścieżki źródłowe, sumy SHA-256 i liczbę podtestów. [Źródło WPT](https://github.com/web-platform-tests/wpt/tree/9e1907a13cbbc338975302097a4bafcbc4d12dc5/css/css-position/sticky) · [Licencja WPT](../wpt-url/LICENSE.md)
+This suite contains 19 pages and 52 synchronous subtests. The original pages, shared `sticky-util.js`, and upstream `testharness.js` use the bytes from revision `9e1907a13cbbc338975302097a4bafcbc4d12dc5`. The manifest records source paths, SHA-256 digests, and subtest counts. [Web Platform Tests source](https://github.com/web-platform-tests/wpt/tree/9e1907a13cbbc338975302097a4bafcbc4d12dc5/css/css-position/sticky) · [License](../wpt-url/LICENSE.md)
 
 ```powershell
-$env:CARGO_PROFILE_TEST_DEBUG = '0'
-$env:CARGO_INCREMENTAL = '0'
 cargo test -p rust-browser-engine --test sticky_wpt -- --nocapture
 node tools/verify-sticky-wpt.mjs OUTPUT REA_CLI
 ```
 
-Test Rust wykonuje oryginalne ciała podtestów i zachowuje ich asercje. Prosty adapter uruchamia każde ciało jako osobne zadanie JavaScript na wczytanym dokumencie. Dla dwóch plików wpisy identyfikatorów elementów na `Window` pochodzą z istniejącego DOM. Przy przypadkach korzystających z `setupStickyTest` adapter przekazuje tekstową wartość `element.style` do właściwości `style.cssText` silnika. Odczyty geometrii i przewijanie wykonuje normalny kod silnika.
+The Rust test runs each original subtest body and preserves its assertions. It registers DOM identifiers as `Window` properties for two files and passes style text from `setupStickyTest` to the engine's `style.cssText`. Geometry and scrolling use the normal engine.
 
-Kompilator JavaScript alfy.12 kończy wczytywanie `position-sticky-parsing.html`
-na przypisaniu do istniejącej zmiennej w `for...of`. Raport rejestruje ten
-podtest jako niewykonany. Rozpoznawanie `sticky` przez CSS i CSSOM sprawdzają
-osobna regresja parsera i scenariusz `tools/verify-sticky-browser.mjs`.
-
-Oddzielny proces headless Chrome uruchamia te same strony z oficjalnym `testharness.js`. Jego adapter raportujący zbiera oryginalne wyniki w niezależnych ramkach dokumentu o wymiarach 800 × 600 CSS px. Przypadki testują geometrię, w tym interakcję sticky z wewnętrznym `overflow: hidden`. Wyniki dla testu obejmującego strukturę z deklaracjami CSS tabeli dotyczą asercji geometrii. Zestaw obejmuje przewijanie viewportu, fizyczne insets, ograniczenia bloków zawierających, zmianę stylu i DOM oraz zagnieżdżone elementy sticky.
+The reference run executes the same pages with the original `testharness.js` in separate document frames at 800 × 600 CSS pixels. Cases cover physical insets, containing blocks, viewport and nested scrolling, `overflow: hidden`, style and DOM changes, and nested sticky elements. The table case measures geometry around table CSS declarations.

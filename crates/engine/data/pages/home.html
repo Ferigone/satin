@@ -1,0 +1,31 @@
+<style>
+  .home-hero { padding: 30px 34px; background: #12312e; color: #f2faf7; }
+  .home-hero h1 { margin: 8px 0 12px; font-size: 58px; }
+  .home-hero .eyebrow { color: #78dfc0; }
+  .home-hero p { margin: 0; }
+  .home-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .home-cards .card { margin: 0; }
+  .home-cards span { color: #405562; }
+  @media (max-width: 620px) { .home-cards { grid-template-columns: 1fr; } }
+</style>
+<section class="home-hero">
+  <p class="eyebrow">WINDOWS ALPHA · {{VERSION}}</p>
+  <h1>Satin</h1>
+  <p>Enter a web address or try one of the built-in pages.</p>
+</section>
+<h2>Explore Satin</h2>
+<div class="home-cards">
+  <a class="card" href="about:media"><strong>Video playback</strong><br><span>Play, pause, and seek in a sample MP4.</span></a>
+  <a class="card" href="about:graphics"><strong>Graphics and layout</strong><br><span>Try SVG, transforms, and scrolling.</span></a>
+  <a class="card" href="about:canvas"><strong>Canvas 2D</strong><br><span>Draw a scene and inspect a pixel.</span></a>
+  <a class="card" href="about:version"><strong>What's available</strong><br><span>See features and compatibility gaps.</span></a>
+</div>
+<h2>More built-in pages</h2>
+<p><a href="about:javascript">JavaScript</a> · <a href="about:forms">Forms</a> ·
+<a href="about:platform">Web APIs</a> · <a href="about:demo">HTML and CSS</a> ·
+<a href="about:numbers">Integers</a> · <a href="about:bytes">Bytes and streams</a> ·
+<a href="about:files">File preview</a> · <a href="about:messages">Message ports</a> ·
+<a href="about:time">Time and layout</a> · <a href="about:routes">History</a> ·
+<a href="about:async">Async tasks</a> · <a href="about:modules">Modules</a></p>
+<p><a href="https://example.com/">Example.com</a> · <a href="http://info.cern.ch/">The first website</a></p>
+<p class="muted">Ctrl+L Focus address bar · Ctrl+T New tab · Ctrl+R Reload · Ctrl+Plus/Minus Zoom</p>

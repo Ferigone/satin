@@ -1,140 +1,95 @@
-# Cel i etapy
+# Roadmap
 
-Cel: niezależny silnik WWW w Rust, wzorowany na zachowaniu Chrome, pozwalający docelowo korzystać ze współczesnych stron i aplikacji. Windows jest pierwszą platformą. Optymalizacja ma równoważyć zużycie pamięci i szybkość, przy zachowaniu poprawności.
+Satin is building an independent web engine in Rust for modern sites and applications. Windows is the first platform. Performance work balances memory use and responsiveness while preserving web compatibility.
 
-## Podetap alfa.13
+The current compatibility priority is daily use of popular sites, starting with YouTube and Twitch. Verification covers page startup, usable controls, and actual playback as separate milestones.
 
-MessageChannel i MessagePort przekazują klonowane dane i przenoszą porty
-w obrębie dokumentu. Windows otwiera wybór do pól plikowych, a FileList
-i FormData zachowują wybrane obiekty File. ImageBitmap dekoduje, skaluje,
-rysuje, klonuje i przenosi obrazy. Fetch przesyła ciało ze strumienia przez
-HTTP/2. Strony próbne to `about:messages` i `about:files`.
-[Porty wiadomości](MESSAGE_PORTS.md) · [Structured clone](STRUCTURED_CLONE.md)
+## Alpha.13
 
-## Podetap alfa.12
+`MessageChannel` and `MessagePort` pass cloned data and transfer ports within a document. Windows opens a file picker for file inputs, and `FileList` and `FormData` preserve user-selected `File` objects. `ImageBitmap` decodes, scales, paints, clones, and transfers images. Fetch sends a streamed request body over HTTP/2. Try `about:messages` and `about:files`. [Message ports](MESSAGE_PORTS.md) · [Structured clone](STRUCTURED_CLONE.md)
 
-BigInt i 64-bitowe tablice typowane uzupełniają operacje na liczbach
-i danych binarnych. Gettery oraz settery w literałach obiektowych
-działają również z obliczanymi kluczami. Structured clone przenosi bufory
-i kopiuje Blob, File, DOMException oraz ImageData. Oryginalny zestaw
-WPT z BigInt i akcesorami jest wykonywany w dokumencie. Ręczna próba
-to `about:numbers`.
-[Structured clone](STRUCTURED_CLONE.md) · [Weryfikacja wydań](VERIFICATION.md)
+## Alpha.12
 
-## Podetap alfa.11
+BigInt and 64-bit typed arrays add numeric and binary operations. Object literal getters and setters also work with computed property keys. Structured cloning transfers buffers and copies `Blob`, `File`, `DOMException`, and `ImageData`. The browser runs unmodified BigInt and accessor WPT cases in a document. Try `about:numbers`. [Structured clone](STRUCTURED_CLONE.md) · [Release verification](VERIFICATION.md)
 
-Canvas 2D rysuje i udostępnia piksele w natywnym rendererze. Web Streams
-przekazuje strumienie bajtowe do czytników BYOB i obsługuje potoki z
-przekształcaniem i zapisem. DOM korzysta z tego samego EventTarget co zwykłe
-cele oraz AbortSignal. StructuredClone umożliwia klonowanie grafów
-i przenoszenie buforów. Ręczne próby to `about:canvas` oraz
-**Przekształć tekst** na `about:bytes`.
-[Structured clone](STRUCTURED_CLONE.md) · [Weryfikacja wydań](VERIFICATION.md)
+## Alpha.11
 
-## Podetap alfa.10
+Canvas 2D paints and exposes pixels in the native renderer. Web Streams supports BYOB readers for byte streams and pipes for transforming and writing data. The DOM uses the same `EventTarget` as standalone targets and `AbortSignal`. `structuredClone` clones object graphs and transfers buffers. Try `about:canvas` or the text transform on `about:bytes`. [Structured clone](STRUCTURED_CLONE.md) · [Release verification](VERIFICATION.md)
 
-Web Storage trafia do profilu i do sesji karty. Date, prywatne elementy
-klas, interwały i kolejka klatek uzupełniają JavaScript. Grid przyjmuje
-nazwane linie i obszary oraz powtórzenia zależne od dostępnej szerokości
-lub wysokości. Ręczna próba to `about:time`.
-[Data i czas](DATE.md) · [Transport i zadania](NAVIGATION.md)
+## Alpha.10
 
-## Podetap alfa.9
+Web Storage persists local storage in the profile and keeps session storage with the tab. The engine adds `Date`, private class elements, interval timers, and animation frame callbacks. Grid supports named lines and areas and repeats based on available width or height. Try `about:time`. [Date and time](DATE.md) · [Transport and tasks](NAVIGATION.md) · [Grid](GRID.md)
 
-Fetch dostarcza nagłówki przed ukończeniem odbioru. Dalsze porcje przechodzą
-przez ograniczoną kolejkę i pozostają pod kontrolą czytnika. VM obsługuje dane
-binarne oraz generatory. Blob, File i FormData działają w Fetch i w nawigacji
-formularza. Ręczna próba `about:bytes` łączy te ścieżki.
-[Weryfikacja wydań](VERIFICATION.md) · [Transport](NAVIGATION.md)
+## Alpha.9
 
-## Podetap alfa.8
+Fetch delivers headers before receiving the full body. Body chunks go through a bounded queue under the reader's control. The VM supports binary data and generators. `Blob`, `File`, and `FormData` work with Fetch and form navigation. Try `about:bytes` to exercise these paths together. [Release verification](VERIFICATION.md) · [Transport](NAVIGATION.md)
 
-Kolekcje kluczowane i własny RegExp uzupełniają bibliotekę JavaScript.
-MutationObserver jest połączony z parserem i DOM. History i Location
-obsługują zmiany adresu w istniejącym dokumencie oraz przywracanie stanu.
-`about:routes` łączy te mechanizmy w próbie przejścia między dwoma widokami.
-Zakres i limity opisują [historia](HISTORY.md) i [obserwatory DOM](MUTATION_OBSERVERS.md).
+## Alpha.8
 
-## Podetap alfa.7
+The JavaScript standard library adds keyed collections and a native `RegExp` implementation. `MutationObserver` integrates with the parser and DOM. History and Location support URL updates within the active document and restore history state. Try `about:routes` to move between two views. [History](HISTORY.md) · [DOM observers](MUTATION_OBSERVERS.md)
 
-Asynchroniczny transport przerywa oczekiwanie na I/O. VM wznawia funkcje
-async i moduły przez kolejkę mikrozadań. Host wykonuje skrypty dołączane po
-wczytaniu, utrzymuje graf dla `import()` i udostępnia AbortSignal oraz URL.
-Ręczna próba `about:async` pozwala ukończyć albo przerwać zadanie. Testy z
-lokalnym serwerem sprawdzają kolejność skryptów, zachowanie aktywnych połączeń
-i kodowanie danych formularza. Wyniki wydania są w VERIFICATION.md.
+## Alpha.7
 
-## Podetap alfa.6
+Asynchronous transport can cancel pending I/O. The VM resumes async functions and modules through the microtask queue. The host runs dynamically inserted scripts, maintains the module graph for `import()`, and exposes `AbortSignal` and `URL`. Try `about:async` to complete or cancel a task. A local server checks script ordering, active connection behavior, and form encoding. [Dynamic scripts](DYNAMIC_SCRIPTS.md) · [Release verification](VERIFICATION.md)
 
-Przyrostowy parser i dekoder HTML są połączone z Fetch i VM w zwykłej nawigacji.
-Podetap dodaje wykonywanie skryptów podczas parsowania, document.write, statyczny
-graf modułów, klasy, wybrane żywe kolekcje DOM oraz fonty sieciowe.
-Ręczna próba to `about:modules`. Launcher z pulpitu uruchomił alfę.6 i pokazał
-„Moduły: 1” po kliknięciu. Stan instalacji i dokładne wyniki są w VERIFICATION.md.
+## Alpha.6
 
-## Podetap alfa.5
+Regular navigation uses the incremental HTML decoder and parser with Fetch and the VM. This release adds script execution while parsing, `document.write`, a static module graph, classes, selected live DOM collections, and web fonts. The desktop launcher ran alpha.6, and clicking in `about:modules` updated the module counter in the title to 1. [Streaming HTML](HTML_STREAMING.md) · [Fonts](FONTS.md) · [Release verification](VERIFICATION.md)
 
-Kod alfa.5 łączy własne SVG/XML i rasteryzację, pozycjonowanie/warstwy/overflow
-oraz macierze 2D z rzeczywistymi odczytami CSSOM. Własna VM dodaje szablony,
-destrukturyzację, default/rest/spread obiektów, optional chaining i przypisania
-logiczne. Wyniki aktualnego podetapu i jego instalacji są zapisywane w
-VERIFICATION.md. Cały cel zgodności WWW pozostaje otwarty.
+## Alpha.5
 
-about:graphics udostępnia ręczne próby przesuwania/obracania, pomiaru,
-kliknięcia SVG i przewijania panelu. Wspólny lokalny scenariusz porównuje Rust
-oraz osobny Chrome przez REA. Nowe mechanizmy mają ograniczenia opisane w
-SVG.md, CSSOM_VIEW.md, CSS_LAYOUT.md i JAVASCRIPT.md.
+The engine combines SVG and XML parsing and rasterization, positioned layers and overflow, 2D matrices, and CSSOM measurements. The VM adds templates, destructuring, defaults, rest and object spread, optional chaining, and logical assignment.
 
-## 1. Fundament — rozwój trwa
+Use `about:graphics` to move and rotate an element, measure geometry, click an SVG shape, and scroll a panel. A shared local scenario compares the graphics paths with a reference browser. [SVG](SVG.md) · [CSSOM View](CSSOM_VIEW.md) · [CSS layout](CSS_LAYOUT.md) · [JavaScript](JAVASCRIPT.md) · [Reference observations](RESEARCH.md)
 
-Własne HTML/CSS/DOM, układ blokowy i liniowy, tekst, linki, obrazy, HTTP/HTTPS, historia, karty, profil, tryb bez okna, launcher i wersjonowana instalacja. Wydanie wymaga przejścia testów silnika, prób sieci, kontroli obrazu oraz rzeczywistego uruchomienia zainstalowanej kopii.
+## 1. Browser foundation
 
-Poprzednia alfa 0.1.0-alpha.4 została udostępniona pod ikoną Rust Browser na pulpicie. Przeszła 335 testów Rust, ścisłą kontrolę Clippy, próby HTTPS i 45 kontroli scenariusza formularza/sesji z odniesieniem Chrome przez REA. Zainstalowany launcher zwrócił alfa.4 i uruchomił about:forms z tytułem Formularz: OK po syntetycznym kliknięciu. Cel skrótu, manifest i hash skopiowanego pliku potwierdzono niezależnie od instalatora. Profil i alfa.3 są zachowane; szczegóły w VERIFICATION.md.
+The foundation includes Rust implementations of HTML, CSS, DOM, block and inline layout, text, links, and images. The app provides HTTP and HTTPS, browsing history, tabs, a profile, headless mode, a launcher, and versioned installation. Release checks cover engine tests, HTTPS requests, rendered output, and launching the installed copy.
 
-Rozbudowa alfa.2 objęła odzyskiwanie błędów HTML, adopcję formatowania i tabele, indeksowane selektory, ograniczoną pamięć kształtowania tekstu i podzbiór Flexbox. Kod alfa.3 dodaje parsowanie fragmentów w kontekście elementu, zagnieżdżone template z nieaktywną zawartością oraz podzbiór Grid z kontrolą rozmiaru i pracy algorytmu.
+Alpha.4 was available through the desktop shortcut. It passed 335 Rust tests, strict Clippy, HTTPS checks, and 45 reference checks for a form and session scenario. The installed launcher reported alpha.4. A synthetic click on `about:forms` set the title to the form success state. The shortcut target, manifest, and installed binary hash were verified independently of setup. The profile and previous alpha.3 build were preserved. [Release verification](VERIFICATION.md) · [Reference observations](RESEARCH.md)
 
-Strona about:platform łączy Promise/JSON, klonowanie szablonu, mutacje DOM i Grid. Jej wcześniejsza próba przez zainstalowany launcher, spoza katalogu kompilacji i z oddzielnym profilem, potwierdziła przedstawienie klatki oraz tytuł Platforma: 3 po kliknięciu testowym. Alfa.4 dodaje about:forms do ręcznych prób edycji, wyboru opcji, resetu i lokalnej obsługi formularzy.
+Alpha.2 expanded HTML error recovery, formatting element adoption, and table parsing. It added selector indexing, a bounded text shaping cache, and a Flexbox subset. Alpha.3 added contextual fragment parsing, nested templates with inert contents, and Grid with limits on allocation and layout work.
 
-Kod alfa.4 parsuje obce treści SVG/MathML w dokumentach i fragmentach HTML: przestrzenie nazw elementów i atrybutów, nazwy SVG o mieszanej wielkości liter, CDATA, punkty integracji oraz powrót do reguł HTML. Klonowanie i import fragmentów zachowują metadane przestrzeni nazw i template.content. Wszystkie wcześniej wyłączone przypadki SVG/MathML w przypiętym html5lib są teraz wykonywane; mianowniki, znane błędy i nieobsługiwane przypadki pozostają jawne w crates/engine/data/html5lib/README.md. Parsowanie tych drzew nie zapewnia jeszcze grafiki SVG ani składu MathML.
+An installed copy ran `about:platform` outside the build directory with a separate profile. It presented a frame and displayed the platform counter at 3 in the title after a synthetic click. This page combines Promise and JSON, template cloning, DOM mutations, and Grid. Alpha.4 added `about:forms` for editing, selecting options, resetting values, and testing local form submission.
 
-Pozostałe prace fundamentu obejmują pełniejsze HTML/CSS i typografię, zaznaczanie tekstu strony, przyrostowe przeliczanie, izolację procesu treści z IPC oraz tor GPU. Grid nadal wymaga m.in. subgrid i dalszych reguł rozmiarów. Pełny Flexbox, pozycjonowanie, fonty sieciowe i animacje także pozostają w rozwoju.
+Alpha.4 expanded SVG and MathML foreign content parsing in HTML documents and fragments. It handles element and attribute namespaces, case adjustments for SVG names, CDATA, integration points, and switching back to HTML parsing rules. Cloning and import preserve namespace metadata and `template.content`. The pinned html5lib suite now runs every previously disabled SVG and MathML case. The test data README records totals, known failures, and unsupported cases. At this stage, the support covered parsing and DOM integration. [HTML parser test data](../crates/engine/data/html5lib/README.md)
 
-## 2. Własny JavaScript i strony interaktywne — rozpoczęto
+Remaining foundation work includes broader HTML and CSS coverage, typography, text selection, incremental updates, content-process isolation and IPC, and a GPU rendering path. Grid still needs subgrid and more sizing rules. Flexbox, positioned layout, web fonts, and CSS animations also need broader coverage.
 
-Zakres etapu obejmuje kompletny język, bibliotekę standardową i platformę stron interaktywnych: tożsamość i żywotność obiektów DOM, harmonogram, mikrozadania, zdarzenia, Promise, moduły, formularze, Fetch, cookies i historię SPA. Zgodność językowa jest mierzona przypiętym Test262 z poprawnymi wariantami i środowiskiem testów; raport zachowuje nieobsługiwane przypadki oraz błędy.
+## 2. JavaScript and interactive pages
 
-Pierwszy podetap w kodzie alfa.2 obejmuje własny lexer/parser/bajtkod/VM, wartości UTF-16, domknięcia, model obiektów i tracing GC. Host łączy to z podzbiorem DOM, kliknięciami, timerami i mikrozadaniami. Źródła klasyczne wykonują się po zakończeniu parsowania. Powstał osobny proces testowy i runner przypiętego Test262, który zachowuje nieobsługiwane przypadki i błędy w raporcie. ECMAScript i platforma WWW nadal nie są kompletne.
+The scope includes the language, its standard library, and the platform for interactive sites. It covers DOM object identity and liveness, scheduling, microtasks and events, Promise, modules, forms, Fetch, cookies, and same-document history. Language conformance is measured against a pinned Test262 revision with the applicable variants and harness. Reports retain unsupported cases and failures.
 
-Kod podetapu alfa.3 obejmuje:
+Alpha.2 introduced the Rust lexer, parser, bytecode compiler, and VM with UTF-16 values, closures, an object model, and tracing garbage collection. The host integrated a DOM subset, clicks, timers, and microtasks. Classic scripts ran after parsing. A separate test process and Test262 runner reported language coverage and gaps. [JavaScript](JAVASCRIPT.md)
 
-- Natywne rekordy Promise, rozwiązywanie thenable, łańcuchy then/catch/finally i jedną śledzoną przez GC kolejkę FIFO reakcji oraz mikrozadań. JSON.parse i JSON.stringify mają własną gramatykę i serializację UTF-16, reviver/replacer oraz kontrolę pracy i alokacji.
-- Buforowane Fetch/Headers/Request/Response z text/json, klonowaniem i kontrolą bodyUsed. Transport HTTP(S) działa w ograniczonych pulach wątków, oddzielonych od pętli okna i nawigacji. Obejmuje CORS z preflight, kontrolę nagłówków, przekierowania i nieprzezroczyste odpowiedzi no-cors.
-- innerHTML/outerHTML/insertAdjacentHTML, DocumentFragment, template.content, cloneNode, replaceChildren i operacje wstawiania/usuwania. Fragmenty zachowują kontekst, flagę skryptów i tryb dokumentu. Zmiany przechodzą wspólną kontrolę hierarchii, cykli, głębokości, liczby węzłów i danych areny przed zatwierdzeniem. Wstawione w ten sposób skrypty pozostają nieaktywne.
-- Próbę about:platform oraz niezależne testy łączące odpowiedź Fetch, Promise/JSON, szablony i mutacje DOM. Podzbiory oraz ich ograniczenia są opisane w JAVASCRIPT.md, CSS_LAYOUT.md i danych testowych HTML.
+Alpha.3 added the following:
 
-Kod podetapu alfa.4 obejmuje:
+- Native Promise records with thenable resolution, `then`/`catch`/`finally` chaining, and a shared FIFO queue for GC-traced reactions and microtasks. `JSON.parse` and `JSON.stringify` use a dedicated grammar and UTF-16 serialization, support revivers and replacers, and enforce work and allocation limits.
+- Buffered Fetch, Headers, Request, and Response with `text()`, `json()`, cloning, and `bodyUsed` checks. HTTP and HTTPS work ran in bounded thread pools outside the window loop and navigation. Fetch handled CORS preflight, header validation, redirects, and opaque `no-cors` responses.
+- `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `DocumentFragment`, `template.content`, `cloneNode`, `replaceChildren`, and insertion and removal. Fragments preserve context, the script flag, and the document mode. The update checks hierarchy, cycles, depth, node budget, and arena storage before committing. Scripts inserted through these methods stay inert.
+- The `about:platform` demo and integration tests that combine Fetch responses, Promise and JSON, templates, and DOM mutations. [JavaScript](JAVASCRIPT.md) · [CSS layout](CSS_LAYOUT.md) · [HTML parser test data](../crates/engine/data/html5lib/README.md)
 
-- Odrębny typ Symbol, symboliczne klucze i rejestr Symbol.for/keyFor, synchroniczny protokół iteratorów, iteratory Array/String, Array.from, for-of z deklarowanym identyfikatorem oraz spread tablic i argumentów wywołania/new. Wspólny mechanizm uwzględnia zamykanie iteratorów i budżety pracy; same tożsamości well-known Symbol nie wdrażają wszystkich ich konsumentów.
-- Promise.all/race/allSettled/any oparte na rzeczywistym protokole iteratorów, z porządkiem wyników, thenable i AggregateError. Biblioteka Promise/JSON, model obiektów i GC pozostają własną implementacją, opisaną wraz z lukami w JAVASCRIPT.md.
-- Host formularzy: dirty/default values, checkboxy i grupy radio, select/options, własność formularza także poza jego poddrzewem, disabled, reset, anulowalne zdarzenia oraz podzbiór walidacji. Natywne okno ma edycję tekstu/hasła, zaznaczanie klawiaturą i schowek, nawigację Tab/Shift+Tab, listę rozwijaną/listbox i uruchamianie submittera. Nawigacja GET oraz URL-encoded POST obsługuje zmianę lub zachowanie metody/ciała według typu przekierowania.
-- Własny CookieStore dla nawigacji i Fetch credentials oraz document.cookie. Obejmuje HttpOnly, Secure, SameSite, domeny/ścieżki, prefiksy, reguły ICANN/private z przypiętej PSL i podstawowe partycjonowanie Partitioned według strony głównej. Trwałe cookies na Windows przechodzą przez DPAPI i atomowy zapis pod blokadą profilu; cookies sesyjne nie są odtwarzane po zakończeniu procesu.
+Alpha.4 added the following:
 
-Zakres formularzy jest sprawdzany przez 17 testów semantyki oraz 8 testów renderera. Obejmują m.in. anulowanie, reentrancy, własność, radio/select, edycję UTF-16, bieżące migawki wartości, geometrię, maskowanie haseł także przy uproszczonym układzie oraz przycinanie obrazu. tools/verify-forms.mjs łączy handlery wejścia aplikacji z rzeczywistym lokalnym HTTP, POST/303, Origin/Cookie, Promise.all/JSON/Fetch, prywatnością HttpOnly i ponownym otwarciem tego samego profilu. Opcjonalny wzorzec REA uruchamia osobny, należący do próby proces Chrome; raport zachowuje ograniczenia przechwytywania i nie oznacza pełnej równoważności przeglądarek.
+- A separate Symbol type, symbol keys, the `Symbol.for`/`Symbol.keyFor` registry, synchronous iterators, Array and String iterators, `Array.from`, `for...of` with a declared identifier, and spread in arrays, calls, and `new` expressions. Shared iterator handling covers closure and work limits. Some built-ins that consume well-known symbols remain pending.
+- `Promise.all`, `race`, `allSettled`, and `any` with the synchronous iterator protocol, result ordering, thenables, and `AggregateError`. The engine implements Promise, JSON, the object model, and garbage collection in Rust. [JavaScript](JAVASCRIPT.md)
+- Form state for dirty and default values, checkboxes and radio groups, select and option elements, ownership outside a form's subtree, disabled controls, reset, cancelable events, and a validation subset. The native window supports text and password editing, keyboard selection and clipboard, Tab and Shift+Tab, dropdowns and listboxes, and submitter activation. GET and URL-encoded POST navigation apply redirect-specific rules for the request method and body. [Forms](FORMS.md)
+- A CookieStore shared by navigation, Fetch credentials, and `document.cookie`. It supports HttpOnly, Secure, SameSite, domain and path rules, prefixes, ICANN and private rules from a pinned Public Suffix List, and basic top-level partitioning. On Windows, persistent cookies are protected with DPAPI and written atomically under the profile lock. Session cookies expire when the process exits. [Cookies](COOKIES.md)
 
-Do wykonania pozostają m.in. Intl, Proxy, SharedArrayBuffer, atrybuty importu, zbiory Unicode RegExp i pozostałe części biblioteki standardowej. Fetch wymaga dalszych opcji żądań. Porty wymagają przesyłania między kontekstami, a formularze pełniejszej walidacji, pickerów daty i koloru, dostępności i zaznaczania przeciąganiem. Historia nawigacji wymaga BFCache, pełnej serializacji stanu i ponownego przesłania POST. Pozostają pełne konteksty i polityki prywatności cookies, IndexedDB i magazyny uwierzytelniania, CSP oraz ograniczenia dostępu do sieci lokalnej.
+Seventeen form semantics tests and eight renderer tests cover cancellation, reentrancy, ownership, radio and select behavior, UTF-16 editing, current value snapshots, geometry, password masking, including in fallback layout, and paint clipping. `tools/verify-forms.mjs` exercises app input handlers against a local HTTP server. It checks POST/303, Origin and Cookie headers, Promise and JSON with Fetch, HttpOnly visibility, and reopening the profile. The optional reference run uses a separate browser process. [Forms](FORMS.md) · [Reference observations](RESEARCH.md)
 
-Pozostają destrukcyjne `document.write` i `document.open`, aktualizacje zasobów zależne od mutacji, zdarzenia specjalistyczne, retargeting w Shadow DOM i kolekcje z właściwościami nazwanymi. Plan platformy JavaScript i WWW wymaga szerszych prób na rzeczywistych aplikacjach.
+Remaining language work includes Intl, Proxy, SharedArrayBuffer, import attributes, RegExp Unicode sets, and more of the standard library. Fetch needs additional request options. Ports need cross-context transfer. Forms need broader validation, date and color pickers, accessibility, and drag selection. Navigation history needs BFCache, full state serialization, and POST resubmission. Cookies need all browsing contexts and privacy policies. IndexedDB, credential storage, CSP, and local network access restrictions remain pending.
 
-## 3. Platforma WWW — do wykonania
+Destructive `document.write` and `document.open`, resource updates after DOM mutations, specialized events, Shadow DOM retargeting, and collections with named properties also remain pending. Compatibility verification will expand to more real applications.
 
-IndexedDB, workery i service workery, aplikacje offline, WebAssembly, pełna grafika SVG i skład MathML, pełniejsze Canvas 2D, OffscreenCanvas, WebGL, WebGPU, audio/wideo, WebRTC, uprawnienia i integracje systemowe. Macierz funkcji wynika ze standardów i porównań z przypiętą wersją Chrome. DRM/CDM i dostępność chronionych usług wymagają osobnych integracji oraz weryfikacji.
+## 3. Web platform
 
-## 4. Wydajność i wydanie użytkowe — do wykonania
+Remaining work includes IndexedDB, workers and service workers, offline applications, WebAssembly, broader SVG and Canvas 2D coverage, MathML layout, OffscreenCanvas, WebGL, WebGPU, audio and video, WebRTC, permissions, and native integrations. The feature matrix uses web standards and comparisons with a pinned reference browser. Protected media and services require separate DRM and CDM integration and verification.
 
-Profilowanie i kontrola alokacji, przyrostowy layout i rysowanie, kafelkowanie i kompozycja GPU, budżety cache oraz własny JIT. WPT, Test262 i rzeczywiste scenariusze witryn, wraz z testami bezpieczeństwa i długich sesji. Pomiary obejmują cały zestaw procesów, RAM, GPU, CPU, start i opóźnienia interakcji.
+## 4. Performance and a practical release
 
-## Zasada kończenia etapów
+Planned work includes profiling and allocation controls, incremental layout and painting, tiling and GPU composition, cache budgets, and a JIT compiler. Verification uses WPT, Test262, real-site workflows, security tests, and long sessions. Measurements cover the entire process set, memory, GPU and CPU use, startup, and interaction latency.
 
-Każdy ukończony etap dostaje działającą, sprawdzoną instalację pod tą samą ikoną pulpitu. Profil i poprzedni build pozostają dostępne. Wersja wskazuje rzeczywistą obsługę funkcji i jej braki.
+## Release criteria
 
-Cały projekt pozostaje nieukończony do czasu wdrożenia i weryfikacji pełnego zakresu. Pierwsza alfa, zielone testy podzbioru ani wyniki kilku witryn nie oznaczają realizacji całego celu.
+Each completed stage produces a tested installation under the same desktop shortcut, with the profile and the previous build available. Release notes record supported features and known gaps. Full project completion requires implementation and verification across the roadmap.

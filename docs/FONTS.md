@@ -1,52 +1,15 @@
-# Fonty w alfie 6
+# Fonts in alpha.6
 
-CSS zachowuje listę rodzin w kolejności autora. Rozróżnia nazwy z cudzysłowami
-od rodzin ogólnych, takich jak `serif`, `monospace` i `system-ui`.
-Grubość i styl są niezależnymi dziedziczonymi właściwościami. Skrót `font`
-ustawia też rozmiar i wysokość linii. Dopasowanie bierze pod uwagę styl,
-grubość oraz zakres znaków. Brak glifu kieruje wybór do kolejnej rodziny,
-a następnie do ograniczonej listy rodzin systemowych odpowiednich dla
-danego zakresu Unicode. Wybór awaryjny wykorzystuje klastry grafemów, aby
-utrzymać zwykłe znaki bazowe i akcenty w jednym foncie.
+CSS keeps font families in the author's order and distinguishes quoted names from generic families such as `serif`, `monospace`, and `system-ui`. Weight and style are separate inherited properties. The `font` shorthand also sets size and line height. Matching considers style, weight, and character coverage. When a glyph is missing, the engine tries the next family, then a bounded list of system families for that Unicode range. Fallback uses grapheme clusters to keep common base characters and accents in a single font.
 
-`@font-face` odczytuje listę źródeł `local()` i `url()` z podpowiedziami
-`format()`, `unicode-range`, styl i zakres grubości. Dekoder otwiera
-pliki sfnt z konturami TrueType oraz ich kontenery WOFF i WOFF2. Instancje
-fontu zmiennego używają tych samych parametrów osi `wght`, `ital` i `slnt`
-w kształtowaniu oraz rysowaniu. Dla pochylonej odmiany osi `slnt` używany
-jest kąt 14 stopni. Zainstalowane fonty są dopasowywane po rodzinie lub
-konkretnej nazwie twarzy w `local()`.
+`@font-face` reads `local()` and `url()` sources with `format()` hints, `unicode-range`, style, and weight range. The decoder opens sfnt files with TrueType outlines, including WOFF and WOFF2 containers. Variable font instances use the same `wght`, `ital`, and `slnt` values for shaping and painting. The slanted `slnt` variant uses 14 degrees. `local()` matches installed fonts by family or face name.
 
-Każdy ukształtowany fragment tekstu zachowuje użyte twarze. Glif wskazuje
-pozycję twarzy w tym fragmencie. Dzięki temu osobne instancje układu i
-renderera korzystają z tych samych bajtów i parametrów, również przy
-rysowaniu formularzy. Fonty systemowe z jednego pliku współdzielą bajty.
-Pamięci podręczne tekstu i glifów mają słabe referencje do twarzy, więc
-zamknięta strona może zwolnić dane fontów.
+Each shaped run keeps its font faces. A glyph refers to its face's index in the run. Separate layout and renderer instances use the same bytes and variation parameters, including when painting form controls. System fonts from a single file share bytes. Text and glyph caches hold weak references to faces, allowing font data to be released when the last page using it closes.
 
-Pobierany plik ma limit 4 MiB przed dekodowaniem i 8 MiB w formacie sfnt.
-Zestaw strony mieści 32 twarze i 32 MiB danych sfnt. Walidacja przed
-przekazaniem danych do dekodera sprawdza rozmiary tabel, dane konturów
-WOFF2 i sumy strumieni. Walidacja sfnt ogranicza liczbę punktów, głębokość
-grafu składowych, jego rozwinięcie, cykle i pracę osi zmiennych.
-Katalog fontów systemowych ogranicza żywe dane do 64 MiB i 128 twarzy.
-Pamięć ukształtowanego tekstu ma budżet 4 MiB, plany kształtowania do 2 MiB
-szacowanego kosztu, a mapy bitowe glifów 16 MiB.
-Rasteryzacja pobiera budżet przed rozwinięciem konturu i alokacją bitmapy.
+A downloaded font has a 4 MiB limit before decoding and an 8 MiB limit as sfnt. A page can use up to 32 faces and 32 MiB of sfnt data. Validation before decoding checks table sizes, WOFF2 outline data, and stream totals. The sfnt validator limits points, component graph depth and expansion, cycles, and variable-axis work. The system font catalog caps live data at 64 MiB and 128 faces. The shaped text cache has a 4 MiB budget, shaping plans are limited to an estimated 2 MiB, and glyph bitmaps to 16 MiB. Rasterization charges its work budget before expanding outlines and allocating bitmaps.
 
-Pokrycie obejmuje kształtowanie i rysowanie własnych plików TTF, WOFF
-i WOFF2, dobór rodzin i zakresów znaków, osie zmienne, użycie tych samych
-twarzy przez niezależny renderer oraz zwalnianie pamięci po ostatnim
-użyciu. Próbki powstają z prostokątnych konturów z repozytorium projektu.
-Własna próba Chrome 157 z tymi samymi plikami dała szerokość 32 CSS px
-dla WOFF2, 42 CSS px przy użyciu drugiej rodziny i 16, 24 oraz 32 CSS px
-dla grubości 400, 550 i 700 fontu zmiennego.
+Tests cover shaping and painting TTF, WOFF, and WOFF2 files, selecting families and character ranges, variable axes, face sharing with the renderer, and release of font data after the last use. The fixtures use rectangular outlines in the repository. With the same fixtures, Chrome 157 measured 32 CSS px for WOFF2, 42 CSS px for fallback to the second family, and 16, 24, and 32 CSS px at variable weights 400, 550, and 700.
 
-Zakres alfy obejmuje jednobarwne kontury i poziomy układ tekstu. Pobierane
-kolekcje oraz CFF i CFF2 wymagają dalszej pracy. Pozostają pełny algorytm
-bidi i łamania wiersza, kolorowe glify, synteza krojów, wszystkie osie
-OpenType, dokładne kąty `oblique`, CSS Font Loading API i czasy
-`font-display`. Wyniki zależą od fontów dostępnych w Windows w tych
-przypadkach, w których strona korzysta z rodzin systemowych.
+This stage covers monochrome outlines and horizontal text. Downloaded collections, CFF and CFF2, complete bidirectional and line-breaking algorithms, color glyphs, font synthesis, all OpenType axes, exact `oblique` angles, the CSS Font Loading API, and `font-display` timing remain open. Pages using system families depend on the fonts present in Windows.
 
-Algorytmy oparto na specyfikacjach CSS Fonts oraz WOFF. [CSS Fonts Level 4](https://www.w3.org/TR/css-fonts-4/), [WOFF 1](https://www.w3.org/TR/WOFF/), [WOFF 2](https://www.w3.org/TR/WOFF2/).
+The implementation follows CSS font matching and WOFF container standards. [CSS Fonts Level 4](https://www.w3.org/TR/css-fonts-4/) · [WOFF 1](https://www.w3.org/TR/WOFF/) · [WOFF 2](https://www.w3.org/TR/WOFF2/)

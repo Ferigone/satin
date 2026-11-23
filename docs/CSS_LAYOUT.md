@@ -1,169 +1,53 @@
-# CSS, układ i tekst w alfie 6
+# CSS, layout, and text through alpha.6
 
-Selektory oraz deklaracje są kompilowane raz na budowę układu. Indeks prawej
-części selektora wybiera kandydatów po id, klasie i tagu. Kaskada rozwija skróty
-na niezależne właściwości i uwzględnia specificity, important, dziedziczenie,
-wartości CSS-wide oraz ograniczony podzbiór zmiennych.
+The engine compiles selectors and declarations once per layout build. An index of the rightmost selector compound finds candidates by ID, class, and tag. The cascade expands shorthands into longhands and applies specificity, `!important`, inheritance, CSS-wide keywords, and a subset of custom properties.
 
-Układ obsługuje model pudełkowy, min/max i border-box, część procentowych
-rozmiarów, sąsiednie pionowe marginesy, inline-block oraz podzbiór Flexbox:
-kierunki, grow/shrink, wrap, gap, order, auto-margins i wyrównanie. ElementBox,
-element_at i rect_for łączą geometrię z tożsamością DOM. Głębokie albo nadmiernie
-kosztowne układy przechodzą na iteracyjny, uproszczony przepływ treści;
-Layout.limited ujawnia ten stan. Próby 256 poziomów bloków, inline i flex
-przeszły na wątkach ze stosem dokładnie 1 MiB.
+Layout supports the box model, minimum and maximum sizes, `border-box`, some percentage sizes, adjacent vertical margins, and inline blocks. The Flexbox subset includes direction, grow and shrink, wrapping, gaps, order, auto margins, and alignment. `ElementBox`, `element_at`, and `rect_for` connect geometry to DOM identity. Deep or expensive layouts fall back to a simplified iterative flow and set `Layout.limited`. Tests with 256 levels of block, inline, and flex boxes passed on threads with a 1 MiB stack.
 
-Pamięć kształtowania tekstu jest ograniczona liczbą wpisów i rozmiarem danych.
-Awaryjne dzielenie długiego słowa korzysta z klastrów ukształtowanego tekstu,
-zamiast wielokrotnie kształtować rosnące prefiksy.
-Alfa 6 używa obliczonych rodzin i krojów CSS, wspólnych danych fontów sieciowych
-i awaryjnego dopasowania według zakresu znaku. [Obsługa fontów](FONTS.md).
+The text shaping cache limits entry count and memory use. Long words break at shaped text clusters in fallback layout, reusing the shaping work. Alpha.6 uses computed CSS families and faces, shared web font data, and character coverage for fallback. [Fonts](FONTS.md)
 
-## Grid i granice tokenów CSS — alfa.3
+## Grid and CSS token boundaries in alpha.3
 
-Własny algorytm Grid obsługuje display:grid/inline-grid, jawne oraz cykliczne
-niejawne tory, rozmiary stałe i procentowe, auto/min-content/max-content/fr,
-minmax() i repeat() z liczbą całkowitą. Pozycjonowanie obejmuje dodatnie i ujemne
-numery linii, span, grid-area bez nazw, row/column flow, dense/sparse i order.
-Wspierane są gap, min/max-height kontenera, rozmiary procentowe elementów,
-wyrównanie, rozciąganie i auto-marginesy. Niejawne tory przed początkiem
-jawnej siatki otrzymują prawidłową fazę cyklicznego wzorca auto-tracks.
+The Grid algorithm handles `display: grid` and `inline-grid`, explicit and cyclic implicit tracks, fixed and percentage sizes, `auto`, `min-content`, `max-content`, `fr`, `minmax()`, and integer `repeat()`. Placement supports positive and negative line numbers, spans, unnamed `grid-area` values, row and column flow, dense and sparse placement, and order. It supports gaps, minimum and maximum container height, percentage item sizes, alignment, stretching, and auto margins. Implicit tracks before the explicit grid start at the correct point in the repeating auto-track pattern. [Later Grid features](GRID.md)
 
-Rozmieszczanie najpierw zajmuje jawne obszary, następnie ustalone wiersze,
-a pozostałe elementy obsługuje kursor auto-placement. Rozmiary wewnętrzne są
-rozwiązywane według rosnących spanów; planowane przyrosty torów zapobiegają
-uzależnieniu wyniku od kolejności elementów z takim samym spanem. Tory fr
-zamrażają minima przed ponownym podziałem miejsca. Procentowe wiersze i odstępy
-cykliczne są najpierw auto/zero podczas wyznaczania rozmiaru kontenera, a potem
-rozwiązywane względem otrzymanego rozmiaru bez ponownego powiększania kontenera.
-Komentarze i ukryte węzły nie rozdzielają ciągłego tekstu na osobne anonimowe
-elementy siatki. Scalony tekst i wynik sprawdzenia whitespace są pamiętane tylko
-na czas budowy układu.
+Placement starts with explicit areas, then items with fixed rows, then the remaining items through the auto-placement cursor. The sizing pass resolves intrinsic sizes in increasing span order. Planned track increases make the results independent of item order within a span group. Flexible tracks freeze at their minimum size before redistributing space. During intrinsic container sizing, cyclic percentage rows and gaps use `auto` and zero. Once the container size is known, the percentages resolve against it without a second container sizing pass. Adjacent text forms a single anonymous grid item across comments and hidden nodes. Merged text and whitespace checks are cached for the duration of the layout build.
 
-Limity to 128 torów na oś i 4096 elementów siatki. Każda próba zajęcia komórki
-zużywa wspólny budżet pracy układu; przekroczenie powoduje widoczny,
-uproszczony przepływ z Layout.limited=true. Nie tworzy się macierzy o wymiarach
-wynikających z dowolnie dużych numerów linii. Przypadek linii 32000 oraz 256
-poziomów zagnieżdżonego Grid przeszedł kontrolę zachowania treści/linków;
-próba głębokości korzystała ze stosu dokładnie 1 MiB. Zwykłe listy torów są
-współdzielone między wyliczonymi stylami; jednostki rem/vw są obliczane przed
-układem.
+A grid allows 128 tracks per axis and 4,096 items. Each placement attempt consumes the shared layout work budget. Exceeding it uses the visible flow fallback and sets `Layout.limited`. Storage stays bounded for large requested line numbers. The test at line 32,000 and the 256-level nested grid test retained content and links. The depth test used a 1 MiB stack. Computed styles share track lists, and `rem` and `vw` resolve before layout.
 
-Komentarz nie jest już zamieniany na token whitespace. Prywatna granica tokenu
-rozróżnia p/**/.x od p /**/ .x i nie pozwala scalić di/**/v ani 10/**/px.
-Publiczne reguły i deklaracje zapisują takie granice jako komentarze, bez
-wycieku znaków sterujących. Podstawienia var() także zachowują granice tokenów:
-var(--n)px nie staje się wymiarem, jeśli --n zawiera tylko liczbę. Surowe NUL
-wejścia jest normalizowane do U+FFFD i nie może udawać prywatnej granicy.
+The tokenizer treats comments as token boundaries. It distinguishes `p/**/.x` from `p /**/ .x` and keeps `di/**/v` and `10/**/px` split. Rules and declarations serialize internal boundaries as comments. `var()` substitution also preserves boundaries, so `var(--n)px` stays a number and an identifier when `--n` contains a bare number. The tokenizer normalizes input NUL to U+FFFD before processing internal separators.
 
-Algorytmy opracowano na podstawie
-[CSS Grid Level 1](https://www.w3.org/TR/css-grid-1/#layout-algorithm) oraz
-[CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/#consume-comments).
-To nadal podzbiór standardów, a nie pełny tokenizer ani pełne Grid.
+The algorithm implements a subset of Grid and CSS Syntax. [CSS Grid Level 1](https://www.w3.org/TR/css-grid-1/#layout-algorithm) · [CSS Syntax Level 3](https://www.w3.org/TR/css-syntax-3/#consume-comments)
 
-## Pomiary referencyjne
+## Reference measurements
 
-Alfa.3: Chrome 157.0.8103.51, osobny profil, tryb headless, skala 1, viewport
-984 × 905 CSS px. 38 własnych fixture'ów Grid dało 145 pudełek i 580
-porównywanych współrzędnych. Maksymalna różnica wyniosła 0.010422 CSS px.
-Test pinned_chrome_157_grid_reference zachowuje cały dokument wejściowy oraz
-otrzymane wartości; tolerancja wynosi 0.05 CSS px. Zawiera także wewnętrzne
-rozmiary zagnieżdżonych pudełek inline, mieszane funkcje minmax, wielotorowe
-spany, implicit tracks przed początkiem siatki, cykliczne procenty i limity
-min/max-height. W fixture'ach nie ma zależności od renderowania glifów: font-size
-i line-height są zerowe, a rozmiary wewnętrzne wynikają z jawnych pudełek.
-Dodatkowa własna próba Chrome potwierdziła grupowanie tekstu oddzielonego
-komentarzem/display:none oraz brak dziedziczenia paddingu do anonimowego itemu.
+The alpha.3 comparison used headless Chrome 157.0.8103.51 with an isolated profile, device scale 1, and a 984 × 905 CSS px viewport. Thirty-eight Grid fixtures produced 145 boxes and 580 coordinates. The maximum difference was 0.010422 CSS px. The test `pinned_chrome_157_grid_reference` records the input and expected results with a 0.05 CSS px tolerance. It covers inline box intrinsic sizes, mixed `minmax()` values, multi-track spans, implicit tracks before the explicit grid, cyclic percentages, and minimum and maximum height. Fixtures use zero font size and line height. Their intrinsic sizes come from explicit box dimensions. A separate reference case checked text grouping across comments and `display: none` and confirmed that anonymous items omit the container's padding. [Grid reference test](../crates/engine/tests/layout_grid.rs)
 
-Wspólny ukierunkowany zestaw CSS/layout ma 35 zaliczonych testów i jeden
-świadomie pominięty benchmark opt-in. Próby Flexbox poprzedniego wydania
-pozostają niezmienione i nadal przechodzą.
+At this stage, the targeted CSS and layout suite passed 35 tests, including the existing Flexbox cases. The benchmark is opt-in.
 
-Chrome 157.0.8103.51, viewport 784 × 505 CSS px, skala 1, oddzielny profil i
-własny lokalny dokument. Jedenaście prostokątów dało 44 porównywane współrzędne;
-maksymalna różnica wyniosła 0.005219 CSS px. Test
-pinned_chrome_157_box_and_flex_reference zachowuje oczekiwane wartości.
-To sprawdzenie określonych pudełek i Flexbox, bez oceny renderowania fontów
-ani pełnego pokrycia CSS. Źródło próby i wynik Chrome są w docs/evidence.
+A separate run used Chrome 157.0.8103.51 with an isolated profile, device scale 1, a 784 × 505 CSS px viewport, and a local document. Eleven rectangles yielded 44 coordinates. The maximum difference was 0.005219 CSS px. The test `pinned_chrome_157_box_and_flex_reference` records the expected geometry for the tested boxes and Flexbox cases. [Box and Flexbox reference test](../crates/engine/tests/layout_geometry.rs)
 
-Historyczny benchmark alfy.2 release: 4000 reguł klasowych i 4000 akapitów, siedem próbek,
-rozgrzana pamięć fontów. Ostatni przebieg: parse+compile 14.761 ms, mediana
-wyliczania stylu 2.692 ms, mediana Layout::build 39.000 ms. Odwiedzono 4000
-kandydatów; pełne sprawdzenie wszystkich par oznaczałoby 16000000 wizyt.
-To porównanie liczby operacji, bez zmierzonego czasu starego algorytmu.
-Dzielenie 20000 / 200000 znaków ASCII trwało 3.099 / 34.994 ms. Poprzedni
-przebieg miał odpowiednio 20.447 / 5.083 / 34.066 ms i 2.946 / 29.553 ms,
-więc pojedynczych czasów nie należy traktować jako stałej wydajności.
+The alpha.2 release benchmark used 4,000 class rules and 4,000 paragraphs, seven samples, and a warm font cache. The recorded run took 14.761 ms to parse and compile, with medians of 2.692 ms for style computation and 39.000 ms for `Layout::build`. The selector index visited 4,000 candidates out of 16,000,000 possible pairs. The all-pairs count is an operation estimate. Splitting 20,000 and 200,000 ASCII characters took 3.099 ms and 34.994 ms. A prior run recorded 20.447 ms, 5.083 ms, and 34.066 ms for parsing, style, and layout, and 2.946 ms and 29.553 ms for splitting. The timings measure this layout workload and vary across runs.
 
-Powtórzenie: cargo test --release -p rust-browser-engine --test
-layout_performance -- --ignored --nocapture. To syntetyczny pomiar podsystemu;
-nie mierzy całkowitego RAM/CPU aplikacji i nie dowodzi przewagi nad Chrome.
+```powershell
+cargo test --release -p rust-browser-engine --test layout_performance -- --ignored --nocapture
+```
 
-## Pozycjonowanie, przepełnienie i transformacje — alfa.5
+## Positioning, overflow, and transforms in alpha.5
 
-Układ oddziela przepływ dokumentu od geometrii wizualnej. `position:relative`
-przesuwa pudełko i jego zawartość bez zmiany miejsca zajętego w przepływie.
-`absolute` i `fixed` nie uczestniczą w rozmiarach bloków, Flexbox ani Grid.
-Ich pozycje powstają po wyznaczeniu wymiarów bloków odniesienia: padding box
-najbliższego pozycjonowanego przodka dla absolute, viewport dla fixed,
-albo przodek z transformacją, który ustanawia właściwy blok odniesienia.
-Obsługiwane są fizyczne top/right/bottom/left, inset, procenty, rozciągnięcie
-między przeciwległymi krawędziami, min/max i automatyczne marginesy.
+Layout tracks document flow and visual geometry separately. `position: relative` moves a box and its contents and preserves the in-flow space. Absolute and fixed boxes are out of flow for block, Flexbox, and Grid sizing. Their positions resolve after their containing block dimensions. The containing block is the nearest positioned ancestor's padding box for absolute positioning, the viewport for fixed positioning, or a transformed ancestor when it establishes the relevant containing block. The engine handles physical insets, the `inset` shorthand, percentages, stretching between opposite insets, minimum and maximum sizes, and auto margins.
 
-`overflow`, `overflow-x` i `overflow-y` obsługują visible/hidden/clip/auto/scroll
-oraz regułę obliczania par osi. Zakresy przewijania mają ograniczone przesunięcia;
-przewijanie zawartości nie przesuwa ramki ani jej tła. Klipy i transformacje
-korzystają ze wspólnych, zrównoważonych poleceń PushState/PopState.
-Trafienia kontrolek, elementów i linków używają macierzy odwrotnej i tych samych
-klipów. Prostokąty DOM pozostają nieprzyciętymi obwiedniami wizualnymi;
-osobna geometria offsetów pomija transformacje i przewijanie.
+`overflow`, `overflow-x`, and `overflow-y` support `visible`, `hidden`, `clip`, `auto`, and `scroll`, including paired-axis value computation. Scroll offsets are clamped to the scrollable range. Scrolling moves the contents within the box and leaves the border and background at the box position. Clips and transforms share balanced `PushState` and `PopState` commands. Hit testing for controls, elements, and links uses inverse transforms and the same clips. DOM rectangles expose unclipped visual bounds. Offset geometry comes from the untransformed, unscrolled box.
 
-Lista transformacji 2D obejmuje matrix, translate/translateX/translateY,
-scale/scaleX/scaleY, rotate, skew/skewX/skewY i transform-origin.
-Transformacje składają się w kolejności CSS; osobliwe macierze nie tworzą
-aktywnego obszaru trafień. Konteksty stosu dla transformacji, fixed i z-index
-pozycjonowanych elementów oraz elementów Flex/Grid są rysowane atomowo.
-Kolejność trafień odpowiada kolejności warstw, a przykryty link nie jest aktywny.
+The 2D transform list includes `matrix`, `translate` and its axis variants, `scale` and its axis variants, `rotate`, `skew` and its axis variants, and `transform-origin`. Transforms compose in CSS order. A singular matrix yields an empty hit region. Transforms, fixed positioning, and applicable `z-index` values on positioned boxes and flex or grid items create stacking contexts painted as a unit. Hit testing follows the paint order, with covering elements taking precedence over links below them.
 
-Zachowano obliczone style we współdzielonym Arc, geometrię viewportu oraz
-przesunięcia zagnieżdżonych obszarów. Flaga depends_on_viewport_scroll pozwala
-przewijać zwykłe strony bez ponownego układania i przebudowywać strony fixed,
-gdy zmieni się viewport. Obliczone właściwości SVG przekazują rzeczywistych
-zwycięzców kaskady do osobnego modułu SVG; podstawowe pudełko SVG korzysta
-z tej samej ścieżki rozmiarowania treści zastępowanej co obrazy.
+The layout snapshot stores shared computed styles in an `Arc`, viewport geometry, and nested scroll offsets. `depends_on_viewport_scroll` selects a layout rebuild when viewport movement affects fixed elements. Other pages can update the scroll position directly. The SVG module receives the winning computed values from the cascade. The outer SVG box uses the image sizing path for replaced content.
 
-Własna próba headless Chrome 157.0.8103.51, skala 1, viewport 984 × 905 CSS px,
-obejmuje 20 przypadków i 45 pudełek (180 współrzędnych): bloki odniesienia,
-insety, shrink-to-fit, auto-marginesy, min/max, transformacje i fixed wewnątrz
-transformowanego przodka. Maksymalna różnica wyniosła 0.00001145 CSS px;
-tolerancja testu to 0.05 CSS px. Niezmieniony dokument wejściowy i wynik są
-w tests/fixtures/css_position_reference.json. Dodatkowe próby sprawdzają
-klipy w pikselach, przewijanie, kolejność z-index, dokładne trafienia obróconych
-pudełek oraz 256 poziomów elementów na stosie 1 MiB.
+The positioning reference used headless Chrome 157.0.8103.51, device scale 1, and a 984 × 905 CSS px viewport. It tested 20 cases with 45 boxes and 180 coordinates. The cases include containing blocks, insets, shrink-to-fit, auto margins, minimum and maximum sizes, transforms, and fixed positioning inside a transformed ancestor. The maximum difference was 0.00001145 CSS px with a 0.05 CSS px test tolerance. Other tests check pixel clips, scrolling, `z-index` order, rotated hit regions, and 256 levels of elements on a 1 MiB stack. [Position reference fixture](../crates/engine/tests/fixtures/css_position_reference.json)
 
-Adres linku jest współdzielony między fragmentami tekstu i rozwiązywany raz
-na element. Metadane linków mają limit 64 KiB na adres oraz 8 MiB łącznie;
-wyczerpanie oznacza Layout.limited zamiast nieograniczonego kopiowania adresów.
-Nowy etap wizualny przechodzi po drzewie i kontekstach iteracyjnie; emisja
-klipów i poleceń ma osobny budżet miliona jednostek pracy. Stylowane funkcje
-transformacji są ograniczone do 32 operacji.
+A link URL resolves once per element and is shared across text fragments. Link metadata allows up to 64 KiB per URL and 8 MiB total, with exhaustion setting `Layout.limited`. The visual pass walks the tree and stacking contexts iteratively. Clip and command emission have a separate budget of 1,000,000 work units. Each transform list allows up to 32 operations.
 
-Algorytmy oparto na [CSS Positioned Layout Level 3](https://www.w3.org/TR/css-position-3/),
-[CSS Transforms Level 1](https://www.w3.org/TR/css-transforms-1/) i
-[CSS Overflow Level 3](https://www.w3.org/TR/css-overflow-3/).
-To implementacja ograniczonego podzbioru poziomego układu LTR: sticky,
-logiczne insety, RTL/writing modes, pełne statyczne pozycje absolute w Flex/Grid,
-fragmentacja pozycjonowanych elementów, 3D/perspective, maski, clip-path CSS,
-zaokrąglone klipy i natywne paski przewijania wymagają dalszej pracy.
+This stage covers a subset of horizontal left-to-right layout. Sticky positioning, logical insets, right-to-left layout and writing modes, full static positions for absolute boxes in Flexbox and Grid, positioned fragmentation, 3D transforms and perspective, masks, CSS `clip-path`, rounded clips, and native scrollbars remain open. [CSS Positioned Layout Level 3](https://www.w3.org/TR/css-position-3/) · [CSS Transforms Level 1](https://www.w3.org/TR/css-transforms-1/) · [CSS Overflow Level 3](https://www.w3.org/TR/css-overflow-3/)
 
-## Pozostałe ograniczenia
+## Other limits at alpha.6
 
-Grid nie obsługuje jeszcze nazw linii/obszarów, template-areas, auto-fit/auto-fill,
-fit-content(), subgrid/masonry, baseline alignment, pionowych writing modes,
-fragmentacji ani pełnych zależności rozmiaru elementów zastępowanych od
-proporcji i obu osi. Nie zaimplementowano całego CSS Syntax/Selectors ani całej
-semantyki CSSOM. Pozostają pełny Flexbox i pełne warianty pozycjonowania,
-transformacji oraz clippingu, relacje marginesów rodzic–dziecko, kompletny bidi/Unicode,
-pełne dopasowanie fontów i cały CSS Font Loading API. Wyniki referencyjne dotyczą wybranych
-geometrii; nie oznaczają zgodności całego CSS, przewagi nad Chrome ani pomiaru
-całkowitego RAM/CPU przeglądarki.
+At alpha.6, remaining Grid features included named lines and areas, `grid-template-areas`, `auto-fit`, `auto-fill`, `fit-content()`, subgrid and masonry, baseline alignment, vertical writing modes, fragmentation, and replaced-element sizing with aspect ratios and constraints on both axes. The Grid feature notes describe subsequent additions. CSS Syntax, Selectors, CSSOM, and Flexbox have partial coverage. Parent-child margin collapsing, full bidirectional and Unicode text support, broader font matching, and the CSS Font Loading API remain open at this stage. [Grid](GRID.md) · [CSSOM View](CSSOM_VIEW.md) · [Fonts](FONTS.md)

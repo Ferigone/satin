@@ -53,6 +53,7 @@ pub(super) struct CanvasStore {
 #[derive(Default)]
 struct CanvasSources {
     images: HashMap<String, Arc<image::RgbaImage>>,
+    svg_sizes: HashMap<String, [u32; 2]>,
     status: Arc<HashMap<String, ImageAvailability>>,
     references: Arc<HashMap<NodeId, (String, String)>>,
 }
@@ -73,6 +74,11 @@ impl CanvasStore {
 
     pub(super) fn update_sources(&mut self, page: &LoadedPage) {
         self.sources.images.clone_from(&page.images);
+        self.sources.svg_sizes.clear();
+        self.sources.svg_sizes.extend(page.svg_images.iter().map(|(key, svg)| {
+            let (width, height) = svg.intrinsic_size();
+            (key.clone(), [width as u32, height as u32])
+        }));
         self.sources.status = page.image_availability.clone();
         self.sources.references = page.image_references.clone();
     }
@@ -106,37 +112,76 @@ fn bitmap_size(state: &State, node: NodeId) -> [u32; 2] {
     element_canvas::size(&state.document, node)
 }
 
+fn image_url(state: &State, node: NodeId) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+
+    let document = &state.document;
+    let source = document.attr(node, "src")?;
+    let src = source.trim();
+    if src.is_empty() {
+        return None;
+    }
+    if let Some((observed, url)) = state.canvases.sources.references.get(&node)
+        && observed == source
+    {
+        return Some(Cow::Borrowed(url));
+    }
+    url::Url::parse(src)
+        .or_else(|_| document_base(state).join(src))
+        .ok()
+        .map(|url| Cow::Owned(url.into()))
+}
+
+fn image_key(state: &State, node: NodeId, url: &str) -> String {
+    let cors = crate::network::crossorigin_credentials(state.document.attr(node, "crossorigin"));
+    crate::loader::image_asset_key(url, cors)
+}
+
+pub(super) fn image_request_key(state: &State, node: NodeId) -> Option<String> {
+    image_url(state, node).map(|url| image_key(state, node, &url))
+}
+
+#[derive(Default)]
+pub(super) struct ImageMetadata {
+    pub(super) size: [u32; 2],
+    pub(super) settled: bool,
+    pub(super) url: Option<String>,
+}
+
+pub(super) fn image_metadata(state: &State, node: NodeId) -> ImageMetadata {
+    if state.image_updates.contains(&node) {
+        return ImageMetadata::default();
+    }
+    if state.invalid_images.contains(&node) {
+        return ImageMetadata { settled: true, ..Default::default() };
+    }
+    let Some(url) = image_url(state, node) else {
+        return ImageMetadata { settled: true, ..Default::default() };
+    };
+    let key = image_key(state, node, &url);
+    let sources = &state.canvases.sources;
+    let size = sources.images.get(&key)
+        .map(|bitmap| [bitmap.width(), bitmap.height()])
+        .or_else(|| sources.svg_sizes.get(&key).copied());
+    ImageMetadata {
+        size: size.unwrap_or_default(),
+        settled: size.is_some() || sources.status.contains_key(&key),
+        url: Some(url.into_owned()),
+    }
+}
+
 fn image_source(state: &State, node: NodeId) -> ImageStatus {
     let document = &state.document;
-    if document.namespace(node) != crate::dom::Namespace::Html || document.tag(node) != "img" {
+    if !super::image_element::is_image(document, node) || state.invalid_images.contains(&node) {
         return ImageStatus::Broken;
     }
-    let Some(src) = document.attr(node, "src").map(str::trim) else {
+    if document.attr(node, "src").is_none() {
         return ImageStatus::Pending;
-    };
-    if src.is_empty() {
-        return ImageStatus::Broken;
     }
-    let stored_url = state
-        .canvases
-        .sources
-        .references
-        .get(&node)
-        .and_then(|(observed, url)| {
-            (Some(observed.as_str()) == document.attr(node, "src")).then_some(url.as_str())
-        });
-    let resolved;
-    let url = if let Some(url) = stored_url {
-        url
-    } else {
-        let Ok(url) = url::Url::parse(src).or_else(|_| document_base(state).join(src)) else {
-            return ImageStatus::Broken;
-        };
-        resolved = url;
-        resolved.as_str()
+    let Some(url) = image_url(state, node) else {
+        return ImageStatus::Broken;
     };
-    let cors = crate::network::crossorigin_credentials(document.attr(node, "crossorigin"));
-    let key = crate::loader::image_asset_key(url, cors);
+    let key = image_key(state, node, &url);
     let sources = &state.canvases.sources;
     let availability = sources.status.get(&key);
     if let Some(image) = sources.images.get(&key) {

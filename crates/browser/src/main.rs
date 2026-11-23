@@ -3,18 +3,21 @@ mod app;
 mod file_picker;
 mod headless;
 mod jobs;
+mod media;
 mod profile;
 mod testing;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod updater;
 
 use rust_browser_engine::{Fonts, Layout, paint::Canvas, script::ScriptRuntime};
 use std::path::PathBuf;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("Rust Browser: {error}");
+        eprintln!("Satin: {error}");
         #[cfg(windows)]
         if !std::env::args().any(|a| a == "--headless" || a == "--smoke-window") {
-            let title = "Rust Browser\0".encode_utf16().collect::<Vec<_>>();
+            let title = "Satin\0".encode_utf16().collect::<Vec<_>>();
             let message = format!("{error}\0").encode_utf16().collect::<Vec<_>>();
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
@@ -33,12 +36,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|a| a == "--version") {
-        println!("Rust Browser {}", env!("CARGO_PKG_VERSION"));
+        println!("Satin {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if args.iter().any(|a| a == "--help") {
         println!(
-            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --width 1280 --height 800 --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID] [--file-picker-responses JSON_FILE]"
+            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --width 1280 --height 800 --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID --smoke-actions JSON_FILE] [--file-picker-responses JSON_FILE]"
         );
         return Ok(());
     }
@@ -161,6 +164,19 @@ fn run() -> Result<(), String> {
     let profile = value("--profile")
         .map(PathBuf::from)
         .unwrap_or_else(profile::default_path);
+    let url = url
+        .as_deref()
+        .map(rust_browser_engine::normalize_url)
+        .transpose()?;
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if !args.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--smoke-window" | "--smoke-click-id" | "--smoke-actions"
+        )
+    }) {
+        updater::start_for_installed_launch();
+    }
     app::run(
         profile,
         url,

@@ -47,6 +47,7 @@ enum Consumer {
     Image(Arc<str>),
     Module(ModuleKey, CredentialsMode),
     Font(FontKey),
+    Media(MediaKey),
 }
 
 struct ResourceQueue {
@@ -278,7 +279,8 @@ impl DocumentSession {
     }
     pub fn needs_advance(&self, runtime: Option<&ScriptRuntime>) -> bool {
         runtime.is_some_and(|realm| {
-            realm.has_queued_script_tasks() || self.module_tasks.ready(&self.modules, realm)
+            realm.has_queued_script_tasks() || realm.state.borrow().media.has_loads()
+                || self.module_tasks.ready(&self.modules, realm)
         }) || self
             .next_deadline()
             .is_some_and(|next| next <= Instant::now())
@@ -286,15 +288,15 @@ impl DocumentSession {
     pub fn next_resource(&mut self) -> Option<ResourceLoad> {
         self.resources.take()
     }
-    pub fn stop(&mut self, page: &mut LoadedPage, runtime: Option<&ScriptRuntime>) {
-        if let Some(realm) = runtime {
+    pub fn stop(&mut self, page: &mut LoadedPage, mut runtime: Option<&mut ScriptRuntime>) {
+        if let Some(realm) = runtime.as_deref_mut() {
             {
                 let mut state = realm.state.borrow_mut();
                 state.ready_state = "complete";
                 state.dynamic_scripts.pending.clear();
+                state.image_updates.clear();
             }
             self.module_tasks.stop_queued(realm);
-            realm.snapshot(page);
         } else if let Some(parser) = &self.parser
             && let Ok(document) = parser.borrow_mut().stream.take_document()
         {
@@ -314,8 +316,14 @@ impl DocumentSession {
             .retain(|_, state| matches!(state, ImageState::Failed));
         page.stats.skipped_resources += self.resources.pending.len();
         for (_, (consumer, _)) in self.resources.pending.drain() {
-            if let Consumer::Module(key, _) = consumer {
-                self.modules.fail(key, "Module fetch stopped".into());
+            match consumer {
+                Consumer::Module(key, _) => self.modules.fail(key, "Module fetch stopped".into()),
+                Consumer::Media(key) => {
+                    if let Some(realm) = runtime.as_deref_mut() {
+                        realm.accept_media_bytes(key, Err("Media fetch stopped".into()));
+                    }
+                }
+                _ => {}
             }
         }
         self.resources.initial_deadline = None;
@@ -324,6 +332,9 @@ impl DocumentSession {
         self.resources.retry_at = None;
         self.runnable = false;
         self.dirty = false;
+        if let Some(realm) = runtime {
+            realm.snapshot(page);
+        }
     }
     pub fn retry_resource(&mut self, load: ResourceLoad) {
         self.resources.retry(load);
@@ -437,6 +448,15 @@ impl DocumentSession {
         for _ in 0..24 {
             self.flush_dynamic_scripts(page, runtime, viewport)?;
             self.flush_parser_discoveries(page, runtime, viewport)?;
+            if let Some(realm) = runtime {
+                loop {
+                    let load = realm.state.borrow_mut().media.take_load();
+                    let Some((key, request)) = load else { break; };
+                    if let Err(error) = self.resources.queue(request, Consumer::Media(key)) {
+                        realm.accept_media_bytes(key, Err(error));
+                    }
+                }
+            }
             self.sync_fonts(page)?;
             self.update_resources(page, runtime);
             if !self.cached_image_events.is_empty() {
@@ -623,13 +643,36 @@ impl DocumentSession {
 
     fn flush_dynamic_scripts(
         &mut self,
-        page: &LoadedPage,
+        page: &mut LoadedPage,
         runtime: &mut Option<ScriptRuntime>,
         viewport: Viewport,
     ) -> Result<(), String> {
         let Some(realm) = runtime else {
             return Ok(());
         };
+        let updates = std::mem::take(&mut realm.state.borrow_mut().image_updates);
+        if !updates.is_empty() {
+            let mut state = realm.state.borrow_mut();
+            let base = super::document_base(&state);
+            for node in updates {
+                let Some(src) = state.document.attr(node, "src").map(str::to_owned) else {
+                    continue;
+                };
+                match parser_host::resolve_resource(&self.client, &base, &src) {
+                    Ok(url) => self.discover_image(
+                        page,
+                        node,
+                        src,
+                        url,
+                        parser_host::cors_attr(&state.document, node),
+                    ),
+                    Err(_) => {
+                        state.invalid_images.insert(node);
+                        self.cached_image_events.push((node, false));
+                    }
+                }
+            }
+        }
         if self
             .module_tasks
             .begin(realm, &mut self.modules, &self.client, &mut self.resources)
@@ -654,8 +697,9 @@ impl DocumentSession {
         self.parser.as_ref().map_or_else(
             || {
                 page.document.connected_nodes().any(|id| {
-                    matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
-                    if attrs.keys().any(|name| name.starts_with("on")))
+                    media::has_controls(&page.document, id)
+                        || matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
+                            if attrs.keys().any(|name| name.starts_with("on")))
                 })
             },
             |parser| parser.borrow().wants_realm,
@@ -988,6 +1032,7 @@ impl DocumentSession {
                 Arc::make_mut(&mut page.image_availability)
                     .insert(key.to_string(), crate::loader::ImageAvailability::Failed);
                 self.resources_dirty = true;
+                self.cached_image_events.push((node, false));
                 self.messages.push((node, message));
             }
         }
@@ -1116,6 +1161,14 @@ impl DocumentSession {
                 if let Some(ImageState::Pending(waiters)) = self.images.remove(&key) {
                     events = waiters;
                 }
+                if let Some(realm) = runtime {
+                    let state = realm.state.borrow();
+                    events.retain(|node| {
+                        !state.image_updates.contains(node)
+                            && super::canvas::image_request_key(&state, *node).as_deref()
+                                == Some(key.as_ref())
+                    });
+                }
                 let memory = DECODED_IMAGE_BYTES.saturating_sub(self.decoded_images);
                 let mut origin_clean = false;
                 if let Ok(DocumentResource {
@@ -1163,6 +1216,16 @@ impl DocumentSession {
                     self.fonts.fail(&key, &self.client, &mut self.resources);
                 }
                 self.sync_fonts(page)?;
+            }
+            Consumer::Media(key) => {
+                let media = result.and_then(|asset| match asset.body {
+                    ResourceBody::Media(bytes) => Ok((asset.url.to_string(), bytes)),
+                    _ => Err("Unexpected media resource payload".into()),
+                });
+                let downloaded = media.is_ok();
+                if let Some(realm) = runtime {
+                    accepted = realm.accept_media_bytes(key, media) && downloaded;
+                }
             }
         }
         if let Some(bytes) = transfer.filter(|_| accepted) {

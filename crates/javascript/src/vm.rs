@@ -5,7 +5,7 @@ use crate::{
         Binding, Cell, EnvId, EnvKind, Environment, Heap, Object, ObjectKind, Property,
         PropertyKind, array_index,
     },
-    parser::{FunctionKind, VarKind},
+    parser::{FunctionKind, LabelId, VarKind},
     patterns::{Invocation, PatternMode},
 };
 use std::{
@@ -173,8 +173,46 @@ pub(crate) enum Item {
 pub(crate) enum Completion {
     Normal(Option<Value>),
     Return(Value),
-    Break,
-    Continue,
+    Break(Option<LabelId>, Option<Value>),
+    Continue(Option<LabelId>, Option<Value>),
+}
+impl Completion {
+    pub(crate) fn update_empty(self, fallback: Option<Value>) -> Self {
+        match self {
+            Self::Normal(None) => Self::Normal(fallback),
+            Self::Break(target, None) => Self::Break(target, fallback),
+            Self::Continue(target, None) => Self::Continue(target, fallback),
+            completion => completion,
+        }
+    }
+
+    pub(crate) fn leave_label(self, label: LabelId) -> Self {
+        match self {
+            Self::Break(Some(target), value) if target == label => Self::Normal(value),
+            completion => completion,
+        }
+    }
+
+    /// None means the current iteration should continue. A completion must
+    /// leave this loop, closing its iterator if it uses the iterator protocol.
+    pub(crate) fn after_loop_body(
+        self,
+        label: Option<LabelId>,
+        result: &mut Option<Value>,
+    ) -> Option<Self> {
+        let value = match self {
+            Self::Normal(value) => value,
+            Self::Continue(target, value) if target.is_none() || target == label => value,
+            Self::Break(target, value) if target.is_none() || target == label => {
+                return Some(Self::Normal(value.or_else(|| result.take())));
+            }
+            abrupt => return Some(abrupt.update_empty(result.take())),
+        };
+        if value.is_some() {
+            *result = value;
+        }
+        None
+    }
 }
 impl Default for Vm {
     fn default() -> Self {
@@ -2700,7 +2738,7 @@ impl Vm {
                         result = value;
                     }
                 }
-                abrupt => return Ok(abrupt),
+                abrupt => return Ok(abrupt.update_empty(result)),
             }
         }
         if let Some(item) = stack.pop() {
@@ -3273,61 +3311,56 @@ impl Vm {
                     c => return Ok(c),
                 }
             }
+            Op::Label(label, body) => return Ok(self.run_chunk(body, env)?.leave_label(*label)),
             Op::Branch(test, yes, no) => {
                 let selected = if self.expression_value(test, env)?.is_truthy() {
                     Some(yes)
                 } else {
                     no.as_ref()
                 };
-                if let Some(selected) = selected {
-                    match self.run_chunk(selected, env)? {
-                        Completion::Normal(v) => {
-                            if v.is_some() {
-                                result = v;
-                            }
-                        }
-                        c => return Ok(c),
-                    }
-                }
+                return Ok(if let Some(selected) = selected {
+                    self.run_chunk(selected, env)?
+                        .update_empty(Some(Value::Undefined))
+                } else {
+                    Completion::Normal(Some(Value::Undefined))
+                });
             }
-            Op::While(test, body) => {
+            Op::While(test, body, label) => {
+                result = Some(Value::Undefined);
                 while self.expression_value(test, env)?.is_truthy() {
                     self.tick()?;
-                    match self.run_chunk(body, env)? {
-                        Completion::Normal(v) => {
-                            if v.is_some() {
-                                result = v;
-                            }
-                        }
-                        Completion::Continue => {}
-                        Completion::Break => break,
-                        c => return Ok(c),
+                    if let Some(completion) = self
+                        .run_chunk(body, env)?
+                        .after_loop_body(*label, &mut result)
+                    {
+                        return Ok(completion);
                     }
                 }
             }
-            Op::DoWhile(body, test) => loop {
-                self.tick()?;
-                match self.run_chunk(body, env)? {
-                    Completion::Normal(v) => {
-                        if v.is_some() {
-                            result = v;
-                        }
+            Op::DoWhile(body, test, label) => {
+                result = Some(Value::Undefined);
+                loop {
+                    self.tick()?;
+                    if let Some(completion) = self
+                        .run_chunk(body, env)?
+                        .after_loop_body(*label, &mut result)
+                    {
+                        return Ok(completion);
                     }
-                    Completion::Continue => {}
-                    Completion::Break => break,
-                    c => return Ok(c),
+                    if !self.expression_value(test, env)?.is_truthy() {
+                        break;
+                    }
                 }
-                if !self.expression_value(test, env)?.is_truthy() {
-                    break;
-                }
-            },
+            }
             Op::For {
                 initial,
                 test,
                 update,
                 body,
                 lexical,
+                label,
             } => {
+                result = Some(Value::Undefined);
                 let mut iteration = if lexical.is_empty() {
                     env
                 } else {
@@ -3359,15 +3392,11 @@ impl Vm {
                     {
                         break;
                     }
-                    match self.run_chunk(body, iteration)? {
-                        Completion::Normal(v) => {
-                            if v.is_some() {
-                                result = v;
-                            }
-                        }
-                        Completion::Continue => {}
-                        Completion::Break => break,
-                        c => return Ok(c),
+                    if let Some(completion) = self
+                        .run_chunk(body, iteration)?
+                        .after_loop_body(*label, &mut result)
+                    {
+                        return Ok(completion);
                     }
                     if !lexical.is_empty() {
                         let bindings = self.heap.environment(iteration).bindings.clone();
@@ -3387,101 +3416,40 @@ impl Vm {
                     }
                 }
             }
-            Op::ForIn(kind, name, object, body) => {
-                let head = if *kind == VarKind::Var {
-                    env
-                } else {
-                    let scope =
-                        self.heap
-                            .allocate_env(Environment::new(Some(env), EnvKind::Block, None));
-                    self.declare_pattern(name, scope, *kind != VarKind::Const, true)?;
-                    scope
-                };
+            Op::ForIn(kind, name, object, body, label) => {
+                result = Some(Value::Undefined);
+                let head = self.iteration_scope(env, *kind, name)?;
                 let object = self.expression_value(object, head)?;
                 let keys = self.enumerable_keys(object)?;
                 for key in keys {
-                    self.tick()?;
-                    let scope = if *kind == VarKind::Var {
-                        env
-                    } else {
-                        let scope = self.heap.allocate_env(Environment::new(
-                            Some(env),
-                            EnvKind::Block,
-                            None,
-                        ));
-                        self.declare_pattern(name, scope, *kind != VarKind::Const, true)?;
-                        scope
-                    };
-                    self.bind_pattern(
-                        name,
-                        Value::String(key),
-                        scope,
-                        PatternMode::Binding(*kind),
-                        strict,
-                        None,
-                    )?;
-                    match self.run_chunk(body, scope)? {
-                        Completion::Normal(v) => {
-                            if v.is_some() {
-                                result = v;
-                            }
-                        }
-                        Completion::Continue => {}
-                        Completion::Break => break,
-                        c => return Ok(c),
+                    let scope =
+                        self.bind_iteration_value(env, *kind, name, Value::String(key), strict)?;
+                    if let Some(completion) = self
+                        .run_chunk(body, scope)?
+                        .after_loop_body(*label, &mut result)
+                    {
+                        return Ok(completion);
                     }
                 }
             }
-            Op::ForOf(kind, name, iterable, body, false) => {
-                let head = if *kind == VarKind::Var {
-                    env
-                } else {
-                    let scope =
-                        self.heap
-                            .allocate_env(Environment::new(Some(env), EnvKind::Block, None));
-                    self.declare_pattern(name, scope, *kind != VarKind::Const, true)?;
-                    scope
-                };
+            Op::ForOf(kind, name, iterable, body, false, label) => {
+                result = Some(Value::Undefined);
+                let head = self.iteration_scope(env, *kind, name)?;
                 let iterable = self.expression_value(iterable, head)?;
                 let mut iterator = self.get_iterator(iterable)?;
                 while let Some(value) = self.iterator_step(&mut iterator)? {
                     let completion = (|| {
-                        self.tick()?;
-                        let scope = if *kind == VarKind::Var {
-                            env
-                        } else {
-                            let scope = self.heap.allocate_env(Environment::new(
-                                Some(env),
-                                EnvKind::Block,
-                                None,
-                            ));
-                            self.declare_pattern(name, scope, *kind != VarKind::Const, true)?;
-                            scope
-                        };
-                        self.bind_pattern(
-                            name,
-                            value,
-                            scope,
-                            PatternMode::Binding(*kind),
-                            strict,
-                            None,
-                        )?;
+                        let scope = self.bind_iteration_value(env, *kind, name, value, strict)?;
                         self.run_chunk(body, scope)
                     })();
                     match completion {
-                        Ok(Completion::Normal(value)) => {
-                            if value.is_some() {
-                                result = value;
+                        Ok(completion) => {
+                            if let Some(completion) =
+                                completion.after_loop_body(*label, &mut result)
+                            {
+                                self.iterator_close(&mut iterator, Ok(Value::Undefined))?;
+                                return Ok(completion);
                             }
-                        }
-                        Ok(Completion::Continue) => {}
-                        Ok(Completion::Break) => {
-                            self.iterator_close(&mut iterator, Ok(Value::Undefined))?;
-                            break;
-                        }
-                        Ok(Completion::Return(value)) => {
-                            self.iterator_close(&mut iterator, Ok(Value::Undefined))?;
-                            return Ok(Completion::Return(value));
                         }
                         Err(error) => {
                             return self
@@ -3492,6 +3460,7 @@ impl Vm {
                 }
             }
             Op::Switch(test, cases, plan) => {
+                result = Some(Value::Undefined);
                 let value = self.expression_value(test, env)?;
                 let scope =
                     self.heap
@@ -3511,13 +3480,9 @@ impl Vm {
                 }
                 if let Some(start) = start.or(default) {
                     for (_, body) in &cases[start..] {
-                        match self.run_chunk(body, scope)? {
-                            Completion::Normal(v) => {
-                                if v.is_some() {
-                                    result = v;
-                                }
-                            }
-                            Completion::Break => break,
+                        match self.run_chunk(body, scope)?.update_empty(result.take()) {
+                            Completion::Normal(value) => result = value,
+                            Completion::Break(None, value) => return Ok(Completion::Normal(value)),
                             c => return Ok(c),
                         }
                     }
@@ -3530,8 +3495,8 @@ impl Vm {
                     Value::Undefined
                 }));
             }
-            Op::Break => return Ok(Completion::Break),
-            Op::Continue => return Ok(Completion::Continue),
+            Op::Break(target) => return Ok(Completion::Break(*target, None)),
+            Op::Continue(target) => return Ok(Completion::Continue(*target, None)),
             Op::Throw(e) => {
                 let value = self.expression_value(e, env)?;
                 return Err(self.thrown_error(value)?);
@@ -3577,14 +3542,7 @@ impl Vm {
                         other => completion = other,
                     }
                 }
-                match completion? {
-                    Completion::Normal(v) => {
-                        if v.is_some() {
-                            result = v;
-                        }
-                    }
-                    other => return Ok(other),
-                }
+                return completion.map(|value| value.update_empty(Some(Value::Undefined)));
             }
             _ => unreachable!(),
         }

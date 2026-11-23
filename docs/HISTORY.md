@@ -1,47 +1,15 @@
-# Historia, Location i adres dokumentu
+# Session history, Location, and the document URL
 
-Karta i uruchomiony dokument współdzielą historię sesji. `pushState` dodaje
-wpis, a `replaceState` aktualizuje bieżący. Zmiany są widoczne od razu w
-`location`, `document.URL`, `document.documentURI`, rozwiązywaniu odnośników,
-formularzach i względnych żądaniach Fetch. Aktualizacja adresu zachowuje
-bieżący dokument, jego VM i pobrane zasoby. Pierwszy aktywny `<base href>`
-zachowuje swój rozwiązany adres przy zmianie samego adresu dokumentu.
+The tab and active document share session history. `pushState` adds an entry, and `replaceState` updates the current entry. Changes immediately affect `location`, `document.URL`, `document.documentURI`, and resolution of links, forms, and relative Fetch requests. A same-document URL change retains the document, its VM, and fetched resources. The first active `<base href>` retains its resolved URL through changes to the document URL.
 
-Zmiana fragmentu przez `location.hash` aktualizuje adres i może wywołać
-`popstate` jeszcze w bieżącym wywołaniu. `hashchange` jest zadaniem kolejki,
-więc zaplanowane wcześniej mikrozadania mogą wykonać się przed zdarzeniem.
-`history.go`, `back` i `forward` zlecają nawigację przeglądarce. Przejście
-wpisów tego samego dokumentu przywraca jego bieżący stan. Skróty w oknie
-wykorzystują ten sam mechanizm. `PopStateEvent` i `HashChangeEvent` dziedziczą
-po `Event` i korzystają ze wspólnej obsługi zdarzeń DOM.
+Setting `location.hash` updates the URL and can dispatch `popstate` during the same call. `hashchange` runs as a queued task, so previously scheduled microtasks can run first. `history.go`, `back`, and `forward` request traversal through the browser. Same-document traversal restores the state for the destination entry. Native keyboard shortcuts use the same mechanism. `PopStateEvent` and `HashChangeEvent` inherit from `Event` and use the shared DOM event implementation.
 
-Zapis stanu historii kopiuje graf zwykłych obiektów i tablic. Zachowuje
-cykle, współdzielone elementy, puste indeksy tablic, `undefined`, liczby
-specjalne i tekst UTF-16. Getter `history.state` zwraca ten sam obiekt przez
-czas aktywności wpisu. Kolejne odtworzenie wpisu sięga do zapisanego stanu.
-Funkcje, symbole i węzły DOM zgłaszają `DataCloneError`. Typy specjalne takie
-jak `Map`, `Set`, `RegExp`, bufory i daty pozostają do dodania do serializacji.
+History state serialization copies a graph of plain objects and arrays. It preserves cycles, shared references, array holes, `undefined`, special numeric values, and UTF-16 strings. `history.state` returns the same object while its entry is active. Returning to an entry restores its saved state. Functions, symbols, and DOM nodes raise `DataCloneError`. Serializing specialized types such as `Map`, `Set`, `RegExp`, buffers, and dates remains open.
 
-Zmiana adresu przez History sprawdza reguły przepisywania komponentów URL.
-Inny schemat, host, port lub dane uwierzytelnienia są niedozwolone. Jeśli
-odtwarzany dokument przekierowuje na inną domenę, nowy dokument otrzymuje
-odrębną tożsamość i pusty stan historii. Zmiany `Location` między dokumentami
-korzystają z tego samego transportu co kliknięcia odnośników.
+History URLs follow component rewrite rules. A changed scheme, host, port, or credentials is rejected. If a restored document redirects to another domain, the new document receives a separate identity and empty history state. Cross-document `Location` changes use the same transport as link navigation.
 
-Sesja przechowuje maksymalnie 100 wpisów. Limity danych stanu wynoszą 512 KiB
-na wpis i 4 MiB na kartę. Sesja po restarcie przechowuje adresy kart. Historia
-poprzednich wpisów, BFCache, odtworzenie ciała POST i Navigation API wymagają
-dalszej pracy. Wydanie obsługuje podstawowe przewijanie do fragmentu i zapis
-położenia strony przy poruszaniu się po historii. Pozostałe tryby restauracji
-dokumentów i złożone kotwice tekstowe są w rozwoju.
+A session holds up to 100 entries. State budgets are 512 KiB per entry and 4 MiB per tab. After restart, the session restores tab URLs. Persisted history entries, BFCache, POST body replay, and the Navigation API remain open. This stage supports basic fragment scrolling and saves page position during traversal. More restoration modes and text fragments need further work.
 
-Próba `about:routes` zmienia widok po `pushState` i `popstate`. Map przechowuje
-widoki, RegExp odczytuje fragment, a MutationObserver aktualizuje tytuł karty.
-`tools/verify-history.mjs` uruchamia wspólny scenariusz w trybie bez okna,
-w natywnym oknie oraz w Chrome przez REA. Serwer sprawdza żądania względem
-przepisanego i zamrożonego `baseURI`, dokładną kolejność zdarzeń oraz przejście
-`location.replace` z ponownym wczytaniem przez `history.go(0)`.
+The `about:routes` demo changes views through `pushState` and `popstate`. A Map holds the views, a regular expression reads the fragment, and a MutationObserver updates the tab title. The verifier runs one scenario in headless mode, a native window, and a Chrome reference process through REA. A local server checks requests resolved from updated and frozen `baseURI` values, event ordering, and navigation through `location.replace` followed by `history.go(0)` reload. [History verifier](../tools/verify-history.mjs)
 
-Specyfikacja definiuje reguły adresu, stanu i zdarzeń.
-[HTML History](https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-history-interface) ·
-[HTML Location](https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-location-interface)
+HTML defines the URL, state, and event behavior. [History interface](https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-history-interface) · [Location interface](https://html.spec.whatwg.org/multipage/nav-history-apis.html#the-location-interface)

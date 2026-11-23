@@ -1,103 +1,28 @@
-<p class="eyebrow">RUST BROWSER · ALFA.13</p>
-<h1>Własny silnik w Rust.</h1>
-<p>Wersja rozwojowa {{VERSION}}. HTML, CSS, DOM, układ, rysowanie i JavaScript
-są własną implementacją. Chrome jest wzorcem porównań.</p>
-<h2>Nowe możliwości</h2>
+<p class="eyebrow">SATIN · {{VERSION}}</p>
+<h1>About Satin</h1>
+<p>Satin is an open-source web browser with a Rust engine. This Windows x64 alpha has partial website compatibility.</p>
+<h2>Browsing</h2>
 <ul>
-  <li>MessageChannel przesyła wiadomości przez porty. W tym samym dokumencie można przenieść port i bufor do odbiorcy.</li>
-  <li>Pola plikowe korzystają z okna wyboru Windows. FileList i FormData udostępniają wybrany plik stronie.</li>
-  <li>ImageBitmap udostępnia płótnu obrazy z plików. Wynik można przeskalować, sklonować lub przenieść.</li>
-  <li>Fetch przesyła ciało z ReadableStream przy połączeniu HTTP/2.</li>
+  <li>HTTP and HTTPS, certificate checking, tabs, history, zoom, and a persistent profile.</li>
+  <li>Forms with text fields, choices, a native Windows file picker, and basic validation.</li>
+  <li>Cookies, localStorage, sessionStorage, and basic navigation within a document.</li>
+  <li>Installed copies check for releases on GitHub and apply verified updates at the next launch.</li>
 </ul>
-<h2>Wcześniejsze funkcje JavaScript</h2>
+<h2>Pages and graphics</h2>
 <ul>
-  <li>BigInt zachowuje dokładność dużych liczb całkowitych. BigInt64Array, BigUint64Array i DataView obsługują zapis 64-bitowy.</li>
-  <li>JavaScript obsługuje gettery i settery w literałach obiektów.</li>
-  <li>structuredClone kopiuje Blob, File, DOMException i ImageData, zachowując powiązania widoków pamięci.</li>
+  <li>Incremental HTML parsing, DOM updates, and subsets of CSS Flexbox, Grid, and positioned layout.</li>
+  <li>System and web fonts, images, SVG shapes and paths, and Canvas 2D.</li>
+  <li>Progressive H.264/AAC MP4 playback on Windows, including pause, seek, and volume.</li>
 </ul>
-<p><a href="about:messages">Prześlij wiadomość</a> · <a href="about:files">Wyświetl wybrany obraz</a> · <a href="about:numbers">Sprawdź liczby całkowite</a></p>
-<h2>Grafika, dane i układ</h2>
+<p><a href="about:graphics">Graphics demo</a> · <a href="about:canvas">Canvas demo</a> · <a href="about:media">Video demo</a></p>
+<h2>JavaScript and web APIs</h2>
 <ul>
-  <li>Canvas 2D obsługuje ścieżki, tekst, gradienty, wzory, kopiowanie i eksport pikseli.</li>
-  <li>EventTarget i CustomEvent działają na węzłach DOM, dokumencie i oknie.</li>
-  <li>structuredClone kopiuje m.in. tablice, kolekcje, daty i bufory oraz przenosi ArrayBuffer.</li>
-  <li>localStorage pamięta dane witryny w profilu. sessionStorage przechowuje dane w obrębie karty.</li>
-  <li>Date, prywatne pola oraz metody klas, setInterval i requestAnimationFrame.</li>
-  <li>CSS Grid obsługuje nazwane linie i obszary oraz auto-fit i auto-fill.</li>
+  <li>Promises, async functions and generators, modules, classes, BigInt, and typed arrays.</li>
+  <li>Events, timers, MutationObserver, and IntersectionObserver.</li>
+  <li>Fetch, Blob, File, FormData, streams, and message channels within a document.</li>
 </ul>
-<p><a href="about:canvas">Sprawdź rysowanie Canvas 2D</a> · <a href="about:time">Sprawdź zegar i układ</a></p>
-<h2>Pliki i strumienie</h2>
-<ul>
-  <li>Fetch udostępnia nagłówki i porcje bajtów podczas pobierania.</li>
-  <li>Czytniki BYOB, WritableStream i TransformStream działają także z potokami Fetch i Blob.</li>
-  <li>Blob, File i FormData obsługują dane binarne i multipart.</li>
-  <li>ArrayBuffer, numeryczne tablice typowane, DataView, TextEncoder i TextDecoder.</li>
-  <li>Generatory, generatory asynchroniczne i pętla for await … of.</li>
-</ul>
-<p><a href="about:bytes">Sprawdź pliki i strumienie</a></p>
-<h2>DOM, nawigacja i biblioteka JavaScript</h2>
-<ul>
-  <li>Map, Set, WeakMap i WeakSet w silniku JavaScript.</li>
-  <li>Własny RegExp, literały wyrażeń regularnych i metody dopasowania tekstu.</li>
-  <li>MutationObserver śledzi zmiany DOM podczas i po wczytaniu strony.</li>
-  <li>History i Location obsługują zmianę adresu i stan widoku podczas przechodzenia między wpisami.</li>
-</ul>
-<p><a href="about:routes">Sprawdź nawigację w jednym dokumencie</a></p>
-<h2>Asynchroniczne skrypty i sieć</h2>
-<ul>
-  <li>Funkcje async, await w modułach i dynamiczny import modułów JavaScript.</li>
-  <li>Wstawianie elementów script może uruchamiać kod po wczytaniu strony.</li>
-  <li>AbortController przerywa Fetch, także podczas oczekiwania na nagłówki lub dalsze dane.</li>
-  <li>URL oraz URLSearchParams pozwalają odczytywać i zmieniać adresy i wysyłać dane URL-encoded.</li>
-</ul>
-<p><a href="about:async">Uruchom i anuluj zadanie</a></p>
-<h2>Wcześniejsze uzupełnienia</h2>
-<ul>
-  <li>HTML jest parsowany w miarę odbierania danych. Klasyczne skrypty mogą
-  działać podczas parsowania i wstawiać tekst do dokumentu przez document.write.</li>
-  <li>Statyczne moduły JavaScript, import mapy, klasy z dziedziczeniem i pola publiczne.
-  Moduły mogą współdzielić bieżące eksporty. Pobieranie sprawdza CORS, typ i integralność zasobu.</li>
-  <li>Fonty systemowe i sieciowe, w tym WOFF oraz WOFF2, uporządkowana lista rodzin
-  i dobór znaków do fontów. Pobranie fontu może zmienić rozmiary tekstu na otwartej stronie.</li>
-  <li>Własne rysowanie SVG: kształty i ścieżki, kontury, gradienty, przycięcia,
-  lokalne use/symbol i trafianie w kształt. Osobny ograniczony parser XML dla plików SVG.</li>
-  <li>Pozycjonowanie relative/absolute/fixed, kolejność warstw, przekształcenia 2D,
-  zagnieżdżone przewijanie i przycinanie. Pomiary elementów i obliczone style dostępne w JavaScript.</li>
-  <li>Szablony tekstowe i tagowane, destrukturyzacja, parametry domyślne/rest,
-  spread/rest obiektów, optional chaining i przypisania logiczne.</li>
-  <li>Symbole, klucze symbolowe, iteratory, for-of, spread, obliczane nazwy
-  właściwości oraz Promise.all/race/allSettled/any/try i AggregateError.</li>
-  <li>Pola formularzy, zaznaczanie i edycja tekstu, checkbox/radio/select,
-  podstawowa walidacja, reset i wysyłanie GET/POST. Wartości bieżące są oddzielone od atrybutów.</li>
-  <li>Cookies HTTP i document.cookie, HttpOnly, Secure, SameSite, domeny/ścieżki
-  oraz partycjonowanie. Cookies z datą ważności są zabezpieczane DPAPI w profilu Windows.</li>
-  <li>Parser obcych przestrzeni nazw SVG/MathML, integracja z HTML, CDATA
-  oraz zachowanie metadanych przy klonowaniu i wstawianiu fragmentów.</li>
-</ul>
-<p><a href="about:modules">Sprawdź moduły i parser</a> · <a href="about:graphics">Grafika i układ</a> · <a href="about:forms">Formularze</a></p>
-<h2>Pozostałe możliwości</h2>
-<p>HTTP/HTTPS z kontrolą certyfikatów, CORS i przekierowania, Fetch/Headers/Request/Response,
-Promise i JSON, template i mutacje DOM, podzbiory Flexbox i Grid, tekst, linki,
-obrazy, zdarzenia, timery, karty, historia, zoom i zachowywany profil.</p>
-<h2>Braki bieżącej alfy</h2>
-<p>Zgodność witryn jest częściowa. Brakuje m.in. Intl, Proxy, SharedArrayBuffer,
-atrybutów importu i zbiorów Unicode RegExp. Historia wymaga
-dalszej obsługi typów specjalnych stanu i BFCache. SVG ma podzbiór statycznej
-grafiki: tekst SVG, filtry, maski, wzory, animacje i pełne XML pozostają do wdrożenia.
-Pozostają skład MathML, multimedia, OffscreenCanvas, filtry Canvas 2D,
-bufory Float16, WebAssembly, pełne CSS i typografia.</p>
-<p>Formularze mają podzbiór stanów pól i walidacji.
-Pełne kontrolki dat, liczb i kolorów, przeciąganie zaznaczenia i pełna dostępność
-wymagają dalszej pracy. Cookies sesyjne kończą się z sesją aplikacji; cookie policy,
-pełna integracja ramek, IndexedDB i magazyny uwierzytelniania pozostają w rozwoju.</p>
-<p>Całościowy odczyt ciała Fetch ma limit 4 MiB.
-Część opcji żądań i pełne polityki dostępu do sieci
-pozostają w rozwoju. document.write działa w aktywnym
-parserze. Zastępowanie dokumentu przez document.open, izolacja procesu treści i kompozytor GPU wymagają implementacji.</p>
-<p>Porty działają w obrębie jednego dokumentu. Workery, FileReader i przenoszenie strumieni są w rozwoju.</p>
-<p>CSS i jego API są częściowe: pozostają m.in. sticky, transformacje 3D,
-pełne style pseudoelementów, reguły overflow dla całego viewportu i płynne przewijanie.
-Odczyty geometrii współdzielą układ z rendererem, ale nie obejmują jeszcze całego CSSOM.</p>
-<p class="muted">Limity złożoności mogą zatrzymać skrypt lub uprościć układ.
-Profil i poprzedni build są zachowywane przy instalowaniu kolejnego wydania.</p>
-<p><a href="about:home">Wróć na start</a></p>
+<p><a href="about:modules">Module demo</a> · <a href="about:bytes">Streams demo</a> · <a href="about:messages">Message demo</a></p>
+<h2>Compatibility</h2>
+<p>Complex sites may stop during initialization or render incompletely. Adaptive streaming, including Media Source Extensions, is in development. YouTube and Twitch playback remain priority gaps.</p>
+<p>Further work includes web workers, WebAssembly, Intl, Proxy, IndexedDB, advanced CSS and SVG, accessibility, and content process isolation. Large scripts and documents may hit resource limits.</p>
+<p><a href="about:home">Home</a> · <a href="https://github.com/Ferigone/satin/releases">Releases</a></p>

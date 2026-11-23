@@ -171,6 +171,7 @@ impl Parser {
                 self.advance(1);
                 is_static = true;
                 if self.eat("{") {
+                    let old_labels = std::mem::take(&mut self.labels);
                     let old = (
                         self.super_property,
                         self.super_call,
@@ -203,6 +204,7 @@ impl Parser {
                         self.static_block,
                         self.yield_context,
                     ) = old;
+                    self.labels = old_labels;
                     elements.push(ClassElement::StaticBlock(body?));
                     continue;
                 }

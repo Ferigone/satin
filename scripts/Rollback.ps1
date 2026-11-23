@@ -1,16 +1,32 @@
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Process.ps1')
 $installRoot = Join-Path $env:LOCALAPPDATA 'RustBrowser'
 $current = Join-Path $installRoot 'current.json'
 $previous = Join-Path $installRoot 'previous.json'
-if (-not (Test-Path -LiteralPath $previous)) { throw 'Nie ma jeszcze poprzedniego wydania do przywrócenia.' }
-$metadata = Get-Content -LiteralPath $previous -Raw | ConvertFrom-Json
-if ($metadata.product -ne 'RustBrowser' -or $metadata.profileSchema -ne 1) { throw 'Nieobsługiwana wersja lub format profilu.' }
-$target = [IO.Path]::GetFullPath((Join-Path $installRoot $metadata.executable))
-$versionsRoot = [IO.Path]::GetFullPath((Join-Path $installRoot 'versions')) + [IO.Path]::DirectorySeparatorChar
-if (-not $target.StartsWith($versionsRoot,[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target)) { throw 'Nieprawidłowa ścieżka pliku poprzedniej wersji.' }
-if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $metadata.sha256) { throw 'Plik poprzedniej wersji został zmieniony.' }
-$pending = Join-Path $installRoot 'rollback.pending'
-[IO.File]::WriteAllText($pending,(Get-Content -LiteralPath $previous -Raw),[Text.UTF8Encoding]::new($false))
-[IO.File]::Replace($pending,$current,(Join-Path $installRoot 'rollback.backup'))
-Copy-Item -LiteralPath (Join-Path $installRoot 'rollback.backup') -Destination $previous -Force
-Write-Output ('Przywrócono ' + $metadata.buildId + '. Zamknij otwartą przeglądarkę i uruchom ją ponownie przez ikonę.')
+if (-not (Test-Path -LiteralPath $previous -PathType Leaf)) { throw 'There is no previous Satin version to restore.' }
+$previousJson = [IO.File]::ReadAllText($previous)
+$metadata = ConvertFrom-SatinManifest $previousJson
+if ($metadata.buildId -cnotmatch '^[A-Za-z0-9.+-]{1,160}$' -or $metadata.buildId -in '.', '..' -or
+    $metadata.executable -cne "versions/$($metadata.buildId)/rust-browser.exe") {
+    throw 'The previous Satin version has an invalid executable path.'
+}
+$target = Join-Path $installRoot $metadata.executable
+if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $metadata.sha256) {
+    throw 'The previous Satin executable is missing or has changed.'
+}
+
+$pending = Join-Path $installRoot ('rollback-' + [Guid]::NewGuid().ToString('N') + '.pending')
+[IO.File]::WriteAllText($pending, $previousJson, [Text.UTF8Encoding]::new($false))
+try {
+    $updateLock = Enter-SatinPublicationLock -InstallRoot $installRoot
+    try {
+        $null = ConvertFrom-SatinManifest ([IO.File]::ReadAllText($current))
+        if ([IO.File]::ReadAllText($previous) -cne $previousJson) {
+            throw 'The previous Satin version changed during verification. Run rollback again.'
+        }
+        [IO.File]::Replace($pending, $current, $previous)
+    } finally { $updateLock.Dispose() }
+} finally {
+    if ([IO.File]::Exists($pending)) { [IO.File]::Delete($pending) }
+}
+Write-Output "Restored Satin $($metadata.version). Close and reopen the browser to use it."

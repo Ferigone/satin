@@ -1,6 +1,6 @@
 //! The parser temporarily borrows the actual DOM arena from the realm. A
 //! pending parser script never holds that borrow while running JavaScript.
-use super::super::{Shared, fatal, mark_dirty, mutation_observers, run_classic, text, unsupported};
+use super::super::{Shared, fatal, mark_dirty, media, mutation_observers, run_classic, text, unsupported};
 use super::dynamic_scripts::{self, Flags};
 use crate::{
     dom::{Document, Namespace, NodeId, mutation::MutationSink},
@@ -275,6 +275,7 @@ impl ParserHost {
             let tag = doc.tag(id);
             if doc.nodes[index].parent.is_some()
                 && (matches!(tag, "input" | "button" | "select" | "textarea")
+                    || media::has_controls(doc, id)
                     || matches!(&doc.nodes[index].kind, crate::dom::NodeKind::Element { attrs, .. }
                         if attrs.keys().any(|name| name.starts_with("on"))))
                 && connected(doc, id)

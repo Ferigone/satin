@@ -11,12 +11,15 @@ mod file_list;
 mod form_data;
 mod forms;
 mod history_api;
+mod image_element;
 mod intersection_observers;
 mod layout_api;
+mod media;
 mod message_ports;
 mod mutation_observers;
 mod namespaces;
 mod navigation;
+mod navigator;
 mod scheduler;
 mod storage;
 mod streams;
@@ -29,6 +32,7 @@ pub use forms::{
     MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, OptionSnapshot, SelectedFile,
 };
 pub use navigation::{DocumentSession, ResourceLoad};
+pub use media::{MediaCommand, MediaKey, MediaUpdate};
 
 pub(crate) fn initial_control_snapshots(document: &Document) -> HashMap<NodeId, ControlSnapshot> {
     forms::initial_snapshots(document)
@@ -60,7 +64,11 @@ struct State {
     prototype: Value,
     script_prototype: Value,
     canvas_prototype: Value,
+    media_prototypes: media::Prototypes,
     input_prototype: Value,
+    image_prototype: Value,
+    image_updates: std::collections::BTreeSet<NodeId>,
+    invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
     window: Value,
     event_prototype: Value,
@@ -87,6 +95,7 @@ struct State {
     form_clone_hook: Option<FormCloneHook>,
     mutations: Rc<RefCell<mutation_observers::Observers>>,
     canvases: canvas::CanvasStore,
+    media: media::Store,
 }
 
 pub struct ScriptRuntime {
@@ -206,6 +215,10 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.script_prototype.clone()
         } else if crate::canvas::is_canvas(&state.document, id) {
             state.canvas_prototype.clone()
+        } else if let Some(prototype) = state.media_prototypes.element(&state.document, id) {
+            prototype
+        } else if image_element::is_image(&state.document, id) {
+            state.image_prototype.clone()
         } else if state.document.namespace(id) == crate::dom::Namespace::Html
             && state.document.tag(id) == "input"
         {
@@ -369,7 +382,11 @@ fn set_attribute(
         if changes_canvas_attribute {
             canvas::attribute_changed(vm, &mut state, id, &key)?;
         }
+        image_element::attribute_changed(&mut state, id, &key);
         drop(state);
+        if key == "src" && media::is_media(&host.borrow().document, id) {
+            media::reset(vm, host, id)?;
+        }
         mutation_observers::schedule(vm, host);
         dynamic_scripts::attribute_changed(vm, host, id, &key, present)
     } else {
@@ -542,8 +559,11 @@ impl ScriptRuntime {
         vm.root(script_prototype.clone());
         let canvas_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(canvas_prototype.clone());
+        let media_prototypes = media::Prototypes::new(&mut vm, &prototype)?;
         let input_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(input_prototype.clone());
+        let image_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(character_data_prototype.clone());
         let window = vm.global();
@@ -564,7 +584,11 @@ impl ScriptRuntime {
             prototype: prototype.clone(),
             script_prototype: script_prototype.clone(),
             canvas_prototype: canvas_prototype.clone(),
+            media_prototypes,
             input_prototype: input_prototype.clone(),
+            image_prototype: image_prototype.clone(),
+            image_updates: Default::default(),
+            invalid_images: Default::default(),
             character_data_prototype: character_data_prototype.clone(),
             window: window.clone(),
             event_prototype: Value::Undefined,
@@ -591,8 +615,10 @@ impl ScriptRuntime {
             form_clone_hook: None,
             mutations: Rc::default(),
             canvases,
+            media: media::Store::default(),
         }));
         install_node(&mut vm, &state, prototype.clone())?;
+        image_element::install(&mut vm, &state, image_prototype)?;
         install_character_data(&mut vm, &state, prototype.clone(), character_data_prototype)?;
         dynamic_scripts::install(&mut vm, &state, script_prototype)?;
         module_tasks::install(&mut vm, &state);
@@ -603,6 +629,7 @@ impl ScriptRuntime {
         for name in ["window", "self", "globalThis"] {
             vm.set_global(name, window.clone())?;
         }
+        navigator::install(&mut vm, &window)?;
         let console = vm.new_object();
         for name in ["log", "info", "warn", "error", "debug"] {
             let state = state.clone();
@@ -778,6 +805,7 @@ impl ScriptRuntime {
         let fetch = fetch::FetchHost::install(&mut vm, page, abort, streams, blobs.clone())?;
         let event_constructor = vm.get_global("Event")?;
         state.borrow_mut().event_prototype = vm.get_property(event_constructor, "prototype")?;
+        media::install(&mut vm, &state)?;
         let url = state.borrow().url.clone();
         let storage = storage::StorageHost::install(&mut vm, &state, tab_storage, &url)?;
         scheduler::install_performance(&mut vm, &state)?;
@@ -811,8 +839,7 @@ impl ScriptRuntime {
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
         self.vm.eval(source)
     }
-    /// Static pages allocate no VM. The realm is created only when executable
-    /// scripts or HTML event handlers actually exist in this document.
+    /// Static pages without interactive content allocate no VM.
     pub fn for_page(page: &mut LoadedPage) -> Result<Option<Self>, JsError> {
         Self::for_page_with_viewport(page, crate::layout::Viewport::default())
     }
@@ -823,11 +850,10 @@ impl ScriptRuntime {
         let handlers =
             page.document
                 .connected_nodes()
-                .any(|id| match &page.document.nodes[id.0].kind {
-                    NodeKind::Element { attrs, .. } => {
-                        attrs.keys().any(|name| name.starts_with("on"))
-                    }
-                    _ => false,
+                .any(|id| {
+                    media::has_controls(&page.document, id)
+                        || matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
+                            if attrs.keys().any(|name| name.starts_with("on")))
                 });
         if page.scripts.is_empty() && !handlers && page.form_controls.is_empty() {
             return Ok(None);
@@ -904,12 +930,14 @@ impl ScriptRuntime {
     /// Returns whether the link's default navigation is allowed.
     pub fn click(&mut self, node: NodeId) -> bool {
         let state = self.state.clone();
+        state.borrow_mut().media.activate();
         let forms = self.forms.clone();
         forms.activate_picker_gesture();
         let allowed = self
             .vm
             .with_task(|vm| {
                 let allowed = forms.activate(vm, node)?;
+                if allowed { media::default_click(vm, &state, node)?; }
                 drain_microtask_queue(vm, &state)?;
                 Ok(allowed)
             })
@@ -990,7 +1018,9 @@ impl ScriptRuntime {
     pub fn has_queued_script_tasks(&self) -> bool {
         let state = self.state.borrow();
         state.navigation_attached
-            && (state.dynamic_scripts.has_pending() || state.import_requests.has_pending())
+            && (state.dynamic_scripts.has_pending()
+                || state.import_requests.has_pending()
+                || !state.image_updates.is_empty())
     }
     pub fn take_form_submissions(&self) -> Vec<FormSubmission> {
         self.forms.take_submissions()
@@ -1148,11 +1178,15 @@ impl ScriptRuntime {
             || self.intersections.has_task()
             || self.storage.has_events()
             || self.messages.has_tasks()
+            || state.media.has_loads()
+            || state.media.has_commands()
             || state.routing.has_events()
             || state.routing.has_commands()
             || self.forms.has_submissions()
             || state.navigation_attached
-                && (state.dynamic_scripts.has_pending() || state.import_requests.has_pending())
+                && (state.dynamic_scripts.has_pending()
+                    || state.import_requests.has_pending()
+                    || !state.image_updates.is_empty())
         {
             return Some(Instant::now());
         }
@@ -1794,7 +1828,7 @@ fn update_style(
 }
 
 fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<(), JsError> {
-    for property in [
+    install_event_handler_list(vm, state, object, &[
         "onclick",
         "onload",
         "onerror",
@@ -1816,7 +1850,11 @@ fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<
         "onpopstate",
         "onhashchange",
         "onstorage",
-    ] {
+    ])
+}
+
+fn install_event_handler_list(vm: &mut Vm, state: &Shared, object: Value, properties: &[&str]) -> Result<(), JsError> {
+    for &property in properties {
         let name = property.strip_prefix("on").unwrap().to_owned();
         let get_state = state.clone();
         let get_name = name.clone();

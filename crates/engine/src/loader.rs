@@ -25,6 +25,11 @@ use svg_image::svg_mime;
 use transport::{BodyError, CancelSignal, Interrupted, RequestControl};
 
 pub const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(18);
+pub(crate) const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 Satin/",
+    env!("CARGO_PKG_VERSION"),
+    " (independent Rust engine; development alpha)"
+);
 const DOCUMENT_LIMIT: usize = 8 * 1024 * 1024;
 const ENCODING_WAIT: Duration = Duration::from_millis(100);
 const RESOURCE_LIMIT: usize = 4 * 1024 * 1024;
@@ -403,7 +408,7 @@ impl Loader {
                     std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 0)),
                 ],
             )
-            .user_agent("Mozilla/5.0 RustBrowser/0.1 (independent Rust engine; development alpha)")
+            .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(8))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -1363,6 +1368,7 @@ fn text_encoding(bytes: &[u8], content_type: &str) -> (&'static encoding_rs::Enc
 const BASE_STYLE: &str = "body{margin:0;background:#f8fafc;color:#172936;font-family:sans-serif}main{max-width:820px;margin:48px auto;padding:28px}h1{font-size:42px;line-height:1.15;margin:16px 0 24px}p{font-size:18px;line-height:1.6}h2{font-size:23px;margin-top:32px}.eyebrow{font-size:13px;font-weight:bold;color:#16836a}a{color:#126f5e}.card{display:block;padding:18px;margin:12px 0;background:white;border:1px solid #dde5e8;text-decoration:none}.muted{color:#62727f;font-size:15px}pre{font-size:14px;padding:18px;background:#edf1f5}li{margin:10px 0}code{color:#13725d}";
 fn builtin_source(name: &str) -> String {
     let (title, body) = match name {
+        "media" => ("Video playback", include_str!("../data/pages/media.html")),
         "time" => ("Zegar i układ", include_str!("../data/pages/time.html")),
         "canvas" => ("Płótno 2D", include_str!("../data/pages/canvas.html")),
         "numbers" => (
@@ -1405,33 +1411,26 @@ fn builtin_source(name: &str) -> String {
             r#"<p class='eyebrow'>WŁASNY SILNIK · PRÓBA LOKALNA</p><h1>Od tekstu do pikseli.</h1><p>Ta strona przechodzi przez parser HTML, kaskadę CSS, układ i renderer napisane w Rust.</p><h2>Tekst i style</h2><p>Zwykły tekst, <strong>pogrubienie</strong>, <em>kursywa</em>, <code>kod o stałej szerokości</code> i <a href='#kotwica'>link do kotwicy</a>. Polskie litery: zażółć gęślą jaźń. Encje: &copy; &euro; &rarr;.</p><blockquote style='border:2px solid #16836a;padding:16px;background:#eaf6f0'>Układ jest przeliczany po zmianie rozmiaru okna.</blockquote><h2>Lista i obraz</h2><ol><li>Nawigacja przez wpisanie adresu lub kliknięcie linku.</li><li>Przewijanie kółkiem, Page Down i klawiszami strzałek.</li><li>Wstecz, dalej i odświeżanie oraz wiele kart.</li></ol><img src='about:sample-image' width='400' alt='Próbny obraz renderera'><h2 id='kotwica'>Jesteś przy kotwicy.</h2><pre>fn main() { println!("Rust Browser"); }</pre><p><a href='about:home'>Wróć na start</a> · <a href='about:version'>Informacje o wersji</a></p>"#,
         ),
         "version" => (
-            "Informacje o wersji",
+            "About Satin",
             include_str!("../data/pages/version.html"),
         ),
-        _ => (
-            "Nowa karta",
-            r#"<p class='eyebrow'>RUST BROWSER · ALFA 0.1</p><h1>Mały początek.<br>Własny silnik.</h1><p>Wpisz adres w pasku u góry albo otwórz jedną ze stron poniżej.</p><a class='card' href='about:graphics'><strong>Nowe: grafika i układ</strong><br>SVG, pozycjonowanie, obrót i rzeczywiste pomiary elementów.</a><a class='card' href='about:forms'><strong>Nowe: formularze</strong><br>Wpisywanie tekstu, wybór opcji i wysyłanie formularza.</a><a class='card' href='about:platform'><strong>Nowe: platforma WWW</strong><br>Grid, szablony HTML, Promise, JSON i Fetch.</a><a class='card' href='about:javascript'><strong>Własny JavaScript</strong><br>Przyciski, licznik i timer — sprawdź interaktywną stronę.</a><a class='card' href='about:demo'><strong>Sprawdź silnik</strong><br>Tekst, CSS, obrazy i nawigacja na lokalnej stronie próbnej.</a><a class='card' href='https://example.com'><strong>Example.com</strong><br>Prosta strona HTTPS — pierwszy krok w Internet.</a><a class='card' href='http://info.cern.ch/'><strong>Początki WWW w CERN</strong><br>Klasyczna witryna do sprawdzenia linków i nawigacji.</a><p class='muted'>Ctrl+L — adres · Ctrl+T — nowa karta · Ctrl+R — odśwież · Ctrl+plus/minus — zoom</p><p class='muted'>To wersja rozwojowa. <a href='about:version'>Zobacz działające funkcje i zakres kolejnych etapów.</a></p>"#,
-        ),
+        _ => ("New Tab", include_str!("../data/pages/home.html")),
     };
-    let body = body.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
-    let body = if title == "Nowa karta" {
-        let body = body.replacen("<a class='card' href='about:graphics'>",
-            "<a class='card' href='about:numbers'><strong>Liczby całkowite</strong><br>Oblicz kwadrat i zobacz zapis liczby w ośmiu bajtach.</a><a class='card' href='about:canvas'><strong>Płótno 2D</strong><br>Narysuj krajobraz i sprawdź kolor piksela.</a><a class='card' href='about:bytes'><strong>Pliki i strumienie</strong><br>Odczytaj bajty, zmień tekst w potoku lub sprawdź plik z formularza.</a><a class='card' href='about:time'><strong>Zegar i układ</strong><br>Sprawdź czas lokalny i zmianę układu przy różnej szerokości okna.</a><a class='card' href='about:routes'><strong>Próba nawigacji</strong><br>Zmieniaj widoki i wracaj do wcześniejszego adresu w tej samej karcie.</a><a class='card' href='about:async'><strong>Zadanie asynchroniczne</strong><br>Uruchom zadanie lub przerwij je w trakcie działania.</a><a class='card' href='about:modules'><strong>Moduły i żywy dokument</strong><br>Przetestuj import JavaScriptu, licznik i wstawianie HTML podczas parsowania.</a><a class='card' href='about:graphics'>",
-            1);
-        body.replacen(
-            "<a class='card' href='about:numbers'>",
-            concat!(
-                "<a class='card' href='about:messages'><strong>Wiadomości między portami</strong><br>Prześlij bufor i odbierz wynik.</a>",
-                "<a class='card' href='about:files'><strong>Podgląd pliku</strong><br>Wybierz obraz i zobacz go w tej karcie.</a>",
-                "<a class='card' href='about:numbers'>"
-            ),
-            1,
-        )
+    let body = body.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")).replace("RUST BROWSER", "SATIN");
+    let body = if name == "media" {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let sample = STANDARD.encode(include_bytes!("../data/pages/media-demo.mp4"));
+        body.replace("{{MEDIA_SAMPLE}}", &sample)
     } else {
         body
     };
+    let lang = if matches!(name, "media" | "version") || title == "New Tab" {
+        "en"
+    } else {
+        "pl"
+    };
     format!(
-        "<!doctype html><html lang='pl'><head><meta charset='utf-8'><title>{title}</title><style>{BASE_STYLE}</style></head><body><main>{}</main></body></html>",
+        "<!doctype html><html lang='{lang}'><head><meta charset='utf-8'><title>{title}</title><style>{BASE_STYLE}</style></head><body><main>{}</main></body></html>",
         body
     )
 }

@@ -23,6 +23,10 @@ pub enum SmokeAction {
     Title {
         value: String,
     },
+    WaitTitle {
+        value: String,
+        timeout_ms: u64,
+    },
 }
 pub fn read_actions(path: &Path) -> Result<VecDeque<SmokeAction>, String> {
     if std::fs::metadata(path)
