@@ -42,7 +42,9 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const key = (value, modifiers = {}) => ({ action: 'key', value, ...modifiers });
 const wait = value => ({ action: 'wait_title', value, timeout_ms: 8000 });
 const save = key('d', { control: true });
-const openBookmarks = [key('f', { alt: true }), key('ArrowDown'), key('ArrowDown'), key('Enter')];
+const openBookmarks = [
+  key('f', { alt: true }), key('ArrowDown'), key('ArrowDown'), key('ArrowDown'), key('Enter'),
+];
 const expected = (...entries) => ({
   schema: 1,
   entries: entries.map(({ title, path }) => ({ title, url: origin + path })),
