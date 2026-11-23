@@ -79,6 +79,15 @@ export function satinFailure(load, runTab, native) {
   return null;
 }
 
+export function satinFirstDiagnostic(load) {
+  if (load?.summary != null) return load.summary.javascript?.diagnostics?.[0] ?? null;
+  const process = load?.process;
+  if (process?.code !== 1 || process.signal || process.spawnError || process.timedOut) return null;
+  // Satin prefixes all CLI errors, including load and tool failures. Only
+  // recover an explicitly typed VM budget error, not arbitrary stderr.
+  return /^Satin: ((?:ExecutionLimit|HeapLimit): [^\r\n]+)/.exec(load.stderr ?? '')?.[1] ?? null;
+}
+
 function launch(executable, args, timeoutMs) {
   const child = spawn(executable, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = '', spawnError = null, timedOut = false;
@@ -137,7 +146,7 @@ async function satin(executable, dir, options, entry) {
     }
   }
   entry.firstFailedStage = satinFailure(entry.load, entry.runTab, entry.native);
-  entry.firstDiagnostic = entry.load.summary?.javascript?.diagnostics?.[0] ?? null;
+  entry.firstDiagnostic = satinFirstDiagnostic(entry.load);
   entry.firstResultByIdObserved = entry.runAllById.documentLoaded && count(entry.runAllById.dom?.counters.ran) > 0;
   entry.websiteRun = 'unverified'; // Native smoke gives no post-sequence DOM checkpoint.
 }

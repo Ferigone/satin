@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completeCounters, count, countersConsistent, findChapter, satinFailure, satinSnapshot } from './website.mjs';
+import {
+  completeCounters, count, countersConsistent, findChapter, satinFailure, satinFirstDiagnostic, satinSnapshot,
+} from './website.mjs';
 
 const initial = `<a href="#" class="nav-link" id="run">Run</a>
 <img src="images/runall.png" alt="Run All" id="btnRunAll">
@@ -38,6 +40,40 @@ test('reports the earliest blocked stage even if a later input attempt also fail
   const tab = { dom: { runClass: 'selected nav-link' } };
   assert.equal(satinFailure(initialized, tab, native), 'run-all-control');
   assert.equal(satinFailure(initialized, tab, null), null);
+});
+
+const fatalLoad = {
+  documentLoaded: false, summary: null, dom: null,
+  process: { code: 1, signal: null, spawnError: null, timedOut: false },
+  stderr: 'Satin: ExecutionLimit: Native work budget exhausted\n',
+};
+
+test('surfaces a fatal Satin VM budget error when the load exits without a JSON summary', () => {
+  assert.equal(satinFirstDiagnostic(fatalLoad), 'ExecutionLimit: Native work budget exhausted');
+  assert.equal(satinFirstDiagnostic({ ...fatalLoad, stderr: 'Satin: HeapLimit: Allocation limit exceeded\r\n' }),
+    'HeapLimit: Allocation limit exceeded');
+  assert.equal(satinFailure(fatalLoad, null, null), 'document-load');
+});
+
+test('uses a present JSON summary rather than treating stderr as a JavaScript diagnostic', () => {
+  const summary = diagnostics => ({ javascript: { diagnostics } });
+  assert.equal(satinFirstDiagnostic({ ...fatalLoad, summary: summary(['reported first', 'reported second']) }),
+    'reported first');
+  assert.equal(satinFirstDiagnostic({ ...fatalLoad, summary: summary([]) }), null);
+});
+
+test('does not turn network, tool, or abnormal process failures into JavaScript diagnostics', () => {
+  for (const stderr of [
+    'Satin: TLS certificate validation failed\n',
+    'Satin: Click target #run does not exist\n',
+    'Satin: Error: Connection timed out\nSatin: ExecutionLimit: Nested error text\n',
+    'ExecutionLimit: Not a Satin CLI diagnostic\n',
+  ]) assert.equal(satinFirstDiagnostic({ ...fatalLoad, stderr }), null);
+
+  for (const process of [
+    { code: 0 }, { code: null, signal: 'SIGTERM' }, { code: 1, signal: 'SIGTERM' },
+    { code: 1, timedOut: true }, { code: 1, spawnError: 'ENOENT' },
+  ]) assert.equal(satinFirstDiagnostic({ ...fatalLoad, process }), null);
 });
 
 test('selects an exact loaded chapter label and its advertised plan, never a partial or ambiguous label', () => {
