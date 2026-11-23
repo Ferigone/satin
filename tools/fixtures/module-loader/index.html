@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Module loader fixture</title>
+<script type="importmap">
+{
+  "imports": {
+    "flavor": "./targets/global.mjs",
+    "global/": "./targets/",
+    "shared-loader": "./modules/shared.mjs",
+    "blocked": "./targets/global.mjs",
+    "invalid-address": "./targets/global.mjs"
+  },
+  "scopes": {
+    "./modules/": {
+      "flavor": "./targets/outer.mjs",
+      "outer-only": "./targets/outer-fallback.mjs"
+    },
+    "./modules/deep/": {
+      "flavor": "./targets/deep.mjs",
+      "blocked": null,
+      "invalid-address": "would-be-relative.mjs"
+    }
+  }
+}
+</script>
+<body>
+<pre id="module-loader-receipt">{}</pre>
+<script type="module" src="./main.mjs"></script>
+</body>
+</html>
