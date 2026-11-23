@@ -85,3 +85,37 @@ fn splice_charges_work_and_enforces_array_length_limits() {
         ErrorKind::ExecutionLimit
     );
 }
+
+#[test]
+fn splice_checks_safe_length_after_argument_coercion_and_before_budgets() {
+    check(
+        r"
+        let trace = '';
+        const receiver = {
+            get length() {
+                trace += 'get,';
+                return {valueOf() { trace += 'length,'; return Infinity; }};
+            },
+            set length(value) { trace += 'set,'; }
+        };
+        const start = {valueOf() { trace += 'start,'; return -1; }};
+        const count = {valueOf() { trace += 'count,'; return 0; }};
+        let error;
+        try { Array.prototype.splice.call(receiver, start, count, 'new'); }
+        catch (e) { error = e; }
+        error instanceof TypeError && trace === 'get,length,start,count,' &&
+            !receiver.hasOwnProperty('9007199254740990')
+        ",
+    );
+
+    let mut vm = Vm::with_limits(VmLimits {
+        max_array_length: 4,
+        ..VmLimits::default()
+    });
+    for source in [
+        "Array.prototype.splice.call({length: Infinity}, -1, 1, 'replacement')",
+        "Array.prototype.splice.call({length: 5}, 0, 1)",
+    ] {
+        assert_eq!(vm.eval(source).unwrap_err().kind, ErrorKind::ExecutionLimit);
+    }
+}

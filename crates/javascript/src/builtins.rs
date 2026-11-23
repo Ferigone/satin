@@ -895,22 +895,48 @@ fn move_indexed_property(
 }
 
 fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, JsError> {
+    const MAX_SAFE_LENGTH: u64 = (1 << 53) - 1;
     let object = vm.coerce_object(receiver)?;
-    let len = length(vm, object.clone())?;
-    let start = relative(integer(vm, arg(args, 0))?, len);
+    let length_value = vm.get_property(object.clone(), "length")?;
+    let len = integer(vm, length_value)?.clamp(0.0, MAX_SAFE_LENGTH as f64) as u64;
+    let relative_start = integer(vm, arg(args, 0))?;
+    let start = if relative_start < 0.0 {
+        (len as f64 + relative_start).max(0.0) as u64
+    } else {
+        relative_start.min(len as f64) as u64
+    };
     let removed_count = match args.len() {
         0 => 0,
         1 => len - start,
-        _ => integer(vm, arg(args, 1))?.clamp(0.0, (len - start) as f64) as usize,
+        _ => integer(vm, arg(args, 1))?.clamp(0.0, (len - start) as f64) as u64,
     };
     let items = args.get(2..).unwrap_or_default();
-    let new_len = (len - removed_count).saturating_add(items.len());
-    if new_len > vm.limits.max_array_length as usize {
+    let new_len = (len - removed_count).saturating_add(items.len() as u64);
+    if new_len > MAX_SAFE_LENGTH {
+        return Err(JsError::type_error(
+            "Array splice exceeds maximum safe length",
+        ));
+    }
+    // Check the traversal and result bounds before species creation or mutation.
+    let limit = u64::from(vm.limits.max_array_length);
+    if len > limit {
+        return Err(JsError::new(
+            ErrorKind::ExecutionLimit,
+            "Array-like length budget exhausted",
+        ));
+    }
+    if new_len > limit {
         return Err(JsError::new(
             ErrorKind::ExecutionLimit,
             "Array length budget exhausted",
         ));
     }
+    let (len, start, removed_count, new_len) = (
+        len as usize,
+        start as usize,
+        removed_count as usize,
+        new_len as usize,
+    );
 
     let removed = vm.array_species_create(object.clone(), removed_count)?;
     for i in 0..removed_count {
