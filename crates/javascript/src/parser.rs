@@ -1794,7 +1794,8 @@ impl Parser {
             return Ok(Expr::RegExp(program));
         }
         if self.at("...") {
-            return Err(self.error("Spread syntax is not implemented"));
+            // List productions consume spread/rest before parsing their operand.
+            return Err(self.error("Unexpected '...' in an expression"));
         }
         if self.eat("class") {
             return self.class(false).map(Expr::Class);
