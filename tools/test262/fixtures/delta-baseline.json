@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "test262Revision": "48221d7c1f7745dc13e420a2e850a248c0b2afb4",
+  "selection": { "paths": ["language/delta", "built-ins/Array"], "offset": 0, "limit": null },
+  "workerSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "results": [
+    { "path": "test/language/delta/dual.js", "variant": "sloppy", "status": "pass" },
+    { "path": "test/language/delta/dual.js", "variant": "strict", "status": "pass" },
+    { "path": "test/language/delta/repaired.js", "variant": "raw", "status": "fail" },
+    { "path": "test/language/delta/unsupported.js", "variant": "module", "status": "unsupported" },
+    { "path": "test/language/delta/absent.js", "variant": "strict", "status": "fail" },
+    { "path": "test/language/delta/excluded.js", "variant": "sloppy", "status": "pass" },
+    { "path": "test/language/delta/invalid.js", "variant": null, "status": "invalid_metadata", "reason": "bad YAML" },
+    { "path": "test/language/delta/restored.js", "variant": "raw", "status": "excluded" }
+  ]
+}

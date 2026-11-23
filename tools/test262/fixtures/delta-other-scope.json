@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "test262Revision": "48221d7c1f7745dc13e420a2e850a248c0b2afb4",
+  "selection": { "paths": ["language/delta", "built-ins/Array"], "offset": 1, "limit": 2 },
+  "results": []
+}

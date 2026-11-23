@@ -42,7 +42,31 @@ The runner sends at most one request at a time. JSONL requests are capped at 16 
 
 The VM defaults to 64 MiB of estimated allocations and 100,000 heap cells, with additional source, text, and nesting limits. The allocation budget estimates VM memory. Reaching a resource limit yields `resource_limit`. The outer deadline stops only the worker process created by the runner and records `timeout` or `crash` as appropriate. [JavaScript engine documentation](../../docs/JAVASCRIPT.md)
 
-Run the runner's classification tests with
+## Compare two reports
+
+From the repository root, pass the baseline report first:
+
+```powershell
+node tools/test262/delta.mjs target/test262/baseline.json target/test262/candidate.json
+```
+
+The comparator needs only Node and the two schema-1 JSON reports. It rejects different Test262 revisions, `--path` filters, offsets, or limits; path filter order and duplicate filters do not matter. Other spellings of a path must be kept identical between runs. The JSON delta records the revision, filters, and both worker hashes (if present). Schema-1 reports do not record `--timeout-ms` or `--instructions`, so run both workers with the same values. The comparator cannot check those budgets.
+
+The delta compares statuses for each `(path, variant)` pair, including a `null` variant for invalid metadata. It ignores test order, timings, and diagnostic text.
+
+- A regression is a matched variant that went from `pass` to a non-passing result, such as `fail`, `unsupported`, or `timeout`. The reverse is an improvement. A change between two non-passing outcomes is reported separately.
+- `new` and `missing` mean a row is present on only one side. Changes to or from an explicit `excluded` status are reported separately. The runner does not emit `excluded`; the comparator never infers it from an absent row or from `unsupported`.
+- `lostCoverage` counts non-excluded baseline rows that are missing or excluded in the candidate. These are coverage losses, not matched-variant regressions.
+
+Exit code `0` means the comparison found neither a regression nor a coverage loss. Exit code `1` means it found either; both codes write the JSON delta to stdout. Exit code `2` means invalid arguments, an unreadable or invalid report, or a scope mismatch; the diagnostic goes to stderr and no delta is written.
+
+Run the comparator fixtures offline without installing dependencies or downloading Test262:
+
+```powershell
+node --test tools/test262/delta.test.mjs
+```
+
+Run all runner and comparator tests after installing the runner's Node dependencies:
 
 ```powershell
 npm --prefix tools/test262 test
