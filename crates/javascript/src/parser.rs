@@ -863,16 +863,12 @@ impl Parser {
                     (Some(kind), declarations.remove(0).0)
                 }
                 Some(Stmt::Expression(target))
-                    if (enumerate || !disallowed_of_target) && assignable(&target) =>
+                    if (enumerate || !disallowed_of_target)
+                        && (assignable(&target)
+                            || matches!(target, Expr::Array(..) | Expr::Object(..))) =>
                 {
+                    // Bare array and object literals must also parse as assignment patterns.
                     (None, self.pattern(target, false)?)
-                }
-                Some(Stmt::Expression(Expr::Array(..) | Expr::Object(..)))
-                    if enumerate || !disallowed_of_target =>
-                {
-                    return Err(self.error(
-                        "Destructuring assignment targets in iteration heads are not implemented",
-                    ));
                 }
                 Some(Stmt::Expression(_)) => {
                     return Err(self.error("Invalid iteration assignment target"));

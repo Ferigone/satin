@@ -544,11 +544,10 @@ fn switch_has_one_lexical_scope() {
 #[test]
 fn unsupported_grammar_cannot_pass_negative_syntax_tests() {
     let mut vm = Vm::new();
-    vm.check_syntax("async function g(){for await (target of source){}}")
+    vm.check_syntax("async function g(){for await ([target] of source){}}")
         .unwrap();
     for source in [
-        "async function g(){for await ([target] of source){}}",
-        "for([x='x' in {}] of [[]]){}",
+        "async function g(){for await ([target = await 1] of source){}}",
         "import('./module.js', {})",
     ] {
         assert_eq!(
