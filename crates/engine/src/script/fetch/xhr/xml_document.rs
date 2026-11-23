@@ -7,7 +7,7 @@ use roxmltree::{Node, NodeType};
 use rust_browser_javascript::{HostIndexedProperties, JsError, Value, Vm};
 use std::rc::Rc;
 
-pub(super) use source::Source;
+pub(super) use source::{Source, fallback_text_encoding};
 
 const NAME: u32 = 0;
 const KIND: u32 = 1;
@@ -87,7 +87,9 @@ impl Host {
         webidl::operation(vm, element.clone(), "getAttribute", 1, |vm, this, args| {
             require_node(vm, &this)?;
             webidl::required(args, 1, "Element.getAttribute")?;
-            let name = string_arg(vm, args, 0)?;
+            let Some(name) = string_arg(vm, args, 0)? else {
+                return Ok(Value::Null);
+            };
             get_attribute(vm, &this, ATTRIBUTES, &name)
         })?;
         webidl::operation(
@@ -99,11 +101,13 @@ impl Host {
                 require_node(vm, &this)?;
                 webidl::required(args, 2, "Element.getAttributeNS")?;
                 let ns = if arg(args, 0).is_nullish() {
-                    String::new()
+                    Some(String::new())
                 } else {
                     string_arg(vm, args, 0)?
                 };
-                let name = string_arg(vm, args, 1)?;
+                let (Some(ns), Some(name)) = (ns, string_arg(vm, args, 1)?) else {
+                    return Ok(Value::Null);
+                };
                 if ns.contains('\0') || name.contains('\0') {
                     return Ok(Value::Null);
                 }
@@ -197,10 +201,13 @@ fn install_element<'a>(
     xml: &'a str,
 ) -> Result<&'a str, JsError> {
     let tag = node.tag_name();
-    let start = &xml[node.range().start + 1..];
+    let start = xml
+        .get(node.range().start..)
+        .and_then(|tail| tail.strip_prefix('<'))
+        .ok_or_else(position_error)?;
     let end = start
         .find(|c| source::xml_space(c) || matches!(c, '/' | '>'))
-        .expect("validated tag");
+        .ok_or_else(position_error)?;
     let name = &start[..end];
     put_text(vm, object, LOCAL, tag.name())?;
     if let Some(uri) = tag.namespace() {
@@ -212,7 +219,14 @@ fn install_element<'a>(
     let qualified = vm.new_object_with_prototype(Value::Null)?;
     let namespaced = vm.new_object_with_prototype(Value::Null)?;
     for attr in node.attributes() {
-        let qname = &xml[attr.range_qname()];
+        // roxmltree 0.20 saturates range_qname's length at u16::MAX,
+        // which may truncate the name or cut through a UTF-8 code point.
+        // The attribute's start offset is not subject to that limit.
+        let qname = xml
+            .get(attr.range().start..)
+            .and_then(|tail| tail.split(|c| source::xml_space(c) || c == '=').next())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(position_error)?;
         put_attribute(
             vm,
             &qualified,
@@ -312,10 +326,16 @@ fn get_attribute(vm: &mut Vm, node: &Value, id: u32, name: &str) -> Result<Value
     })
 }
 
-fn string_arg(vm: &mut Vm, args: &[Value], index: usize) -> Result<String, JsError> {
+fn position_error() -> JsError {
+    JsError::type_error("Invalid XML source position")
+}
+
+fn string_arg(vm: &mut Vm, args: &[Value], index: usize) -> Result<Option<String>, JsError> {
     let value = vm.to_string(&arg(args, index))?;
     vm.charge_work(value.len())?;
-    Ok(value.to_string_lossy())
+    // XML names cannot contain a lone surrogate. A DOMString with one
+    // must not accidentally match an actual U+FFFD in the parsed XML.
+    Ok(String::from_utf16(value.as_utf16()).ok())
 }
 
 fn install_node(vm: &mut Vm, proto: &Value, child_list: &Value) -> Result<(), JsError> {

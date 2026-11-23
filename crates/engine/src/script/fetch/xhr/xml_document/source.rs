@@ -33,21 +33,11 @@ impl Source {
         {
             return None;
         }
-        // XHR's response MIME type defaults to text/xml if extraction fails.
-        let mime = response
-            .headers
-            .iter()
-            .find(|(name, _)| name == "content-type")
-            .and_then(|(_, value)| MimeType::parse(value))
-            .unwrap_or_else(|| MimeType::parse("text/xml").expect("XML MIME type"));
-        if !(matches!(mime.essence.as_str(), "text/xml" | "application/xml")
-            || mime.essence.ends_with("+xml"))
-        {
+        let mime = response_mime(response);
+        if !is_xml(&mime) {
             return None;
         }
-        let charset = mime
-            .parameter("charset")
-            .and_then(|label| Encoding::for_label(label.as_bytes()));
+        let charset = charset(&mime);
         Some(Self {
             raw,
             content_type: mime.essence,
@@ -69,22 +59,103 @@ impl Source {
 
     pub(super) fn decode(&self) -> Option<(Cow<'_, str>, &'static Encoding)> {
         let raw = self.raw.as_slice();
-        let (encoding, skip) = if let Some(bom) = Encoding::for_bom(raw) {
-            bom
-        } else if let Some(encoding) = self.charset {
-            (encoding, 0)
-        } else if raw.starts_with(b"\0<\0?") {
-            (UTF_16BE, 0)
-        } else if raw.starts_with(b"<\0?\0") {
-            (UTF_16LE, 0)
-        } else if let Some(label) = declaration_encoding(raw) {
-            (Encoding::for_label(label.as_bytes())?, 0)
-        } else {
-            (UTF_8, 0)
+        // RFC 7303 §3.2: BOM, then external charset, then XML's
+        // in-band encoding detection (with UTF-8 as its default).
+        let (encoding, skip) = match Encoding::for_bom(raw) {
+            Some(bom) => bom,
+            None => (self.charset.or_else(|| in_band_encoding(raw))?, 0),
         };
         let xml = encoding.decode_without_bom_handling_and_without_replacement(&raw[skip..])?;
         (xml.len() <= SOURCE_LIMIT).then_some((xml, encoding))
     }
+}
+
+pub(in crate::script::fetch::xhr) fn fallback_text_encoding(
+    response: &WebResponse,
+    raw: &[u8],
+) -> &'static Encoding {
+    let mime = response_mime(response);
+    // XHR with the default response type sniffs XML with no known MIME
+    // charset. Its text decoder is lossy and handles a BOM independently.
+    charset(&mime)
+        .or_else(|| {
+            if is_xml(&mime) {
+                in_band_encoding(raw)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(UTF_8)
+}
+
+fn is_xml(mime: &MimeType) -> bool {
+    matches!(mime.essence.as_str(), "text/xml" | "application/xml")
+        || mime.essence.ends_with("+xml")
+}
+
+fn charset(mime: &MimeType) -> Option<&'static Encoding> {
+    mime.parameter("charset")
+        .and_then(|label| Encoding::for_label(label.as_bytes()))
+}
+
+fn in_band_encoding(raw: &[u8]) -> Option<&'static Encoding> {
+    if raw.starts_with(b"\0<\0?") {
+        Some(UTF_16BE)
+    } else if raw.starts_with(b"<\0?\0") {
+        Some(UTF_16LE)
+    } else if let Some(label) = declaration_encoding(raw) {
+        Encoding::for_label(label.as_bytes())
+    } else {
+        Some(UTF_8)
+    }
+}
+
+fn response_mime(response: &WebResponse) -> MimeType {
+    // The transport can combine repeated Content-Type fields. Follow
+    // Fetch's MIME extraction: last valid type, splitting only unquoted
+    // commas and remembering a charset across the same MIME essence.
+    let mut selected: Option<MimeType> = None;
+    let mut inherited_charset = None;
+    for (_, value) in response
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+    {
+        let (mut quoted, mut escaped) = (false, false);
+        for entry in value.split(|c| match c {
+            _ if escaped => {
+                escaped = false;
+                false
+            }
+            '\\' if quoted => {
+                escaped = true;
+                false
+            }
+            '"' => {
+                quoted = !quoted;
+                false
+            }
+            ',' => !quoted,
+            _ => false,
+        }) {
+            let Some(mut mime) = MimeType::parse(entry).filter(|mime| mime.essence != "*/*") else {
+                continue;
+            };
+            if selected
+                .as_ref()
+                .is_none_or(|last| last.essence != mime.essence)
+            {
+                inherited_charset = mime.parameter("charset").map(str::to_owned);
+            } else if mime.parameter("charset").is_none()
+                && let Some(charset) = &inherited_charset
+            {
+                mime.parameters.push(("charset".into(), charset.clone()));
+            }
+            selected = Some(mime);
+        }
+    }
+    // XHR's response MIME type defaults to text/xml if extraction fails.
+    selected.unwrap_or_else(|| MimeType::parse("text/xml").expect("XML MIME type"))
 }
 
 pub(super) fn parse(xml: &str) -> Option<roxmltree::Document<'_>> {

@@ -413,6 +413,9 @@ fn response_xml_rejects_non_xml_mime_malformed_xml_dtd_and_excessive_input() {
         (Some("application/xml"), format!(
             r#"<!DOCTYPE Root [<!ENTITY e SYSTEM "http://{foreign}/never">]><Root>&e;</Root>"#
         ).into_bytes()),
+        (Some("application/xml"), format!(
+            r#"<!DOCTYPE Root SYSTEM "http://{foreign}/never"><Root/>"#
+        ).into_bytes()),
         (None, format!("{}{}", "<a>".repeat(65), "</a>".repeat(65)).into_bytes()),
         (None, format!("<root{too_many_attrs}/>").into_bytes()),
         (None, too_many_nodes.into_bytes()),
@@ -531,4 +534,109 @@ fn response_xml_only_materializes_at_done_on_async_completion() {
         runtime.eval("states.join('|')").unwrap(),
         Value::from("true|true|true|CaseSensitive"),
     );
+}
+
+#[test]
+fn response_xml_preserves_long_qualified_names_and_traces_retained_child_lists() {
+    let (address, server) = serve(|_| {
+        // Longer than u16::MAX in UTF-8, and that offset falls inside é.
+        let name = "é".repeat(32768);
+        let body = format!(
+            r#"<Top><Child {name}="full" �="replacement"><![CDATA[<!DOCTYPE Root>]]></Child></Top>"#
+        );
+        xml_reply(Some("application/xml"), body.as_bytes())
+    });
+    let mut runtime = realm(&format!("http://{address}/page"), "");
+    runtime
+        .eval(
+            r#"
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '/payload.xml', false);
+        xhr.send();
+        var saved = xhr.responseXML.documentElement.childNodes;
+        xhr.open('GET', '/reset');
+    "#,
+        )
+        .unwrap();
+    // The XHR no longer roots this response. Here only its child list is live.
+    runtime.cancel_pending_network().unwrap();
+    let actual = runtime
+        .eval(
+            r#"
+        var child = saved[0], name = 'é'.repeat(32768);
+        [
+            xhr.responseXML === null, child.nodeName,
+            child.ownerDocument.documentElement.childNodes === saved,
+            child.getAttribute(name), child.getAttribute(name.slice(1)) === null,
+            child.getAttribute('\uFFFD'), child.getAttribute('\uD800') === null,
+            child.getAttributeNS(null, '\uD800') === null, child.textContent
+        ].join('|');
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        actual,
+        Value::from("true|Child|true|full|true|replacement|true|true|<!DOCTYPE Root>"),
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn response_xml_and_default_text_follow_xml_mime_encoding_precedence() {
+    let cases = [
+        (
+            "text/xml",
+            "<Root>é</Root>".as_bytes(),
+            "text/xml|UTF-8|é|é",
+        ),
+        (
+            "application/xml",
+            b"<?xml version='1.0' encoding='windows-1252'?><Root>\xe9</Root>",
+            "application/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml; charset=windows-1252",
+            b"<?xml version='1.0' encoding='utf-8'?><Root>\xe9</Root>",
+            "application/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml; charset=windows-1252",
+            "\u{FEFF}<Root>é</Root>".as_bytes(),
+            "application/xml|UTF-8|é|é",
+        ),
+        (
+            r#"text/plain; charset=windows-1252; note="x, y", application/xml"#,
+            "<Root>é</Root>".as_bytes(),
+            "application/xml|UTF-8|é|é",
+        ),
+        (
+            r#"text/xml; charset=windows-1252, text/xml; note="x, y""#,
+            b"<Root>\xe9</Root>",
+            "text/xml|windows-1252|é|é",
+        ),
+        (
+            "application/xml, text/plain",
+            "<Root>é</Root>".as_bytes(),
+            "null|é",
+        ),
+        ("application/xml", b"<Root>\xff</Root>", "null|�"),
+    ];
+    for (mime, body, expected) in cases {
+        let (address, server) = serve(move |_| xml_reply(Some(mime), body));
+        let mut runtime = realm(&format!("http://{address}/page"), "");
+        assert_eq!(
+            runtime.eval(r#"
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', '/payload', false);
+                xhr.send();
+                var doc = xhr.responseXML;
+                var text = xhr.responseText.slice(-8, -7);
+                doc === null ? 'null|' + text :
+                    [doc.contentType, doc.characterSet, doc.documentElement.textContent, text].join('|');
+            "#).unwrap(),
+            Value::from(expected),
+            "{mime}",
+        );
+        server.join().unwrap();
+    }
 }
