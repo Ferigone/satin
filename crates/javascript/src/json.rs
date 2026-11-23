@@ -731,6 +731,15 @@ pub(crate) fn install(vm: &mut Vm) {
     let json = vm.new_object();
     vm.define_data_property(vm.global(), "JSON", json.clone(), true, false, true)
         .unwrap();
+    vm.define_data_property_key(
+        json.clone(),
+        vm.well_known_key("toStringTag"),
+        "JSON".into(),
+        false,
+        false,
+        true,
+    )
+    .unwrap();
     method(vm, json.clone(), "parse", 2, |vm, _, args| {
         let source = vm.to_string(&args.first().cloned().unwrap_or_default())?;
         parse(vm, &source, args.get(1).cloned().unwrap_or_default())

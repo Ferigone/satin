@@ -5,6 +5,19 @@ fn run(source: &str) -> Value {
         .unwrap_or_else(|e| panic!("{e}\n{source}"))
 }
 #[test]
+fn json_has_the_standard_to_string_tag() {
+    assert_eq!(
+        run(
+            r#"
+            var desc = Object.getOwnPropertyDescriptor(JSON, Symbol.toStringTag);
+            desc.value === "JSON" && !desc.writable && !desc.enumerable &&
+                desc.configurable && Object.prototype.toString.call(JSON) === "[object JSON]"
+            "#
+        ),
+        Value::Bool(true)
+    );
+}
+#[test]
 fn parses_ordinary_json_and_numbers() {
     assert_eq!(
         run(
