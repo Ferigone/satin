@@ -1541,6 +1541,14 @@ impl Vm {
                     }
                     _ => {}
                 }
+                // A compatible redefinition of an immutable String property
+                // must not add a second, stored copy of the implicit key.
+                if let ObjectKind::Boxed(Value::String(text)) = &self.heap.object(id)?.kind
+                    && (key == JsString::from("length")
+                        || array_index(&key).is_some_and(|i| (i as usize) < text.len()))
+                {
+                    return Ok(());
+                }
             }
         } else if !self.heap.object(id)?.extensible {
             return Err(JsError::type_error("Object is not extensible"));
