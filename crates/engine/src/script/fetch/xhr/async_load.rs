@@ -19,6 +19,8 @@ pub(in crate::script::fetch) struct Pending {
     root: RootId,
     cancel: CancelSignal,
     pipe: Option<FetchBody>,
+    buffered: Option<Arc<Vec<u8>>>,
+    scheduled: Option<Task>,
     received: Vec<u8>,
     request_size: usize,
     last_progress: Option<Instant>,
@@ -26,8 +28,17 @@ pub(in crate::script::fetch) struct Pending {
 
 impl Pending {
     pub(in crate::script::fetch) fn size(&self) -> usize {
-        self.request_size + self.received.capacity()
+        self.request_size
+            + self.received.capacity()
+            + self.buffered.as_ref().map_or(0, |bytes| bytes.capacity())
     }
+}
+
+#[derive(Clone, Copy)]
+enum Task {
+    Read,
+    End,
+    Error,
 }
 
 impl Host {
@@ -59,6 +70,8 @@ impl Host {
                     root: vm.root(xhr.clone()),
                     cancel,
                     pipe: None,
+                    buffered: None,
+                    scheduled: None,
                     received: Vec::new(),
                     request_size,
                     last_progress: None,
@@ -83,6 +96,7 @@ impl Host {
         let pending = host.pending_xhr.remove(&id)?;
         if cancel {
             host.ready.retain(|job| job.id != id);
+            host.ready_xhr.retain(|queued| *queued != id);
             pending.cancel.cancel();
         }
         Some(pending)
@@ -97,6 +111,40 @@ impl Host {
     fn target(&self, vm: &Vm, id: u64) -> Option<Value> {
         let host = self.fetch.borrow();
         vm.root_value(host.pending_xhr.get(&id)?.root)
+    }
+
+    fn schedule(&self, id: u64, task: Task) {
+        let mut host = self.fetch.borrow_mut();
+        if let Some(pending) = host.pending_xhr.get_mut(&id)
+            && pending.scheduled.is_none()
+        {
+            // One queue entry per bounded pending request.
+            pending.scheduled = Some(task);
+            host.ready_xhr.push_back(id);
+        }
+    }
+
+    pub(in crate::script::fetch) fn run_next_task(&self, vm: &mut Vm) -> Result<(), JsError> {
+        let (id, task) = {
+            let mut host = self.fetch.borrow_mut();
+            let Some(id) = host.ready_xhr.pop_front() else {
+                return Ok(());
+            };
+            let Some(task) = host
+                .pending_xhr
+                .get_mut(&id)
+                .and_then(|pending| pending.scheduled.take())
+            else {
+                return Ok(());
+            };
+            (id, task)
+        };
+        let result = match task {
+            Task::Read => self.receive_body(vm, id),
+            Task::End => self.finish(vm, id),
+            Task::Error => self.fail(vm, id, "error"),
+        };
+        self.cleanup_failed_delivery(vm, id, result)
     }
 
     fn cleanup_failed_delivery(
@@ -212,67 +260,92 @@ impl Host {
                 .get_mut(&id)
                 .unwrap()
                 .pipe = Some(pipe);
-            return self.receive_body(vm, id);
+            // The producer posts a read notification even if the entire
+            // response has already arrived. Do not pull its body in this
+            // headers task: that would run chunk/EOF before its checkpoint.
+            return Ok(());
         }
-        if let Some(body) = body
-            && !body.is_empty()
-        {
-            if !self.append(vm, id, &body)? {
-                return self.fail(vm, id, "error");
+        if let Some(body) = body {
+            if body.len() > FETCH_BODY_LIMIT {
+                self.schedule(id, Task::Error);
+            } else {
+                super::super::budget(vm, &self.fetch, body.capacity())?;
+                self.fetch
+                    .borrow_mut()
+                    .pending_xhr
+                    .get_mut(&id)
+                    .unwrap()
+                    .buffered = Some(body);
+                self.schedule(id, Task::Read);
             }
-            self.notify_chunk(vm, id)?;
+            return Ok(());
         }
+        // XHR handles a null body inline, unlike the close of a body stream.
         self.finish(vm, id)
     }
 
     pub(in crate::script::fetch) fn progress(&self, vm: &mut Vm, id: u64) -> Result<(), JsError> {
+        if self
+            .fetch
+            .borrow()
+            .pending_xhr
+            .get(&id)
+            .is_some_and(|pending| pending.scheduled.is_some())
+        {
+            // A queued continuation already owns this read. It will
+            // acknowledge the pipe and observe any newly arrived data.
+            return Ok(());
+        }
         let result = self.receive_body(vm, id);
         self.cleanup_failed_delivery(vm, id, result)
     }
 
     fn receive_body(&self, vm: &mut Vm, id: u64) -> Result<(), JsError> {
-        if let Some(pipe) = self
+        let buffered = self
             .fetch
-            .borrow()
+            .borrow_mut()
             .pending_xhr
-            .get(&id)
-            .and_then(|p| p.pipe.as_ref())
-        {
-            pipe.acknowledge();
-        } else {
+            .get_mut(&id)
+            .and_then(|pending| pending.buffered.take());
+        if let Some(body) = buffered {
+            if body.is_empty() {
+                return self.finish(vm, id);
+            }
+            if !self.append(vm, id, &body)? {
+                return self.fail(vm, id, "error");
+            }
+            self.notify_chunk(vm, id)?;
+            self.schedule(id, Task::End);
             return Ok(());
         }
-        let mut changed = false;
-        let ended = loop {
-            let result = self
-                .fetch
-                .borrow_mut()
+        let result = {
+            let mut host = self.fetch.borrow_mut();
+            let Some(pipe) = host
                 .pending_xhr
                 .get_mut(&id)
-                .unwrap()
-                .pipe
-                .as_mut()
-                .unwrap()
-                .read();
-            match result {
-                Poll::Ready(Ok(Some(bytes))) => {
-                    if !self.append(vm, id, &bytes)? {
-                        return self.fail(vm, id, "error");
-                    }
-                    changed = true;
-                }
-                Poll::Ready(Err(_)) => return self.fail(vm, id, "error"),
-                Poll::Ready(Ok(None)) => break true,
-                Poll::Pending => break false,
-            }
+                .and_then(|pending| pending.pipe.as_mut())
+            else {
+                return Ok(());
+            };
+            pipe.acknowledge();
+            pipe.read()
         };
-        if changed {
-            self.notify_chunk(vm, id)?;
+        match result {
+            Poll::Ready(Ok(Some(bytes))) => {
+                if !self.append(vm, id, &bytes)? {
+                    return self.fail(vm, id, "error");
+                }
+                self.notify_chunk(vm, id)?;
+                // A notification can represent more than one chunk or have
+                // EOF already visible in the pipe. Arrange a separate read
+                // task rather than consuming any of that in this callback.
+                self.schedule(id, Task::Read);
+                Ok(())
+            }
+            Poll::Ready(Ok(None)) => self.finish(vm, id),
+            Poll::Ready(Err(_)) => self.fail(vm, id, "error"),
+            Poll::Pending => Ok(()),
         }
-        if ended {
-            self.finish(vm, id)?;
-        }
-        Ok(())
     }
 
     fn append(&self, vm: &mut Vm, id: u64, bytes: &[u8]) -> Result<bool, JsError> {

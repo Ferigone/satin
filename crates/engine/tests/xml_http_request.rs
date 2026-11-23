@@ -196,13 +196,6 @@ fn asynchronous_text_uses_fetch_head_and_body_notifications() {
         .transport_handle()
         .block_on(loader.open_web_fetch(&job.request, &cancel, Instant::now() + FETCH_TIMEOUT))
         .unwrap();
-    runtime.complete_fetch(job.id, Ok(head)).unwrap();
-    assert_eq!(
-        runtime
-            .eval("[xhr.readyState,xhr.status,xhr.responseText].join('|')")
-            .unwrap(),
-        Value::from("2|200|")
-    );
     let (notify, wakes) = mpsc::channel();
     loader
         .transport_handle()
@@ -212,12 +205,26 @@ fn asynchronous_text_uses_fetch_head_and_body_notifications() {
                 let _ = notify.send(());
             }
         }));
+    // Deliberately wait for data to be present before delivering the head.
+    // Header handling must not consume an already-ready pipe.
+    wakes.recv_timeout(Duration::from_secs(5)).unwrap();
+    runtime.complete_fetch(job.id, Ok(head)).unwrap();
+    assert_eq!(
+        runtime
+            .eval("[xhr.readyState,xhr.status,xhr.responseText].join('|')")
+            .unwrap(),
+        Value::from("2|200|")
+    );
+    runtime.progress_network(job.id).unwrap();
+    assert_eq!(runtime.eval("xhr.readyState").unwrap(), Value::from(3));
+    runtime.pump_with_network_errors().unwrap();
     for _ in 0..8 {
         if runtime.pending_network() == 0 {
             break;
         }
         wakes.recv_timeout(Duration::from_secs(5)).unwrap();
         runtime.progress_network(job.id).unwrap();
+        runtime.pump_with_network_errors().unwrap();
     }
     assert_eq!(runtime.pending_network(), 0);
     assert_eq!(
@@ -271,6 +278,7 @@ fn async_abort_cancels_queued_or_in_flight_fetch_and_ignores_stale_results() {
     runtime
         .complete_network(replacement.id, Ok(response("new")))
         .unwrap();
+    runtime.pump_with_network_errors().unwrap();
     assert_eq!(
         runtime
             .eval("events.join(',')+'|'+xhr.responseText")
@@ -530,10 +538,157 @@ fn response_xml_only_materializes_at_done_on_async_completion() {
             }),
         )
         .unwrap();
+    runtime.pump_with_network_errors().unwrap();
     assert_eq!(
         runtime.eval("states.join('|')").unwrap(),
         Value::from("true|true|true|CaseSensitive"),
     );
+}
+
+fn buffered_response(path: &str, body: &[u8]) -> WebResponse {
+    WebResponse {
+        url: format!("https://example.test{path}"),
+        status: 200,
+        status_text: "OK".into(),
+        headers: vec![("content-type".into(), "text/plain".into())],
+        body: Some(Arc::new(body.to_vec())),
+        response_type: ResponseType::Basic,
+        redirected: false,
+    }
+}
+
+#[test]
+fn xhr_headers_body_and_eof_have_separate_tasks_and_microtask_checkpoints() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime
+        .eval(
+            r#"
+        var xhr = new XMLHttpRequest(), trace = [];
+        xhr.onreadystatechange = function() {
+            var state = xhr.readyState;
+            trace.push('S' + state);
+            if (state > 1) {
+                // Each real task needs 600k work units, which fits by
+                // itself but two stages must not share that budget.
+                'x'.repeat(300000);
+                Promise.resolve().then(function() {
+                    trace.push('M' + state + '@' + xhr.readyState);
+                });
+            }
+        };
+        xhr.onload = function() { trace.push('load:' + xhr.responseText); };
+        xhr.onloadend = function() { trace.push('end'); };
+        xhr.open('GET', '/phases');
+        xhr.send();
+    "#,
+        )
+        .unwrap();
+    let id = runtime.take_network_jobs().pop().unwrap().id;
+    runtime
+        .complete_network(id, Ok(buffered_response("/phases", b"abc")))
+        .unwrap();
+    assert_eq!(
+        runtime.eval("trace.join(',')").unwrap(),
+        Value::from("S1,S2,M2@2")
+    );
+    assert_eq!(runtime.pending_network(), 1);
+    assert!(runtime.next_deadline().is_some());
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime.eval("trace.join(',')").unwrap(),
+        Value::from("S1,S2,M2@2,S3,M3@3,S4,load:abc,end,M4@4"),
+    );
+    assert_eq!(runtime.pending_network(), 0);
+}
+
+#[test]
+fn xhr_done_and_load_callbacks_still_share_one_fuel_budget() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime
+        .eval(
+            r#"
+        var xhr = new XMLHttpRequest(), trace = [];
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4) {
+                'x'.repeat(300000);
+                trace.push('done');
+            }
+        };
+        xhr.onload = function() { 'x'.repeat(300000); trace.push('unexpected load'); };
+        xhr.onloadend = function() { trace.push('unexpected end'); };
+        xhr.open('GET', '/end');
+        xhr.send();
+    "#,
+        )
+        .unwrap();
+    let id = runtime.take_network_jobs().pop().unwrap().id;
+    runtime
+        .complete_network(id, Ok(buffered_response("/end", b"abc")))
+        .unwrap();
+    let error = runtime.pump_with_network_errors().unwrap_err();
+    assert_eq!(
+        error.kind,
+        rust_browser_javascript::ErrorKind::ExecutionLimit
+    );
+    assert_eq!(
+        runtime
+            .eval("[xhr.readyState,trace.join(',')].join('|')")
+            .unwrap(),
+        Value::from("4|done")
+    );
+    assert_eq!(runtime.pending_network(), 0);
+}
+
+#[test]
+fn xhr_body_checkpoint_can_abort_queued_eof_and_reopen_without_stale_load() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime
+        .eval(
+            r#"
+        var xhr = new XMLHttpRequest(), trace = [], first = true;
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 3 && first) {
+                first = false;
+                Promise.resolve().then(function() {
+                    trace.push('cancel@' + xhr.readyState);
+                    xhr.abort();
+                    xhr.open('GET', '/new');
+                    xhr.send();
+                });
+            }
+        };
+        xhr.onabort = function() { trace.push('abort@' + xhr.readyState); };
+        xhr.onload = function() { trace.push('load:' + xhr.responseText); };
+        xhr.open('GET', '/old');
+        xhr.send();
+    "#,
+        )
+        .unwrap();
+    let old = runtime.take_network_jobs().pop().unwrap();
+    runtime
+        .complete_network(old.id, Ok(buffered_response("/old", b"stale")))
+        .unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert!(old.request.signal.as_ref().unwrap().is_cancelled());
+    assert_eq!(
+        runtime.eval("trace.join(',')").unwrap(),
+        Value::from("cancel@3,abort@4")
+    );
+    assert_eq!(runtime.pending_network(), 1);
+    let new = runtime.take_network_jobs().pop().unwrap();
+    runtime.progress_network(old.id).unwrap();
+    runtime
+        .complete_network(old.id, Ok(buffered_response("/old", b"stale")))
+        .unwrap();
+    runtime
+        .complete_network(new.id, Ok(buffered_response("/new", b"fresh")))
+        .unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime.eval("trace.join(',')").unwrap(),
+        Value::from("cancel@3,abort@4,load:fresh")
+    );
+    assert_eq!(runtime.pending_network(), 0);
 }
 
 #[test]

@@ -18,7 +18,7 @@ use crate::{
 use rust_browser_javascript::{ErrorKind, JsError, JsString, RootId, Value, Vm};
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Range,
     rc::{Rc, Weak},
     sync::{Arc, Weak as ArcWeak},
@@ -95,6 +95,7 @@ struct State {
     next: u64,
     pending: BTreeMap<u64, Pending>,
     pending_xhr: BTreeMap<u64, xhr::Pending>,
+    ready_xhr: VecDeque<u64>,
     ready: Vec<FetchJob>,
     bodies: Vec<ArcWeak<Vec<u8>>>,
     headers: Vec<Weak<RefCell<HeadersData>>>,
@@ -831,6 +832,7 @@ impl FetchHost {
             next: 1,
             pending: BTreeMap::new(),
             pending_xhr: BTreeMap::new(),
+            ready_xhr: VecDeque::new(),
             ready: Vec::new(),
             bodies: Vec::new(),
             headers: Vec::new(),
@@ -974,6 +976,17 @@ impl FetchHost {
         let state = self.state.borrow();
         state.pending_requests() + usize::from(state.streams.has_network_waiters())
     }
+    pub(super) fn has_queued_xhr_tasks(&self) -> bool {
+        !self.state.borrow().ready_xhr.is_empty()
+    }
+
+    pub(super) fn run_next_xhr_task(&self, vm: &mut Vm) -> Result<(), JsError> {
+        if let Some(xhr) = &self.xhr {
+            xhr.run_next_task(vm)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn progress(&self, vm: &mut Vm, id: u64) -> Result<(), JsError> {
         let is_xhr = self.state.borrow().pending_xhr.contains_key(&id);
         if let Some(xhr) = &self.xhr

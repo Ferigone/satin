@@ -1231,6 +1231,7 @@ impl ScriptRuntime {
         let state = self.state.borrow();
         if self.vm.has_pending_jobs()
             || self.fetch.has_queued_requests()
+            || self.fetch.has_queued_xhr_tasks()
             || self.layout.has_events()
             || self.intersections.has_task()
             || self.storage.has_events()
@@ -1269,7 +1270,21 @@ impl ScriptRuntime {
     }
 
     pub fn pump(&mut self) {
+        if let Err(error) = self.pump_with_network_errors() {
+            diagnostic(&self.state, error.to_string());
+        }
+    }
+
+    pub fn pump_with_network_errors(&mut self) -> Result<(), JsError> {
         self.drain_microtasks();
+        // These continuations are fetch tasks. Cap each pump's batch and
+        // use the usual per-task checkpoint, not a reset inside a handler.
+        for _ in 0..16 {
+            if !self.fetch.has_queued_xhr_tasks() {
+                break;
+            }
+            self.network_task(fetch::FetchHost::run_next_xhr_task, false)?;
+        }
         media::run_stream_tasks(&mut self.vm, &self.state);
         if self.workers.has_tasks() {
             let state = self.state.clone();
@@ -1363,6 +1378,7 @@ impl ScriptRuntime {
         }
         report_unhandled(&mut self.vm, &self.state);
         self.vm.collect_garbage();
+        Ok(())
     }
     pub fn snapshot(&self, page: &mut LoadedPage) -> bool {
         self.publish_canvas_frames();

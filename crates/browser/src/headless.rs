@@ -312,7 +312,9 @@ fn load_document(
                     .next_deadline()
                     .is_some_and(|next| next <= Instant::now())
                 {
-                    runtime.pump();
+                    runtime
+                        .pump_with_network_errors()
+                        .map_err(|error| error.to_string())?;
                 }
                 network.dispatch_fetch(runtime)?;
                 network.media.dispatch(1, network.generation, runtime);
@@ -345,7 +347,7 @@ fn load_document(
             continue;
         }
         match message.payload {
-            Payload::MediaWake | Payload::WorkerWake => {},
+            Payload::MediaWake | Payload::WorkerWake => {}
             Payload::Navigation(NavigationPart::Open(opened)) => {
                 document = Some(DocumentSession::start_in_tab(
                     *opened,
@@ -474,7 +476,9 @@ pub(crate) fn run_tasks(
                 .next_deadline()
                 .is_some_and(|next| next <= Instant::now())
             {
-                realm.pump();
+                realm
+                    .pump_with_network_errors()
+                    .map_err(|error| error.to_string())?;
             }
             if crate::file_picker::answer_headless(realm, file_picker_responses)? {
                 continue;
