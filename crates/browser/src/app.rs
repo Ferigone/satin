@@ -1,5 +1,3 @@
-mod settings;
-
 use crate::jobs::{Job, Message, Payload, Task, Workers};
 use crate::media::Bridge;
 use crate::profile::{Profile, Session};
@@ -39,11 +37,15 @@ use winit::{
 };
 
 mod address_bar;
+mod bookmark_menu;
+mod bookmarks;
 mod chrome_menu;
 mod icons;
 mod navigation_error;
+mod settings;
 mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
+use self::bookmark_menu::Menu;
 use navigation_error::Recovery;
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
@@ -89,8 +91,10 @@ enum Action {
     Close(usize),
     Settings,
     Version,
+    Bookmarks,
     Menu,
     MenuItem(usize),
+    BookmarkItem(usize),
     Minimize,
     Maximize,
     CloseWindow,
@@ -100,12 +104,17 @@ impl Action {
     fn caption(self) -> bool {
         matches!(self, Self::Minimize | Self::Maximize | Self::CloseWindow)
     }
+
+    fn in_menu(self) -> bool {
+        matches!(self, Self::Menu | Self::MenuItem(_) | Self::BookmarkItem(_))
+    }
 }
 
-const MENU_ITEMS: [(Action, &str); 4] = [
+const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::Home, "Start page"),
     (Action::NewTab, "New tab"),
     (Action::Settings, "Settings"),
+    (Action::Bookmarks, "Bookmarks"),
     (Action::Version, "About Satin"),
 ];
 
@@ -193,6 +202,8 @@ pub fn run(
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
     let session = settings.initial_session(session);
+    let bookmarks_path = path.join(bookmarks::FILE_NAME);
+    let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let fonts = Fonts::new()?;
     let events = EventLoop::<()>::with_user_event()
         .build()
@@ -235,6 +246,7 @@ pub fn run(
         canvas: None,
         fonts,
         profile,
+        bookmarks,
         settings,
         settings_panel: None,
         tabs,
@@ -315,6 +327,7 @@ struct App {
     canvas: Option<Canvas>,
     fonts: Fonts,
     profile: Profile,
+    bookmarks: Result<bookmarks::Bookmarks, String>,
     settings: settings::Store,
     settings_panel: Option<settings::Panel>,
     tabs: Vec<Tab>,
@@ -333,7 +346,7 @@ struct App {
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
     chrome_hover: Option<Action>,
-    chrome_menu: Option<usize>,
+    chrome_menu: Option<Menu>,
     caption_pressed: Option<Action>,
     last_title_press: Option<(Instant, f32, f32)>,
     hover: Option<String>,
@@ -879,7 +892,7 @@ impl App {
         self.redraw();
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
-        if !matches!(action, Action::Menu | Action::MenuItem(_)) {
+        if !action.in_menu() {
             self.chrome_menu = None;
         }
         match action {
@@ -928,14 +941,23 @@ impl App {
             Action::Home => self.navigate("about:home".into(), true),
             Action::Settings => self.open_settings(),
             Action::Version => self.navigate("about:version".into(), true),
+            Action::Bookmarks => self.show_bookmarks(),
             Action::Menu => {
                 self.select_popup = None;
-                self.chrome_menu = self.chrome_menu.is_none().then_some(0);
+                self.chrome_menu = self.chrome_menu.is_none().then_some(Menu::Main(0));
                 self.redraw();
             }
             Action::MenuItem(index) => {
-                self.chrome_menu = None;
-                self.action(MENU_ITEMS[index].0, event_loop);
+                if matches!(self.chrome_menu, Some(Menu::Main(_)))
+                    && let Some((action, _)) = MENU_ITEMS.get(index).copied()
+                {
+                    self.action(action, event_loop);
+                }
+            }
+            Action::BookmarkItem(index) => {
+                if matches!(self.chrome_menu, Some(Menu::Bookmarks(_))) {
+                    self.pick_bookmark_row(index);
+                }
             }
             Action::Minimize => {
                 if let Some(window) = &self.window {
@@ -1049,7 +1071,7 @@ impl App {
         self.redraw();
     }
     fn insert(&mut self, text: &str) {
-        if self.settings_panel.is_some() {
+        if self.settings_panel.is_some() || matches!(self.chrome_menu, Some(Menu::Bookmarks(_))) {
             return;
         }
         if !self.address_focus {
@@ -1070,7 +1092,10 @@ impl App {
             self.settings_key(key);
             return;
         }
-        if let Some(selected) = self.chrome_menu {
+        if self.bookmark_panel_key(&key) {
+            return;
+        }
+        if let Some(Menu::Main(selected)) = self.chrome_menu {
             match key {
                 Key::Named(NamedKey::Escape) => {
                     self.chrome_menu = None;
@@ -1081,7 +1106,7 @@ impl App {
                     let previous = key == Key::Named(NamedKey::ArrowUp)
                         || (key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
                     let step = if previous { MENU_ITEMS.len() - 1 } else { 1 };
-                    self.chrome_menu = Some((selected + step) % MENU_ITEMS.len());
+                    self.chrome_menu = Some(Menu::Main((selected + step) % MENU_ITEMS.len()));
                     self.redraw();
                     return;
                 }
@@ -1124,6 +1149,10 @@ impl App {
                     }
                     "r" => {
                         self.navigate(self.tabs[self.active].url.clone(), false);
+                        return;
+                    }
+                    "d" if !self.modifiers.shift_key() && !self.modifiers.super_key() => {
+                        self.save_current_bookmark();
                         return;
                     }
                     "a" if self.address_focus => {
@@ -1947,8 +1976,10 @@ impl App {
     }
 
     fn draw_chrome_menu(&mut self, canvas: &mut Canvas, width: f32) {
-        let Some(selected) = self.chrome_menu else {
-            return;
+        let selected = match self.chrome_menu {
+            Some(Menu::Main(selected)) => selected,
+            Some(Menu::Bookmarks(_)) => return self.draw_bookmarks(canvas, width),
+            None => return,
         };
         let u = self.scale;
         let x = width - 212.;
@@ -2162,8 +2193,7 @@ impl App {
         if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
             return;
         }
-        if self.chrome_menu.is_some() && !matches!(action, Some(Action::Menu | Action::MenuItem(_)))
-        {
+        if self.chrome_menu.is_some() && !action.is_some_and(Action::in_menu) {
             self.chrome_menu = None;
             self.redraw();
         }
@@ -2886,15 +2916,18 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                if !(event.repeat
-                    && self.settings_panel.is_some()
-                    && matches!(
-                        event.logical_key,
-                        Key::Named(NamedKey::Enter | NamedKey::Space)
-                    ))
-                {
-                    self.key(event.logical_key, event.text.as_deref(), event_loop);
+                let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
+                let changes_panel = match event.logical_key {
+                    Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                        self.settings_panel.is_some() || bookmarks_open
+                    }
+                    Key::Named(NamedKey::Delete) => bookmarks_open,
+                    _ => false,
+                };
+                if event.repeat && changes_panel {
+                    return;
                 }
+                self.key(event.logical_key, event.text.as_deref(), event_loop);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
@@ -3233,7 +3266,11 @@ fn chrome_icon(
                 line(offset, 9., offset, 10.);
             }
         }
-        Action::Settings | Action::Select(_) | Action::MenuItem(_) => {}
+        Action::Settings
+        | Action::Select(_)
+        | Action::Bookmarks
+        | Action::MenuItem(_)
+        | Action::BookmarkItem(_) => {}
     }
 }
 
