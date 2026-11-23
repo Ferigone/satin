@@ -299,3 +299,132 @@ fn a_late_mailbox_head_defers_timeout_without_delivering_headers() {
         Value::from("s1,s4,timeout,end")
     );
 }
+
+#[test]
+fn deadline_boundary_queued_eof_retires_or_moves_behind_unaffected_fifo_work() {
+    for (at_deadline, mailbox_first) in [(false, true), (true, false), (true, true)] {
+        let mut rt = realm();
+        rt.eval(
+            r#"
+            var trace=[];
+            function send(label, timeout) {
+                var xhr=new XMLHttpRequest();
+                xhr.onreadystatechange=function(){trace.push(label+xhr.readyState);};
+                xhr.onload=function(){trace.push(label+':load:'+xhr.responseText);};
+                xhr.ontimeout=function(){trace.push(label+':timeout:'+xhr.status);};
+                xhr.onloadend=function(){trace.push(label+':end');};
+                xhr.open('GET','/'+label); xhr.timeout=timeout; xhr.send();
+            }
+            send('a',1000); send('b',0);
+            "#,
+        )
+        .unwrap();
+        let jobs = rt.take_network_jobs();
+        assert_eq!(jobs.len(), 2);
+        let [a, b] = [jobs[0].id, jobs[1].id];
+        let deadline = rt.fetch.xhr_deadline().unwrap();
+        rt.complete_network(a, Ok(response("/a", "A"))).unwrap();
+        rt.complete_network(b, Ok(response("/b", "B"))).unwrap();
+        step_at(&mut rt, deadline - ms(2)); // A read; queue [B read, A EOF].
+        step_at(&mut rt, deadline - ms(2)); // B read; queue [A EOF, B EOF].
+        assert_eq!(
+            rt.eval("trace.join(',')").unwrap(),
+            Value::from("a1,b1,a2,b2,a3,b3")
+        );
+
+        let boundary = if at_deadline {
+            deadline
+        } else {
+            deadline - ms(1)
+        };
+        set_now(&rt, boundary);
+        if mailbox_first {
+            // A progress wake cannot steal the local continuation. At the
+            // deadline it latches timeout, but still does not dispatch DONE.
+            rt.progress_network(a).unwrap();
+            assert_eq!(rt.pending_network(), 2);
+            assert_eq!(rt.eval("trace.length").unwrap(), Value::from(6));
+            assert_eq!(
+                jobs[0].request.signal.as_ref().unwrap().is_cancelled(),
+                at_deadline
+            );
+        }
+        step_at(&mut rt, boundary);
+        assert_eq!(rt.pending_network(), 1);
+        assert_eq!(
+            rt.eval("trace.slice(6).join(',')").unwrap(),
+            Value::from(if at_deadline {
+                "b4,b:load:B,b:end"
+            } else {
+                "a4,a:load:A,a:end"
+            })
+        );
+        step_at(&mut rt, deadline);
+        assert_eq!(
+            rt.eval("trace.slice(6).join(',')").unwrap(),
+            Value::from(if at_deadline {
+                "b4,b:load:B,b:end,a4,a:timeout:0,a:end"
+            } else {
+                "a4,a:load:A,a:end,b4,b:load:B,b:end"
+            })
+        );
+        assert_eq!(rt.pending_network(), 0);
+        assert_eq!(
+            jobs[0].request.signal.as_ref().unwrap().is_cancelled(),
+            at_deadline
+        );
+        assert!(!jobs[1].request.signal.as_ref().unwrap().is_cancelled());
+    }
+}
+
+#[test]
+fn deadline_boundary_mailbox_error_is_accepted_only_before_the_author_deadline() {
+    for at_deadline in [false, true] {
+        let mut rt = realm();
+        rt.eval(
+            r#"
+            var xhr=new XMLHttpRequest(), trace=[];
+            xhr.onreadystatechange=function(){trace.push('s'+xhr.readyState);};
+            xhr.onerror=function(){trace.push('error:'+xhr.status);};
+            xhr.ontimeout=function(){trace.push('timeout:'+xhr.status);};
+            xhr.onloadend=function(){trace.push('end');};
+            xhr.open('GET','/failure'); xhr.timeout=1000; xhr.send();
+            "#,
+        )
+        .unwrap();
+        let job = rt.take_network_jobs().pop().unwrap();
+        let deadline = rt.fetch.xhr_deadline().unwrap();
+        set_now(
+            &rt,
+            if at_deadline {
+                deadline
+            } else {
+                deadline - ms(1)
+            },
+        );
+        let error = || FetchError::new(FetchErrorKind::Network, "Fetch deadline exceeded");
+        rt.complete_network(job.id, Err(error())).unwrap();
+        assert_eq!(
+            rt.eval("trace.join(',')").unwrap(),
+            Value::from(if at_deadline {
+                "s1"
+            } else {
+                "s1,s4,error:0,end"
+            })
+        );
+        assert_eq!(rt.fetch.has_queued_xhr_tasks(), at_deadline);
+
+        set_now(&rt, deadline);
+        rt.complete_network(job.id, Err(error())).unwrap(); // Latched or stale.
+        rt.pump_with_network_errors().unwrap();
+        assert_eq!(rt.pending_network(), 0);
+        assert_eq!(
+            rt.eval("trace.join(',')").unwrap(),
+            Value::from(if at_deadline {
+                "s1,s4,timeout:0,end"
+            } else {
+                "s1,s4,error:0,end"
+            })
+        );
+    }
+}
