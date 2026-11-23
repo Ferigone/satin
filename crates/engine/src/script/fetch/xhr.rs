@@ -1,4 +1,7 @@
 //! Window XMLHttpRequest text loading over the existing Fetch transport.
+mod async_load;
+mod progress_event;
+
 use super::{Shared, byte_string, typed, usv};
 use crate::{
     Loader,
@@ -9,6 +12,7 @@ use crate::{
     },
     script::{abort, arg, event_target, getter, unsupported, webidl},
 };
+pub(super) use async_load::Pending;
 use rust_browser_javascript::{ErrorKind, JsError, Value, Vm};
 use std::{
     cell::{OnceCell, RefCell},
@@ -37,6 +41,8 @@ struct Request {
     synchronous: bool,
     request: Option<WebRequest>,
     response: Option<WebResponse>,
+    pending: Option<u64>,
+    generation: u64,
 }
 
 impl Request {
@@ -58,13 +64,14 @@ impl Request {
     }
 }
 
-struct Host {
+pub(super) struct Host {
     fetch: Shared,
     loader: OnceCell<Result<Loader, String>>,
     cookies: crate::cookies::CookieStore,
     headers: ConnectPolicy,
     events: event_target::Events,
     exception: Value,
+    progress_proto: Value,
     live: RefCell<Vec<Weak<RefCell<Request>>>>,
 }
 
@@ -122,6 +129,38 @@ impl Host {
         self.events.dispatch(vm, xhr, event).map(|_| ())
     }
 
+    fn fire_progress(
+        &self,
+        vm: &mut Vm,
+        xhr: Value,
+        kind: &str,
+        loaded: usize,
+        total: usize,
+    ) -> Result<(), JsError> {
+        let event = vm.new_object_with_prototype(self.progress_proto.clone())?;
+        let event = progress_event::init(
+            vm,
+            event,
+            kind.into(),
+            [false; 3],
+            true,
+            [Value::Bool(total != 0), loaded.into(), total.into()],
+        )?;
+        self.events.dispatch(vm, xhr, event).map(|_| ())
+    }
+
+    fn success_events(
+        &self,
+        vm: &mut Vm,
+        xhr: Value,
+        loaded: usize,
+        total: usize,
+    ) -> Result<(), JsError> {
+        self.fire(vm, xhr.clone(), "readystatechange")?;
+        self.fire_progress(vm, xhr.clone(), "load", loaded, total)?;
+        self.fire_progress(vm, xhr, "loadend", loaded, total)
+    }
+
     fn sync_fetch(&self, request: WebRequest) -> Result<WebResponse, FetchError> {
         let error = |message: String| FetchError::new(FetchErrorKind::Network, message);
         let loader = self
@@ -155,10 +194,10 @@ fn receiver(vm: &Vm, xhr: &Value) -> Result<Rc<RefCell<Request>>, JsError> {
     typed(vm, xhr, "XMLHttpRequest")
 }
 
-fn response_text(vm: &mut Vm, response: &WebResponse) -> Result<Value, JsError> {
-    let Some(body) = &response.body else {
+fn response_text(vm: &mut Vm, response: &WebResponse, body: &[u8]) -> Result<Value, JsError> {
+    if body.is_empty() {
         return Ok("".into());
-    };
+    }
     vm.charge_work(body.len())?;
     vm.ensure_string_allocation(body.len())?;
     let encoding = response
@@ -175,9 +214,25 @@ fn response_text(vm: &mut Vm, response: &WebResponse) -> Result<Value, JsError> 
     vm.finish_string(text.encode_utf16().collect())
 }
 
-pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<(), JsError> {
+fn content_length(response: &WebResponse) -> usize {
+    response
+        .headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn response_size(response: &WebResponse) -> usize {
+    super::bytes(&response.headers) + response.url.capacity() + response.status_text.capacity()
+}
+
+pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<Rc<Host>, JsError> {
     let exception = vm.get_global("DOMException")?;
     vm.root(exception.clone());
+    let events = fetch.borrow().abort.events().clone();
+    let progress_proto = progress_event::install(vm, &events.event_proto)?;
+    vm.root(progress_proto.clone());
     let host = Rc::new(Host {
         fetch: fetch.clone(),
         loader: page
@@ -190,8 +245,9 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             .unwrap_or_default(),
         cookies: page.cookies.clone(),
         headers: page.connect_policy.clone(),
-        events: fetch.borrow().abort.events().clone(),
+        events,
         exception,
+        progress_proto,
         live: RefCell::default(),
     });
     let prototype = vm.new_object_with_prototype(host.events.target_proto.clone())?;
@@ -253,15 +309,26 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         }
         let mut request = WebRequest::get(url, client);
         request.method = method;
-        let state_changed = data.borrow().ready != Ready::Opened;
+        let (state_changed, generation, pending) = {
+            let data = data.borrow();
+            (
+                data.ready != Ready::Opened,
+                data.generation.wrapping_add(1),
+                data.pending,
+            )
+        };
         let replacement = Request {
             ready: Ready::Opened,
             synchronous,
             request: Some(request),
-            response: None,
+            generation,
+            ..Request::default()
         };
         context.budget(vm, Some(&data), replacement.metadata_size())?;
         vm.set_host_slot(xhr.clone(), TEXT_SLOT, "".into())?;
+        if let Some(id) = pending {
+            context.discard(vm, id);
+        }
         *data.borrow_mut() = replacement;
         if state_changed {
             context.fire(vm, xhr, "readystatechange")?;
@@ -302,7 +369,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
     let context = host.clone();
     webidl::operation(vm, prototype.clone(), "send", 0, move |vm, xhr, args| {
         let data = receiver(vm, &xhr)?;
-        let mut request = {
+        let (mut request, synchronous) = {
             let data = data.borrow();
             if !data.can_send() {
                 return Err(context.exception(
@@ -311,12 +378,10 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
                     "XMLHttpRequest is not open for send",
                 ));
             }
-            if !data.synchronous {
-                return Err(unsupported(
-                    "Asynchronous XMLHttpRequest is not implemented",
-                ));
-            }
-            data.request.clone().expect("open request")
+            (
+                data.request.clone().expect("open request"),
+                data.synchronous,
+            )
         };
         let body = arg(args, 0);
         if !body.is_nullish() && !matches!(request.method.as_str(), "GET" | "HEAD") {
@@ -342,30 +407,44 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             request.body = Some(Arc::new(body.into_bytes()));
         }
         request.connect_policy = Some(context.policy());
+        if !synchronous {
+            context.queue(vm, xhr, &data, request)?;
+            return Ok(Value::Undefined);
+        }
         data.borrow_mut().request = None;
         let response = context.sync_fetch(request);
         data.borrow_mut().ready = Ready::Done;
         let mut response = response.map_err(|_| {
             context.exception(vm, "NetworkError", "XMLHttpRequest transport failed")
         })?;
-        let text = response_text(vm, &response)?;
-        response.body = None;
-        context.budget(
-            vm,
-            None,
-            super::bytes(&response.headers)
-                + response.url.capacity()
-                + response.status_text.capacity(),
-        )?;
+        let body = response.body.take();
+        let body = body.as_deref().map_or(&[][..], Vec::as_slice);
+        let text = response_text(vm, &response, body)?;
+        let total = content_length(&response);
+        context.budget(vm, None, response_size(&response))?;
         vm.set_host_slot(xhr.clone(), TEXT_SLOT, text)?;
         data.borrow_mut().response = Some(response);
-        context.fire(vm, xhr, "readystatechange")?;
+        context.success_events(vm, xhr, body.len(), total)?;
         Ok(Value::Undefined)
     })?;
-    webidl::operation(vm, prototype.clone(), "abort", 0, |vm, xhr, _| {
+    let context = host.clone();
+    webidl::operation(vm, prototype.clone(), "abort", 0, move |vm, xhr, _| {
         let data = receiver(vm, &xhr)?;
-        if data.borrow().ready == Ready::Done {
-            *data.borrow_mut() = Request::default();
+        let (id, generation) = {
+            let data = data.borrow();
+            (data.pending, data.generation)
+        };
+        if let Some(id) = id {
+            context.fail(vm, id, "abort")?;
+        }
+        let still_done = {
+            let data = data.borrow();
+            data.ready == Ready::Done && data.generation == generation
+        };
+        if still_done {
+            let mut data = data.borrow_mut();
+            data.ready = Ready::Unsent;
+            data.response = None;
             vm.set_host_slot(xhr, TEXT_SLOT, "".into())?;
         }
         Ok(Value::Undefined)
@@ -426,6 +505,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         "response",
         "responseText",
     ] {
+        let context = host.clone();
         getter(vm, prototype.clone(), name, move |vm, xhr, _| {
             let data = receiver(vm, &xhr)?;
             let data = data.borrow();
@@ -446,6 +526,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
                         .encode_utf16()
                         .collect(),
                 )?,
+                _ if data.ready == Ready::Loading => context.partial_text(vm, &data)?,
                 _ => vm.host_slot(&xhr, TEXT_SLOT).unwrap_or_else(|| "".into()),
             })
         })?;
@@ -461,11 +542,22 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
             vm.define_data_property(object, name, (state as u32).into(), false, true, false)?;
         }
     }
-    event_target::install_handler(
-        vm,
-        prototype,
+    for kind in [
         "readystatechange",
-        |vm, xhr| receiver(vm, xhr).map(|_| ()),
-        |_, _| Ok(()),
-    )
+        "loadstart",
+        "progress",
+        "abort",
+        "error",
+        "load",
+        "loadend",
+    ] {
+        event_target::install_handler(
+            vm,
+            prototype.clone(),
+            kind,
+            |vm, xhr| receiver(vm, xhr).map(|_| ()),
+            |_, _| Ok(()),
+        )?;
+    }
+    Ok(host)
 }

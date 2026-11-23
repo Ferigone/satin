@@ -94,6 +94,7 @@ struct State {
     form_data: Option<form_data::FormDataHost>,
     next: u64,
     pending: BTreeMap<u64, Pending>,
+    pending_xhr: BTreeMap<u64, xhr::Pending>,
     ready: Vec<FetchJob>,
     bodies: Vec<ArcWeak<Vec<u8>>>,
     headers: Vec<Weak<RefCell<HeadersData>>>,
@@ -102,6 +103,21 @@ struct State {
 }
 pub(super) struct FetchHost {
     state: Shared,
+    xhr: Option<Rc<xhr::Host>>,
+}
+
+impl State {
+    fn pending_requests(&self) -> usize {
+        self.pending.len() + self.pending_xhr.len()
+    }
+
+    fn next_id(&mut self) -> Result<u64, JsError> {
+        let id = self.next;
+        self.next = id
+            .checked_add(1)
+            .ok_or_else(|| JsError::type_error("Fetch request identifier exhausted"))?;
+        Ok(id)
+    }
 }
 
 fn validate_request(request: &mut WebRequest) -> Result<(), JsError> {
@@ -138,6 +154,11 @@ fn budget(vm: &mut Vm, state: &Shared, extra: usize) -> Result<(), JsError> {
     state.requests.retain(|v| v.strong_count() > 0);
     state.responses.retain(|v| v.strong_count() > 0);
     let mut total = state.pending.values().map(|p| p.metadata).sum::<usize>();
+    total += state
+        .pending_xhr
+        .values()
+        .map(xhr::Pending::size)
+        .sum::<usize>();
     let mut seen = BTreeSet::new();
     for body in &state.bodies {
         if let Some(body) = body.upgrade()
@@ -775,9 +796,10 @@ impl FetchHost {
         blobs: blobs::BlobFactory,
     ) -> Result<Self, JsError> {
         let client = Url::parse(&page.url).unwrap_or_else(|_| page.base.clone());
-        let host = Self::install_with_urls(vm, page.base.clone(), client, abort, streams, blobs)?;
+        let mut host =
+            Self::install_with_urls(vm, page.base.clone(), client, abort, streams, blobs)?;
         host.set_xhr_meta_policy(&page.meta_connect_policy);
-        xhr::install(vm, &host.state, page)?;
+        host.xhr = Some(xhr::install(vm, &host.state, page)?);
         Ok(host)
     }
 
@@ -808,6 +830,7 @@ impl FetchHost {
             form_data: None,
             next: 1,
             pending: BTreeMap::new(),
+            pending_xhr: BTreeMap::new(),
             ready: Vec::new(),
             bodies: Vec::new(),
             headers: Vec::new(),
@@ -825,7 +848,7 @@ impl FetchHost {
                 if args.is_empty() {
                     return Err(JsError::type_error("fetch requires an input"));
                 }
-                if shared.borrow().pending.len() >= PENDING {
+                if shared.borrow().pending_requests() >= PENDING {
                     return Err(JsError::type_error("Fetch pending request limit reached"));
                 }
                 let (data, signal, body) = request_init(vm, &shared, arg(args, 0), arg(args, 1))?;
@@ -854,17 +877,10 @@ impl FetchHost {
                     + 512;
                 budget(vm, &shared, metadata)?;
                 // Init getters can reenter fetch and fill the queue.
-                if shared.borrow().pending.len() >= PENDING {
+                if shared.borrow().pending_requests() >= PENDING {
                     return Err(JsError::type_error("Fetch pending request limit reached"));
                 }
-                let id = {
-                    let mut state = shared.borrow_mut();
-                    let id = state.next;
-                    state.next = id
-                        .checked_add(1)
-                        .ok_or_else(|| JsError::type_error("Fetch request identifier exhausted"))?;
-                    id
-                };
+                let id = shared.borrow_mut().next_id()?;
                 let owner = Rc::downgrade(&shared);
                 let cancel = CancelSignal::new();
                 request.signal = Some(cancel.clone());
@@ -930,7 +946,7 @@ impl FetchHost {
             Ok(capability.promise)
         });
         vm.set_global("fetch", fetch)?;
-        Ok(Self { state })
+        Ok(Self { state, xhr: None })
     }
     pub(super) fn take_requests(&self) -> Vec<(u64, WebRequest)> {
         let mut state = self.state.borrow_mut();
@@ -951,13 +967,20 @@ impl FetchHost {
         !self.state.borrow().ready.is_empty()
     }
     pub(super) fn has_pending_request(&self, id: u64) -> bool {
-        self.state.borrow().pending.contains_key(&id)
+        let state = self.state.borrow();
+        state.pending.contains_key(&id) || state.pending_xhr.contains_key(&id)
     }
     pub(super) fn pending_count(&self) -> usize {
         let state = self.state.borrow();
-        state.pending.len() + usize::from(state.streams.has_network_waiters())
+        state.pending_requests() + usize::from(state.streams.has_network_waiters())
     }
     pub(super) fn progress(&self, vm: &mut Vm, id: u64) -> Result<(), JsError> {
+        let is_xhr = self.state.borrow().pending_xhr.contains_key(&id);
+        if let Some(xhr) = &self.xhr
+            && is_xhr
+        {
+            return xhr.progress(vm, id);
+        }
         let streams = self.state.borrow().streams.clone();
         streams.progress(vm, id)
     }
@@ -977,7 +1000,7 @@ impl FetchHost {
             (state.abort.clone(), state.streams.clone())
         };
         let reason = abort.default_reason(vm, Value::Undefined)?;
-        let mut error = None;
+        let mut error = self.xhr.as_ref().and_then(|xhr| xhr.cancel_all(vm).err());
         for id in ids {
             if let Err(failed) = abort_pending(vm, &self.state, id, reason.clone()) {
                 error.get_or_insert(failed);
@@ -992,6 +1015,12 @@ impl FetchHost {
         id: u64,
         result: Result<StreamingResponse, FetchError>,
     ) -> Result<(), JsError> {
+        let is_xhr = self.state.borrow().pending_xhr.contains_key(&id);
+        if let Some(xhr) = &self.xhr
+            && is_xhr
+        {
+            return xhr.complete(vm, id, result);
+        }
         let result = result.map(
             |StreamingResponse {
                  mut metadata,

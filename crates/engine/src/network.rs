@@ -93,6 +93,8 @@ pub struct WebRequest {
     pub credentials: CredentialsMode,
     pub redirect: RedirectMode,
     pub signal: Option<CancelSignal>,
+    // A document API can carry the active connect-src snapshot through the
+    // generic transport, including checks on redirect destinations.
     pub(crate) connect_policy: Option<ConnectPolicy>,
 }
 impl WebRequest {
