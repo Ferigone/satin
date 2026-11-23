@@ -1645,10 +1645,9 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                                 .filter_map(|s| compile_selector(s, depth + 1))
                                 .collect()
                         };
-                        if args.is_empty() {
-                            return None;
-                        }
-                        if name != "where" {
+                        // An empty forgiving list is valid but matches nothing.
+                        // :not() has already failed if any member could not parse.
+                        if !args.is_empty() && name != "where" {
                             specificity.add(args.iter().map(|s| s.specificity).max()?);
                         }
                         if name == "not" {

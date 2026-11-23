@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Forgiving and strict functional selector lists</title>
+<style>
+  p { width: 60px; height: 20px; color: black; font-size: 16px; margin: 0; padding: 0 }
+  #rows > p:is(:lane-unknown, p.keep, p >) { width: 120px }
+  #rows > p:where(p >, p.keep, :lane-unknown) { height: 40px }
+  #kept, #rows > p:not(.off, :lane-unknown) { color: red }
+  #kept, #rows > p:not() { font-size: 30px }
+  #rows > p:not(.off, .blocked) { margin-left: 8px }
+  #rows > p:not(:is(:lane-unknown, p >)) { padding-left: 9px }
+  #rows > p:not(:where(:lane-unknown, p >)) { padding-right: 10px }
+  #kept, #rows > p:is(:lane-unknown, p >) { margin-right: 11px }
+  #kept, #rows > p:where(:lane-unknown, p >) { margin-bottom: 12px }
+  #rows > p:not(:is()) { padding-top: 13px }
+  #rows > p:not(:where(,)) { padding-bottom: 14px }
+</style>
+<div id="rows"><p id="kept" class="keep">kept</p><p id="other" class="off">other</p></div>
+<output id="result" data-control="not-run" data-empty="not-run"></output>
+<script>
+  var kept = getComputedStyle(document.getElementById('kept'));
+  var other = getComputedStyle(document.getElementById('other'));
+  var result = document.getElementById('result');
+  function controls(s) {
+    return [s.width, s.height, s.color, s.fontSize, s.marginLeft].join(';');
+  }
+  function emptyLists(s) {
+    return [s.paddingLeft, s.paddingRight, s.marginRight, s.marginBottom,
+      s.paddingTop, s.paddingBottom].join(';');
+  }
+  result.setAttribute('data-control', controls(kept) + '|' + controls(other));
+  result.setAttribute('data-empty', emptyLists(kept) + '|' + emptyLists(other));
+</script>

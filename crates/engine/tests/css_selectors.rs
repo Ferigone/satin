@@ -131,6 +131,23 @@ fn stylesheet_of_type_ignores_other_namespaces_after_live_mutation() {
     );
 }
 
+#[test]
+fn stylesheet_forgiving_functional_lists_remain_valid_when_empty() {
+    stylesheet_fixture(
+        include_str!("../../../tools/fixtures/css-functional-selector-lists.html"),
+        &[
+            (
+                "data-control",
+                "120px;40px;rgb(0, 0, 0);16px;8px|60px;20px;rgb(0, 0, 0);16px;0px",
+            ),
+            (
+                "data-empty",
+                "9px;10px;11px;12px;13px;14px|9px;10px;0px;0px;13px;14px",
+            ),
+        ],
+    );
+}
+
 fn stylesheet_fixture(fixture: &str, expected_attributes: &[(&str, &str)]) {
     let mut page = LoadedPage::from_html("https://example.test/", fixture);
     let mut runtime = ScriptRuntime::for_page_with_viewport(&mut page, Viewport::default())
