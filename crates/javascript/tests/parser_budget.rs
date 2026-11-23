@@ -60,6 +60,24 @@ fn ordinary_grammar_compile_execute_and_drop_on_one_mib_stack() {
 }
 
 #[test]
+fn nested_blocks_leave_room_for_ordinary_expression_recursion() {
+    small_stack(|| {
+        // A function defined in a bundle's initializer can already have several
+        // enclosing statements before parsing a call with nested arguments.
+        let source = format!(
+            "function bump(x){{return x+1;}} let result; {}result = {}0{};{} result;",
+            "{".repeat(17),
+            "bump(".repeat(10),
+            ")".repeat(10),
+            "}".repeat(17),
+        );
+        let mut vm = Vm::new();
+        vm.check_syntax(&source).unwrap();
+        assert_eq!(vm.eval(&source).unwrap(), Value::Number(10.0));
+    });
+}
+
+#[test]
 fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
     small_stack(|| {
         let chains = [

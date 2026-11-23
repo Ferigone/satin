@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 // can have different depths (e.g. a flat left-associative operator chain). Keep
 // both bounded before an unsafe-to-drop tree can be constructed. The limits are
 // verified together with compilation and destruction on a 1 MiB native stack.
-const MAX_PARSER_DEPTH: usize = 24;
+const MAX_PARSER_DEPTH: usize = 32;
 const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
