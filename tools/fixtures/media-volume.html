@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Media volume check</title>
+<video id="clip" width="320" height="180" preload="none" muted
+       src="../../crates/engine/data/pages/media-demo.mp4"></video>
+<button id="run-volume" type="button">Play and check volume controls</button>
+<p id="report" data-result="idle">Click to start the local MP4.</p>
+<script>
+  const clip = document.getElementById("clip");
+  const report = document.getElementById("report");
+  const changes = [];
+  const observed = [];
+  const steps = [
+    () => { clip.volume = 1; clip.muted = true; },
+    () => { clip.volume = 0.5; },
+    () => { clip.muted = false; },
+    () => { clip.volume = 0.5; clip.muted = false; },
+  ];
+  let started = false;
+  let checked = false;
+  function checkVolume(step) {
+    if (step < steps.length) {
+      changes.length = 0;
+      steps[step]();
+      setTimeout(() => {
+        observed.push(changes.join(",") || "-");
+        checkVolume(step + 1);
+      }, 150);
+      return;
+    }
+    clip.pause();
+    const events = observed.join("|");
+    const ok = events === "-|0.5:true|0.5:false|-" &&
+      clip.volume === 0.5 && !clip.muted && clip.paused;
+    report.setAttribute("data-result", ok ? "pass" : "fail");
+    report.textContent = "events=" + events + " volume=" + clip.volume +
+      " muted=" + clip.muted + " paused=" + clip.paused;
+    document.title = ok ? "Media volume OK" : "Media volume mismatch";
+  }
+  clip.addEventListener("volumechange", () => {
+    if (checked) changes.push(clip.volume + ":" + clip.muted);
+  });
+  clip.addEventListener("timeupdate", () => {
+    if (!started || checked || clip.paused || clip.currentTime < 0.25 || !clip.videoWidth) return;
+    // Confirm actual playback before exercising the property setters.
+    report.setAttribute("data-playback", "yes");
+    checked = true;
+    checkVolume(0);
+  });
+  document.getElementById("run-volume").addEventListener("click", () => {
+    if (started) return;
+    started = true;
+    report.setAttribute("data-result", "running");
+    clip.play().catch(error => {
+      report.setAttribute("data-result", "error");
+      report.textContent = error.name + ": " + error.message;
+    });
+  });
+</script>

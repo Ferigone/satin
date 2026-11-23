@@ -614,7 +614,7 @@ fn pause(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsError> {
 
 fn set_number(
     vm: &mut Vm,
-    state: &Shared,
+    host: &Shared,
     id: NodeId,
     name: &str,
     value: Value,
@@ -624,7 +624,7 @@ fn set_number(
         return Err(JsError::type_error("Expected a finite media value"));
     }
     if name == "volume" && !(0. ..=1.).contains(&value) {
-        let class = state.borrow().media.exception.clone();
+        let class = host.borrow().media.exception.clone();
         return Err(abort::dom_exception_error(
             vm,
             class,
@@ -632,8 +632,11 @@ fn set_number(
             "Volume must be between 0 and 1",
         )?);
     }
-    let mut state = state.borrow_mut();
+    let mut state = host.borrow_mut();
     let track = ensure_track(&mut state, id)?;
+    if name == "volume" && track.volume == value {
+        return Ok(());
+    }
     let key = track.key;
     let opened = track.opened;
     let command = if name == "volume" {
@@ -654,11 +657,13 @@ fn set_number(
         .expect("track already exists");
     if name == "volume" {
         track.volume = value;
+        drop(state);
+        event(vm, host, id, "volumechange")
     } else {
         track.time = value.max(0.);
         track.seeking = track.opened;
+        Ok(())
     }
-    Ok(())
 }
 
 fn property(state: &super::State, id: NodeId, name: &str) -> Value {
@@ -739,6 +744,9 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
                 let mut state = ctx.borrow_mut();
                 let track = ensure_track(&mut state, id)?;
                 let muted = value.is_truthy();
+                if track.muted == muted {
+                    return Ok(Value::Undefined);
+                }
                 if track.opened {
                     let command = MediaCommand::Muted {
                         key: track.key,
@@ -752,11 +760,10 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
                     .get_mut(&id)
                     .expect("track already exists")
                     .muted = muted;
+                drop(state);
+                event(vm, &ctx, id, "volumechange")?;
             } else {
                 set_number(vm, &ctx, id, name, value)?;
-            }
-            if name != "currentTime" {
-                event(vm, &ctx, id, "volumechange")?;
             }
             Ok(Value::Undefined)
         });
