@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Structural selector An+B token boundaries</title>
+<style>
+  #list > p { color: black; width: 60px; margin-left: 0; padding-left: 0 }
+  #list > p:nth-child(n 2), #list > p.sentinel { color: red }
+  #list > p:nth-child(2 n + 1) { margin-left: 8px }
+  #list > p:nth-child(1 2), #list > p.sentinel { padding-left: 9px }
+  #list > p:nth-child(-n + 2) { background-color: green }
+  #list > p.arm:nth-child(2) { width: 120px }
+</style>
+<div id="list"><p id="a" class="sentinel">a</p><!-- not an element -->
+  <p id="b">b</p><p id="c">c</p></div>
+<output id="result" data-syntax="not-run" data-live="not-run"></output>
+<script>
+  var list = document.getElementById('list');
+  var a = document.getElementById('a');
+  var b = document.getElementById('b');
+  var c = document.getElementById('c');
+  var result = document.getElementById('result');
+  var aStyle = getComputedStyle(a);
+  var bStyle = getComputedStyle(b);
+  var cStyle = getComputedStyle(c);
+  var syntax = [aStyle.color, bStyle.color, cStyle.color, aStyle.marginLeft, cStyle.marginLeft,
+    aStyle.paddingLeft, aStyle.backgroundColor, bStyle.backgroundColor, cStyle.backgroundColor].join(';');
+  result.setAttribute('data-syntax', syntax);
+  var before = bStyle.width;
+  b.setAttribute('class', 'arm');
+  var afterClass = getComputedStyle(b).width;
+  list.insertBefore(b, a);
+  var afterMove = getComputedStyle(b).width;
+  list.insertBefore(a, b);
+  var restored = getComputedStyle(b).width;
+  result.setAttribute('data-live', [before, afterClass, afterMove, restored].join(';'));
+</script>
