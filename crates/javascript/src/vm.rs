@@ -1353,6 +1353,11 @@ impl Vm {
         }
         Ok(o.properties.get(key).cloned())
     }
+    fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
+        matches!(receiver, Value::String(s) if
+            key == &JsString::from("length")
+                || array_index(key).is_some_and(|index| (index as usize) < s.len()))
+    }
     pub(crate) fn set(
         &mut self,
         receiver: Value,
@@ -1633,6 +1638,15 @@ impl Vm {
                 return Err(JsError::type_error(
                     "Cannot delete a property of null or undefined",
                 ));
+            }
+            if Self::primitive_string_has_own_key(&receiver, key) {
+                return if strict {
+                    Err(JsError::type_error(
+                        "Cannot delete non-configurable property",
+                    ))
+                } else {
+                    Ok(false)
+                };
             }
             return Ok(true);
         };
@@ -2071,7 +2085,26 @@ impl Vm {
             }
             Reference::Property(object, key) => {
                 let key = self.property_reference_key(&object, &key)?;
-                self.set_key(object, &key, value, strict)
+                if object.as_object().is_some() {
+                    return self.set_key(object, &key, value, strict);
+                }
+                // Only string wrappers have own properties for primitive
+                // bases. Otherwise start the lookup at the wrapper prototype
+                // without allocating a wrapper or changing the receiver.
+                let string_own_key = matches!(&key, PropertyKey::String(name)
+                    if Self::primitive_string_has_own_key(&object, name));
+                let succeeded = match self.property_start(&object) {
+                    Some(prototype) if !string_own_key => {
+                        self.set_from(Value::Object(prototype), &key, value, object)?
+                    }
+                    _ => false,
+                };
+                if !succeeded && strict {
+                    return Err(JsError::type_error(
+                        "Cannot assign a property on this primitive",
+                    ));
+                }
+                Ok(())
             }
             Reference::Private(object, id) => self.private_set(object, id, value),
             Reference::Unresolvable(key) => {

@@ -153,3 +153,47 @@ fn dot_and_optional_dot_require_identifier_names() {
         "#,
     );
 }
+
+#[test]
+fn strict_primitive_assignment_uses_inherited_setters_with_the_primitive_receiver() {
+    assert_script(
+        r#"
+        const calls = [];
+        const symbol = Symbol();
+        const setter = function (value) {
+            "use strict";
+            calls.push(typeof this, this, value);
+        };
+        Object.defineProperty(Number.prototype, "slot", { set: setter });
+        Object.defineProperty(String.prototype, symbol, { set: setter });
+        Object.defineProperty(String.prototype, "0", { set: setter });
+        (function () {
+            "use strict";
+            (3).slot = 4;
+            "ab"[symbol] = 5;
+            try { "ab"[0] = 6; } catch (error) { calls.push(error instanceof TypeError); }
+            try { true.missing = 8; } catch (error) { calls.push(error instanceof TypeError); }
+        })();
+        false.missing = 9;
+        calls.join("/") === "number/3/4/string/ab/5/true/true" && false.missing === undefined;
+        "#,
+    );
+}
+
+#[test]
+fn delete_respects_non_configurable_own_keys_of_a_primitive_string() {
+    assert_script(
+        r#"
+        const sloppy = (delete "ab"[0]) === false &&
+            (delete "ab".length) === false &&
+            (delete "ab"[3]) === true && (delete "ab"["01"]) === true &&
+            (delete "ab".charAt) === true;
+        const strict = (function () {
+            "use strict";
+            try { delete "\uD800"[0]; } catch (error) { return error instanceof TypeError; }
+            return false;
+        })();
+        sloppy && strict;
+        "#,
+    );
+}
