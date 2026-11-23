@@ -93,6 +93,7 @@ pub struct WebRequest {
     pub credentials: CredentialsMode,
     pub redirect: RedirectMode,
     pub signal: Option<CancelSignal>,
+    pub(crate) connect_policy: Option<ConnectPolicy>,
 }
 impl WebRequest {
     pub fn get(url: Url, client_url: Url) -> Self {
@@ -106,6 +107,7 @@ impl WebRequest {
             credentials: CredentialsMode::SameOrigin,
             redirect: RedirectMode::Follow,
             signal: None,
+            connect_policy: None,
         }
     }
     pub fn validate(&mut self) -> Result<(), FetchError> {
@@ -667,7 +669,9 @@ impl Loader {
         control.check().map_err(interrupted_fetch)?;
         let check_connect = |url: &Url, redirected| {
             if connect_policy
-                .is_none_or(|policy| policy.allows(&request.client_url, url, redirected))
+                .into_iter()
+                .chain(request.connect_policy.as_ref())
+                .all(|policy| policy.allows(&request.client_url, url, redirected))
             {
                 Ok(())
             } else {

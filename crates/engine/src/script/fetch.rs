@@ -2,6 +2,7 @@
 mod blob_url;
 mod upload;
 mod wasm_streaming;
+mod xhr;
 use super::{
     abort, arg, blobs, fatal, form_data, getter, method, streams::StreamHost, text, unsupported,
     url_api,
@@ -82,6 +83,7 @@ struct State {
     base: Url,
     base_resolver: Option<Rc<dyn Fn() -> Url>>,
     document: Weak<RefCell<super::State>>,
+    xhr_meta_policy: crate::loader::ConnectPolicy,
     client: Url,
     headers_proto: RootId,
     request_proto: RootId,
@@ -754,6 +756,10 @@ impl FetchHost {
         self.state.borrow_mut().document = Rc::downgrade(document);
     }
 
+    pub(super) fn set_xhr_meta_policy(&self, policy: &crate::loader::ConnectPolicy) {
+        self.state.borrow_mut().xhr_meta_policy = policy.clone();
+    }
+
     pub(super) fn set_base_resolver(&self, resolver: Rc<dyn Fn() -> Url>) {
         self.state.borrow_mut().base_resolver = Some(resolver);
     }
@@ -769,7 +775,10 @@ impl FetchHost {
         blobs: blobs::BlobFactory,
     ) -> Result<Self, JsError> {
         let client = Url::parse(&page.url).unwrap_or_else(|_| page.base.clone());
-        Self::install_with_urls(vm, page.base.clone(), client, abort, streams, blobs)
+        let host = Self::install_with_urls(vm, page.base.clone(), client, abort, streams, blobs)?;
+        host.set_xhr_meta_policy(&page.meta_connect_policy);
+        xhr::install(vm, &host.state, page)?;
+        Ok(host)
     }
 
     pub(super) fn install_with_urls(
@@ -788,6 +797,7 @@ impl FetchHost {
             base,
             base_resolver: None,
             document: Weak::new(),
+            xhr_meta_policy: Default::default(),
             client,
             headers_proto: vm.root(hp.clone()),
             request_proto: vm.root(rp.clone()),
