@@ -1414,24 +1414,45 @@ fn grid_track_sizes(
             .filter(|track| matches!(track.max, GridBreadth::Flex(_)))
             .map(|track| track.base / track.flex.max(1.))
             .fold(0f32, f32::max);
+        // The hypothetical fr size can only decrease when a track freezes.
+        // Visit potential freezes in descending base/factor order so each
+        // spanning item takes one bounded scan, not repeated restarts.
+        let mut freeze_order: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| matches!(track.max, GridBreadth::Flex(_)) && track.base > 0.)
+            .map(|(index, track)| (index, track.base / track.flex))
+            .collect();
+        freeze_order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         for item in &items {
-            let slice = &states[item.start..(item.start + item.span).min(states.len())];
-            let flex = slice
+            let span = item.start..item.start + item.span;
+            let slice = &states[span.clone()];
+            let mut flex: f32 = slice
                 .iter()
                 .filter(|track| matches!(track.max, GridBreadth::Flex(_)))
                 .map(|track| track.flex)
-                .sum::<f32>();
-            if flex > 0. {
-                let fixed = slice
-                    .iter()
-                    .filter(|track| !matches!(track.max, GridBreadth::Flex(_)))
-                    .map(|track| track.limit)
-                    .sum::<f32>();
-                fraction = fraction.max(
-                    (item.maximum - fixed - gap * item.span.saturating_sub(1) as f32)
-                        / flex.max(1.),
-                );
+                .sum();
+            if flex <= 0. {
+                continue;
             }
+            let fixed = slice
+                .iter()
+                .filter(|track| !matches!(track.max, GridBreadth::Flex(_)))
+                .map(|track| track.limit)
+                .sum::<f32>();
+            let mut leftover = item.maximum - fixed - gap * item.span.saturating_sub(1) as f32;
+            let mut hypothetical = leftover.max(0.) / flex.max(1.);
+            for &(index, required) in &freeze_order {
+                if hypothetical >= required {
+                    break;
+                }
+                if span.contains(&index) {
+                    leftover -= states[index].base;
+                    flex -= states[index].flex;
+                    hypothetical = leftover.max(0.) / flex.max(1.);
+                }
+            }
+            fraction = fraction.max(hypothetical);
         }
         for track in &mut states {
             track.base = if matches!(track.max, GridBreadth::Flex(_)) {

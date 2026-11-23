@@ -167,7 +167,9 @@ fn deep_and_remeasured_grid_layout_is_bounded_on_one_mib_stack() {
 
 fn check_grid(source: &str, expected: &[(&str, [f32; 4])]) {
     check_grid_document(
-        &format!("<!doctype html><style>body{{margin:0;font-size:0;line-height:0}}</style>{source}"),
+        &format!(
+            "<!doctype html><style>body{{margin:0;font-size:0;line-height:0}}</style>{source}"
+        ),
         expected,
     );
 }
@@ -204,6 +206,23 @@ fn empty_axis_does_not_create_an_implicit_track() {
             ("explicit-row", [0., 0., 180., 25.]),
             ("occupied-row", [0., 25., 180., 40.]),
             ("item", [0., 25., 180., 40.]),
+        ],
+    );
+}
+
+#[test]
+fn indefinite_flex_fraction_freezes_spanned_tracks_at_their_minimum() {
+    check_grid_document(
+        include_str!("fixtures/grid_indefinite_flex_minmax_span.html"),
+        &[
+            ("one-freeze", [0., 0., 160., 125.]),
+            ("one-first", [0., 0., 160., 100.]),
+            ("one-last", [0., 100., 160., 6.25]),
+            ("two-freezes", [0., 125., 160., 165.]),
+            ("two-middle", [0., 225., 160., 40.]),
+            ("two-last", [0., 265., 160., 6.25]),
+            ("no-freeze", [0., 290., 160., 100.]),
+            ("no-last", [0., 315., 160., 25.]),
         ],
     );
 }
