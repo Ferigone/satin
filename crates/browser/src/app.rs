@@ -36,6 +36,7 @@ use winit::{
     window::{CursorIcon, Icon, ResizeDirection, Theme, Window, WindowId},
 };
 
+mod chrome_menu;
 mod icons;
 
 const TAB_H: f32 = 58.;
@@ -1942,16 +1943,19 @@ impl App {
         for (index, (_, label)) in MENU_ITEMS.iter().enumerate() {
             let item_y = y + 6. + index as f32 * 35.;
             let action = Action::MenuItem(index);
-            if self.chrome_hover == Some(action)
-                || (index == selected && !matches!(self.chrome_hover, Some(Action::MenuItem(_))))
-            {
-                rounded_chrome_rect(
-                    canvas,
-                    scaled_rect(u, x + 6., item_y, 188., 35.),
-                    7. * u,
-                    CHROME_HOVER,
-                );
-            }
+            let bounds = Rect {
+                x: x + 6.,
+                y: item_y,
+                width: 188.,
+                height: 35.,
+            };
+            chrome_menu::draw_row_highlight(
+                canvas,
+                bounds,
+                u,
+                self.chrome_hover == Some(action),
+                index == selected,
+            );
             canvas.label(
                 label,
                 (x + 17.) * u,
@@ -1961,15 +1965,7 @@ impl App {
                 false,
                 &mut self.fonts,
             );
-            self.hits.push((
-                Rect {
-                    x: x + 6.,
-                    y: item_y,
-                    width: 188.,
-                    height: 35.,
-                },
-                action,
-            ));
+            self.hits.push((bounds, action));
         }
     }
 
