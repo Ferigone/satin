@@ -186,9 +186,11 @@ fn normalize(map: Option<&Map<String, Value>>, base: &Url) -> SpecifierMap {
             continue;
         }
         let key = as_url(key, base).map_or_else(|| key.clone(), |u| u.into());
+        // Addresses use the same URL-like grammar as module specifiers.
+        // An invalid address is a blocking entry, not a relative URL or a miss.
         let target = value
             .as_str()
-            .and_then(|value| base.join(value).ok())
+            .and_then(|value| as_url(value, base))
             .filter(|url| !key.ends_with('/') || url.as_str().ends_with('/'));
         normalized.insert(key, target);
     }
@@ -238,6 +240,45 @@ fn preview(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_non_url_addresses_block_fallback() {
+        let base = Arc::new(Url::parse("https://example.test/app/index.html").unwrap());
+        let scoped = Arc::new(base.join("scope/entry.mjs").unwrap());
+        let mut map = ImportMap::default();
+        map.register(
+            r##"{
+                "imports": {"pkg": "./global.mjs"},
+                "scopes": {
+                    "./scope/": {
+                        "pkg": "bare.mjs",
+                        "empty": "",
+                        "query": "?module",
+                        "fragment": "#module",
+                        "relative": "./relative.mjs",
+                        "absolute": "https://example.test/absolute.mjs"
+                    }
+                }
+            }"##,
+            &base,
+        )
+        .unwrap();
+        assert_eq!(map.resolve("pkg", &base).unwrap().path(), "/app/global.mjs");
+        for specifier in ["pkg", "empty", "query", "fragment"] {
+            assert_eq!(
+                map.resolve(specifier, &scoped).unwrap_err(),
+                format!("Import map blocks module {specifier:?}")
+            );
+        }
+        assert_eq!(
+            map.resolve("relative", &scoped).unwrap().path(),
+            "/app/relative.mjs"
+        );
+        assert_eq!(
+            map.resolve("absolute", &scoped).unwrap().path(),
+            "/absolute.mjs"
+        );
+    }
 
     #[test]
     fn scopes_normalization_prefix_and_already_resolved_rules() {
