@@ -4537,8 +4537,9 @@ fn contains_variable(source: &str) -> bool {
     variable_offset(source, 0).is_some()
 }
 fn variable_offset(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
     let (mut quote, mut escaped) = (0, false);
-    for (i, &b) in source.as_bytes().iter().enumerate().skip(start) {
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
         if escaped {
             escaped = false;
             continue;
@@ -4557,7 +4558,16 @@ fn variable_offset(source: &str, start: usize) -> Option<usize> {
             quote = b;
             continue;
         }
-        if source.as_bytes()[i..].starts_with(b"var(") {
+        // Function names are ASCII case-insensitive, but a suffix of a
+        // longer identifier (or a dimension, hash or at-keyword) is not var().
+        if bytes
+            .get(i..i + 4)
+            .is_some_and(|name| name.eq_ignore_ascii_case(b"var("))
+            && (i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[i - 1], b'-' | b'_' | b'#' | b'@')
+                    || bytes[i - 1] >= 128))
+        {
             return Some(i);
         }
     }

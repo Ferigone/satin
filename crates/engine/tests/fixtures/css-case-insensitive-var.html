@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Reduced CSS Variables test: ASCII case-insensitive var()</title>
+<div style="color: purple; --Channels: 0, 128, 0; --Source: green; --resolved: VAR(--Source)">
+  <span id="nested" style="color: blue; color: rgb(VaR(--missing, var(--Channels)))"></span>
+  <span id="cycle" style="--bad: var(--missing, Var(--bad)); color: var(--bad, green)"></span>
+  <span id="sensitive" style="--Shade: blue; color: blue; color: vAR(--shade, green)"></span>
+  <span id="inherited" style="--Source: blue; color: var(--resolved, red)"></span>
+  <span id="invalid" style="--type: 9px; color: red; color: VaR(--type, blue)"></span>
+  <span id="other-function" style="--type: otherVaR(--missing); color: var(--type, blue)"></span>
+  <span id="empty" style="color: var(--missing,) green"></span>
+</div>
+<pre id="receipt"></pre>
+<script>
+var ids = ['nested', 'cycle', 'sensitive', 'inherited', 'invalid', 'other-function', 'empty'];
+var result = {};
+for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    result[id] = getComputedStyle(document.getElementById(id)).color;
+}
+document.getElementById('receipt').textContent = JSON.stringify(result);
+</script>
