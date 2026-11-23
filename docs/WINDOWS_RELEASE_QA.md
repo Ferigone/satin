@@ -1,0 +1,105 @@
+# Windows x64 release QA
+
+## Compare startup and idle memory
+
+Run the same PowerShell command for each release executable. Pin the SHA-256
+from the release asset metadata or the candidate build receipt, not from an
+unverified download.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Measure-WindowsRelease.ps1 `
+    -Executable '<path to Windows x64 browser executable>' `
+    -Version '0.1.0-alpha.17' `
+    -Sha256 '9B28B286851B50075979BA5E0604A10FDA7AD5CFC720CB722B29580058C77243'
+```
+
+The alpha.17 pin is for the browser, not the launcher. It matches the browser
+entry of the `v0.1.0-alpha.17` installer ZIP (SHA-256
+`0349151C2A3167E77C95D26248A77C052B860346DCBA387B11548CF8A9FAF3BF`).
+
+- The probe copies the binary into a unique directory under
+  `target/windows-measurements`, validates its digest and `--version`, and uses
+  a new profile and process-local `LOCALAPPDATA` on every launch. It neither
+  runs the installer nor changes a shortcut. The updater is not eligible.
+- The workload is one native window showing a local, network-free, 240-card
+  CSS grid, with a one-shot script. The probe measures process start to the
+  first observed native window, then process start to the page-specific
+  window title. The title is set from an animation-frame callback that checks
+  the card count and layout height. This is a readiness proxy, not a hardware
+  presentation timestamp.
+- Exclude one warmup launch; report the median across five fresh-profile
+  launches. For each launch, take the median of 20 memory samples 250 ms apart
+  in the interval from 5 s to just before 10 s after title readiness. Report
+  the main process's working set (resident, may include shared pages) and
+  private bytes (private committed memory, not private resident pages)
+  separately, in MiB. Neither counter includes separate OS/GPU processes.
+- Compare only receipts with the same fixture digest, client dimensions and
+  DPI. Use the same machine, logged-in desktop/monitor, display settings, and
+  power mode. Do not interact with the windows. Stop unrelated builds and
+  downloads where possible; repeat with the binaries in reverse order if
+  timings matter. The OS file cache is not flushed. The JSON includes the
+  executable and fixture hashes, geometry, per-run values and raw samples so
+  an outlier or noisy run can be identified.
+
+This measures one small local content load, not multi-tab residency, network
+navigation, video playback, or support for the Twitch and YouTube players.
+
+## Package and promotion gates
+
+- `cargo metadata --format-version 1 --no-deps --locked` must report one
+  workspace version. A pushed version tag must exactly equal `v` followed by
+  that version. `--version` on the staged release browser and its launcher
+  should report the same version. The launcher requires a staged
+  `current.json` and browser under `versions/` to forward `--version`.
+- `scripts/PackageRelease.ps1` emits `satin-windows-x64.exe` (browser only for
+  automatic updates), `Satin-windows-x64.zip` (browser, launcher and installer
+  scripts) and `SHA256SUMS.txt`. Check that the ZIP's browser entry and
+  standalone executable are byte-identical, the ZIP has both Windows x64
+  executables, and both hashes match `SHA256SUMS.txt`.
+- `.github/workflows/release.yml` verifies PRs targeting `master`, pushes to
+  `master`, and `v*` tags. Only a push in `Ferigone/satin` can run the
+  contents-write publish job after verification. A **master push with an
+  unpublished workspace version is a publication trigger**; a tag is not
+  required. Published equal/newer SemVer releases cause a no-op. The
+  prerelease numbers in `alpha.17` and `alpha.18` are compared numerically.
+- The publish job accepts only a draft associated with that commit, verifies
+  each GitHub asset's status, size and SHA-256, then makes the draft public.
+  A draft is not an update channel. Publication is serialized, but GitHub
+  concurrency is not a FIFO queue of all pending runs. If a run fails after
+  creating a draft, investigate the draft and asset digests; don't assume a
+  rebuild can safely resume a draft whose binaries differ.
+
+## Installer, Preview, update and rollback
+
+- Only run `Install.ps1` or packaged `Install.cmd` when intentionally installing
+  for the current desktop user. Changing `LOCALAPPDATA` is not enough to
+  isolate it: the script also resolves the Windows Desktop known folder for
+  `Satin.lnk`. Run native/headless smokes on a staged binary with a disposable
+  profile instead. The installer stages the browser, runs smokes, and uses
+  the shared publication lock and `File.Replace` to retain `previous.json`
+  when there is an existing `current.json`.
+- Preview uses a different profile and stores hash-named snapshots, not
+  installed versions. For a pinned release snapshot, validate the digest
+  after copying and reject mismatches without falling back to an unpinned
+  build. Perform any staging check with an isolated `LOCALAPPDATA` and
+  `-NoLaunch`. Creating or retargeting the desktop Preview shortcut is a
+  separate action.
+- Only a normal Windows x64 run of the current installed build qualifies for
+  automatic updates (`current.json` version and absolute executable must
+  match). Headless, smoke-window and unmanaged executable launches do not
+  qualify. Updater selection requires a newer SemVer and a non-draft GitHub
+  release; alpha prereleases are intentionally admitted. The standalone
+  asset must pass official HTTPS URL, size, SHA-256, and PE machine checks. The
+  browser swaps manifests for the next launch, not the running executable,
+  profile or launcher.
+- `Rollback.ps1` verifies the previous target's SHA-256, then swaps the
+  manifests under the same lock. Relaunch to use it. When a newer installed
+  version is now in `previous.json`, that version is the updater's floor, so
+  it won't immediately undo the rollback. A simulated manifest swap is not
+  proof of an actual release download.
+- For a public alpha.17 → alpha.18 test, prime a disposable install and
+  profile with the authentic alpha.17 assets before promotion. Observe the
+  updater only after publication. Verify both manifests, the running
+  launcher-reported version, byte identity with the public executable, and
+  preservation of the old binary and profile sentinel. Allow enough time
+  for startup delay, retry budgets and the asset download.
