@@ -2,7 +2,9 @@ param(
     [switch]$CreateShortcut,
     [switch]$NoLaunch,
     [string]$ShortcutDirectory = [Environment]::GetFolderPath('DesktopDirectory'),
-    [switch]$FromShortcut
+    [switch]$FromShortcut,
+    [ValidatePattern('\A[0-9a-fA-F]{64}\z')]
+    [string]$VerifiedReleaseSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +25,9 @@ function New-PreviewShortcut {
     }
     $shortcut.TargetPath = $windowsPowerShell
     $shortcut.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -FromShortcut' -f $PSCommandPath
+    if ($VerifiedReleaseSha256) {
+        $shortcut.Arguments += ' -VerifiedReleaseSha256 ' + $VerifiedReleaseSha256.ToLowerInvariant()
+    }
     $shortcut.WorkingDirectory = $projectDirectory
     $shortcut.IconLocation = $icon.FullName + ',0'
     $shortcut.Description = $description
@@ -110,8 +115,21 @@ try {
         throw "Satin Preview could not acquire its build lock. Another launch may already be building. $($_.Exception.Message)"
     }
 
-    $executable = Build-Preview
+    if ($VerifiedReleaseSha256) {
+        $pinnedHash = $VerifiedReleaseSha256.ToLowerInvariant()
+        $pinnedSnapshot = Join-Path $snapshots "rust-browser-$pinnedHash.exe"
+        $executable = if (Test-Path -LiteralPath $pinnedSnapshot -PathType Leaf) {
+            $pinnedSnapshot
+        } else {
+            Join-Path $projectDirectory 'target\release\rust-browser.exe'
+        }
+    } else {
+        $executable = Build-Preview
+    }
     $hash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($VerifiedReleaseSha256 -and $hash -cne $pinnedHash) {
+        throw 'The Satin Preview executable no longer matches the verified release build.'
+    }
     $snapshot = Join-Path $snapshots "rust-browser-$hash.exe"
     $reused = (Test-Path -LiteralPath $snapshot -PathType Leaf) -and
         (Get-FileHash -LiteralPath $snapshot -Algorithm SHA256).Hash -eq $hash

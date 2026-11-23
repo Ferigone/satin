@@ -17,11 +17,21 @@ From the repository root, build and verify the Windows release.
 .\scripts\Verify.ps1
 ```
 
-The desktop checks exercise local navigation, script events, forms, and real MP4 playback. The verifier checks `about:media` and `about:streaming` in a native window and headless. The streaming example advances its video clock before appending the final audio and video fragments. It uses a generated motion pattern and a sine tone. Results and screenshots go under `target`.
+The desktop checks exercise local navigation, script events, forms, and real MP4 playback. They navigate to a relative HTML path with an encoded space using `location.assign()` in headless mode and a regular link in a native window. Both verify that the destination runs its own script. The verifier also checks `about:media` and `about:streaming` in both modes. The streaming example advances its video clock before appending the final audio and video fragments. It uses a generated motion pattern and a sine tone. Results and screenshots go under `target`.
 
 The headless and desktop smoke reports include playback time, readiness, video dimensions, decoded frame count, and audio-track detection for each active media element.
 
 The verifier also clicks the test button on `about:workers` in both modes. The page transfers a typed-array backing buffer to a classic Blob worker and checks that ownership moved. The worker changes one byte, executes an authored WebAssembly module, and sends the modified view and numeric result back to the page.
+
+To offer the exact verified build through Satin Preview, pin its executable digest instead of rebuilding on click:
+
+```powershell
+$digest = (Get-FileHash .\target\release\rust-browser.exe -Algorithm SHA256).Hash
+.\scripts\Preview.ps1 -NoLaunch -VerifiedReleaseSha256 $digest
+.\scripts\Preview.ps1 -CreateShortcut -VerifiedReleaseSha256 $digest
+```
+
+The pinned shortcut can use the matching snapshot after a subsequent build and still uses the separate Satin Preview profile.
 
 ## Website compatibility
 

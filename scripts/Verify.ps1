@@ -16,6 +16,70 @@ $window = Invoke-BrowserProcess -Executable $binary -Arguments @('--smoke-window
 if ($window.ExitCode -ne 0) { throw $window.Stderr }
 $native = $window.Stdout | ConvertFrom-Json
 if (-not $native.window_smoke -or $native.frames_presented -lt 1) { throw 'The native window did not present a frame.' }
+$navigationDirectory = Join-Path $qaDirectory 'navigation fixture'
+New-Item -ItemType Directory -Path $navigationDirectory -Force | Out-Null
+$navigationStart = Join-Path $navigationDirectory 'index.html'
+$navigationDestination = Join-Path $navigationDirectory 'second page.html'
+$navigationTitle = 'Satin relative navigation OK'
+$utf8 = [Text.UTF8Encoding]::new($false)
+$navigationStartMarkup = @'
+<!doctype html>
+<title>Navigation start</title>
+<p><a id="next-page" href="second%20page.html">Open the next page</a></p>
+<button id="script-navigation">Open using Location</button>
+<script>
+  document.getElementById("script-navigation").addEventListener("click", () => {
+    location.assign("second%20page.html?source=location");
+  });
+</script>
+'@
+[IO.File]::WriteAllText($navigationStart, $navigationStartMarkup, $utf8)
+$navigationMarkup = @'
+<!doctype html>
+<title>Navigation target</title>
+<main>
+  <h1>Second page</h1>
+  <p>This document was loaded by following a relative link.</p>
+  <h2>Navigation proof</h2>
+  <ol>
+    <li>Read the source HTML.</li><li>Render the anchor.</li><li>Activate the link.</li>
+    <li>Resolve the relative address.</li><li>Load the destination HTML.</li>
+    <li>Parse the destination script.</li><li>Run the script.</li><li>Present the new document.</li>
+  </ol>
+</main>
+<script>document.title = "Satin relative navigation OK";</script>
+'@
+[IO.File]::WriteAllText($navigationDestination, $navigationMarkup, $utf8)
+$navigationHeadless = Invoke-BrowserProcess -Executable $binary -LogDirectory $logs -Arguments @(
+    '--headless', '--url', $navigationStart, '--click-id', 'script-navigation',
+    '--profile', (Join-Path $qaDirectory 'headless navigation profile')
+)
+if ($navigationHeadless.ExitCode -ne 0) { throw "Headless navigation failed. See $($navigationHeadless.StderrPath)." }
+$navigation = $navigationHeadless.Stdout | ConvertFrom-Json
+$navigationImage = Join-Path $qaDirectory 'navigation-window.png'
+$navigationActions = Join-Path $qaDirectory 'navigation-actions.json'
+$steps = @(@{action='click';id='next-page'}, @{action='wait_title';value=$navigationTitle;timeout_ms=5000})
+[IO.File]::WriteAllText($navigationActions, ($steps | ConvertTo-Json -Compress), $utf8)
+$navigationWindow = Invoke-BrowserProcess -Executable $binary -LogDirectory $logs -Arguments @(
+    '--smoke-window', $navigationImage, '--smoke-actions', $navigationActions, '--url', $navigationStart,
+    '--profile', (Join-Path $qaDirectory 'native navigation profile')
+)
+if ($navigationWindow.ExitCode -ne 0) { throw "Native navigation failed. See $($navigationWindow.StderrPath)." }
+$navigationNative = $navigationWindow.Stdout | ConvertFrom-Json
+foreach ($result in @($navigation, $navigationNative)) {
+    if ($result.title -cne $navigationTitle -or $result.javascript.diagnostics.Count -ne 0 -or
+        $result.layout_limited -or $result.paint_limited) {
+        throw 'Navigation did not load and run the destination document.'
+    }
+}
+$navigationDestinationUrl = ([Uri]$navigationDestination).AbsoluteUri
+if ($navigation.javascript.executed_scripts -ne 1 -or $navigation.url -cne ($navigationDestinationUrl + '?source=location')) {
+    throw 'Headless Location navigation did not preserve the query and execute the destination script.'
+}
+if (-not $navigationNative.window_smoke -or $navigationNative.frames_presented -lt 1 -or
+    $navigationNative.url -cne $navigationDestinationUrl) {
+    throw 'The native window did not present the destination after following the link.'
+}
 $interactive = Invoke-BrowserProcess -Executable $binary -Arguments @('--headless','--url','about:javascript','--click-id','increment','--click-count','3','--screenshot',(Join-Path $qaDirectory 'javascript.png'),'--dump-dom',(Join-Path $qaDirectory 'javascript.html')) -LogDirectory $logs
 if ($interactive.ExitCode -ne 0) { throw $interactive.Stderr }
 $javascript = $interactive.Stdout | ConvertFrom-Json
@@ -72,6 +136,11 @@ if ($Network) {
         $networkCases += [pscustomobject]@{url=$bad;result='rejected';error=$negative.Stderr.Trim()}
     }
 }
-$report = [ordered]@{version=$version.Stdout.Trim();document=$document;nativeWindow=$native;javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed';network=$networkCases;media=$media;streaming=$streaming;worker=$worker;workerNative=$workerNative}
+$report = [ordered]@{
+    version=$version.Stdout.Trim();document=$document;nativeWindow=$native
+    navigation=$navigation;navigationNative=$navigationNative
+    javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed'
+    network=$networkCases;media=$media;streaming=$streaming;worker=$worker;workerNative=$workerNative
+}
 [IO.File]::WriteAllText((Join-Path $qaDirectory 'report.json'),($report | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
 $report | ConvertTo-Json -Depth 10
