@@ -298,7 +298,14 @@ fn relative_offsets_and_transformed_fixed_containing_blocks() {
 #[test]
 fn native_layout_work_is_charged_to_the_current_javascript_task() {
     let mut r = runtime("<!doctype html><div id=box>Budget</div>");
-    let error=r.eval("var box=document.getElementById('box');while(true){try{box.style.width='20px';box.getBoundingClientRect()}catch(e){}}").unwrap_err();
+    // Every write invalidates layout; repeating the same declaration is a no-op.
+    let error = r
+        .eval(
+            "var box=document.getElementById('box'), toggle=false;\
+             while(true){try{toggle=!toggle;box.style.width=toggle?'20px':'21px';\
+             box.getBoundingClientRect()}catch(e){}}",
+        )
+        .unwrap_err();
     assert_eq!(
         error.kind,
         rust_browser_javascript::ErrorKind::ExecutionLimit
