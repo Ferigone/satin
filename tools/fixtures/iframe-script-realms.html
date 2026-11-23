@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Initial iframe document and realm checks</title>
+<pre id="results">pending</pre>
+<iframe hidden id="initial"></iframe>
+<script>
+(function () {
+    var results = document.getElementById("results");
+    var checked = 0, failed = 0;
+    results.textContent = "";
+
+    function check(name, test) {
+        checked++;
+        try {
+            if (!test()) throw new Error("false");
+            results.textContent += "PASS " + name + "\n";
+        } catch (error) {
+            failed++;
+            results.textContent += "FAIL " + name + ": " + error.name + ": " + error.message + "\n";
+        }
+    }
+
+    function addFrame(sandbox) {
+        var frame = document.createElement("iframe");
+        frame.hidden = true;
+        if (sandbox !== null) frame.setAttribute("sandbox", sandbox);
+        return document.body.appendChild(frame);
+    }
+
+    function runScripts(label, sandbox) {
+        var frame = addFrame(sandbox);
+        var child = frame.contentWindow;
+        var parentObject = {};
+        var calls = 0, childObject;
+        check(label + ": connected Window and separate Document", function () {
+            return child !== null && child !== undefined && child !== window &&
+                child.document !== document && frame.contentDocument === child.document &&
+                child.document.defaultView === child;
+        });
+        check(label + ": indexed window.frames", function () {
+            return window.frames === window && window.frames[window.frames.length - 1] === child &&
+                window.frames[0] === document.getElementById("initial").contentWindow;
+        });
+        check(label + ": split writes and live cross-realm values", function () {
+            var doc = child.document;
+            var initialChildObject = child.Object;
+            if (doc.open() !== doc) return false;
+            child.parentObject = parentObject;
+            child.report = function (received, owned) {
+                if (received !== parentObject) throw new Error("parent object lost identity");
+                calls++;
+                childObject = owned;
+                return Object;
+            };
+            doc.writeln("<scr" + "ipt type='text/javascript'>");
+            doc.writeln("var own = {}; parentObject.changed = 42;");
+            if (calls !== 0) return false;
+            doc.writeln("var callerObject = report(parentObject, own);");
+            doc.writeln("</scr" + "ipt>");
+            var wasSynchronous = calls === 1;
+            doc.write("<p id='written'>");
+            doc.writeln("done");
+            doc.close();
+            return wasSynchronous && calls === 1 && parentObject.changed === 42 &&
+                childObject === child.own && child.callerObject === Object &&
+                child.Object === initialChildObject && child.Object !== Object &&
+                Object.getPrototypeOf(childObject) === child.Object.prototype &&
+                !Object.prototype.hasOwnProperty.call(window, "own") &&
+                child.document.getElementById("written").textContent === "done\n";
+        });
+        var count = window.length;
+        document.body.removeChild(frame);
+        check(label + ": removal updates window.frames", function () {
+            return window.length === count - 1;
+        });
+    }
+
+    function deniesDocument(frame) {
+        if (frame.contentDocument !== null || !frame.contentWindow) return false;
+        try {
+            void frame.contentWindow.document;
+        } catch (error) {
+            return error.name === "SecurityError";
+        }
+        return false;
+    }
+
+    runScripts("initial blank", null);
+    runScripts("initial blank with both sandbox permissions", "allow-scripts allow-same-origin");
+
+    var inert = addFrame("allow-same-origin");
+    check("sandboxed scripts do not run even through document.write", function () {
+        var child = inert.contentWindow;
+        var doc = inert.contentDocument;
+        doc.open();
+        doc.write("<scr" + "ipt>window.ran = true;</scr" + "ipt><div id='marker'></div>");
+        doc.close();
+        return child.document === doc && child.ran === undefined && doc.getElementById("marker") !== null;
+    });
+    document.body.removeChild(inert);
+
+    var opaque = addFrame("allow-scripts");
+    check("sandbox without allow-same-origin denies document access", function () {
+        return deniesDocument(opaque);
+    });
+    document.body.removeChild(opaque);
+
+    var navigated = addFrame(null);
+    var beforeNavigation = navigated.contentWindow;
+    var finished = false;
+    var deadline = setTimeout(function () {
+        check("opaque data URL loads before document denial check", function () { return false; });
+        finish();
+    }, 1200);
+    function finish() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(deadline);
+        results.textContent += (checked - failed) + "/" + checked + " passed";
+    }
+    navigated.onload = function () {
+        if (finished) return;
+        check("opaque data URL denies document access after navigation", function () {
+            return navigated.contentWindow === beforeNavigation && deniesDocument(navigated);
+        });
+        finish();
+    };
+    navigated.src = "data:text/html,%3Ctitle%3Eopaque%3C%2Ftitle%3E";
+})();
+</script>
