@@ -40,6 +40,26 @@ $forms = $formsRun.Stdout | ConvertFrom-Json
 if ($forms.title -ne 'Formularz: OK' -or $forms.javascript.diagnostics.Count -ne 0 -or $forms.javascript.pending_requests -ne 0) { throw 'The forms, Promise.all, and JSON check failed.' }
 $media = Invoke-SatinMediaSmoke -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'media profile') -OutputDirectory $qaDirectory -LogDirectory $logs
 $streaming = Invoke-SatinMediaSmoke -Segmented -Executable $binary -ProfileDirectory (Join-Path $qaDirectory 'streaming profile') -OutputDirectory $qaDirectory -LogDirectory $logs
+$workerHeadless = Invoke-BrowserProcess -Executable $binary -LogDirectory $logs -Arguments @(
+    '--headless', '--url', 'about:workers', '--click-id', 'worker-run', '--run-for-ms', '2000'
+)
+if ($workerHeadless.ExitCode -ne 0) { throw $workerHeadless.Stderr }
+$worker = $workerHeadless.Stdout | ConvertFrom-Json
+if ($worker.title -cne 'Satin Worker OK' -or $worker.javascript.diagnostics.Count -ne 0) {
+    throw 'The headless Worker and WebAssembly check failed.'
+}
+$workerActions = Join-Path $qaDirectory 'worker-actions.json'
+[IO.File]::WriteAllText($workerActions, '[{"action":"click","id":"worker-run"},{"action":"wait_title","value":"Satin Worker OK","timeout_ms":5000}]', [Text.UTF8Encoding]::new($false))
+$workerWindow = Invoke-BrowserProcess -Executable $binary -LogDirectory $logs -Arguments @(
+    '--smoke-window', (Join-Path $qaDirectory 'workers-window.png'), '--smoke-actions', $workerActions,
+    '--url', 'about:workers', '--profile', (Join-Path $qaDirectory 'worker profile')
+)
+if ($workerWindow.ExitCode -ne 0) { throw $workerWindow.Stderr }
+$workerNative = $workerWindow.Stdout | ConvertFrom-Json
+if (-not $workerNative.window_smoke -or $workerNative.frames_presented -lt 1 -or
+    $workerNative.title -cne 'Satin Worker OK' -or $workerNative.javascript.diagnostics.Count -ne 0) {
+    throw 'The native Worker and WebAssembly check failed.'
+}
 if ($Network) {
     $positive = Invoke-BrowserProcess -Executable $binary -Arguments @('--headless','--url','https://example.com','--screenshot',(Join-Path $qaDirectory 'https-example.png')) -LogDirectory $logs
     if ($positive.ExitCode -ne 0) { throw ('The valid HTTPS request failed. ' + $positive.Stderr) }
@@ -52,6 +72,6 @@ if ($Network) {
         $networkCases += [pscustomobject]@{url=$bad;result='rejected';error=$negative.Stderr.Trim()}
     }
 }
-$report = [ordered]@{version=$version.Stdout.Trim();document=$document;nativeWindow=$native;javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed';network=$networkCases;media=$media;streaming=$streaming}
+$report = [ordered]@{version=$version.Stdout.Trim();document=$document;nativeWindow=$native;javascript=$javascript;platform=$platform;forms=$forms;eventWindow=$eventNative;timer='passed';network=$networkCases;media=$media;streaming=$streaming;worker=$worker;workerNative=$workerNative}
 [IO.File]::WriteAllText((Join-Path $qaDirectory 'report.json'),($report | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
 $report | ConvertTo-Json -Depth 10

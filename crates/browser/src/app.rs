@@ -190,6 +190,10 @@ pub fn run(
     let media = Bridge::new(move || {
         let _ = media_proxy.send_event(());
     });
+    let worker_proxy = events.create_proxy();
+    let worker_wake = Arc::new(move || {
+        let _ = worker_proxy.send_event(());
+    });
     let mut tabs = session
         .tabs
         .into_iter()
@@ -219,6 +223,7 @@ pub fn run(
         next_id,
         jobs,
         media,
+        worker_wake,
         incoming,
         mouse: (0., 0.),
         modifiers: ModifiersState::empty(),
@@ -297,6 +302,7 @@ struct App {
     next_id: u64,
     jobs: Workers,
     media: Bridge,
+    worker_wake: Arc<dyn Fn() + Send + Sync>,
     incoming: Receiver<Message>,
     mouse: (f32, f32),
     modifiers: ModifiersState,
@@ -363,8 +369,12 @@ impl App {
         if !session.needs_advance(tab.runtime.as_ref()) {
             return false;
         }
+        let new_realm = tab.runtime.is_none();
         match session.advance(Arc::make_mut(page), &mut tab.runtime, viewport) {
             Ok(changed) => {
+                if new_realm && let Some(runtime) = &mut tab.runtime {
+                    runtime.set_worker_wake(self.worker_wake.clone());
+                }
                 let was_loading = tab.loading;
                 tab.loading = !session.loaded();
                 if changed {
@@ -2797,7 +2807,7 @@ impl ApplicationHandler<()> for App {
                     }
                 }
                 Payload::NavigationError(error) => self.fail_page(index, &error),
-                Payload::MediaWake => continue,
+                Payload::MediaWake | Payload::WorkerWake => continue,
             }
             if index == self.active {
                 if !self.address_focus {

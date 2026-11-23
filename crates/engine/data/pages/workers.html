@@ -1,0 +1,59 @@
+<style>
+  #worker-run { padding: 9px 14px; border: 1px solid #146c58; color: #146c58; background: white; font-size: 16px; }
+  #worker-status { min-height: 24px; }
+</style>
+<h1>Worker and WebAssembly</h1>
+<p>Send a buffer to a background worker. The worker changes a byte and calls a JavaScript function from a WebAssembly module.</p>
+<button type="button" id="worker-run">Run the test</button>
+<p id="worker-status" aria-live="polite">Ready to run.</p>
+<p><a href="about:home">Home</a> · <a href="about:version">Features</a></p>
+<script>
+  const button = document.getElementById("worker-run");
+  const status = document.getElementById("worker-status");
+  const workerSource = [
+    "self.onmessage = event => {",
+    "  const bytes = event.data;",
+    "  bytes[0] += 2;",
+    "  const module = new Uint8Array([",
+    "    0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,",
+    "    2,11,1,3,101,110,118,3,115,117,109,0,0,3,2,1,0,",
+    "    7,7,1,3,114,117,110,0,1,10,10,1,8,0,32,0,32,1,16,0,11",
+    "  ]);",
+    "  WebAssembly.instantiate(module, {env: {sum: (a, b) => a + b}}).then(result => {",
+    "    self.postMessage({bytes, value: result.instance.exports.run(19, 23)}, [bytes.buffer]);",
+    "    self.close();",
+    "  }, error => { self.postMessage({error: error.message}); self.close(); });",
+    "};"
+  ].join("\n");
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    status.textContent = "Waiting for the worker.";
+    const source = URL.createObjectURL(new Blob([workerSource]));
+    const worker = new Worker(source, {name: "Satin sample"});
+    URL.revokeObjectURL(source);
+    const bytes = new Uint8Array([40, 7]);
+    function finish(message, passed) {
+      status.textContent = message;
+      status.setAttribute("data-result", passed ? "passed" : "failed");
+      button.disabled = false;
+      document.title = passed ? "Satin Worker OK" : "Worker test failed";
+    }
+    worker.onerror = event => {
+      event.preventDefault();
+      finish(event.message || "The worker could not run.", false);
+      worker.terminate();
+    };
+    worker.onmessageerror = () => finish("The worker result could not be read.", false);
+    worker.onmessage = event => {
+      const result = event.data;
+      const passed = !result.error && bytes.buffer.byteLength === 0 &&
+        result.bytes[0] === 42 && result.bytes[1] === 7 && result.value === 42;
+      finish(
+        passed ? "The worker returned bytes [42, 7] and WebAssembly returned 42." :
+          (result.error || "The worker returned unexpected data."),
+        passed
+      );
+    };
+    worker.postMessage(bytes, [bytes.buffer]);
+  });
+</script>

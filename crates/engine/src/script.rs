@@ -27,6 +27,7 @@ mod structured_clone;
 mod text_encoding;
 mod url_api;
 mod webidl;
+mod workers;
 pub use forms::{
     ControlSnapshot, FilePickerRequest, FormKey, FormSubmission, MAX_PICKER_BYTES,
     MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, OptionSnapshot, SelectedFile,
@@ -109,6 +110,7 @@ pub struct ScriptRuntime {
     storage: storage::StorageHost,
     messages: message_ports::MessagePorts,
     image_bitmap: canvas::ImageBitmapFactory,
+    workers: workers::Workers,
 }
 
 fn mark_dirty(state: &mut State) {
@@ -817,7 +819,14 @@ impl ScriptRuntime {
         let image_bitmap = canvas::install_image_bitmap(&mut vm, &state, window.clone())?;
         let cloning =
             structured_clone::CloneHost::new(&mut vm, blobs, image_data, image_bitmap, file_lists)?;
-        let messages = message_ports::install(&mut vm, events, cloning.clone())?;
+        let messages = message_ports::install(&mut vm, events.clone(), cloning.clone())?;
+        let workers = workers::install(
+            &mut vm,
+            &state,
+            events,
+            messages.clone(),
+            page.worker_policy,
+        )?;
         cloning.install(&mut vm, window, messages.clone())?;
         scheduler::install_performance(&mut vm, &state)?;
         history_api::install(&mut vm, &state, document, &layout)?;
@@ -836,6 +845,7 @@ impl ScriptRuntime {
             storage,
             messages,
             image_bitmap,
+            workers,
         })
     }
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
@@ -1180,6 +1190,7 @@ impl ScriptRuntime {
             || self.intersections.has_task()
             || self.storage.has_events()
             || self.messages.has_tasks()
+            || self.workers.has_tasks()
             || state.media.has_loads()
             || state.media.has_commands()
             || state.media.has_stream_tasks()
@@ -1203,9 +1214,38 @@ impl ScriptRuntime {
     pub fn set_foreground(&mut self, foreground: bool) {
         self.state.borrow_mut().scheduler.set_foreground(foreground);
     }
+
+    pub fn set_worker_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.workers.set_wake(wake);
+    }
+
+    pub fn has_workers(&self) -> bool {
+        self.workers.has_workers()
+    }
+
     pub fn pump(&mut self) {
         self.drain_microtasks();
         media::run_stream_tasks(&mut self.vm, &self.state);
+        if self.workers.has_tasks() {
+            let state = self.state.clone();
+            for _ in 0..32 {
+                let result = self.vm.with_task(|vm| {
+                    if !self.workers.dispatch_next(vm)? {
+                        return Ok(false);
+                    }
+                    drain_microtask_queue(vm, &state)?;
+                    Ok(true)
+                });
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        diagnostic(&state, error.to_string());
+                        break;
+                    }
+                }
+            }
+        }
         if self.messages.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
@@ -1698,14 +1738,29 @@ fn install_character_data(
 
 struct InlineStyleNode(NodeId);
 
-fn inline_style_value(state: &Shared, id: NodeId, name: &str) -> String {
+fn inline_declarations(state: &Shared, id: NodeId) -> Vec<css::Declaration> {
     let state = state.borrow();
     css::declarations(state.document.attr(id, "style").unwrap_or(""))
-        .into_iter()
-        .rev()
-        .find(|d| d.name == name)
-        .map(|d| d.value)
-        .unwrap_or_default()
+}
+
+fn inline_style_value(state: &Shared, id: NodeId, name: &str) -> String {
+    css::inline_style::specified(&inline_declarations(state, id), name).0
+}
+
+fn cssom_property_name(vm: &mut Vm, name: Value) -> Result<String, JsError> {
+    let mut name = text(vm, name)?;
+    if !name.starts_with("--") {
+        name.make_ascii_lowercase();
+    }
+    Ok(name)
+}
+
+fn cssom_property_value(vm: &mut Vm, value: Value) -> Result<String, JsError> {
+    if matches!(value, Value::Null) {
+        Ok(String::new())
+    } else {
+        text(vm, value)
+    }
 }
 
 fn inline_style_node(vm: &Vm, style: &Value) -> Result<NodeId, JsError> {
@@ -1729,10 +1784,18 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
         let set_state = state.clone();
         let set = vm.new_native_function(property, move |vm, this, args| {
             let id = inline_style_node(vm, &this)?;
-            let value = text(vm, arg(args, 0))?;
-            update_style(vm, &set_state, id, css_name, &value)?;
+            let value = cssom_property_value(vm, arg(args, 0))?;
+            update_style(vm, &set_state, id, css_name, &value, false)?;
             Ok(Value::Undefined)
         });
+        if property != css_name {
+            vm.define_accessor(
+                style_prototype.clone(),
+                css_name,
+                Some(get.clone()),
+                Some(set.clone()),
+            )?;
+        }
         vm.define_accessor(style_prototype.clone(), property, Some(get), Some(set))?;
     }
     let get_state = state.clone();
@@ -1742,11 +1805,35 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
         "getPropertyValue",
         move |vm, this, args| {
             let id = inline_style_node(vm, &this)?;
-            let mut name = text(vm, arg(args, 0))?;
-            if !name.starts_with("--") {
-                name.make_ascii_lowercase();
-            }
+            let name = cssom_property_name(vm, arg(args, 0))?;
             Ok(inline_style_value(&get_state, id, &name).into())
+        },
+    )?;
+    let get_state = state.clone();
+    method(
+        vm,
+        style_prototype.clone(),
+        "getPropertyPriority",
+        move |vm, this, args| {
+            let id = inline_style_node(vm, &this)?;
+            let name = cssom_property_name(vm, arg(args, 0))?;
+            let declarations = inline_declarations(&get_state, id);
+            let important = css::inline_style::specified(&declarations, &name).1;
+            Ok(if important { "important" } else { "" }.into())
+        },
+    )?;
+    let remove_state = state.clone();
+    method(
+        vm,
+        style_prototype.clone(),
+        "removeProperty",
+        move |vm, this, args| {
+            let id = inline_style_node(vm, &this)?;
+            let name = cssom_property_name(vm, arg(args, 0))?;
+            let declarations = inline_declarations(&remove_state, id);
+            let previous = css::inline_style::specified(&declarations, &name).0;
+            write_inline_style(vm, &remove_state, id, &name, declarations, None)?;
+            Ok(previous.into())
         },
     )?;
     vm.root(style_prototype.clone());
@@ -1790,8 +1877,8 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
             });
             let set_state = state.clone();
             let set = vm.new_native_function(property, move |vm, _, args| {
-                let value = text(vm, arg(args, 0))?;
-                update_style(vm, &set_state, id, css_name, &value)?;
+                let value = cssom_property_value(vm, arg(args, 0))?;
+                update_style(vm, &set_state, id, css_name, &value, false)?;
                 Ok(Value::Undefined)
             });
             vm.define_accessor(style.clone(), property, Some(get), Some(set))?;
@@ -1814,12 +1901,17 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
         vm.define_accessor(style.clone(), "cssText", Some(get), Some(set))?;
         let set_state = state.clone();
         method(vm, style.clone(), "setProperty", move |vm, _, args| {
-            let key = text(vm, arg(args, 0))?;
-            let value = text(vm, arg(args, 1))?;
-            if !arg(args, 2).is_nullish() && !text(vm, arg(args, 2))?.is_empty() {
-                return Err(unsupported("style.setProperty priority is not implemented"));
+            let key = cssom_property_name(vm, arg(args, 0))?;
+            let value = cssom_property_value(vm, arg(args, 1))?;
+            let priority = if arg(args, 2).is_nullish() {
+                String::new()
+            } else {
+                text(vm, arg(args, 2))?
+            };
+            let important = priority.eq_ignore_ascii_case("important");
+            if value.is_empty() || priority.is_empty() || important {
+                update_style(vm, &set_state, id, &key, &value, important)?;
             }
-            update_style(vm, &set_state, id, &key, &value)?;
             Ok(Value::Undefined)
         })?;
         vm.root(style.clone());
@@ -1833,6 +1925,7 @@ fn update_style(
     id: NodeId,
     key: &str,
     value: &str,
+    important: bool,
 ) -> Result<(), JsError> {
     if !key
         .chars()
@@ -1841,25 +1934,43 @@ fn update_style(
     {
         return Ok(());
     }
-    if !value.is_empty() {
-        let candidate = css::declarations(&format!("{key}:{value};"));
-        if candidate.len() != 1
-            || candidate[0].name != key
-            || candidate[0].important
+    let replacement = if value.is_empty() {
+        None
+    } else {
+        let mut declarations = css::declarations(&format!("{key}:{value};"));
+        if declarations.len() != 1
+            || declarations[0].name != key
+            || declarations[0].important
             || !css::supports_declaration(key, value)
         {
             return Ok(());
         }
+        let mut declaration = declarations.pop().unwrap();
+        declaration.important = important;
+        Some(declaration)
+    };
+    write_inline_style(
+        vm,
+        state,
+        id,
+        key,
+        inline_declarations(state, id),
+        replacement,
+    )
+}
+
+fn write_inline_style(
+    vm: &mut Vm,
+    state: &Shared,
+    id: NodeId,
+    name: &str,
+    mut declarations: Vec<css::Declaration>,
+    replacement: Option<css::Declaration>,
+) -> Result<(), JsError> {
+    if !css::inline_style::edit(&mut declarations, name, replacement) {
+        return Ok(());
     }
-    let old = state
-        .borrow()
-        .document
-        .attr(id, "style")
-        .unwrap_or("")
-        .to_owned();
-    let mut declarations = css::declarations(&old);
-    declarations.retain(|d| d.name != key);
-    let mut new = declarations
+    let new = declarations
         .into_iter()
         .map(|d| {
             format!(
@@ -1870,9 +1981,6 @@ fn update_style(
             )
         })
         .collect::<String>();
-    if !value.is_empty() {
-        new.push_str(&format!("{key}:{value};"));
-    }
     set_attribute(vm, state, id, "style", Some(new))
 }
 

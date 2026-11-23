@@ -91,7 +91,11 @@ impl JsBigInt {
         }
     }
 
-    fn from_integer(value: Integer) -> Result<Self, JsError> {
+    pub(crate) fn to_owned_integer(&self) -> Integer {
+        self.integer().into_owned()
+    }
+
+    pub(crate) fn from_integer(value: Integer) -> Result<Self, JsError> {
         if let Some(value) = value.to_i64() {
             return Ok(Self::from_i64(value));
         }

@@ -110,6 +110,98 @@ fn axis_shorthands_validate_as_a_whole() {
 }
 
 #[test]
+fn specified_axis_shorthands_follow_single_edge_writes_and_removals() {
+    let mut runtime = runtime(r#"<!doctype html><div id="box"></div>"#);
+    runtime
+        .eval(
+            r#"
+            const style = document.getElementById('box').style;
+            const axes = [
+                ['marginBlock', 'margin-block'], ['marginInline', 'margin-inline'],
+                ['paddingBlock', 'padding-block'], ['paddingInline', 'padding-inline'],
+                ['insetBlock', 'inset-block'], ['insetInline', 'inset-inline']
+            ];
+            function check(value, message) {
+                if (!value) throw new Error(message);
+            }
+            for (const axis of axes) {
+                const idl = axis[0], css = axis[1];
+                const start = css + '-start', end = css + '-end';
+                style[idl] = '4PX 10.0px';
+                check(style[idl + 'Start'] === '4px' && style[end] === '10px', css + ' expands');
+                style[idl + 'End'] = '12px';
+                check(style[idl] === '4px 12px', css + ' recombines');
+                check(style.removeProperty(start) === '4px', css + ' returns the old edge');
+                check(style[idl] === '' && style[end] === '12px', css + ' keeps the other edge');
+                check(style.removeProperty(css) === '' && style[end] === '', css + ' removes all edges');
+                style.setProperty(start, '0');
+                style[end] = '0.0px';
+                check(style[idl] === '0px', css + ' elides equal values');
+                check(style.removeProperty(css) === '0px', css + ' returns the old shorthand');
+            }
+            style.marginInline = 'inherit';
+            style.marginInlineEnd = 'unset';
+            check(style.marginInline === '' && style.marginInlineStart === 'inherit', 'mixed CSS-wide keywords');
+            style.marginInline = null;
+            check(style.marginInlineStart === '' && style.marginInlineEnd === '', 'null removes the axis');
+            style.setProperty('--edges', '3px 5px');
+            style.setProperty('margin-inline', 'var(--edges)', 'important');
+            style.setProperty('margin-inline-end', '12px', 'important');
+            const computed = getComputedStyle(document.getElementById('box'));
+            check(style.marginInline === '' && style.marginInlineStart === ''
+                && style.getPropertyPriority('margin-inline-start') === 'important'
+                && computed.marginInline === '3px 12px', 'an override preserves a pending compatible edge');
+            "#,
+        )
+        .unwrap();
+}
+
+#[test]
+fn editing_logical_edges_preserves_priority_and_physical_source_order() {
+    let mut runtime = runtime(
+        r#"<!doctype html><div id="box" style="margin-inline-start:2px!important;
+        margin-inline:4px 10px; margin-right:20px; color:red"></div>"#,
+    );
+    runtime
+        .eval(
+            r#"
+            const box = document.getElementById('box');
+            const style = box.style;
+            const computed = getComputedStyle(box);
+            function check(value, message) {
+                if (!value) throw new Error(message);
+            }
+            check(style.marginInline === '' && style.marginInlineStart === '2px'
+                && style.marginInlineEnd === '10px', 'authored !important picks each edge separately');
+            check(style.getPropertyPriority('MARGIN-INLINE-START') === 'important'
+                && style.getPropertyPriority('margin-inline') === '', 'authored priority');
+            style.marginInlineStart = '8px';
+            check(style.marginInline === '8px 10px' && computed.marginRight === '20px',
+                'editing one edge preserves the other edge before a physical declaration');
+            style.setProperty('MARGIN-INLINE', '4px 10px', 'IMPORTANT');
+            check(style.marginInline === '4px 10px'
+                && style.getPropertyPriority('margin-inline') === 'important', 'important shorthand');
+            style.marginInlineEnd = '12px';
+            check(style.marginInline === '' && style.marginInlineStart === '4px'
+                && style.marginInlineEnd === '12px' && computed.marginRight === '12px',
+                'one edge can replace its old important value');
+            style.setProperty('margin-inline-start', '99px', ' important ');
+            style.setProperty('margin-inline-start', '99px !important', 'important');
+            check(style.marginInlineStart === '4px', 'invalid priority and inline bang do not set');
+            style.setProperty('margin-inline', '6px 11px');
+            check(style.marginInline === '6px 11px' && computed.marginRight === '11px'
+                && style.getPropertyPriority('margin-inline-start') === '', 'the shorthand replaces both priorities');
+            check(style.removeProperty('margin-inline') === '6px 11px'
+                && computed.marginRight === '20px' && style.color === 'red', 'removal keeps unrelated declarations');
+            const empty = document.createElement('div');
+            check(empty.style.removeProperty('margin-inline') === '' && !empty.hasAttribute('style'),
+                'removing an absent edge does not create a style attribute');
+            "#,
+        )
+        .unwrap();
+}
+
+#[test]
 fn pinned_wpt_logical_properties_with_variables() {
     // css/css-logical/logicalprops-with-variables.html at WPT revision
     // 9e1907a13cbbc338975302097a4bafcbc4d12dc5. License: fixtures/wpt-url/LICENSE.md.

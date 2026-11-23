@@ -422,7 +422,11 @@ pub(super) fn install_timers(vm: &mut Vm, state: &Shared) -> Result<(), JsError>
             Ok(Value::Undefined)
         },
     )?;
-    webidl::operation(vm, window, "queueMicrotask", 1, |vm, _, args| {
+    install_queue_microtask(vm, window)
+}
+
+pub(super) fn install_queue_microtask(vm: &mut Vm, target: Value) -> Result<(), JsError> {
+    webidl::operation(vm, target, "queueMicrotask", 1, |vm, _, args| {
         vm.enqueue_microtask(arg(args, 0))?;
         Ok(Value::Undefined)
     })?;

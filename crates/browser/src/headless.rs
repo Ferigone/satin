@@ -10,7 +10,10 @@ use rust_browser_engine::{
     script::{DocumentSession, ScriptRuntime},
     web_storage::{StorageProfile, TabStorage},
 };
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc;
 
 pub(crate) struct Network {
@@ -59,6 +62,20 @@ impl Network {
             task,
             cancel: self.cancel.clone(),
         }
+    }
+
+    fn bind_worker_wake(&self, runtime: &mut ScriptRuntime) {
+        let generation = self.generation;
+        let sender = self.tx.clone();
+        let thread = std::thread::current();
+        runtime.set_worker_wake(Arc::new(move || {
+            let _ = sender.try_send(Message {
+                tab: 1,
+                navigation: generation,
+                payload: Payload::WorkerWake,
+            });
+            thread.unpark();
+        }));
     }
     fn begin(
         &mut self,
@@ -275,11 +292,15 @@ fn load_document(
         }
         let mut wake = hard_end;
         if let Some((page, session)) = &mut document {
+            let new_realm = realm.is_none();
             if session.needs_advance(realm.as_ref()) {
                 session.advance(page, &mut realm, viewport)?;
             }
             network.dispatch_resources(page, session, &mut realm, viewport)?;
             if let Some(runtime) = &mut realm {
+                if new_realm {
+                    network.bind_worker_wake(runtime);
+                }
                 network.deliver_media(runtime);
                 if let Some(request) = network.next_navigation(runtime)? {
                     document = network.begin(request)?;
@@ -324,7 +345,7 @@ fn load_document(
             continue;
         }
         match message.payload {
-            Payload::MediaWake => {},
+            Payload::MediaWake | Payload::WorkerWake => {},
             Payload::Navigation(NavigationPart::Open(opened)) => {
                 document = Some(DocumentSession::start_in_tab(
                     *opened,
@@ -495,7 +516,10 @@ pub(crate) fn run_tasks(
                 .unwrap()
         } else if let Some(next) = next.filter(|next| *next <= timer_end) {
             next
-        } else if network.media.has_open() && now < timer_end {
+        } else if (network.media.has_open()
+            || runtime.as_ref().is_some_and(ScriptRuntime::has_workers))
+            && now < timer_end
+        {
             timer_end
         } else {
             break;

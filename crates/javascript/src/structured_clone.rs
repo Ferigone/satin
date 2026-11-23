@@ -1,11 +1,15 @@
 //! Same-realm structured cloning with identity preservation and a transfer
 //! commit phase after graph traversal.
+mod packet;
+
 use crate::{
     ErrorKind, JsError, JsString, ObjectId, Value, Vm,
     collections::CollectionCloneEntry,
     heap::{ObjectKind, PropertyKind},
 };
 use std::{collections::BTreeMap, mem::size_of, vec::IntoIter};
+
+pub use packet::StructuredClonePacket;
 
 pub const MAX_STRUCTURED_CLONE_TRANSFERS: usize = 4096;
 
@@ -263,16 +267,7 @@ impl Cloner<'_, '_> {
     }
 
     fn push(&mut self, frame: Frame) -> Result<(), JsError> {
-        if self.pending.len() == self.pending.capacity() {
-            let extra = self.pending.len().max(4);
-            self.vm
-                .reserve_allocation(extra.saturating_mul(size_of::<Frame>()))?;
-            self.pending
-                .try_reserve_exact(extra)
-                .map_err(|_| temporary_allocation_error())?;
-        }
-        self.pending.push(frame);
-        Ok(())
+        push_frame(self.vm, &mut self.pending, frame)
     }
 
     fn visit(&mut self, value: Value) -> CloneResult<Value> {
@@ -309,8 +304,7 @@ impl Cloner<'_, '_> {
             ObjectKind::RegExp(program) => crate::regexp::literal(self.vm, program.clone())?,
             ObjectKind::ArrayBuffer(_) => self.vm.clone_buffer_bytes(source)?,
             ObjectKind::TypedArray(_) | ObjectKind::DataView(_) => {
-                let record = self.vm.clone_view_record(source)?;
-                let buffer = record.buffer();
+                let (buffer, layout) = self.vm.clone_view_layout(source)?;
                 let target_buffer = if let Some(&copy) = self.copies.get(&buffer) {
                     copy
                 } else {
@@ -318,7 +312,7 @@ impl Cloner<'_, '_> {
                     self.remember(buffer, copy)?;
                     copy
                 };
-                self.vm.materialize_clone_view(record, target_buffer)?
+                self.vm.materialize_clone_view(layout, target_buffer)?
             }
             ObjectKind::Collection(_) => {
                 let (target, entries) = self.vm.collection_clone_snapshot(source)?;
@@ -367,25 +361,7 @@ impl Cloner<'_, '_> {
     }
 
     fn copy_properties(&mut self, source: ObjectId, length: Option<u32>) -> CloneResult<Value> {
-        let target = if let Some(length) = length {
-            if length > self.vm.limits.max_array_length {
-                return Err(JsError::new(
-                    ErrorKind::ExecutionLimit,
-                    "Array length budget exhausted",
-                )
-                .into());
-            }
-            self.vm.allocate_constructed(
-                ObjectKind::Array {
-                    length,
-                    length_writable: true,
-                },
-                self.vm.array_prototype,
-            )?
-        } else {
-            self.vm
-                .allocate_constructed(ObjectKind::Ordinary, self.vm.object_prototype)?
-        };
+        let target = new_record(self.vm, length)?;
         let keys = self.vm.enumerable_own_keys(Value::Object(source))?;
         self.push(Frame::Properties {
             source,
@@ -469,10 +445,7 @@ impl Cloner<'_, '_> {
                     target: target.clone(),
                     keys,
                 })?;
-                // The key was enumerable at the snapshot. A prior getter can
-                // delete it, in which case we must not consult the prototype.
-                if self.vm.own_descriptor(source, &key)?.is_some() {
-                    let value = self.vm.get(Value::Object(source), &key)?;
+                if let Some(value) = read_record_property(self.vm, source, &key)? {
                     let cloned = self.visit(value)?;
                     self.vm
                         .define_property(target, key, crate::heap::Property::data(cloned))?;
@@ -529,6 +502,52 @@ impl Cloner<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+fn push_frame<T>(vm: &mut Vm, pending: &mut Vec<T>, frame: T) -> Result<(), JsError> {
+    if pending.len() == pending.capacity() {
+        let extra = pending.len().max(4);
+        vm.reserve_allocation(extra.saturating_mul(size_of::<T>()))?;
+        pending
+            .try_reserve_exact(extra)
+            .map_err(|_| temporary_allocation_error())?;
+    }
+    pending.push(frame);
+    Ok(())
+}
+
+fn new_record(vm: &mut Vm, length: Option<u32>) -> Result<Value, JsError> {
+    if let Some(length) = length {
+        if length > vm.limits.max_array_length {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Array length budget exhausted",
+            ));
+        }
+        vm.allocate_constructed(
+            ObjectKind::Array {
+                length,
+                length_writable: true,
+            },
+            vm.array_prototype,
+        )
+    } else {
+        vm.allocate_constructed(ObjectKind::Ordinary, vm.object_prototype)
+    }
+}
+
+fn read_record_property(
+    vm: &mut Vm,
+    source: ObjectId,
+    key: &JsString,
+) -> Result<Option<Value>, JsError> {
+    // The key was enumerable at the snapshot. A prior getter can delete it,
+    // in which case we must not consult the prototype.
+    if vm.own_descriptor(source, key)?.is_some() {
+        Ok(Some(vm.get(Value::Object(source), key)?))
+    } else {
+        Ok(None)
     }
 }
 

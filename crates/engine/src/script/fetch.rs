@@ -1,6 +1,7 @@
 //! Fetch objects use traced host slots for streams, headers, and signals.
 mod blob_url;
 mod upload;
+mod wasm_streaming;
 use super::{
     abort, arg, blobs, fatal, form_data, getter, method, streams::StreamHost, text, unsupported,
     url_api,
@@ -794,6 +795,7 @@ impl FetchHost {
         install_headers(vm, &state, hp.clone())?;
         install_request(vm, &state, rp.clone())?;
         install_response(vm, &state, sp.clone())?;
+        wasm_streaming::install(vm, &sp)?;
         let shared = state.clone();
         let fetch = vm.new_native_function("fetch", move |vm, _, args| {
             let capability = vm.new_promise_capability()?;

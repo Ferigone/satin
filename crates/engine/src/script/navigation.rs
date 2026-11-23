@@ -14,8 +14,8 @@ use crate::{
     html::ParserScriptKind,
     layout::Viewport,
     loader::{
-        DocumentInput, DocumentResource, OpenedPage, ResourceBody, ResourceKind, ResourceRequest,
-        image_asset_key,
+        BlobWorkerPolicy, DocumentInput, DocumentResource, OpenedPage, ResourceBody, ResourceKind,
+        ResourceRequest, image_asset_key,
     },
     network::CredentialsMode,
 };
@@ -188,6 +188,7 @@ pub struct DocumentSession {
     client: Arc<Url>,
     started: Instant,
     response_start: Instant,
+    worker_policy: BlobWorkerPolicy,
     resources: ResourceQueue,
     fonts: FontLoads,
     modules: ModuleGraph,
@@ -247,6 +248,7 @@ impl DocumentSession {
             None
         };
         let decoded_images = page.images.values().map(|image| image.as_raw().len()).sum();
+        let worker_policy = page.worker_policy;
         Ok((
             page,
             Self {
@@ -257,6 +259,7 @@ impl DocumentSession {
                 client,
                 started,
                 response_start,
+                worker_policy,
                 resources: ResourceQueue::new(),
                 fonts: FontLoads::default(),
                 modules: ModuleGraph::default(),
@@ -310,6 +313,7 @@ impl DocumentSession {
         self.resources.take(Instant::now())
     }
     pub fn stop(&mut self, page: &mut LoadedPage, mut runtime: Option<&mut ScriptRuntime>) {
+        self.sync_parser_worker_policy(page, runtime.as_deref());
         if let Some(realm) = runtime.as_deref_mut() {
             {
                 let mut state = realm.state.borrow_mut();
@@ -416,6 +420,7 @@ impl DocumentSession {
             ScriptRuntime::new_for_history(page, self.history.clone(), &self.storage, self.started)
                 .map_err(|e| e.to_string())?
         };
+        realm.workers.restrict_policy(self.worker_policy);
         {
             let mut state = realm.state.borrow_mut();
             state.navigation_attached = true;
@@ -549,6 +554,7 @@ impl DocumentSession {
                             .advance(runtime.as_ref().map(|realm| &realm.state), None)
                     })
                     .map_err(|error| error.to_string())?;
+                self.sync_parser_worker_policy(page, runtime.as_ref());
                 if let Some(realm) = runtime {
                     mutation_observers::schedule(&mut realm.vm, &realm.state);
                 }
@@ -740,6 +746,7 @@ impl DocumentSession {
         runtime: &mut Option<ScriptRuntime>,
         viewport: Viewport,
     ) -> Result<(), String> {
+        self.sync_parser_worker_policy(page, runtime.as_ref());
         let Some(parser) = self.parser.as_ref() else {
             return Ok(());
         };
@@ -864,6 +871,25 @@ impl DocumentSession {
             }
         }
         Ok(())
+    }
+
+    fn sync_parser_worker_policy(
+        &mut self,
+        page: &mut LoadedPage,
+        runtime: Option<&ScriptRuntime>,
+    ) {
+        if self.worker_policy.allows_blob()
+            && let Some(parser) = &self.parser
+        {
+            let policy = parser.borrow().worker_policy();
+            if !policy.allows_blob() {
+                self.worker_policy.restrict(policy);
+                page.worker_policy.restrict(policy);
+                if let Some(realm) = runtime {
+                    realm.workers.restrict_policy(policy);
+                }
+            }
+        }
     }
 
     fn schedule(

@@ -235,9 +235,17 @@ Allocating string operations also charge proportional copy work independently of
 
 The host owns trusted Rust allocations and the sizes of native captures, DOM storage and input/output buffers. The infallible host allocation helpers do not constitute a general-purpose Rust allocator sandbox. They are intended for bounded embedding data. Process isolation, an allocator-backed exact heap quota and interruptible native operations remain further work.
 
+## WebAssembly
+
+The VM exposes `WebAssembly.Module`, `Instance`, `validate()`, `compile()`, and both `instantiate()` overloads for a bounded integer subset. It copies the visible bytes of a BufferSource, validates the binary sections and operand stack, and links callable JavaScript imports. Exported functions accept i32 arguments and return at most one i32 value. The core executes straight-line locals, constants, add, subtract, multiply, drop, and calls to imported functions.
+
+`compile()` and `instantiate()` return promises with branded compilation and link errors. Byte-source instantiation links through the VM job queue. A compiled module can be reused across instances in the same VM. Exported functions keep their module and imports alive through garbage collection. The core caps module input at 2 MiB and charges decoding and execution to the VM's work and memory budgets. [WebAssembly JavaScript Interface](https://www.w3.org/TR/wasm-js-api-2/) · [WebAssembly Core Specification](https://www.w3.org/TR/wasm-core-2/)
+
+Linear memory, tables, control flow, calls to defined functions, other numeric types, streaming instantiation, and cross-realm module transfer remain open.
+
 ## Explicit gaps and validation
 
-Import attributes and assignment heads in for-in, for-of, and for-await-of remain unsupported. Await and yield within destructuring subexpressions or class computed keys and heritage expressions remain unsupported. Proxy, iterator helpers, Intl, WeakRef/finalization, SharedArrayBuffer/Atomics, and WebAssembly remain absent. Date calendar arithmetic and local timezone integration are covered separately. [Date](DATE.md)
+Import attributes and assignment heads in for-in, for-of, and for-await-of remain unsupported. Await and yield within destructuring subexpressions or class computed keys and heritage expressions remain unsupported. Proxy, iterator helpers, Intl, WeakRef/finalization, and SharedArrayBuffer/Atomics remain absent. Date calendar arithmetic and local timezone integration are covered separately. [Date](DATE.md)
 
 Additional compatibility gaps include complete Annex B and lexical grammar, mapped non-strict arguments, complete early-error and directive handling, exact source preservation for Function.prototype.toString, Unicode identifiers and case handling, numeric formatting and rounding, cross-realm behavior, consumers of exposed well-known Symbols, and standard-library methods. Unsupported productions surface as UnsupportedFeature, so entering unsupported syntax cannot satisfy a negative test expecting SyntaxError.
 

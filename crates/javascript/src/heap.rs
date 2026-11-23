@@ -76,6 +76,8 @@ pub(crate) enum ObjectKind {
     AsyncFromSyncIterator(crate::async_iterator::AsyncFromSyncIterator),
     Module(Box<crate::modules::ModuleData>),
     ModuleNamespace(crate::modules::ModuleNamespace),
+    WasmModule(Rc<crate::wasm::Module>),
+    WasmInstance,
 }
 pub(crate) struct Object {
     /// Opaque host metadata is never script-visible and contains no JS handles.
@@ -609,6 +611,7 @@ fn cell_bytes(cell: &Cell) -> usize {
                 ObjectKind::ArrayBuffer(buffer) => buffer.retained_bytes(),
                 ObjectKind::RegExp(program) => program.retained_bytes(),
                 ObjectKind::Module(data) => data.extra_bytes(),
+                ObjectKind::WasmModule(module) => module.retained_bytes(),
                 ObjectKind::ModuleNamespace(data) => data.exports.len() * 256,
                 ObjectKind::Bound { args, .. } => args.capacity() * std::mem::size_of::<Value>(),
                 ObjectKind::Collection(data) => data.extra_bytes(),

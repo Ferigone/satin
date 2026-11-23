@@ -2,6 +2,93 @@ use super::*;
 
 const PAGE: &str = "https://example.test/path/index.html";
 
+const WORKER_PROBE: &str = r#"
+var results = [];
+var workerUrl = URL.createObjectURL(new Blob(["postMessage('ran'); close()"]));
+function startProbe(label) {
+    var worker = new Worker(workerUrl);
+    worker.onmessage = function(event) { results.push(label + ':' + event.data); };
+    worker.onerror = function(event) {
+        event.preventDefault();
+        results.push(label + ':blocked');
+    };
+}
+"#;
+
+fn wait_for_worker_probes(runtime: &mut Option<ScriptRuntime>) {
+    let realm = runtime.as_mut().unwrap();
+    let (wake, signal) = std::sync::mpsc::sync_channel(1);
+    realm.set_worker_wake(Arc::new(move || {
+        let _ = wake.try_send(());
+    }));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        realm.pump();
+        if !realm.has_workers() {
+            break;
+        }
+        assert!(
+            signal
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .is_ok()
+        );
+    }
+}
+
+#[test]
+fn worker_meta_applies_at_its_parser_position_and_stays_effective() {
+    let source = format!(
+        r#"<!doctype html><head><script>{WORKER_PROBE}
+startProbe('before');
+</script>
+<meta id="policy" http-equiv="Content-Security-Policy" content="worker-src 'none'">
+<meta http-equiv="content-security-policy" content="worker-src blob:">
+<script>
+document.getElementById('policy').remove();
+startProbe('after');
+</script></head><body></body>"#
+    );
+    let (page, _, mut runtime) = start(&source);
+    wait_for_worker_probes(&mut runtime);
+    assert!(!page.worker_policy.allows_blob());
+    assert_eq!(
+        evaluate(
+            &mut runtime,
+            "results.length === 2 && results.includes('before:ran') && results.includes('after:blocked')"
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn worker_meta_requires_the_head_and_is_kept_before_the_realm_exists() {
+    let meta = r#"<meta http-equiv="Content-Security-Policy" content="worker-src 'none'">"#;
+    for (head, body, expected) in [(meta, "", "probe:blocked"), ("", meta, "probe:ran")] {
+        let source = format!(
+            "<!doctype html><head>{head}</head><body>{body}<script>{WORKER_PROBE}startProbe('probe');</script></body>"
+        );
+        let (_, _, mut runtime) = start(&source);
+        wait_for_worker_probes(&mut runtime);
+        assert_eq!(evaluate(&mut runtime, "results.join('|')"), expected.into());
+    }
+}
+
+#[test]
+fn worker_meta_from_parser_write_applies_before_its_nested_script() {
+    let source = format!(
+        r#"<!doctype html><head><script>{WORKER_PROBE}
+document.write('<meta http-equiv="Content-Security-Policy" content="worker-src &#39;none&#39;">'
+    + '<script>startProbe("written");</scr' + 'ipt>');
+</script></head><body></body>"#
+    );
+    let (_, _, mut runtime) = start(&source);
+    wait_for_worker_probes(&mut runtime);
+    assert_eq!(
+        evaluate(&mut runtime, "results.join('|')"),
+        "written:blocked".into()
+    );
+}
+
 #[test]
 fn parser_script_sees_navigation_and_response_timing() {
     let src = r#"<!doctype html><title>Timing</title><script>

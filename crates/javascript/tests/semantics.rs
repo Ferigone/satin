@@ -159,6 +159,98 @@ fn sparse_arrays_and_length() {
     );
     number("var a=[1,2,3];a.length=1;a.push(7);a.pop()+a.length", 8.0);
 }
+
+#[test]
+fn array_sort_is_stable_and_compares_utf16_strings_by_default() {
+    assert_eq!(
+        run(r"
+            const sample = [10, 2, '3', undefined, , 1];
+            const result = sample.sort();
+            const text = ['\uE000', '\u{10000}', '\uD800'];
+            text.sort();
+            const tied = [{id:'first', rank:2}, {id:'second', rank:1}, {id:'third', rank:2}];
+            tied.sort(function (a, b) { 'use strict'; return this === undefined ? a.rank - b.rank : 0; });
+            const nan = [3, 1, 2];
+            nan.sort(() => NaN);
+            result === sample && sample.join(',') === '1,10,2,3,,' &&
+                4 in sample && !(5 in sample) &&
+                text[0].length === 1 && text[0].charCodeAt(0) === 55296 &&
+                text[1].length === 2 && text[2].charCodeAt(0) === 57344 &&
+                tied[0].id === 'second' && tied[1].id === 'first' && tied[2].id === 'third' &&
+                nan.join(',') === '3,1,2'
+        "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn array_sort_preserves_property_order_and_uses_inherited_indices() {
+    assert_eq!(
+        run(r"
+            const settings = Object.create({1: 'b'});
+            settings.length = 5;
+            settings[2] = 'a';
+            settings[4] = undefined;
+            const events = [];
+            const entry = {
+                length: 3,
+                get 0() { events.push('read 0'); return 3; },
+                set 0(value) { events.push('write ' + value); },
+                get 1() { events.push('read 1'); return 1; },
+                set 1(value) { events.push('write ' + value); },
+                2: 2
+            };
+            const comparator = (a, b) => {
+                events.push('compare');
+                return {valueOf() { return a - b; }};
+            };
+            const sorted = Array.prototype.sort.call(settings, (a, b) => {
+                if (a === undefined || b === undefined) throw Error('unexpected undefined');
+                return a < b ? -1 : 1;
+            });
+            Array.prototype.sort.call(entry, comparator);
+            sorted === settings && settings[0] === 'a' && settings[1] === 'b' &&
+                2 in settings && settings[2] === undefined && !(3 in settings) && !(4 in settings) &&
+                events[0] === 'read 0' && events[1] === 'read 1' && events[2] === 'compare' &&
+                events[events.length - 2] === 'write 1' && events[events.length - 1] === 'write 2' &&
+                entry[2] === 3
+        "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn array_sort_propagates_exceptions_from_comparing_writing_and_deleting() {
+    assert_eq!(
+        run(r"
+            const values = [2, 1];
+            const reason = {};
+            let comparatorThrew = false;
+            try { values.sort(() => { throw reason; }); }
+            catch (error) { comparatorThrew = error === reason; }
+            let lengthRead = false;
+            const guarded = {get length() { lengthRead = true; return 1; }};
+            let invalidComparator = false;
+            try { Array.prototype.sort.call(guarded, null); }
+            catch (error) { invalidComparator = error instanceof TypeError; }
+            const locked = {length:3, 2:'last'};
+            Object.defineProperty(locked, '2', {configurable:false});
+            let deletionFailed = false;
+            try { Array.prototype.sort.call(locked); }
+            catch (error) { deletionFailed = error instanceof TypeError; }
+            const readOnly = [2, 1];
+            Object.defineProperty(readOnly, '0', {writable:false});
+            let writeFailed = false;
+            try { readOnly.sort(); }
+            catch (error) { writeFailed = error instanceof TypeError; }
+            comparatorThrew && values[0] === 2 && values[1] === 1 &&
+                invalidComparator && !lengthRead &&
+                deletionFailed && locked[0] === 'last' && locked[2] === 'last' &&
+                writeFailed && readOnly[0] === 2 && readOnly[1] === 1
+        "),
+        Value::Bool(true)
+    );
+}
 #[test]
 fn array_callbacks_and_bindings() {
     number(

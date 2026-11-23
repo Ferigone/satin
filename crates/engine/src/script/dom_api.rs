@@ -91,7 +91,7 @@ fn budget(message: &'static str) -> Failure {
 }
 
 #[derive(Clone)]
-struct Errors {
+pub(super) struct Errors {
     prototype: Value,
 }
 struct ExceptionData {
@@ -187,7 +187,7 @@ impl Errors {
         }
     }
 }
-fn install_errors(vm: &mut Vm) -> Result<Errors, JsError> {
+pub(super) fn install_errors(vm: &mut Vm) -> Result<Errors, JsError> {
     // Capture the intrinsic Error inheritance before page code can replace
     // globals. Thrown objects keep this captured DOMException prototype.
     let prototype = vm.error_value(&JsError::new(ErrorKind::Error, ""))?;

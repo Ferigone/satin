@@ -10,7 +10,7 @@ const PORTS: u32 = 16;
 const ORIGIN_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone)]
-pub(super) struct MessageEvents {
+pub(in crate::script) struct MessageEvents {
     prototype: Value,
     freeze: Value,
 }
@@ -169,6 +169,26 @@ impl MessageEvents {
     pub(super) fn received(&self, vm: &mut Vm, payload: Value) -> Result<Value, JsError> {
         let data = vm.get_property(payload.clone(), "0")?;
         let ports = vm.get_property(payload, "1")?;
+        self.delivered(vm, "message", data, ports)
+    }
+
+    pub(in crate::script) fn received_from_peer(
+        &self,
+        vm: &mut Vm,
+        kind: &str,
+        data: Value,
+    ) -> Result<Value, JsError> {
+        let ports = vm.try_new_array(&[])?;
+        self.delivered(vm, kind, data, ports)
+    }
+
+    fn delivered(
+        &self,
+        vm: &mut Vm,
+        kind: &str,
+        data: Value,
+        ports: Value,
+    ) -> Result<Value, JsError> {
         let fields = Fields {
             data,
             origin: "".into(),
@@ -178,14 +198,13 @@ impl MessageEvents {
         };
         let object = vm.new_object_with_prototype(self.prototype.clone())?;
         vm.mark_platform_object(&object)?;
-        let event =
-            event_target::init_event(vm, object, JsString::from("message"), [false; 3], true)?;
+        let event = event_target::init_event(vm, object, JsString::from(kind), [false; 3], true)?;
         Self::store(vm, &event, fields)?;
         Ok(event)
     }
 }
 
-pub(super) fn install(
+pub(in crate::script) fn install(
     vm: &mut Vm,
     events: &event_target::Events,
     event_constructor: &Value,

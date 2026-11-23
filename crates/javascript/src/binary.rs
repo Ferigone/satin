@@ -14,6 +14,7 @@ use crate::{
 use element::Element;
 pub use host_views::{ArrayBufferView, ArrayBufferViewKind};
 use std::{ops::Range, rc::Rc};
+pub(crate) use structured_clone::ViewLayout;
 pub(crate) use typed_array::{NumericIndex, TypedDescriptor, numeric_index};
 
 const CELL_BYTES: usize = 384;

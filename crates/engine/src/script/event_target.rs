@@ -76,6 +76,7 @@ pub(super) struct Events {
     report: Value,
     exception: Value,
     dom: Option<DomTargets>,
+    implicit_receiver: Option<Value>,
 }
 
 fn target_table(vm: &Vm, object: &Value) -> Option<(Value, Rc<TargetData>)> {
@@ -255,14 +256,18 @@ fn update_abort_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Resu
 
 impl Events {
     pub(super) fn without_document(self) -> Self {
-        Self { dom: None, ..self }
+        Self {
+            dom: None,
+            implicit_receiver: None,
+            ..self
+        }
     }
 
     fn receiver(&self, this: Value) -> Value {
         if this.is_nullish()
-            && let Some(dom) = &self.dom
+            && let Some(global) = &self.implicit_receiver
         {
-            return dom.state.borrow().window.clone();
+            return global.clone();
         }
         this
     }
@@ -300,6 +305,25 @@ impl Events {
         object: Value,
         event_value: Value,
     ) -> Result<bool, JsError> {
+        self.dispatch_with_report(vm, object, event_value, |vm, error| {
+            if vm.is_callable(&self.report) {
+                vm.call(
+                    self.report.clone(),
+                    Value::Undefined,
+                    &[error.to_string().into()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(super) fn dispatch_with_report(
+        &self,
+        vm: &mut Vm,
+        object: Value,
+        event_value: Value,
+        mut report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
+    ) -> Result<bool, JsError> {
         let info = event(vm, &event_value)?;
         info.begin(vm, &event_value, object.clone(), DispatchPath::Direct)?;
         let root = vm.root(event_value.clone());
@@ -309,16 +333,7 @@ impl Events {
                     break;
                 }
                 info.current(vm, &event_value, object.clone(), 2)?;
-                info.invoke(vm, &object, &event_value, capture, |vm, error| {
-                    if vm.is_callable(&self.report) {
-                        vm.call(
-                            self.report.clone(),
-                            Value::Undefined,
-                            &[error.to_string().into()],
-                        )?;
-                    }
-                    Ok(())
-                })?;
+                info.invoke(vm, &object, &event_value, capture, &mut report)?;
             }
             Ok(!info.prevented.get())
         });
@@ -583,6 +598,20 @@ pub(super) fn install_handler(
 }
 
 pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsError> {
+    let implicit_receiver = dom.as_ref().map(|state| state.borrow().window.clone());
+    install_with_receiver(vm, dom, implicit_receiver)
+}
+
+pub(super) fn install_worker(vm: &mut Vm) -> Result<Events, JsError> {
+    let global = vm.global();
+    install_with_receiver(vm, None, Some(global))
+}
+
+fn install_with_receiver(
+    vm: &mut Vm,
+    dom: Option<Shared>,
+    implicit_receiver: Option<Value>,
+) -> Result<Events, JsError> {
     let console = vm.get_global("console")?;
     let report = if console.as_object().is_some() {
         vm.get_property(console, "error")?
@@ -601,6 +630,7 @@ pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsErro
             state,
             listener_count: Rc::default(),
         }),
+        implicit_receiver,
     };
     vm.root(events.target_proto.clone());
     vm.root(events.event_proto.clone());

@@ -11,6 +11,10 @@ use crate::{
 use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::dynamic_import::{DynamicImportHook, SourceReferrer};
@@ -122,6 +126,7 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
+    interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
     pub(crate) execution_depth: usize,
@@ -301,6 +306,7 @@ impl Vm {
             next_private_id: 1,
             remaining: limits.max_instructions,
             limits,
+            interrupt: None,
             active: 0,
             call_depth: 0,
             execution_depth: 0,
@@ -387,6 +393,7 @@ impl Vm {
         source: &str,
         referrer: Option<SourceReferrer>,
     ) -> Result<Value, JsError> {
+        self.check_interrupt()?;
         let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
         self.retain_compiled_chunk(&chunk)?;
         if self.active == 0 {
@@ -407,6 +414,7 @@ impl Vm {
     }
     pub fn call(&mut self, function: Value, this: Value, args: &[Value]) -> Result<Value, JsError> {
         if self.active == 0 {
+            self.check_interrupt()?;
             self.remaining = self.limits.max_instructions;
         }
         self.active += 1;
@@ -421,6 +429,7 @@ impl Vm {
         F: FnOnce(&mut Vm) -> Result<T, JsError>,
     {
         if self.active == 0 {
+            self.check_interrupt()?;
             self.remaining = self.limits.max_instructions;
         }
         self.active += 1;
@@ -428,6 +437,25 @@ impl Vm {
         self.active -= 1;
         result
     }
+    /// Allow a worker's owning thread to request cooperative termination.
+    pub fn set_interrupt_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.interrupt = Some(flag);
+    }
+
+    fn check_interrupt(&self) -> Result<(), JsError> {
+        if self
+            .interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Worker execution terminated",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn global(&self) -> Value {
         Value::Object(self.global_object)
     }
@@ -1072,6 +1100,9 @@ impl Vm {
     }
     pub(crate) fn tick(&mut self) -> Result<(), JsError> {
         self.ensure_allocation(0)?;
+        if self.remaining & 255 == 0 {
+            self.check_interrupt()?;
+        }
         if self.remaining == 0 {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
@@ -1088,6 +1119,7 @@ impl Vm {
         Ok(())
     }
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
+        self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
             self.remaining = 0;

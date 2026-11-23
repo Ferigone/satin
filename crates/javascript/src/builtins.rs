@@ -5,7 +5,7 @@ use crate::{
     parser::FunctionKind,
     vm::{same_value, to_i32, to_u32},
 };
-use std::rc::Rc;
+use std::{cmp::Ordering, mem::size_of, rc::Rc};
 
 pub(crate) fn install(vm: &mut Vm) {
     for (name, value) in [
@@ -37,6 +37,7 @@ pub(crate) fn install(vm: &mut Vm) {
     crate::collections::install(vm);
     crate::promise::install(vm);
     crate::json::install(vm);
+    crate::wasm::install(vm);
     let global = vm.global();
     let eval = method(vm, global, "eval", 1, |vm, _, a| {
         vm.direct_eval(arg(a, 0), vm.global_env, false)
@@ -860,6 +861,126 @@ fn create_array(vm: &mut Vm, args: &[Value], prototype: crate::ObjectId) -> Resu
         vm.try_new_array_with_prototype(args, prototype)
     }
 }
+
+fn reserve_sort_items(
+    vm: &mut Vm,
+    items: &mut Vec<Value>,
+    additional: usize,
+) -> Result<(), JsError> {
+    vm.reserve_allocation(additional.saturating_mul(size_of::<Value>()))?;
+    items
+        .try_reserve_exact(additional)
+        .map_err(|_| JsError::new(ErrorKind::HeapLimit, "Array sort allocation failed"))
+}
+
+fn compare_array_elements(
+    vm: &mut Vm,
+    comparator: &Value,
+    left: &Value,
+    right: &Value,
+) -> Result<Ordering, JsError> {
+    vm.tick()?;
+    match (left.is_undefined(), right.is_undefined()) {
+        (true, true) => return Ok(Ordering::Equal),
+        (true, false) => return Ok(Ordering::Greater),
+        (false, true) => return Ok(Ordering::Less),
+        (false, false) => {}
+    }
+    if !comparator.is_undefined() {
+        let result = vm.invoke(
+            comparator.clone(),
+            Value::Undefined,
+            &[left.clone(), right.clone()],
+        )?;
+        return Ok(vm
+            .to_number(&result)?
+            .partial_cmp(&0.0)
+            .unwrap_or(Ordering::Equal));
+    }
+    let left = vm.to_string(left)?;
+    let right = vm.to_string(right)?;
+    if left.storage_id() == right.storage_id() {
+        return Ok(Ordering::Equal);
+    }
+    vm.consume_work(left.len().min(right.len()))?;
+    Ok(left.cmp(&right))
+}
+
+fn sort_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, JsError> {
+    let comparator = arg(args, 0);
+    if !comparator.is_undefined() && !vm.is_callable(&comparator) {
+        return Err(JsError::type_error("Array sort comparator is not callable"));
+    }
+    let object = vm.coerce_object(receiver)?;
+    let length = length(vm, object.clone())?;
+    let mut items = Vec::new();
+    for index in 0..length {
+        vm.tick()?;
+        let key = JsString::from(index.to_string());
+        if vm.has(&object, &key)? {
+            if items.len() == items.capacity() {
+                let additional = items.capacity().max(8).min(length - items.len());
+                reserve_sort_items(vm, &mut items, additional)?;
+            }
+            items.push(vm.get(object.clone(), &key)?);
+        }
+    }
+
+    let item_count = items.len();
+    if item_count > 1 {
+        let mut scratch = Vec::new();
+        reserve_sort_items(vm, &mut scratch, item_count)?;
+        items = stable_merge_sort(vm, items, scratch, |vm, left, right| {
+            compare_array_elements(vm, &comparator, left, right)
+        })?;
+    }
+    for (index, item) in items.into_iter().enumerate() {
+        vm.tick()?;
+        vm.set(object.clone(), &index.to_string().into(), item, true)?;
+    }
+    for index in item_count..length {
+        vm.tick()?;
+        vm.delete(object.clone(), &index.to_string().into(), true)?;
+    }
+    Ok(object)
+}
+
+pub(crate) fn stable_merge_sort<T: Clone>(
+    vm: &mut Vm,
+    mut items: Vec<T>,
+    mut scratch: Vec<T>,
+    mut compare: impl FnMut(&mut Vm, &T, &T) -> Result<Ordering, JsError>,
+) -> Result<Vec<T>, JsError> {
+    // Comparisons can run JavaScript and throw. Sort the snapshot before any
+    // writes, and take the left item first when two items compare equal.
+    let length = items.len();
+    let mut width = 1;
+    while width < length {
+        scratch.clear();
+        for start in (0..length).step_by(width * 2) {
+            let end = (start + width * 2).min(length);
+            let middle = (start + width).min(end);
+            let mut left = start;
+            let mut right = middle;
+            while left < middle && right < end {
+                if compare(vm, &items[left], &items[right])? != Ordering::Greater {
+                    scratch.push(items[left].clone());
+                    left += 1;
+                } else {
+                    scratch.push(items[right].clone());
+                    right += 1;
+                }
+            }
+            vm.consume_work(middle - left + end - right)?;
+            scratch.extend_from_slice(&items[left..middle]);
+            scratch.extend_from_slice(&items[right..end]);
+        }
+        std::mem::swap(&mut items, &mut scratch);
+        width *= 2;
+    }
+    Ok(items)
+}
+
 fn install_array(vm: &mut Vm) {
     let proto = Value::Object(vm.array_prototype);
     let array = constructor(vm, "Array", 1, proto.clone(), |vm, _, args| {
@@ -877,6 +998,7 @@ fn install_array(vm: &mut Vm) {
         })))
     });
     method(vm, array, "of", 0, |vm, _, a| vm.try_new_array(a));
+    method(vm, proto.clone(), "sort", 1, sort_array);
     method(vm, proto.clone(), "push", 1, |vm, this, a| {
         let object = vm.coerce_object(this)?;
         let len = length(vm, object.clone())?;
@@ -2164,7 +2286,7 @@ fn install_errors(vm: &mut Vm) {
         });
     }
 }
-fn create_error(
+pub(crate) fn create_error(
     vm: &mut Vm,
     kind: ErrorKind,
     args: &[Value],

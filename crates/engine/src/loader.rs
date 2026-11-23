@@ -19,13 +19,15 @@ mod html_encoding;
 mod resources;
 mod svg_image;
 pub(crate) mod transport;
-pub(crate) use home_assets::is_home_image;
+mod worker_policy;
 pub use home_assets::built_in_site_icon;
+pub(crate) use home_assets::is_home_image;
 pub(crate) use resources::decode_oriented_bitmap;
 pub use resources::{DocumentResource, ResourceBody, ResourceKind, ResourceRequest};
 pub use svg_image::SvgImage;
 use svg_image::svg_mime;
 use transport::{BodyError, CancelSignal, Interrupted, RequestControl};
+pub(crate) use worker_policy::BlobWorkerPolicy;
 
 pub const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(18);
 pub(crate) const USER_AGENT: &str = concat!(
@@ -71,6 +73,7 @@ pub struct LoadedPage {
     pub stats: LoadStats,
     pub cookies: CookieStore,
     pub navigation_context: CookieContext,
+    pub(crate) worker_policy: BlobWorkerPolicy,
     pub form_controls: Arc<HashMap<NodeId, Arc<crate::script::ControlSnapshot>>>,
     pub fonts: Arc<crate::fonts::FontSet>,
 }
@@ -113,6 +116,7 @@ impl LoadedPage {
             },
             cookies,
             navigation_context,
+            worker_policy: BlobWorkerPolicy::default(),
             form_controls: Arc::default(),
             fonts: Arc::default(),
         }
@@ -211,6 +215,7 @@ impl LoadedPage {
                 &Url::parse(url).unwrap_or_else(|_| Url::parse("about:home").unwrap()),
                 "GET",
             ),
+            worker_policy: BlobWorkerPolicy::default(),
             form_controls,
             fonts: Arc::new(crate::fonts::FontSet::default()),
         };
@@ -442,6 +447,7 @@ impl Loader {
         let size = main.bytes.len();
         let mime = crate::mime::MimeType::parse(&main.content_type);
         let mut page = LoadedPage::empty(url, self.cookies.clone(), main.context);
+        page.worker_policy = main.worker_policy;
         let input = if svg_mime(&main.content_type) {
             let source = decode_text(&main.bytes, "image/svg+xml; charset=utf-8");
             let svg = LoadedPage::from_svg(&page.url, &source)?;
@@ -546,6 +552,7 @@ impl Loader {
             return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
         }
         let content_type = response_content_type(response.headers(), true);
+        let worker_policy = BlobWorkerPolicy::from_headers(response.headers());
         let url = response.url().clone();
         let mime = crate::mime::MimeType::parse(&content_type);
         if mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
@@ -565,6 +572,7 @@ impl Loader {
                         nosniff: false,
                         origin_clean,
                         response_start,
+                        worker_policy,
                     },
                     started,
                     control,
@@ -576,7 +584,8 @@ impl Loader {
                 .map_err(interrupted_navigation)?;
         }
 
-        let page = LoadedPage::empty(url, self.cookies.clone(), context);
+        let mut page = LoadedPage::empty(url, self.cookies.clone(), context);
+        page.worker_policy = worker_policy;
         let opened = OpenedPage {
             page,
             input: DocumentInput::Streaming,
@@ -736,6 +745,7 @@ impl Loader {
         };
         page.cookies = self.cookies.clone();
         page.navigation_context = main.context;
+        page.worker_policy = main.worker_policy;
         if page.document.truncated {
             return Err("Dokument przekracza limit złożoności parsera w tej wersji alfa.".into());
         }
@@ -1082,6 +1092,7 @@ impl Loader {
                     origin_clean: true,
                     context: request.context.clone(),
                     response_start: Instant::now(),
+                    worker_policy: BlobWorkerPolicy::default(),
                 }
             }
             "http" | "https" => {
@@ -1092,6 +1103,11 @@ impl Loader {
                 }
                 let content_type =
                     response_content_type(response.headers(), request.context.top_level_navigation);
+                let worker_policy = if request.context.top_level_navigation {
+                    BlobWorkerPolicy::from_headers(response.headers())
+                } else {
+                    BlobWorkerPolicy::default()
+                };
                 let final_url = response.url().to_string();
                 let status = response.status().as_u16();
                 let nosniff = response
@@ -1112,6 +1128,7 @@ impl Loader {
                     context,
                     origin_clean,
                     response_start,
+                    worker_policy,
                 }
             }
             "file" => {
@@ -1145,6 +1162,7 @@ impl Loader {
                     context: request.context.clone(),
                     origin_clean: false,
                     response_start: Instant::now(),
+                    worker_policy: BlobWorkerPolicy::default(),
                 }
             }
             _ => {
@@ -1230,6 +1248,7 @@ struct Response {
     context: CookieContext,
     origin_clean: bool,
     response_start: Instant,
+    worker_policy: BlobWorkerPolicy,
 }
 impl Response {
     fn resource(self) -> Result<Self, String> {
@@ -1382,6 +1401,7 @@ fn builtin_source(name: &str) -> (String, bool) {
     let (title, body) = match name {
         "media" => ("Video playback", include_str!("../data/pages/media.html")),
         "streaming" => ("Segmented playback", include_str!("../data/pages/streaming.html")),
+        "workers" => ("Worker and WebAssembly", include_str!("../data/pages/workers.html")),
         "time" => ("Zegar i układ", include_str!("../data/pages/time.html")),
         "canvas" => ("Płótno 2D", include_str!("../data/pages/canvas.html")),
         "numbers" => (
@@ -1439,7 +1459,7 @@ fn builtin_source(name: &str) -> (String, bool) {
         _ => body,
     };
     let home = title == "New Tab";
-    let lang = if matches!(name, "media" | "streaming" | "version") || home {
+    let lang = if matches!(name, "media" | "streaming" | "version" | "workers") || home {
         "en"
     } else {
         "pl"
@@ -1500,6 +1520,109 @@ pub fn builtin(name: &str) -> LoadedPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_policy_follows_the_final_http_response_in_every_navigation_path() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let fixture = std::thread::spawn(move || {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                for line in reader.lines() {
+                    if line.unwrap().is_empty() {
+                        break;
+                    }
+                }
+                let path = request.split_ascii_whitespace().nth(1).unwrap();
+                let (status, headers, body) = match path {
+                    "/redirect" => (
+                        "302 Found",
+                        "Location: /allowed\r\nContent-Security-Policy: worker-src 'none'\r\n",
+                        "",
+                    ),
+                    "/allowed" => (
+                        "200 OK",
+                        concat!(
+                            "Content-Type: text/html\r\n",
+                            "Content-Security-Policy: worker-src blob:\r\n",
+                            "Content-Security-Policy-Report-Only: worker-src 'none'\r\n"
+                        ),
+                        "<title>Allowed</title>",
+                    ),
+                    "/denied" => (
+                        "200 OK",
+                        "Content-Type: text/plain\r\nContent-Security-Policy: worker-src 'self'\r\n",
+                        "Denied",
+                    ),
+                    _ => panic!("unexpected fixture request {path}"),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let loader = Loader::new().unwrap();
+        let cancel = AtomicBool::new(false);
+        let redirect = NavigationRequest::get(&format!("{origin}/redirect")).unwrap();
+        let opened = loader.open_navigation(&redirect, &cancel).unwrap();
+        assert_eq!(opened.page.url, format!("{origin}/allowed"));
+        assert!(opened.page.worker_policy.allows_blob());
+        assert!(
+            !loader
+                .load(&format!("{origin}/denied"), &cancel)
+                .unwrap()
+                .worker_policy
+                .allows_blob()
+        );
+        for (path, expected) in [("allowed", true), ("denied", false)] {
+            let request = NavigationRequest::get(&format!("{origin}/{path}")).unwrap();
+            let mut policy = None;
+            loader
+                .stream_navigation(&request, &cancel, |part| {
+                    if let NavigationPart::Open(opened) = part {
+                        assert!(
+                            policy
+                                .replace(opened.page.worker_policy.allows_blob())
+                                .is_none()
+                        );
+                    }
+                })
+                .unwrap();
+            assert_eq!(policy, Some(expected));
+        }
+        fixture.join().unwrap();
+    }
+
+    #[test]
+    fn worker_policy_allows_pages_without_response_headers() {
+        let loader = Loader::new().unwrap();
+        let cancel = AtomicBool::new(false);
+        for url in ["about:home", "data:text/html,<title>Fixture</title>"] {
+            let request = NavigationRequest::get(url).unwrap();
+            let opened = loader.open_navigation(&request, &cancel).unwrap();
+            assert!(opened.page.worker_policy.allows_blob());
+        }
+        assert!(
+            LoadedPage::from_html("https://example.test/", "")
+                .worker_policy
+                .allows_blob()
+        );
+    }
+
     #[test]
     fn encoding_bom_and_header() {
         assert_eq!(

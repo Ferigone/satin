@@ -33,6 +33,7 @@ pub(crate) struct Job {
 }
 pub(crate) enum Payload {
     MediaWake,
+    WorkerWake,
     Navigation(NavigationPart),
     NavigationError(String),
     Fetch {

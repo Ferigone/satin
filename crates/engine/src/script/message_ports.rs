@@ -1,6 +1,6 @@
 //! Same-document message channels. Endpoint and packet references are VM
 //! edges, while the task source roots only currently runnable queues.
-mod message_event;
+pub(super) mod message_event;
 
 use super::{arg, event_target, getter, structured_clone, webidl};
 use message_event::MessageEvents;
@@ -96,6 +96,15 @@ fn replace(vm: &mut Vm, object: &Value, index: u32, value: Value) {
 }
 
 impl MessagePorts {
+    pub(super) fn received_from_peer(
+        &self,
+        vm: &mut Vm,
+        kind: &str,
+        data: Value,
+    ) -> Result<Value, JsError> {
+        self.message_events.received_from_peer(vm, kind, data)
+    }
+
     fn new_port(&self, vm: &mut Vm) -> Result<Value, JsError> {
         let object = vm.new_object_with_prototype(self.port_prototype.clone())?;
         vm.mark_platform_object(&object)?;

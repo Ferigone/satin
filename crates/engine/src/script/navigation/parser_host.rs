@@ -8,7 +8,7 @@ use crate::{
         HtmlStream, HtmlStreamError, ParserEvent, ParserProgress, ParserScript, ParserScriptKind,
         WriteId,
     },
-    loader::ResourceKind,
+    loader::{BlobWorkerPolicy, ResourceKind},
     network::{CredentialsMode, crossorigin_credentials},
 };
 use rust_browser_javascript::{ErrorKind, JsError, Value, Vm};
@@ -89,6 +89,7 @@ pub(in crate::script) struct ParserHost {
     pub(super) script_flags: HashMap<NodeId, Flags>,
     pub discarded: usize,
     pub wants_realm: bool,
+    worker_policy: BlobWorkerPolicy,
     client: Arc<Url>,
     base: Arc<Url>,
     base_node: Option<NodeId>,
@@ -107,6 +108,7 @@ impl ParserHost {
             script_flags: HashMap::new(),
             discarded: 0,
             wants_realm: false,
+            worker_policy: BlobWorkerPolicy::default(),
             base: client.clone(),
             client,
             base_node: None,
@@ -115,6 +117,10 @@ impl ParserHost {
             sheets: 0,
             images: 0,
         }
+    }
+
+    pub(in crate::script) fn worker_policy(&self) -> BlobWorkerPolicy {
+        self.worker_policy
     }
 
     /// Advance several tokens, or stop at a point where the embedding must
@@ -285,6 +291,22 @@ impl ParserHost {
             match tag {
                 "script" => {
                     self.script_flags.insert(id, Flags::PARSING);
+                }
+                "meta"
+                    if self.worker_policy.allows_blob()
+                        && doc.attr(id, "http-equiv").is_some_and(|value| {
+                            value.eq_ignore_ascii_case("content-security-policy")
+                        })
+                        && doc.nodes[index].parent.is_some_and(|parent| {
+                            doc.namespace(parent) == Namespace::Html
+                                && doc.tag(parent) == "head"
+                                && connected(doc, parent)
+                        }) =>
+                {
+                    if let Some(content) = doc.attr(id, "content") {
+                        self.worker_policy
+                            .restrict(BlobWorkerPolicy::from_meta(content));
+                    }
                 }
                 "base"
                     if self.base_node.is_none()

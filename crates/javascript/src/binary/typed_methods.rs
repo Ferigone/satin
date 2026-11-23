@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     JsError, JsString, Value, Vm,
-    builtins::{join_indexed_properties, method},
+    builtins::{join_indexed_properties, method, stable_merge_sort},
     heap::ObjectKind,
 };
 use std::{cmp::Ordering, mem::size_of, ops::Range};
@@ -606,34 +606,9 @@ fn sort(vm: &mut Vm, this: Value, args: &[Value], copy: bool) -> Result<Value, J
             .chunks_exact(array.element.width())
             .map(|chunk| Element::load_bits(chunk, LITTLE_ENDIAN)),
     );
-    // Stable merge, since an arbitrary JavaScript comparator can throw or be
-    // inconsistent. Order the snapshot before writing back to the backing store.
-    let mut width = 1;
-    while width < length {
-        scratch.clear();
-        for start in (0..length).step_by(width * 2) {
-            let end = (start + width * 2).min(length);
-            let middle = (start + width).min(end);
-            let mut left = start;
-            let mut right = middle;
-            while left < middle && right < end {
-                if compare(vm, &comparator, array.element, values[left], values[right])?
-                    != Ordering::Greater
-                {
-                    scratch.push(values[left]);
-                    left += 1;
-                } else {
-                    scratch.push(values[right]);
-                    right += 1;
-                }
-            }
-            vm.consume_work(middle - left + end - right)?;
-            scratch.extend_from_slice(&values[left..middle]);
-            scratch.extend_from_slice(&values[right..end]);
-        }
-        std::mem::swap(&mut values, &mut scratch);
-        width *= 2;
-    }
+    let values = stable_merge_sort(vm, values, scratch, |vm, left, right| {
+        compare(vm, &comparator, array.element, *left, *right)
+    })?;
     vm.consume_work(length)?;
     for (index, bits) in values.into_iter().enumerate() {
         vm.write_typed_bits(target, index, bits)?;

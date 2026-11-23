@@ -29,6 +29,7 @@ mod symbol;
 mod syntax;
 mod value;
 mod vm;
+mod wasm;
 
 pub use bigint::JsBigInt;
 pub use binary::{ArrayBufferView, ArrayBufferViewKind};
@@ -39,7 +40,7 @@ pub use modules::{ModuleId, ModuleRequest, ModuleStatus};
 pub use promise::PromiseCapability;
 pub use structured_clone::{
     MAX_STRUCTURED_CLONE_TRANSFERS, PlatformClone, PlatformTransfer, StructuredCloneError,
-    StructuredCloneOutput,
+    StructuredCloneOutput, StructuredClonePacket,
 };
 pub use value::{ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value};
 pub use vm::{GcStats, RootId, Vm, VmLimits};

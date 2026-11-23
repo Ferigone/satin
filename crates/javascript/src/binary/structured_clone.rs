@@ -3,15 +3,10 @@ use super::{Buffer, TypedArray, View, element::Element};
 use crate::{JsError, ObjectId, StructuredCloneError, Value, Vm, heap::ObjectKind};
 
 #[derive(Clone, Copy)]
-pub(crate) struct ViewRecord {
-    view: View,
+pub(crate) struct ViewLayout {
+    offset: usize,
+    bytes: Option<usize>,
     element: Option<Element>,
-}
-
-impl ViewRecord {
-    pub(crate) fn buffer(self) -> ObjectId {
-        self.view.buffer
-    }
 }
 
 impl Vm {
@@ -19,18 +14,35 @@ impl Vm {
         &mut self,
         source: ObjectId,
     ) -> Result<Value, StructuredCloneError> {
-        let buffer = self.buffer_data(source)?;
-        let len = buffer.bytes.as_ref().ok_or(detached())?.len();
-        let maximum = buffer.maximum;
+        let (len, maximum) = self.clone_buffer_layout(source)?;
         self.check_binary_allocation(len, 1)?;
         let bytes = self.copy_binary_range(source, 0..len)?;
-        Ok(self.create_buffer(bytes, maximum, self.array_buffer_prototype())?)
+        Ok(self.materialize_clone_buffer(bytes, maximum)?)
     }
 
-    pub(crate) fn clone_view_record(
+    pub(crate) fn clone_buffer_layout(
         &self,
         source: ObjectId,
-    ) -> Result<ViewRecord, StructuredCloneError> {
+    ) -> Result<(usize, Option<usize>), StructuredCloneError> {
+        let buffer = self.buffer_data(source)?;
+        Ok((
+            buffer.bytes.as_ref().ok_or(detached())?.len(),
+            buffer.maximum,
+        ))
+    }
+
+    pub(crate) fn materialize_clone_buffer(
+        &mut self,
+        bytes: Vec<u8>,
+        maximum: Option<usize>,
+    ) -> Result<Value, JsError> {
+        self.create_buffer(bytes, maximum, self.array_buffer_prototype())
+    }
+
+    pub(crate) fn clone_view_layout(
+        &self,
+        source: ObjectId,
+    ) -> Result<(ObjectId, ViewLayout), StructuredCloneError> {
         let (view, element) = match self.heap.object(source)?.kind {
             ObjectKind::TypedArray(array) => (array.view, Some(array.element)),
             ObjectKind::DataView(view) => (view, None),
@@ -42,19 +54,27 @@ impl Vm {
                 "ArrayBufferView is detached or out of bounds",
             ));
         }
-        Ok(ViewRecord { view, element })
+        Ok((
+            view.buffer,
+            ViewLayout {
+                offset: view.offset,
+                bytes: view.bytes,
+                element,
+            },
+        ))
     }
 
     pub(crate) fn materialize_clone_view(
         &mut self,
-        record: ViewRecord,
+        layout: ViewLayout,
         buffer: ObjectId,
     ) -> Result<Value, JsError> {
         let view = View {
             buffer,
-            ..record.view
+            offset: layout.offset,
+            bytes: layout.bytes,
         };
-        match record.element {
+        match layout.element {
             Some(element) => self.new_typed_view(
                 TypedArray { view, element },
                 self.binary.typed[element as usize].expect("initialized typed array prototype"),
@@ -89,25 +109,48 @@ impl Vm {
         &self,
         source: ObjectId,
     ) -> Result<(), StructuredCloneError> {
-        if self.buffer_data(source)?.bytes.is_none() {
-            return Err(detached());
-        }
-        Ok(())
+        self.clone_transfer_capacity(source).map(|_| ())
+    }
+
+    pub(crate) fn clone_transfer_capacity(
+        &self,
+        source: ObjectId,
+    ) -> Result<usize, StructuredCloneError> {
+        Ok(self
+            .buffer_data(source)?
+            .bytes
+            .as_ref()
+            .ok_or_else(detached)?
+            .capacity())
     }
 
     /// Called after validation of every participant, with no intervening
     /// JavaScript execution. The existing allocation charge follows the store.
     pub(crate) fn commit_clone_transfer(&mut self, source: ObjectId, destination: ObjectId) {
+        let (bytes, maximum) = self.take_clone_store(source);
+        *self
+            .buffer_data_mut(destination)
+            .expect("preallocated transfer destination") = Buffer {
+            bytes: Some(bytes),
+            maximum,
+        };
+    }
+
+    /// Moves a validated store out of this VM without allocating or calling JS.
+    pub(crate) fn take_clone_packet_store(&mut self, source: ObjectId) -> (Vec<u8>, Option<usize>) {
+        let (bytes, maximum) = self.take_clone_store(source);
+        self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_sub(bytes.capacity());
+        (bytes, maximum)
+    }
+
+    fn take_clone_store(&mut self, source: ObjectId) -> (Vec<u8>, Option<usize>) {
         let buffer = self
             .buffer_data_mut(source)
             .expect("prevalidated transfer source");
-        let moved = Buffer {
-            bytes: buffer.bytes.take(),
-            maximum: buffer.maximum,
-        };
-        *self
-            .buffer_data_mut(destination)
-            .expect("preallocated transfer destination") = moved;
+        (
+            buffer.bytes.take().expect("prevalidated transfer bytes"),
+            buffer.maximum,
+        )
     }
 }
 

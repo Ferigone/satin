@@ -41,6 +41,7 @@ Enter an address below in Satin.
 | `about:home` | Open the start page and choose a demo |
 | `about:media` | Play, pause, or seek within an MP4 sample |
 | `about:streaming` | Play separate audio and video segments as they arrive |
+| `about:workers` | Transfer a buffer and run a WebAssembly sample in a background worker |
 | `about:javascript` | Run a script and interact with the page |
 | `about:graphics` | Explore layout, SVG, and scrolling |
 | `about:canvas` | Draw on a canvas and inspect the result |
