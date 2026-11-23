@@ -140,6 +140,19 @@ impl Stream {
         self.ending = false;
     }
 
+    pub(super) fn buffered_until(&self, time: f64) -> Option<f64> {
+        let mut ends = self.buffers.values().map(|buffer| {
+            buffer
+                .ranges()
+                .ok()?
+                .into_iter()
+                .find(|&(start, end)| start <= time && time <= end)
+                .map(|(_, end)| end)
+        });
+        let first = ends.next()??;
+        ends.try_fold(first, |earliest, end| Some(earliest.min(end?)))
+    }
+
     pub(super) fn resolver(&self) -> Result<IMFMediaEngineExtension> {
         Ok(Resolver {
             source: self.native.cast()?,

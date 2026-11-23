@@ -21,6 +21,14 @@ The desktop checks exercise local navigation, script events, forms, and real MP4
 
 The headless and desktop smoke checks require positive playback time, a decoded frame, valid video dimensions, playback readiness, and an audio track. Audio-track detection is not an audible-output check. The smoke reports include playback counters for each active media element.
 
+To check the native media backend without opening a window, run on Windows x64 after building:
+
+```powershell
+node tools/verify-native-media.mjs target/debug/rust-browser.exe
+```
+
+This loopback check uses the authored H.264/AAC files. It checks pause, seek, and resume for progressive MP4 and for fragmented MP4 both before and after `endOfStream()`. It also withholds fragments from an open `MediaSource`, checks that `waiting` drops readiness below `HAVE_FUTURE_DATA`, then appends more data and checks that readiness and the clock recover. Each case uses its own profile and records its DOM trace under `target`. This is not an HLS or a website playback check.
+
 The verifier also clicks the test button on `about:workers` in both modes. The page transfers a typed-array backing buffer to a classic Blob worker and checks that ownership moved. The worker changes one byte, executes an authored WebAssembly module, and sends the modified view and numeric result back to the page.
 
 To offer the exact verified build through Satin Preview, pin its executable digest instead of rebuilding on click:

@@ -24,8 +24,9 @@ use windows::{
             MF_MEDIA_ENGINE_EVENT_PLAYING, MF_MEDIA_ENGINE_EVENT_SEEKED,
             MF_MEDIA_ENGINE_EVENT_SEEKING, MF_MEDIA_ENGINE_EVENT_TIMEUPDATE,
             MF_MEDIA_ENGINE_EVENT_WAITING, MF_MEDIA_ENGINE_EXTENSION,
-            MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_VERSION, MFARGB, MFCreateAttributes,
-            MFCreateMFByteStreamOnStream, MFShutdown, MFStartup,
+            MF_MEDIA_ENGINE_READY_HAVE_FUTURE_DATA, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+            MF_VERSION, MFARGB, MFCreateAttributes, MFCreateMFByteStreamOnStream, MFShutdown,
+            MFStartup,
         },
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
@@ -167,6 +168,7 @@ impl Player {
             pending_seek: None,
             ready: false,
             playing: false,
+            waiting_through: None,
             seeking: false,
             ended: false,
             play_after_stream_end: false,
@@ -213,6 +215,7 @@ pub(super) struct Player {
     pending_seek: Option<f64>,
     ready: bool,
     playing: bool,
+    waiting_through: Option<f64>,
     seeking: bool,
     ended: bool,
     play_after_stream_end: bool,
@@ -242,6 +245,7 @@ impl Player {
                 }
                 Command::Pause(_) => {
                     self.play_after_stream_end = false;
+                    self.waiting_through = None;
                     self.engine.Pause()
                 }
                 Command::Seek { time, .. } if !time.is_finite() => {
@@ -252,6 +256,7 @@ impl Player {
                     Ok(())
                 }
                 Command::Seek { time, .. } => {
+                    self.waiting_through = None;
                     self.ended = false;
                     self.engine.SetCurrentTime(time.max(0.))
                 }
@@ -362,7 +367,8 @@ impl Player {
                 capture = true;
                 EventKind::Ready
             }
-            Signal::Loaded => return Ok(()),
+            // Windows can report CANPLAY again after an open stream refills.
+            Signal::Loaded => EventKind::Ready,
             Signal::FirstFrame => {
                 if let Some(frame) = self
                     .frame(true, output, key)
@@ -374,10 +380,12 @@ impl Player {
             }
             Signal::Playing => {
                 self.playing = true;
+                self.waiting_through = None;
                 EventKind::Playing
             }
             Signal::Paused => {
                 self.playing = false;
+                self.waiting_through = None;
                 if self.ended {
                     return Ok(());
                 }
@@ -385,6 +393,12 @@ impl Player {
                 EventKind::Paused
             }
             Signal::Waiting => {
+                if self.playing
+                    && !self.seeking
+                    && let Input::Stream(stream) = &self.input
+                {
+                    self.waiting_through = stream.buffered_until(self.time());
+                }
                 self.playing = false;
                 EventKind::Waiting
             }
@@ -402,6 +416,21 @@ impl Player {
                     return Ok(());
                 }
                 let time = self.time();
+                if self.waiting_through.is_some_and(|edge| time > edge)
+                    && !self.seeking
+                    && unsafe {
+                        !self.engine.IsPaused().as_bool()
+                            && i32::from(self.engine.GetReadyState())
+                                >= MF_MEDIA_ENGINE_READY_HAVE_FUTURE_DATA.0
+                    }
+                {
+                    // Media Foundation can resume after refill without CANPLAY or
+                    // PLAYING. Its ready state alone can stay high during starvation,
+                    // so require the clock to pass the previously buffered range.
+                    self.waiting_through = None;
+                    self.playing = true;
+                    output.publish(key, EventKind::Playing);
+                }
                 if self.playing && !self.seeking && self.stream_end_time() == Some(time) {
                     // Media Foundation can keep running its clock after an MSE seek
                     // has consumed all the data in an explicitly completed stream.
@@ -455,6 +484,7 @@ impl Player {
 
     fn finish(&mut self, output: &Shared, key: Key) {
         self.playing = false;
+        self.waiting_through = None;
         if !std::mem::replace(&mut self.ended, true) {
             output.publish(key, EventKind::Time(self.time()));
             output.publish(key, EventKind::Ended);

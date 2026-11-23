@@ -98,6 +98,7 @@ impl Vm {
                 ObjectKind::ArrayBuffer(Buffer {
                     bytes: None,
                     maximum: None,
+                    wasm: false,
                 }),
                 self.array_buffer_prototype(),
             )?
@@ -116,12 +117,13 @@ impl Vm {
         &self,
         source: ObjectId,
     ) -> Result<usize, StructuredCloneError> {
-        Ok(self
-            .buffer_data(source)?
-            .bytes
-            .as_ref()
-            .ok_or_else(detached)?
-            .capacity())
+        let buffer = self.buffer_data(source)?;
+        if buffer.wasm {
+            return Err(StructuredCloneError::DataClone(
+                "WebAssembly buffers cannot be transferred",
+            ));
+        }
+        Ok(buffer.bytes.as_ref().ok_or_else(detached)?.capacity())
     }
 
     /// Called after validation of every participant, with no intervening
@@ -133,6 +135,7 @@ impl Vm {
             .expect("preallocated transfer destination") = Buffer {
             bytes: Some(bytes),
             maximum,
+            wasm: false,
         };
     }
 

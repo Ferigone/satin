@@ -1,4 +1,4 @@
-use rust_browser_javascript::{Value, Vm};
+use rust_browser_javascript::{StructuredCloneError, Value, Vm, VmLimits};
 
 // (module
 //   (import "env" "sum" (func $sum (param i32 i32) (result i32)))
@@ -175,4 +175,309 @@ fn policy_blocks_new_modules_but_allows_validation_and_precompiled_modules() {
             .unwrap(),
         Value::Bool(true)
     );
+}
+
+fn uleb(mut number: u32, bytes: &mut Vec<u8>) {
+    while number >= 128 {
+        bytes.push((number as u8 & 127) | 128);
+        number >>= 7;
+    }
+    bytes.push(number as u8);
+}
+
+fn section(module: &mut Vec<u8>, id: u8, bytes: &[u8]) {
+    module.push(id);
+    uleb(bytes.len() as u32, module);
+    module.extend_from_slice(bytes);
+}
+
+fn exports(module: &mut Vec<u8>, entries: &[(&str, u8, u8)]) {
+    let mut bytes = vec![entries.len() as u8];
+    for (name, tag, index) in entries {
+        bytes.push(name.len() as u8);
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend([*tag, *index]);
+    }
+    section(module, 7, &bytes);
+}
+
+fn bodies(module: &mut Vec<u8>, instructions: &[&[u8]]) {
+    let mut bytes = vec![instructions.len() as u8];
+    for body in instructions {
+        bytes.extend([body.len() as u8 + 2, 0]); // size, no local declarations
+        bytes.extend_from_slice(body);
+        bytes.push(0x0b);
+    }
+    section(module, 10, &bytes);
+}
+
+fn install_module(vm: &mut Vm, name: &str, bytes: Vec<u8>) {
+    let source = vm.new_uint8_array(bytes).unwrap();
+    vm.set_global(name, source).unwrap();
+}
+
+fn defined_memory_module() -> Vec<u8> {
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    section(
+        &mut module,
+        1,
+        &[
+            3, 0x60, 1, 0x7f, 1, 0x7f, 0x60, 2, 0x7f, 0x7f, 0, 0x60, 0, 1, 0x7f,
+        ],
+    );
+    section(&mut module, 3, &[6, 0, 1, 2, 0, 0, 0]);
+    section(&mut module, 5, &[1, 1, 1, 2]);
+    exports(
+        &mut module,
+        &[
+            ("memory", 2, 0),
+            ("load", 0, 0),
+            ("store", 0, 1),
+            ("size", 0, 2),
+            ("grow", 0, 3),
+            ("loadWithOffset", 0, 4),
+            ("loadSignedByte", 0, 5),
+        ],
+    );
+    bodies(
+        &mut module,
+        &[
+            &[0x20, 0, 0x28, 2, 0],          // i32.load
+            &[0x20, 0, 0x20, 1, 0x36, 2, 0], // i32.store
+            &[0x3f, 0],                      // memory.size
+            &[0x20, 0, 0x40, 0],             // memory.grow
+            &[0x20, 0, 0x28, 0, 1],          // i32.load offset=1
+            &[0x20, 0, 0x2c, 0, 0],          // i32.load8_s
+        ],
+    );
+    section(
+        &mut module,
+        11,
+        &[1, 0, 0x41, 4, 0x0b, 4, 0x78, 0x56, 0x34, 0x12],
+    );
+    module
+}
+
+#[test]
+fn wasm_and_js_access_the_same_storage_and_grow_detaches_old_views() {
+    let mut vm = Vm::new();
+    install_module(&mut vm, "memoryModule", defined_memory_module());
+    assert_eq!(
+        vm.eval(
+            r#"
+            var module = new WebAssembly.Module(memoryModule);
+            var exp = new WebAssembly.Instance(module).exports;
+            var independent = new WebAssembly.Instance(module).exports;
+            var m = exp.memory, original = m.buffer;
+            var view = new Uint8Array(original), data = new DataView(original);
+            var initial = m instanceof WebAssembly.Memory && m.buffer === original &&
+                original instanceof ArrayBuffer && !original.resizable &&
+                exp.size() === 1 && exp.load(4) === 0x12345678 &&
+                independent.memory.buffer !== original;
+            data.setInt32(1, 0x01020304, true);
+            var visibleInWasm = exp.load(1) === 0x01020304 &&
+                independent.load(4) === 0x12345678;
+            exp.store(65532, -2);
+            var visibleInJs = view[65532] === 254 && data.getInt32(65532, true) === -2 &&
+                exp.loadSignedByte(65532) === -2;
+            var trapped = 0;
+            try { exp.store(65533, 0); } catch (e) { trapped += e instanceof WebAssembly.RuntimeError; }
+            try { exp.load(-1); } catch (e) { trapped += e instanceof WebAssembly.RuntimeError; }
+            try { exp.loadWithOffset(-1); } catch (e) { trapped += e instanceof WebAssembly.RuntimeError; }
+            var atomic = exp.load(65532) === -2;
+            var previous = exp.grow(1);
+            var newer = m.buffer;
+            var grew = previous === 1 && exp.size() === 2 && original.detached &&
+                view.length === 0 && newer.byteLength === 131072 &&
+                exp.load(65532) === -2 && exp.load(65536) === 0;
+            var refused = exp.grow(1) === -1 && exp.grow(-1) === -1 && m.buffer === newer;
+            var zero = m.grow(0) === 2 && newer.detached &&
+                m.buffer !== newer && exp.load(65532) === -2;
+            initial && visibleInWasm && visibleInJs && trapped === 3 && atomic && grew && refused && zero
+        "#,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+fn imported_memory_module(invalid_data: bool) -> Vec<u8> {
+    let mut module = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut module, 1, &[1, 0x60, 1, 0x7f, 1, 0x7f]);
+    section(
+        &mut module,
+        2,
+        &[
+            2, 1, b'e', 1, b'm', 2, 1, 1, 2, // (import "e" "m" (memory 1 2))
+            1, b'e', 1, b'f', 0, 0, // (import "e" "f" (func (param i32) (result i32)))
+        ],
+    );
+    section(&mut module, 3, &[1, 0]);
+    exports(&mut module, &[("memory", 2, 0), ("read", 0, 1)]);
+    // Load from the i32 address returned by the imported function.
+    bodies(&mut module, &[&[0x20, 0, 0x10, 0, 0x28, 0, 0]]);
+    if invalid_data {
+        section(
+            &mut module,
+            11,
+            &[2, 0, 0x41, 0, 0x0b, 1, 0xff, 0, 0x41, 0x7f, 0x0b, 1, 0xff],
+        );
+    }
+    module
+}
+
+#[test]
+fn memory_imports_check_limits_preserve_order_and_observe_reentrant_growth() {
+    let mut vm = Vm::new();
+    install_module(&mut vm, "memoryModule", imported_memory_module(false));
+    install_module(&mut vm, "badDataModule", imported_memory_module(true));
+    vm.eval(
+        r#"
+        var order = '', kept, imported, rangeErrors = 0, trapped, unchanged;
+        var mem = new WebAssembly.Memory({initial: 1, maximum: 2});
+        var old = mem.buffer;
+        var fixture = new WebAssembly.Module(memoryModule);
+        function instantiateWith(memory) {
+            return new WebAssembly.Instance(fixture, {e: {m: memory, f() { return 0; }}});
+        }
+        for (const memory of [
+            {},
+            new WebAssembly.Memory({initial: 0, maximum: 2}),
+            new WebAssembly.Memory({initial: 1, maximum: 3}),
+            new WebAssembly.Memory({initial: 1})
+        ]) {
+            try { instantiateWith(memory); } catch (e) { rangeErrors += e instanceof WebAssembly.LinkError; }
+        }
+        try {
+            new WebAssembly.Instance(new WebAssembly.Module(badDataModule), {e: {m: mem, f() {}}});
+        } catch (e) {
+            trapped = e instanceof WebAssembly.RuntimeError;
+        }
+        unchanged = new Uint8Array(old)[0] === 0;
+        WebAssembly.instantiate(memoryModule, {e: {
+            get m() { order += 'm'; return mem; },
+            get f() { order += 'f'; return function(a) {
+                mem.grow(1);
+                new DataView(mem.buffer).setInt32(65536, a, true);
+                return 65536;
+            }; }
+        }}).then(({instance}) => {
+            imported = instance.exports.memory === mem;
+            kept = instance.exports.read;
+        });
+    "#,
+    )
+    .unwrap();
+    flush(&mut vm);
+    vm.collect_garbage();
+    assert_eq!(
+        vm.eval(
+            "imported && trapped && unchanged && rangeErrors === 4 && order === 'mf' && \
+             kept(42) === 42 && old.detached"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn memory_cannot_be_detached_by_transfer_and_failed_growth_is_atomic() {
+    let baseline = Vm::new().estimated_heap_bytes();
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_bytes: baseline + 4 * 65_536,
+        ..VmLimits::default()
+    });
+    assert_eq!(
+        vm.eval(
+            r#"
+            var mem = new WebAssembly.Memory({initial: 1, maximum: 20});
+            var buffer = mem.buffer, view = new Uint8Array(buffer);
+            view[0] = 99;
+            var errors = 0;
+            try { mem.grow(8); } catch (e) { errors += e instanceof RangeError; }
+            try { buffer.transfer(); } catch (e) { errors += e instanceof TypeError; }
+            try { buffer.transferToFixedLength(); } catch (e) { errors += e instanceof TypeError; }
+            errors === 3 && mem.buffer === buffer &&
+                view.length === 65536 && view[0] === 99
+        "#,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let buffer = vm.get_global("buffer").unwrap();
+    assert!(vm.detach_array_buffer(&buffer).is_err());
+    assert!(vm.transfer_array_buffer(&buffer).is_err());
+    assert!(matches!(
+        vm.structured_clone(buffer.clone(), std::slice::from_ref(&buffer)),
+        Err(StructuredCloneError::DataClone(_))
+    ));
+    let view = vm.get_global("view").unwrap();
+    let copy = vm.structured_clone(view, &[]).unwrap();
+    vm.set_global("copy", copy).unwrap();
+    assert_eq!(
+        vm.eval("copy[0] === 99 && copy.buffer !== buffer && !buffer.detached")
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(matches!(
+        vm.serialize_clone_packet_with_transfer(
+            buffer.clone(),
+            &[buffer],
+            128 * 1024,
+            |_| -> Result<(), _> {
+                panic!("a WebAssembly store must not be admitted for transfer")
+            },
+        ),
+        Err(StructuredCloneError::DataClone(_))
+    ));
+}
+
+#[test]
+fn memory_grow_reads_current_state_after_coercion() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+            var m = new WebAssembly.Memory({initial: 0, maximum: 2});
+            var empty = m.buffer, middle;
+            var previous = m.grow({valueOf() {
+                m.grow(1);
+                middle = m.buffer;
+                new Uint8Array(middle)[0] = 42;
+                return 1;
+            }});
+            previous === 1 && empty.detached && middle.detached &&
+                m.buffer.byteLength === 131072 && new Uint8Array(m.buffer)[0] === 42
+        "#,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ivs_sized_memory_and_views_fit_a_single_backing_budget() {
+    const BYTES: usize = 32 * 1024 * 1024;
+    let baseline = Vm::new().estimated_heap_bytes();
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_bytes: baseline + BYTES + 512 * 1024,
+        ..VmLimits::default()
+    });
+    vm.eval("var mem = new WebAssembly.Memory({initial:512, maximum:1024});")
+        .unwrap();
+    assert_eq!(
+        vm.eval(
+            r#"
+            var u8 = new Uint8Array(mem.buffer), u32 = new Uint32Array(mem.buffer);
+            var data = new DataView(mem.buffer);
+            u8[u8.length - 1] = 42;
+            data.getUint8(u32.length * 4 - 1)
+            "#,
+        )
+        .unwrap(),
+        Value::from(42)
+    );
+    vm.eval("mem = u8 = u32 = data = null;").unwrap();
+    vm.collect_garbage();
+    assert!(vm.estimated_heap_bytes() < baseline + 512 * 1024);
 }

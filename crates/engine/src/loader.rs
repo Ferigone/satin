@@ -551,7 +551,7 @@ impl Loader {
                 .await
                 .map_err(interrupted_navigation)?;
         }
-        let (mut response, context, origin_clean, response_start) =
+        let (mut response, url, context, origin_clean, response_start) =
             self.fetch_navigation_http(request, control).await?;
         if response
             .content_length()
@@ -561,7 +561,6 @@ impl Loader {
         }
         let content_type = response_content_type(response.headers(), true);
         let document_policy = DocumentPolicy::from_headers(response.headers());
-        let url = response.url().clone();
         let mime = crate::mime::MimeType::parse(&content_type);
         if mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
             let status = response.status().as_u16();
@@ -937,7 +936,7 @@ impl Loader {
         &self,
         original: &NavigationRequest,
         control: &RequestControl<'_>,
-    ) -> Result<(reqwest::Response, CookieContext, bool, Instant), String> {
+    ) -> Result<(reqwest::Response, Url, CookieContext, bool, Instant), String> {
         let mut request = original.clone();
         request.context.redirect_to(&request.url, &request.method);
         if request
@@ -1064,7 +1063,13 @@ impl Loader {
                     return Err("Serwer nie zwrócił dokumentu.".into());
                 }
             }
-            return Ok((response, request.context, origin_clean, response_start));
+            let mut url = response.url().clone();
+            if request.context.top_level_navigation {
+                // Fragments belong to the document address, not the HTTP request.
+                // The redirect loop has already inherited or replaced the fragment.
+                url.set_fragment(request.url.fragment());
+            }
+            return Ok((response, url, request.context, origin_clean, response_start));
         }
         unreachable!()
     }
@@ -1104,7 +1109,7 @@ impl Loader {
                 }
             }
             "http" | "https" => {
-                let (response, context, origin_clean, response_start) =
+                let (response, final_url, context, origin_clean, response_start) =
                     self.fetch_navigation_http(request, control).await?;
                 if response.content_length().is_some_and(|n| n > limit as u64) {
                     return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
@@ -1116,7 +1121,6 @@ impl Loader {
                 } else {
                     DocumentPolicy::default()
                 };
-                let final_url = response.url().to_string();
                 let status = response.status().as_u16();
                 let nosniff = response
                     .headers()
@@ -1128,7 +1132,7 @@ impl Loader {
                     .await
                     .map_err(navigation_body_error)?;
                 Response {
-                    url: final_url,
+                    url: final_url.into(),
                     content_type,
                     status,
                     nosniff,

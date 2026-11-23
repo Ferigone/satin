@@ -1,5 +1,6 @@
 //! JavaScript embedding for a bounded, straight-line i32 WebAssembly core.
 mod decode;
+mod memory;
 
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
@@ -8,12 +9,14 @@ use crate::{
     vm::to_i32,
 };
 pub(crate) use decode::Module;
-use decode::{Op, Signature, allocation_error, compile_error};
+use decode::{ExportKind, ImportKind, Op, Signature, allocation_error, compile_error};
+pub(crate) use memory::Memory;
 use std::{mem::size_of, rc::Rc};
 
 const INSTANCE_EXPORTS: u32 = 0;
 const INSTANCE_MODULE: u32 = 1;
 const INSTANCE_IMPORTS: u32 = 2;
+const INSTANCE_MEMORY: u32 = 3;
 
 fn arg(args: &[Value], index: usize) -> Value {
     args.get(index).cloned().unwrap_or_default()
@@ -71,14 +74,19 @@ fn validate_import_object(imports: &Value) -> Result<(), JsError> {
     }
 }
 
-fn link(vm: &mut Vm, module: &Module, import_object: &Value) -> Result<Value, JsError> {
+fn link(
+    vm: &mut Vm,
+    module: &Module,
+    import_object: &Value,
+) -> Result<(Value, Option<ObjectId>), JsError> {
     validate_import_object(import_object)?;
     if !module.imports.is_empty() && import_object.is_undefined() {
         return Err(JsError::type_error(
             "WebAssembly module requires an import object",
         ));
     }
-    let mut functions = scratch(vm, module.imports.len())?;
+    let mut functions = scratch(vm, module.imported_functions.len())?;
+    let mut memory = None;
     for import in &module.imports {
         let namespace = vm.get_property(import_object.clone(), module.name(&import.module))?;
         if namespace.as_object().is_none() {
@@ -86,16 +94,32 @@ fn link(vm: &mut Vm, module: &Module, import_object: &Value) -> Result<Value, Js
                 "WebAssembly import namespace must be an object",
             ));
         }
-        let function = vm.get_property(namespace, module.name(&import.field))?;
-        if !vm.is_callable(&function) {
-            return Err(JsError::new(
-                ErrorKind::LinkError,
-                "WebAssembly function import is not callable",
-            ));
+        let value = vm.get_property(namespace, module.name(&import.field))?;
+        match import.kind {
+            ImportKind::Function => {
+                if !vm.is_callable(&value) {
+                    return Err(JsError::new(
+                        ErrorKind::LinkError,
+                        "WebAssembly function import is not callable",
+                    ));
+                }
+                functions.push(value);
+            }
+            ImportKind::Memory(limits) => {
+                let (id, data) = memory::from_value(vm, &value).map_err(|_| {
+                    JsError::new(ErrorKind::LinkError, "Expected a WebAssembly memory import")
+                })?;
+                if !memory::matches_limits(vm, data, limits) {
+                    return Err(JsError::new(
+                        ErrorKind::LinkError,
+                        "WebAssembly memory import limits do not match",
+                    ));
+                }
+                memory = Some(id);
+            }
         }
-        functions.push(function);
     }
-    vm.try_new_array(&functions)
+    Ok((vm.try_new_array(&functions)?, memory))
 }
 
 fn call_import(
@@ -120,13 +144,14 @@ fn invoke_export(
     vm: &mut Vm,
     module_object: &Value,
     imports: &Value,
+    memory: Option<ObjectId>,
     index: usize,
     arguments: &[Value],
 ) -> Result<Value, JsError> {
     let module = module_data(vm, module_object).expect("traced WebAssembly module");
     let signature = module.signature(index);
     let function = index
-        .checked_sub(module.imports.len())
+        .checked_sub(module.imported_functions.len())
         .map(|index| &module.functions[index]);
     let mut locals = scratch(
         vm,
@@ -150,11 +175,55 @@ fn invoke_export(
             Op::LocalTee(index) => locals[index] = *stack.last().expect("validated operand stack"),
             Op::Const(value) => stack.push(value),
             Op::CallImport(index) => {
-                let signature = module.imports[index].signature;
+                let signature = module.imported_functions[index];
                 let start = stack.len() - signature.params;
                 let result = call_import(vm, imports, index, signature, &stack[start..])?;
                 stack.truncate(start);
                 stack.extend(result);
+            }
+            Op::Load {
+                width,
+                signed,
+                offset,
+            } => {
+                let buffer = current_buffer(vm, memory.expect("validated memory"));
+                let bytes = vm.wasm_buffer_bytes(buffer);
+                let address = stack.last_mut().expect("validated memory operand");
+                let range = memory_range(*address as u32, offset, width.into(), bytes.len())?;
+                let bytes = &bytes[range];
+                *address = match (width, signed) {
+                    (1, true) => i32::from(bytes[0] as i8),
+                    (1, false) => i32::from(bytes[0]),
+                    (2, true) => i32::from(i16::from_le_bytes(bytes.try_into().unwrap())),
+                    (2, false) => i32::from(u16::from_le_bytes(bytes.try_into().unwrap())),
+                    _ => i32::from_le_bytes(bytes.try_into().unwrap()),
+                };
+            }
+            Op::Store { width, offset } => {
+                let value = stack.pop().expect("validated memory operand");
+                let address = stack.pop().expect("validated memory operand") as u32;
+                let buffer = current_buffer(vm, memory.expect("validated memory"));
+                let bytes = vm.wasm_buffer_bytes_mut(buffer);
+                let width = usize::from(width);
+                let range = memory_range(address, offset, width, bytes.len())?;
+                bytes[range].copy_from_slice(&value.to_le_bytes()[..width]);
+            }
+            Op::MemorySize => {
+                let object = Value::Object(memory.expect("validated memory"));
+                let (_, data) = memory::from_value(vm, &object)?;
+                stack.push(memory::pages(vm, data) as i32);
+            }
+            Op::MemoryGrow => {
+                let delta = stack.last_mut().expect("validated memory operand");
+                *delta = match memory::grow(
+                    vm,
+                    memory.expect("validated memory"),
+                    *delta as u32 as usize,
+                ) {
+                    Ok(previous) => previous as i32,
+                    Err(error) if error.kind == ErrorKind::RangeError => -1,
+                    Err(error) => return Err(error),
+                };
             }
             Op::Drop => {
                 stack.pop();
@@ -174,43 +243,122 @@ fn invoke_export(
     Ok(stack.pop().map_or(Value::Undefined, Value::from))
 }
 
+fn current_buffer(vm: &Vm, memory: ObjectId) -> ObjectId {
+    let ObjectKind::WasmMemory(data) = vm
+        .heap
+        .object(memory)
+        .expect("traced WebAssembly memory")
+        .kind
+    else {
+        unreachable!("validated memory")
+    };
+    data.buffer
+}
+
+fn memory_range(
+    address: u32,
+    offset: u32,
+    size: usize,
+    len: usize,
+) -> Result<std::ops::Range<usize>, JsError> {
+    // Memory32 addresses are unsigned; adding the instruction offset must not
+    // wrap at 2^32. The complete operation must fit, including unaligned loads.
+    let start = usize::try_from(u64::from(address) + u64::from(offset)).ok();
+    start
+        .and_then(|start| {
+            start
+                .checked_add(size)
+                .filter(|end| *end <= len)
+                .map(|end| start..end)
+        })
+        .ok_or_else(|| {
+            JsError::new(
+                ErrorKind::RuntimeError,
+                "WebAssembly memory access out of bounds",
+            )
+        })
+}
+
+fn initialize_memory(vm: &mut Vm, module: &Module, memory: ObjectId) -> Result<(), JsError> {
+    let buffer = current_buffer(vm, memory);
+    let length = vm.wasm_buffer_bytes(buffer).len();
+    // Check all writes before changing any bytes in an imported memory.
+    let mut bytes = 0usize;
+    for segment in &module.data {
+        memory_range(segment.offset, 0, segment.bytes.len(), length)?;
+        bytes += segment.bytes.len();
+    }
+    vm.consume_work(bytes.div_ceil(64) + module.data.len())?;
+    let destination = vm.wasm_buffer_bytes_mut(buffer);
+    for segment in &module.data {
+        let start = segment.offset as usize;
+        let source = module.bytes(&segment.bytes);
+        destination[start..start + source.len()].copy_from_slice(source);
+    }
+    Ok(())
+}
+
 fn create_instance(
     vm: &mut Vm,
     module_object: Value,
     import_object: &Value,
     prototype: ObjectId,
+    memory_proto: ObjectId,
 ) -> Result<Value, JsError> {
     let module = module_data(vm, &module_object)
         .ok_or_else(|| JsError::type_error("Expected a WebAssembly.Module"))?;
-    let imports = link(vm, &module, import_object)?;
+    let (imports, mut memory) = link(vm, &module, import_object)?;
+    if let Some(limits) = module.defined_memory {
+        memory = memory::create(vm, limits, memory_proto)?.as_object();
+    }
+    if let Some(memory) = memory {
+        initialize_memory(vm, &module, memory)?;
+    }
     vm.ensure_allocation(384)?;
     let exports = vm.new_object_with_prototype(Value::Null)?;
-    let count = module.imports.len() + module.functions.len();
+    let count = module.imported_functions.len() + module.functions.len();
     let mut wrappers: Vec<Option<Value>> = scratch(vm, count)?;
     wrappers.resize(count, None);
     for export in &module.exports {
-        let index = export.function;
-        if wrappers[index].is_none() {
-            vm.ensure_allocation(1024)?;
-            let captured_module = module_object.clone();
-            let captured_imports = imports.clone();
-            let wrapper = vm.native(
-                &index.to_string(),
-                module.signature(index).params,
-                false,
-                Rc::new(move |vm, _, args| {
-                    invoke_export(vm, &captured_module, &captured_imports, index, args)
-                }),
-            );
-            // A kept export keeps its module and JavaScript imports alive.
-            vm.set_host_slot(wrapper.clone(), INSTANCE_MODULE, module_object.clone())?;
-            vm.set_host_slot(wrapper.clone(), INSTANCE_IMPORTS, imports.clone())?;
-            wrappers[index] = Some(wrapper);
-        }
+        let value = match export.kind {
+            ExportKind::Function(index) => {
+                if let Some(wrapper) = &wrappers[index] {
+                    wrapper.clone()
+                } else {
+                    vm.ensure_allocation(1024)?;
+                    let captured_module = module_object.clone();
+                    let captured_imports = imports.clone();
+                    let wrapper = vm.native(
+                        &index.to_string(),
+                        module.signature(index).params,
+                        false,
+                        Rc::new(move |vm, _, args| {
+                            invoke_export(
+                                vm,
+                                &captured_module,
+                                &captured_imports,
+                                memory,
+                                index,
+                                args,
+                            )
+                        }),
+                    );
+                    // A kept export keeps its module and JavaScript imports alive.
+                    vm.set_host_slot(wrapper.clone(), INSTANCE_MODULE, module_object.clone())?;
+                    vm.set_host_slot(wrapper.clone(), INSTANCE_IMPORTS, imports.clone())?;
+                    if let Some(memory) = memory {
+                        vm.set_host_slot(wrapper.clone(), INSTANCE_MEMORY, Value::Object(memory))?;
+                    }
+                    wrappers[index] = Some(wrapper.clone());
+                    wrapper
+                }
+            }
+            ExportKind::Memory => Value::Object(memory.expect("validated memory export")),
+        };
         vm.define_data_property(
             exports.clone(),
             module.name(&export.name),
-            wrappers[index].as_ref().expect("installed export").clone(),
+            value,
             false,
             true,
             false,
@@ -221,6 +369,9 @@ fn create_instance(
     vm.set_host_slot(result.clone(), INSTANCE_EXPORTS, exports)?;
     vm.set_host_slot(result.clone(), INSTANCE_MODULE, module_object)?;
     vm.set_host_slot(result.clone(), INSTANCE_IMPORTS, imports)?;
+    if let Some(memory) = memory {
+        vm.set_host_slot(result.clone(), INSTANCE_MEMORY, Value::Object(memory))?;
+    }
     Ok(result)
 }
 
@@ -240,11 +391,12 @@ fn instantiate(
     imports: Value,
     module_proto: ObjectId,
     instance_proto: ObjectId,
+    memory_proto: ObjectId,
 ) -> Result<Value, JsError> {
     let promise = vm.new_promise_capability()?.promise;
     let promise_id = promise.as_object().unwrap();
     if module_data(vm, &source).is_some() {
-        let result = create_instance(vm, source, &imports, instance_proto);
+        let result = create_instance(vm, source, &imports, instance_proto, memory_proto);
         settle(vm, promise_id, result)?;
         return Ok(promise);
     }
@@ -268,6 +420,7 @@ fn instantiate(
                     captured_module.clone(),
                     &captured_imports,
                     instance_proto,
+                    memory_proto,
                 )?;
                 vm.ensure_allocation(1024)?;
                 let result = vm.new_object();
@@ -364,6 +517,7 @@ fn tag(vm: &mut Vm, target: &Value, name: &'static str) {
 pub(crate) fn install(vm: &mut Vm) {
     let namespace = vm.new_object();
     tag(vm, &namespace, "WebAssembly");
+    let memory_proto = memory::install(vm, &namespace);
     let module = vm.new_object();
     let instance = vm.new_object();
     tag(vm, &module, "WebAssembly.Module");
@@ -384,7 +538,9 @@ pub(crate) fn install(vm: &mut Vm) {
         "Instance",
         &instance,
         false,
-        |vm, prototype, args| create_instance(vm, arg(args, 0), &arg(args, 1), prototype),
+        move |vm, prototype, args| {
+            create_instance(vm, arg(args, 0), &arg(args, 1), prototype, memory_proto)
+        },
     );
     let get_exports = vm.new_native_function("get exports", |vm, this, _| {
         let branded = this.as_object().is_some_and(|id| {
@@ -418,6 +574,7 @@ pub(crate) fn install(vm: &mut Vm) {
     for (name, kind) in [
         ("CompileError", ErrorKind::CompileError),
         ("LinkError", ErrorKind::LinkError),
+        ("RuntimeError", ErrorKind::RuntimeError),
     ] {
         let prototype = vm
             .new_object_with_prototype(Value::Object(vm.error_prototype))
@@ -478,7 +635,14 @@ pub(crate) fn install(vm: &mut Vm) {
         "instantiate",
         1,
         move |vm, _, args| {
-            instantiate(vm, arg(args, 0), arg(args, 1), module_proto, instance_proto)
+            instantiate(
+                vm,
+                arg(args, 0),
+                arg(args, 1),
+                module_proto,
+                instance_proto,
+                memory_proto,
+            )
         },
     );
     vm.set_host_slot(instantiate.clone(), 0, Value::Object(module_proto))

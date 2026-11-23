@@ -1079,16 +1079,29 @@ impl super::ScriptRuntime {
                 };
             }
             MediaUpdate::Ready => {
+                events = match track.ready {
+                    0 | 1 => &["loadeddata", "canplay"],
+                    2 => &["canplay"],
+                    _ => &[],
+                };
                 track.ready = 4;
-                events = &["loadeddata", "canplay"];
             }
             MediaUpdate::Playing if !track.paused => {
-                events = &["playing"];
+                // Some native recoveries emit PLAYING without a fresh CANPLAY.
+                events = if track.ready == 2 {
+                    track.ready = 4;
+                    &["canplay", "playing"]
+                } else {
+                    &["playing"]
+                };
                 plays = std::mem::take(&mut track.plays);
             }
             MediaUpdate::Playing | MediaUpdate::Paused => {}
             MediaUpdate::Waiting => {
                 if !track.paused {
+                    // The current frame may still be displayed, but there isn't
+                    // enough data to continue. Don't leave readyState at 4.
+                    track.ready = track.ready.min(2);
                     events = &["waiting"];
                 }
             }

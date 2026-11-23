@@ -1,4 +1,5 @@
 mod classes;
+mod literals;
 pub(crate) mod modules;
 use crate::{
     ErrorKind, JsError, JsString, Value,
@@ -1314,7 +1315,7 @@ impl Parser {
             && self
                 .lookahead(1)
                 .is_some_and(|next| next.kind == TokenKind::Punct("("));
-        let mut left = if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
+        let left = if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
             if min > 10 || !self.allow_in {
                 return Err(self.error("Unexpected private identifier"));
             }
@@ -1361,6 +1362,14 @@ impl Parser {
         } else {
             self.unary()?
         };
+        self.expression_tail(min, stop_before_simple_assignment, left)
+    }
+    fn expression_tail(
+        &mut self,
+        min: u8,
+        stop_before_simple_assignment: bool,
+        mut left: Expr,
+    ) -> Result<Expr, JsError> {
         loop {
             if min <= 3 && !matches!(left, Expr::Yield { .. }) && self.eat("?") {
                 let yes = self.expression_in(2)?;
@@ -1813,140 +1822,8 @@ impl Parser {
             self.expect(")")?;
             return self.checked_expression(Expr::Group(Box::new(e)));
         }
-        if self.eat("[") {
-            let mut items = Vec::new();
-            let mut trailing = false;
-            while !self.eat("]") {
-                if self.eat(",") {
-                    items.push(None);
-                    continue;
-                }
-                items.push(Some(if self.eat("...") {
-                    let value = self.expression(2)?;
-                    self.checked_expression(Expr::Spread(Box::new(value)))?
-                } else {
-                    self.expression(2)?
-                }));
-                if self.eat("]") {
-                    break;
-                }
-                self.expect(",")?;
-                trailing = self.at("]");
-            }
-            return self.checked_expression(Expr::Array(items, trailing));
-        }
-        if self.eat("{") {
-            let mut pairs = Vec::new();
-            let mut trailing = false;
-            while !self.eat("}") {
-                if self.eat("...") {
-                    pairs.push(ObjectEntry::Spread(self.expression(2)?));
-                    if self.eat("}") {
-                        break;
-                    }
-                    self.expect(",")?;
-                    trailing = self.at("}");
-                    continue;
-                }
-                let is_async = self.async_method_ahead();
-                if is_async {
-                    self.advance(1);
-                }
-                let function_kind = self.function_kind(is_async);
-                let accessor = if function_kind == FunctionKind::Ordinary {
-                    self.accessor_ahead(false)
-                } else {
-                    None
-                };
-                if accessor.is_some() {
-                    self.advance(1);
-                }
-                let computed = self.eat("[");
-                let shorthand = !computed
-                    && matches!(&self.current().kind,
-                        TokenKind::Word(word) | TokenKind::EscapedWord(word) if !reserved(word));
-                let key = if computed {
-                    let key = self.expression_in(2)?;
-                    self.expect("]")?;
-                    key
-                } else {
-                    Expr::Literal(Value::String(self.property_name()?))
-                };
-                let literal_key = if let Expr::Literal(Value::String(key)) = &key {
-                    Some(key.clone())
-                } else {
-                    None
-                };
-                let mut prototype = false;
-                let mut cover = false;
-                let method = accessor.or_else(|| self.at("(").then_some(MethodKind::Method));
-                if function_kind != FunctionKind::Ordinary && !self.at("(") {
-                    return Err(self.error("Method requires a body"));
-                }
-                let value = if let Some(method) = method {
-                    let function = self.method_function(
-                        if computed { None } else { literal_key.clone() },
-                        false,
-                        function_kind,
-                        method,
-                    )?;
-                    self.checked_expression(Expr::Function(function))?
-                } else if self.eat(":") {
-                    prototype = !computed
-                        && literal_key
-                            .as_ref()
-                            .is_some_and(|key| key == &JsString::from("__proto__"));
-                    self.expression(2)?
-                } else {
-                    let Some(key) = literal_key else {
-                        return Err(self.error("Computed property requires a value or method"));
-                    };
-                    if !shorthand {
-                        return Err(self.error("Invalid shorthand property"));
-                    }
-                    if self.class_initializer && key == JsString::from("arguments") {
-                        return Err(self.error("arguments in a class initializer"));
-                    }
-                    if key == JsString::from("yield") && self.yield_context != KeywordContext::None
-                    {
-                        return Err(self.error("yield is not a shorthand identifier here"));
-                    }
-                    if key == JsString::from("await") {
-                        if self.static_block
-                            || self.module_goal
-                            || self.await_context != KeywordContext::None
-                        {
-                            return Err(self.error("await is not a shorthand identifier here"));
-                        }
-                        self.await_count += 1;
-                    }
-                    let value = Expr::Identifier(key.clone());
-                    if self.eat("=") {
-                        cover = true;
-                        let default = self.expression(2)?;
-                        Expr::Assign("=", Box::new(value), Box::new(default))
-                    } else {
-                        value
-                    }
-                };
-                let infer_name =
-                    matches!(&value,Expr::Function(function) if function.name.is_none());
-                pairs.push(ObjectEntry::Property {
-                    key,
-                    value,
-                    prototype,
-                    infer_name,
-                    cover,
-                    computed,
-                    method,
-                });
-                if self.eat("}") {
-                    break;
-                }
-                self.expect(",")?;
-                trailing = self.at("}");
-            }
-            return self.checked_expression(Expr::Object(pairs, trailing));
+        if self.at("[") || self.at("{") {
+            return self.container_literal();
         }
         if self.async_function_ahead() {
             self.advance(2);

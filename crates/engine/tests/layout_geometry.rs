@@ -1,4 +1,6 @@
-use rust_browser_engine::{Fonts, Layout, LoadedPage, Rect, dom::NodeId};
+use rust_browser_engine::script::ScriptRuntime;
+use rust_browser_engine::{Fonts, Layout, LoadedPage, Rect, dom::NodeId, layout::Viewport};
+use serde_json::{Value as Json, json};
 use std::sync::{Mutex, OnceLock};
 fn layout(body: &str, width: f32) -> (LoadedPage, Layout) {
     let html = format!("<!doctype html><style>body{{margin:0}}</style>{body}");
@@ -123,6 +125,52 @@ fn column_flex_grows_in_definite_height() {
     close(rect(&p, &l, "b").y, 290. / 3. + 10.);
     close(rect(&p, &l, "b").width, 200.);
 }
+
+#[test]
+fn viewport_height_resolves_through_percent_sized_flex_shell() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        include_str!("fixtures/css_flex_viewport_shell.html"),
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    for source in page
+        .scripts
+        .iter()
+        .filter_map(|script| script.source.as_deref())
+    {
+        runtime.eval(source).unwrap();
+    }
+
+    // Headless Chrome 157.0.8103.79 at device scale 1, with a fresh
+    // navigation per viewport. Satin also checks live viewport updates.
+    for (width, height, indicator) in [
+        (1280, 800, [629, 414, 22, 22]),
+        (640, 480, [309, 254, 22, 22]),
+    ] {
+        runtime.set_viewport(Viewport {
+            width: width as f32,
+            height: height as f32,
+            ..Default::default()
+        });
+        let measurements = runtime.eval("JSON.stringify(shellMeasurements())").unwrap();
+        let actual: Json =
+            serde_json::from_str(&measurements.as_string().unwrap().to_string_lossy()).unwrap();
+        let full = [0, 0, width, height];
+        assert_eq!(
+            actual,
+            json!({
+                "html": full,
+                "body": full,
+                "#shell": full,
+                "#bar": [0, 0, width, 50],
+                "#loader": full,
+                "#indicator": indicator,
+            }),
+            "viewport {width} × {height}"
+        );
+    }
+}
+
 #[test]
 fn flex_auto_minimum_uses_computed_main_axis_overflow() {
     let (p, l) = layout_document(

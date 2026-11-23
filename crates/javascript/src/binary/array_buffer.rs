@@ -11,7 +11,11 @@ use crate::{
 type BufferGetter = (&'static str, &'static str, fn(&Buffer) -> Value);
 
 impl Vm {
-    fn resize_binary_store(&mut self, id: ObjectId, length: usize) -> Result<(), JsError> {
+    pub(super) fn resize_binary_store(
+        &mut self,
+        id: ObjectId,
+        length: usize,
+    ) -> Result<(), JsError> {
         check_buffer_length(length)?;
         let bytes = self
             .buffer_data(id)?
@@ -55,6 +59,9 @@ impl Vm {
         };
         let buffer = self.buffer_data(id)?;
         let bytes = buffer.bytes.as_ref().ok_or_else(type_error)?;
+        if buffer.wasm {
+            return Err(JsError::type_error("Cannot transfer a WebAssembly buffer"));
+        }
         let maximum = if fixed { None } else { buffer.maximum };
         if maximum.is_some_and(|maximum| length > maximum) {
             return Err(range_error("Transfer exceeds the ArrayBuffer maximum"));
