@@ -76,6 +76,43 @@ fn utf16_surrogates_and_property_names_are_preserved() {
     );
 }
 #[test]
+fn json_string_tokens_preserve_verbatim_and_escaped_source() {
+    assert_eq!(
+        run(r#"
+            var literal = '"prefix\uD800\uD83D\uDE00\uDC00"';
+            var escaped = '"prefix\\uD800\\uD83D\\uDE00\\uDC00"';
+            var seen = [];
+            var values = JSON.parse("[" + literal + "," + escaped + "]", function(k, v, c) {
+                if (k !== "") seen.push(c.source);
+                return v;
+            });
+            values[0] === "prefix\uD800\uD83D\uDE00\uDC00" &&
+                values[1] === values[0] && seen[0] === literal && seen[1] === escaped &&
+                JSON.stringify(JSON.rawJSON(literal)) === literal &&
+                JSON.stringify(JSON.rawJSON(escaped)) === escaped
+            "#),
+        Value::Bool(true)
+    );
+}
+#[test]
+fn verbatim_json_strings_keep_copy_work_and_heap_preflight() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 40,
+        ..VmLimits::default()
+    });
+    let text = JsString::from(format!("\"{}\"", "x".repeat(24)));
+    let error = vm.parse_json(&text).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+    assert_eq!(error.message, "Native work budget exhausted");
+
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_bytes: Vm::new().estimated_heap_bytes() + 6 * 1024,
+        ..VmLimits::default()
+    });
+    let text = JsString::from(format!("\"{}\"", "x".repeat(1024)));
+    assert_eq!(vm.parse_json(&text).unwrap_err().kind, ErrorKind::HeapLimit);
+}
+#[test]
 fn proto_is_an_ordinary_json_data_property() {
     assert_eq!(
         run(

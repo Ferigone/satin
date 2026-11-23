@@ -9,6 +9,9 @@ impl JsString {
     pub fn from_utf16(units: impl Into<Vec<u16>>) -> Self {
         Self(units.into().into())
     }
+    pub(crate) fn from_utf16_slice(units: &[u16]) -> Self {
+        Self(Rc::from(units))
+    }
     pub fn as_utf16(&self) -> &[u16] {
         &self.0
     }

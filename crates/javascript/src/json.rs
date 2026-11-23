@@ -77,49 +77,82 @@ impl Parser<'_> {
         }
         Ok(value)
     }
+    fn string_unit(&mut self, vm: &mut Vm) -> Result<u16, JsError> {
+        let unit = self
+            .bump(vm)?
+            .ok_or_else(|| syntax(self.pos, "unterminated string"))?;
+        if unit < 32 {
+            return Err(syntax(self.pos, "unescaped control character"));
+        }
+        Ok(unit)
+    }
+    fn string_escape(&mut self, vm: &mut Vm) -> Result<u16, JsError> {
+        let escaped = self
+            .bump(vm)?
+            .ok_or_else(|| syntax(self.pos, "unterminated escape"))?;
+        let unit = match escaped {
+            34 => 34,
+            47 => 47,
+            92 => 92,
+            98 => 8,
+            102 => 12,
+            110 => 10,
+            114 => 13,
+            116 => 9,
+            117 => {
+                let mut value = 0u16;
+                for _ in 0..4 {
+                    let digit = self
+                        .bump(vm)?
+                        .and_then(|u| char::from_u32(u as u32))
+                        .and_then(|c| c.to_digit(16))
+                        .ok_or_else(|| syntax(self.pos, "invalid Unicode escape"))?;
+                    value = value * 16 + digit as u16;
+                }
+                value
+            }
+            _ => return Err(syntax(self.pos, "invalid string escape")),
+        };
+        Ok(unit)
+    }
     fn string(&mut self, vm: &mut Vm) -> Result<JsString, JsError> {
         self.expect(vm, 34)?;
-        let mut units = Vec::new();
-        loop {
-            let unit = self
-                .bump(vm)?
-                .ok_or_else(|| syntax(self.pos, "unterminated string"))?;
-            if unit == 34 {
-                let value = vm.finish_string(units)?;
-                return Ok(value.as_string().unwrap().clone());
-            }
-            if unit < 32 {
-                return Err(syntax(self.pos, "unescaped control character"));
-            }
-            let unit = if unit == 92 {
-                match self
-                    .bump(vm)?
-                    .ok_or_else(|| syntax(self.pos, "unterminated escape"))?
-                {
-                    34 => 34,
-                    47 => 47,
-                    92 => 92,
-                    98 => 8,
-                    102 => 12,
-                    110 => 10,
-                    114 => 13,
-                    116 => 9,
-                    117 => {
-                        let mut value = 0u16;
-                        for _ in 0..4 {
-                            let digit = self
-                                .bump(vm)?
-                                .and_then(|u| char::from_u32(u as u32))
-                                .and_then(|c| c.to_digit(16))
-                                .ok_or_else(|| syntax(self.pos, "invalid Unicode escape"))?;
-                            value = value * 16 + digit as u16;
-                        }
-                        value
-                    }
-                    _ => return Err(syntax(self.pos, "invalid string escape")),
+        let start = self.pos;
+        let prefix_end = loop {
+            let end = self.pos;
+            match self.string_unit(vm)? {
+                34 => {
+                    // Copy into final storage without a temporary decoded Vec.
+                    let units = &self.source[start..end];
+                    vm.ensure_string_allocation(units.len())?;
+                    vm.consume_work(units.len())?;
+                    let value = vm.checked_string(JsString::from_utf16_slice(units))?;
+                    return Ok(value.as_string().unwrap().clone());
                 }
-            } else {
-                unit
+                92 => break end,
+                // Keep the same output check and its error ordering even though
+                // no temporary decoded buffer has been allocated yet.
+                _ => vm.ensure_string_allocation(self.pos - start)?,
+            }
+        };
+
+        let first = self.string_escape(vm)?;
+        let prefix = &self.source[start..prefix_end];
+        let len = prefix.len() + 1;
+        vm.ensure_string_allocation(len)?;
+        // Match the geometric growth of the decoded buffer without replaying
+        // the validated prefix or growing a vector one code unit at a time.
+        let mut units = Vec::with_capacity(len.next_power_of_two().max(4));
+        units.extend_from_slice(prefix);
+        units.push(first);
+        loop {
+            let unit = match self.string_unit(vm)? {
+                34 => {
+                    let value = vm.finish_string(units)?;
+                    return Ok(value.as_string().unwrap().clone());
+                }
+                92 => self.string_escape(vm)?,
+                unit => unit,
             };
             vm.ensure_string_allocation(units.len().saturating_add(1))?;
             units.push(unit);
