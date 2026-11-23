@@ -2101,10 +2101,10 @@ impl App {
             self.sync_runtime(self.active);
             self.ensure_layout();
         }
-        let Some(SmokeAction::Checkpoint(checkpoint)) = self.smoke_actions.front() else {
-            unreachable!("only called for checkpoints");
-        };
         let result = (|| {
+            let Some(SmokeAction::Checkpoint(checkpoint)) = self.smoke_actions.front() else {
+                unreachable!("only called for checkpoints");
+            };
             let identity = self.checkpoint_document();
             let expected = self
                 .smoke_checkpoint_document
