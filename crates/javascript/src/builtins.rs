@@ -833,26 +833,36 @@ pub(crate) fn create_dynamic_function(
         source_units = source_units.saturating_add(s.len()).saturating_add(1);
         vm.ensure_dynamic_source(source_units)?;
         vm.consume_work(s.len().saturating_mul(3))?;
-        params.push(String::from_utf16(s.as_utf16()).map_err(|_| {
-            JsError::new(
-                ErrorKind::UnsupportedFeature,
-                "Function parameters containing isolated surrogates are not implemented",
-            )
-        })?);
+        params.push(s);
     }
     let body = if let Some(value) = a.last() {
         let s = vm.to_string(value)?;
         vm.ensure_dynamic_source(source_units.saturating_add(s.len()))?;
         vm.consume_work(s.len().saturating_mul(3))?;
-        String::from_utf16(s.as_utf16()).map_err(|_| {
-            JsError::new(
-                ErrorKind::UnsupportedFeature,
-                "Function source containing isolated surrogates is not implemented",
-            )
-        })?
+        s
     } else {
-        String::new()
+        JsString::default()
     };
+    // Finish the observable ToString calls before converting to the parser's
+    // UTF-8 input. A later conversion hook can throw even if earlier source
+    // text contains a code unit the parser cannot represent.
+    let params = params
+        .into_iter()
+        .map(|s| {
+            String::from_utf16(s.as_utf16()).map_err(|_| {
+                JsError::new(
+                    ErrorKind::UnsupportedFeature,
+                    "Function parameters containing isolated surrogates are not implemented",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = String::from_utf16(body.as_utf16()).map_err(|_| {
+        JsError::new(
+            ErrorKind::UnsupportedFeature,
+            "Function source containing isolated surrogates is not implemented",
+        )
+    })?;
     vm.dynamic_function(&params.join(","), &body, new_target, kind)
 }
 fn length(vm: &mut Vm, object: Value) -> Result<usize, JsError> {
