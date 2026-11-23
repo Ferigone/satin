@@ -139,6 +139,8 @@ async function start() {
     await event(clip, 'waiting');
     note('waiting at buffered edge ' + edge);
     check(clip.readyState < 3 && !clip.paused, 'Reported future data while waiting');
+    await delay(400);
+    check(clip.readyState < 3, 'Recovered before more fragments arrived');
     await Promise.all([append(video, 'video', 5), append(audio, 'audio', 5)]);
     // Queue another four seconds past each track's edge, without ending the source.
     video.timestampOffset = video.buffered.end(0);
@@ -147,7 +149,7 @@ async function start() {
       await Promise.all([append(video, 'video', i), append(audio, 'audio', i)]);
     }
     note('refilled');
-    await advancePast(edge + 0.8);
+    await advancePast(edge + 1.2);
     check(source.readyState === 'open' && !clip.paused && clip.readyState >= 3, 'Did not recover from rebuffering');
     note('clock recovered');
   } else {
