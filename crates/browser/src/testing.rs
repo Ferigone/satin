@@ -53,6 +53,39 @@ pub struct Checkpoint {
     descendant_class: String,
     text: String,
     pub timeout_ms: u64,
+    #[serde(default)]
+    diagnose_timeout: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckpointObservation {
+    DocumentNotReady,
+    MissingRoot,
+    MissingDescendant,
+    TextMismatch,
+    Hidden,
+    NoLayoutBox,
+    NotHittable,
+    Match,
+}
+
+impl CheckpointObservation {
+    pub fn is_match(self) -> bool {
+        self == Self::Match
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::DocumentNotReady => "document-not-ready",
+            Self::MissingRoot => "missing-root",
+            Self::MissingDescendant => "missing-descendant",
+            Self::TextMismatch => "text-mismatch",
+            Self::Hidden => "exact-text-hidden",
+            Self::NoLayoutBox => "exact-text-no-layout-box",
+            Self::NotHittable => "exact-text-not-hittable",
+            Self::Match => "exact-text-hit-too-late",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -130,6 +163,16 @@ impl Checkpoint {
         format!("Smoke checkpoint {:?}: {message}", self.name)
     }
 
+    pub fn timeout_error(&self, last: Option<CheckpointObservation>) -> String {
+        let message = "timed out waiting for a layout hit with exact text";
+        if self.diagnose_timeout {
+            let reason = last.map_or("no-post-click-sample", CheckpointObservation::label);
+            self.error(&format!("{message}; last_observation={reason}"))
+        } else {
+            self.error(message)
+        }
+    }
+
     pub fn require_document(
         &self,
         expected: CheckpointDocument,
@@ -148,17 +191,17 @@ impl Checkpoint {
         Ok(())
     }
 
-    pub fn matches(
+    pub fn observe(
         &self,
         document: &Document,
         layout: &Layout,
         viewport: Viewport,
-    ) -> Result<bool, String> {
+    ) -> Result<CheckpointObservation, String> {
         let mut roots = document
             .connected_nodes()
             .filter(|&node| document.attr(node, "id") == Some(self.within_id.as_str()));
         let Some(root) = roots.next() else {
-            return Ok(false);
+            return Ok(CheckpointObservation::MissingRoot);
         };
         if roots.next().is_some() {
             return Err(self.error("ambiguous root id"));
@@ -166,20 +209,25 @@ impl Checkpoint {
 
         let mut pending = document.nodes[root.0].children.clone();
         let mut matched = None;
+        let mut found_descendant = false;
         while let Some(node) = pending.pop() {
             pending.extend(document.nodes[node.0].children.iter().copied());
             if document.attr(node, "class").is_some_and(|value| {
                 value
                     .split_ascii_whitespace()
                     .any(|token| token == self.descendant_class.as_str())
-            }) && document.text(node).trim() == self.text
-            {
-                if matched.replace(node).is_some() {
+            }) {
+                found_descendant = true;
+                if document.text(node).trim() == self.text && matched.replace(node).is_some() {
                     return Err(self.error("ambiguous matching descendants"));
                 }
             }
         }
-        Ok(matched.is_some_and(|node| layout_hit(document, layout, viewport, node)))
+        Ok(match matched {
+            Some(node) => layout_observation(document, layout, viewport, node),
+            None if found_descendant => CheckpointObservation::TextMismatch,
+            None => CheckpointObservation::MissingDescendant,
+        })
     }
 
     fn output_path(&self, frame: &Path) -> PathBuf {
@@ -234,15 +282,24 @@ impl Checkpoint {
 
 // A box alone may be clipped, offscreen or covered. Use the native content
 // hit test on the part inside the viewport; this is not a pixel oracle.
-fn layout_hit(document: &Document, layout: &Layout, viewport: Viewport, node: NodeId) -> bool {
+fn layout_observation(
+    document: &Document,
+    layout: &Layout,
+    viewport: Viewport,
+    node: NodeId,
+) -> CheckpointObservation {
     let mut ancestor = Some(node);
     while let Some(id) = ancestor {
         if document.attr(id, "hidden").is_some() {
-            return false;
+            return CheckpointObservation::Hidden;
         }
         ancestor = document.nodes[id.0].parent;
     }
-    layout.rects_for(node).into_iter().any(|rect| {
+    let rects = layout.rects_for(node);
+    if rects.is_empty() {
+        return CheckpointObservation::NoLayoutBox;
+    }
+    let hittable = rects.into_iter().any(|rect| {
         let left = rect.x.max(viewport.scroll_x);
         let top = rect.y.max(viewport.scroll_y);
         let right = (rect.x + rect.width).min(viewport.scroll_x + viewport.width);
@@ -258,7 +315,12 @@ fn layout_hit(document: &Document, layout: &Layout, viewport: Viewport, node: No
             hit = document.nodes.get(id.0).and_then(|entry| entry.parent);
         }
         false
-    })
+    });
+    if hittable {
+        CheckpointObservation::Match
+    } else {
+        CheckpointObservation::NotHittable
+    }
 }
 
 pub fn read_actions(path: &Path) -> Result<VecDeque<SmokeAction>, String> {
@@ -314,29 +376,104 @@ mod tests {
             descendant_class: "ran".into(),
             text: "2".into(),
             timeout_ms: 100,
+            diagnose_timeout: false,
         }
     }
 
-    fn observe(html: &str) -> Result<bool, String> {
+    fn observe(html: &str) -> Result<CheckpointObservation, String> {
         let page = LoadedPage::from_html("https://example.test/", html);
         let fonts = Fonts::new().unwrap();
         let viewport = Viewport::default();
         let layout = Layout::build_with_viewport(&page, &fonts, viewport);
-        checkpoint().matches(&page.document, &layout, viewport)
+        checkpoint().observe(&page.document, &layout, viewport)
     }
 
     #[test]
     fn checkpoint_uses_exact_scoped_layout_text() {
-        assert!(observe(r#"<div id="report"><span class="other ran"> 2 </span></div>"#).unwrap());
-        for html in [
-            r#"<div id="wrong"><span class="ran">2</span></div>"#,
-            r#"<div id="report"><span class="ran-extra">2</span></div>"#,
-            r#"<div id="report"><span class="ran">12</span></div>"#,
-            r#"<div id="report" style="display:none"><span class="ran">2</span></div>"#,
-            r#"<div id="report" hidden><span class="ran">2</span></div>"#,
-            r#"<div style="height:2000px"></div><div id="report"><span class="ran">2</span></div>"#,
+        use CheckpointObservation::*;
+        assert!(
+            observe(r#"<div id="report"><span class="other ran"> 2 </span></div>"#)
+                .unwrap()
+                .is_match()
+        );
+        for (html, expected) in [
+            (
+                r#"<div id="wrong"><span class="ran">2</span></div>"#,
+                MissingRoot,
+            ),
+            (
+                r#"<div id="report"><span class="ran-extra">2</span></div>"#,
+                MissingDescendant,
+            ),
+            (
+                r#"<div id="report"><span class="ran">12</span></div>"#,
+                TextMismatch,
+            ),
+            (
+                r#"<div id="report" style="display:none"><span class="ran">2</span></div>"#,
+                NoLayoutBox,
+            ),
+            (
+                r#"<div id="report" hidden><span class="ran">2</span></div>"#,
+                Hidden,
+            ),
         ] {
-            assert!(!observe(html).unwrap(), "{html}");
+            let actual = observe(html).unwrap();
+            assert_eq!(actual, expected, "{html}");
+            assert!(!actual.is_match());
+        }
+        // Move the sampled viewport past a known laid-out element to check
+        // clipping separately from the absence of any layout box.
+        let page = LoadedPage::from_html(
+            "https://example.test/",
+            r#"<div id="report"><span class="ran">2</span></div>"#,
+        );
+        let fonts = Fonts::new().unwrap();
+        let viewport = Viewport::default();
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+        let outside = Viewport {
+            scroll_y: 2000.,
+            ..viewport
+        };
+        assert_eq!(
+            checkpoint()
+                .observe(&page.document, &layout, outside)
+                .unwrap(),
+            NotHittable
+        );
+    }
+
+    #[test]
+    fn checkpoint_timeout_reason_is_opt_in_and_contains_no_page_text() {
+        let default = checkpoint();
+        assert_eq!(
+            default.timeout_error(Some(CheckpointObservation::Hidden)),
+            r#"Smoke checkpoint "results": timed out waiting for a layout hit with exact text"#
+        );
+        let SmokeAction::Checkpoint(opted_in) = serde_json::from_str(
+            r#"{"action":"checkpoint","name":"report","within_id":"sensitive-root","descendant_class":"sensitive-class","text":"private expected text","timeout_ms":100,"diagnose_timeout":true}"#,
+        ).unwrap() else { panic!("expected checkpoint"); };
+        for (sample, reason) in [
+            (None, "no-post-click-sample"),
+            (
+                Some(CheckpointObservation::DocumentNotReady),
+                "document-not-ready",
+            ),
+            (
+                Some(CheckpointObservation::NotHittable),
+                "exact-text-not-hittable",
+            ),
+            (
+                Some(CheckpointObservation::Match),
+                "exact-text-hit-too-late",
+            ),
+        ] {
+            assert_eq!(
+                opted_in.timeout_error(sample),
+                format!(
+                    r#"Smoke checkpoint "report": timed out waiting for a layout hit with exact text; last_observation={reason}"#
+                )
+            );
         }
     }
 

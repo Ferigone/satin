@@ -17,6 +17,16 @@ For `--smoke-window frame.png`, it writes `frame.png.run.json` and `frame.png.re
 
 The successful stdout report includes `checkpoints: { runId, names }`, with the same attempt ID as both sidecars and names in action order. A normal failure rolls back only sidecars created by this attempt; a hard kill or cleanup error may leave files but cannot issue that success report. Use a fresh, exclusively owned output directory and require zero exit, matching attempt IDs and ordered checkpoint names, valid sidecars, and the final PNG; verify expected states and counters externally. IDs identify attempts but are not an attestation of untouched artifacts. An observed transition is not by itself proof of which pointer recipient or callback caused it.
 
+### Optional timeout reason
+
+For local troubleshooting, add `"diagnose_timeout":true` to one checkpoint action. If it expires, stderr appends a single `last_observation=` label to the existing timeout. It creates no new artifact and emits no DOM, selector, observed text, or profile data. Omitted or false preserves the existing error text.
+
+- `missing-root`, `missing-descendant`, `text-mismatch`: no connected root by ID, no matching descendant class, or no exact text among that class, respectively.
+- `exact-text-hidden`, `exact-text-no-layout-box`, `exact-text-not-hittable`: exact text under an explicit `hidden` attribute, no layout box (e.g. `display:none`), or no acceptable native hit at the sampled viewport point.
+- `document-not-ready`, `no-post-click-sample`, `exact-text-hit-too-late`: the latest check skipped an unfinished document, no post-click check ran, or the hit check finished after its deadline.
+
+The label is from the last post-click check, not a final DOM snapshot and not attribution to the click handler. Ambiguity and document replacement still fail separately. An outer process kill may not produce any label. A timeout with any label is still a failure, with no success envelope and the same rollback rules. Do not feed the label into artifact acceptance or use it as evidence of completion.
+
 ## Coordinator validation
 
 Run the focused unit tests once in the authorized build worktree:

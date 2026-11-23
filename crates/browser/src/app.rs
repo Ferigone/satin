@@ -48,7 +48,9 @@ mod settings;
 mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
 use self::bookmark_menu::Menu;
-use crate::testing::{Checkpoint, CheckpointDocument, CheckpointOutputs, SmokeAction};
+use crate::testing::{
+    Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, SmokeAction,
+};
 use navigation_error::Recovery;
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
@@ -290,6 +292,7 @@ pub fn run(
             .unwrap_or_default(),
         smoke_wait_deadline: None,
         smoke_checkpoint_document: None,
+        smoke_checkpoint_observation: None,
         smoke_checkpoint_last: None,
         smoke_checkpoint_outputs: CheckpointOutputs::default(),
         file_picker_responses,
@@ -332,6 +335,7 @@ struct App {
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
     smoke_wait_deadline: Option<Instant>,
     smoke_checkpoint_document: Option<CheckpointDocument>,
+    smoke_checkpoint_observation: Option<CheckpointObservation>,
     smoke_checkpoint_last: Option<Checkpoint>,
     smoke_checkpoint_outputs: CheckpointOutputs,
     file_picker_responses: Option<crate::file_picker::Responses>,
@@ -2053,7 +2057,10 @@ impl App {
         }
     }
 
-    fn checkpoint_matches(&self, checkpoint: &Checkpoint) -> Result<bool, String> {
+    fn checkpoint_observation(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<CheckpointObservation, String> {
         let tab = &self.tabs[self.active];
         let (Some(page), Some(layout)) = (&tab.page, &tab.layout) else {
             return Err(checkpoint.error("no current document layout"));
@@ -2068,7 +2075,7 @@ impl App {
         {
             return Err(checkpoint.error("document or layout is incomplete"));
         }
-        checkpoint.matches(&page.document, layout, self.tab_viewport(self.active))
+        checkpoint.observe(&page.document, layout, self.tab_viewport(self.active))
     }
 
     fn arm_smoke_checkpoint(&mut self) -> Result<(), String> {
@@ -2084,8 +2091,9 @@ impl App {
         if let Some(expected) = self.smoke_checkpoint_document {
             checkpoint.require_document(expected, identity)?;
         }
-        checkpoint.require_unmet(self.checkpoint_matches(checkpoint)?)?;
+        checkpoint.require_unmet(self.checkpoint_observation(checkpoint)?.is_match())?;
         self.smoke_checkpoint_document = Some(identity);
+        self.smoke_checkpoint_observation = None;
         self.smoke_wait_deadline =
             Some(Instant::now() + Duration::from_millis(checkpoint.timeout_ms));
         Ok(())
@@ -2114,19 +2122,23 @@ impl App {
                 .smoke_wait_deadline
                 .ok_or_else(|| checkpoint.error("checkpoint has no input deadline"))?;
             if Instant::now() >= deadline {
-                return Err(checkpoint.error("timed out waiting for a layout hit with exact text"));
+                return Err(checkpoint.timeout_error(self.smoke_checkpoint_observation));
             }
             let tab = &self.tabs[self.active];
-            if tab.loading
+            let observation = if tab.loading
                 || tab.document_session.as_ref().is_some_and(|session| {
                     !session.done() || session.needs_advance(tab.runtime.as_ref())
-                })
-                || !self.checkpoint_matches(checkpoint)?
-            {
+                }) {
+                CheckpointObservation::DocumentNotReady
+            } else {
+                self.checkpoint_observation(checkpoint)?
+            };
+            self.smoke_checkpoint_observation = Some(observation);
+            if !observation.is_match() {
                 return Ok(Some(deadline));
             }
             if Instant::now() >= deadline {
-                return Err(checkpoint.error("timed out waiting for a layout hit with exact text"));
+                return Err(checkpoint.timeout_error(self.smoke_checkpoint_observation));
             }
             checkpoint.capture(
                 self.smoke_output
@@ -2261,7 +2273,7 @@ impl App {
                     .smoke_checkpoint_document
                     .expect("a completed checkpoint has a document");
                 checkpoint.require_document(expected, self.checkpoint_document())?;
-                if !self.checkpoint_matches(checkpoint)? {
+                if !self.checkpoint_observation(checkpoint)?.is_match() {
                     return Err(checkpoint.error("condition no longer matched at final frame"));
                 }
             }
