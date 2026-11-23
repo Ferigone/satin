@@ -38,9 +38,11 @@ use winit::{
     window::{CursorIcon, Icon, ResizeDirection, Theme, Window, WindowId},
 };
 
+mod address_bar;
 mod chrome_menu;
 mod icons;
 mod tab_strip;
+use self::address_bar::{AddressBar, Movement};
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
 const TAB_H: f32 = 58.;
@@ -240,10 +242,8 @@ pub fn run(
         incoming,
         mouse: (0., 0.),
         modifiers: ModifiersState::empty(),
-        address: String::new(),
-        cursor: 0,
+        address: AddressBar::default(),
         address_focus: false,
-        select_all: false,
         preedit: false,
         select_popup: None,
         hits: vec![],
@@ -322,10 +322,8 @@ struct App {
     incoming: Receiver<Message>,
     mouse: (f32, f32),
     modifiers: ModifiersState,
-    address: String,
-    cursor: usize,
+    address: AddressBar,
     address_focus: bool,
-    select_all: bool,
     preedit: bool,
     select_popup: Option<SelectPopup>,
     hits: Vec<(Rect, Action)>,
@@ -567,12 +565,11 @@ impl App {
     }
     fn sync_address(&mut self) {
         let tab = &self.tabs[self.active];
-        self.address = if tab.is_home() {
+        self.address.set_text(if tab.is_home() {
             String::new()
         } else {
             tab.url.clone()
-        };
-        self.cursor = self.address.len();
+        });
     }
     fn set_title(&self) {
         if let Some(w) = &self.window {
@@ -753,7 +750,6 @@ impl App {
         tab.url = url.clone();
         if index == self.active {
             self.address_focus = false;
-            self.select_all = false;
             self.status.clear();
         }
         if url.starts_with("about:") {
@@ -873,8 +869,7 @@ impl App {
                 self.sync_runtime(self.active);
                 self.select_popup = None;
                 self.address_focus = true;
-                self.select_all = true;
-                self.cursor = self.address.len();
+                self.address.select_all();
                 self.redraw();
             }
             Action::Back => self.traverse_history(self.active, -1),
@@ -1043,18 +1038,9 @@ impl App {
             }
             return;
         }
-        if self.select_all {
-            self.address.clear();
-            self.cursor = 0;
-            self.select_all = false;
+        if self.address.insert(text) {
+            self.redraw();
         }
-        let filtered = text.chars().filter(|c| !c.is_control()).collect::<String>();
-        if self.address.len() + filtered.len() > 16384 {
-            return;
-        }
-        self.address.insert_str(self.cursor, &filtered);
-        self.cursor += filtered.len();
-        self.redraw();
     }
     fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
         if self.settings_panel.is_some() {
@@ -1118,7 +1104,7 @@ impl App {
                         return;
                     }
                     "a" if self.address_focus => {
-                        self.select_all = true;
+                        self.address.select_all();
                         self.redraw();
                         return;
                     }
@@ -1128,7 +1114,7 @@ impl App {
                     }
                     "c" => {
                         let value = if self.address_focus {
-                            Some(self.address.clone())
+                            self.address.selected_text().map(str::to_owned)
                         } else {
                             self.tabs[self.active]
                                 .runtime
@@ -1142,14 +1128,14 @@ impl App {
                         }
                         return;
                     }
-                    "x" if self.address_focus && self.select_all => {
-                        if let Some(cb) = &mut self.clipboard {
-                            let _ = cb.set_text(self.address.clone());
+                    "x" if self.address_focus => {
+                        if let (Some(cb), Some(value)) =
+                            (&mut self.clipboard, self.address.selected_text())
+                            && cb.set_text(value).is_ok()
+                        {
+                            self.address.delete_selection();
+                            self.redraw();
                         }
-                        self.address.clear();
-                        self.cursor = 0;
-                        self.select_all = false;
-                        self.redraw();
                         return;
                     }
                     "x" if !self.address_focus => {
@@ -1268,72 +1254,27 @@ impl App {
                 self.redraw();
             }
             Key::Named(NamedKey::Enter) if self.address_focus => {
-                self.navigate(omnibox_target(&self.address), true)
+                self.navigate(omnibox_target(self.address.text()), true)
             }
-            Key::Named(NamedKey::Backspace) if self.address_focus => {
-                if self.select_all {
-                    self.address.clear();
-                    self.cursor = 0;
-                } else if self.cursor > 0 {
-                    let previous = self.address[..self.cursor]
-                        .char_indices()
-                        .last()
-                        .map_or(0, |(i, _)| i);
-                    self.address.drain(previous..self.cursor);
-                    self.cursor = previous;
-                }
-                self.select_all = false;
+            Key::Named(edit @ (NamedKey::Backspace | NamedKey::Delete)) if self.address_focus => {
+                self.address.delete(edit == NamedKey::Backspace);
                 self.redraw();
             }
-            Key::Named(NamedKey::Delete) if self.address_focus => {
-                if self.select_all {
-                    self.address.clear();
-                    self.cursor = 0;
-                } else if self.cursor < self.address.len() {
-                    let next = self.cursor
-                        + self.address[self.cursor..]
-                            .chars()
-                            .next()
-                            .unwrap()
-                            .len_utf8();
-                    self.address.drain(self.cursor..next);
-                }
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::ArrowLeft) if self.address_focus => {
-                self.cursor = if self.select_all {
-                    0
-                } else {
-                    self.address[..self.cursor]
-                        .char_indices()
-                        .last()
-                        .map_or(0, |(i, _)| i)
+            Key::Named(
+                direction @ (NamedKey::ArrowLeft
+                | NamedKey::ArrowRight
+                | NamedKey::Home
+                | NamedKey::End),
+            ) if self.address_focus => {
+                let movement = match direction {
+                    NamedKey::ArrowLeft => Movement::Left,
+                    NamedKey::ArrowRight => Movement::Right,
+                    NamedKey::Home => Movement::Start,
+                    NamedKey::End => Movement::End,
+                    _ => unreachable!(),
                 };
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::ArrowRight) if self.address_focus => {
-                self.cursor = if self.select_all {
-                    self.address.len()
-                } else {
-                    self.cursor
-                        + self.address[self.cursor..]
-                            .chars()
-                            .next()
-                            .map_or(0, char::len_utf8)
-                };
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::Home) if self.address_focus => {
-                self.cursor = 0;
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::End) if self.address_focus => {
-                self.cursor = self.address.len();
-                self.select_all = false;
+                self.address
+                    .move_caret(movement, self.modifiers.shift_key());
                 self.redraw();
             }
             Key::Named(NamedKey::Home | NamedKey::End) => {
@@ -1864,31 +1805,43 @@ impl App {
             available,
             row_height - 8.,
         ));
-        let cursor_width = if self.address_focus {
-            let prefix = self.address.get(..self.cursor).unwrap_or(&self.address);
+        let address = self.address.text();
+        let measure = |index| {
             self.fonts
-                .shape(prefix, font_size, false, false, false)
+                .shape(&address[..index], font_size, false, false, false)
                 .advance
                 / u
+        };
+        let caret = self.address.caret();
+        let cursor_width = if self.address_focus {
+            measure(caret)
         } else {
             0.
         };
         let shift = (cursor_width - available + 8.).max(0.);
-        if self.select_all && self.address_focus {
-            let run = self
-                .fonts
-                .shape(&self.address, font_size, false, false, false);
+        let selected = self.address.selection();
+        if self.address_focus && !selected.is_empty() {
+            let start = if selected.start == caret {
+                cursor_width
+            } else {
+                measure(selected.start)
+            };
+            let end = if selected.end == caret {
+                cursor_width
+            } else {
+                measure(selected.end)
+            };
             canvas.fill_rect(
-                scaled_rect(u, text_x - shift, row_y + 10., run.advance / u, 26.),
+                scaled_rect(u, text_x + start - shift, row_y + 10., end - start, 26.),
                 Color(67, 87, 105, 255),
             );
         }
-        let empty = self.address.is_empty();
+        let empty = address.is_empty();
         canvas.label(
             if empty {
                 "Search or enter an address"
             } else {
-                &self.address
+                address
             },
             (text_x - shift) * u,
             (row_y + 30.) * u,
@@ -1901,7 +1854,7 @@ impl App {
             false,
             &mut self.fonts,
         );
-        if self.address_focus && (!self.select_all || empty) {
+        if self.address_focus && selected.is_empty() {
             canvas.fill_rect(
                 scaled_rect(u, text_x + cursor_width - shift, row_y + 12., 1., 22.),
                 CHROME_TEXT,
