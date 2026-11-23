@@ -5,6 +5,7 @@ mod headless;
 mod jobs;
 mod media;
 mod profile;
+mod shortcuts;
 mod testing;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod updater;

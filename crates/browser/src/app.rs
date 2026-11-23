@@ -1,6 +1,7 @@
 use crate::jobs::{Job, Message, Payload, Task, Workers};
 use crate::media::Bridge;
 use crate::profile::{Profile, Session};
+use crate::shortcuts::{self, Command};
 use rust_browser_engine::{
     Fonts, Layout, LoadedPage, Rect,
     cookies::CookieContext,
@@ -35,6 +36,20 @@ use winit::{
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Icon, ResizeDirection, Theme, Window, WindowId},
 };
+
+mod address_bar;
+mod bookmark_menu;
+mod bookmarks;
+mod chrome_menu;
+mod history_ui;
+mod icons;
+mod navigation_error;
+mod settings;
+mod tab_strip;
+use self::address_bar::{AddressBar, Movement};
+use self::bookmark_menu::Menu;
+use navigation_error::Recovery;
+use tab_strip::{NEW_TAB_WIDTH, TabStrip};
 
 const TAB_H: f32 = 58.;
 const TOP: f32 = TAB_H + 64.;
@@ -76,9 +91,14 @@ enum Action {
     NewTab,
     Select(usize),
     Close(usize),
+    Settings,
     Version,
+    Bookmarks,
+    ShortcutHelp,
     Menu,
+    TabHistory,
     MenuItem(usize),
+    BookmarkItem(usize),
     Minimize,
     Maximize,
     CloseWindow,
@@ -88,12 +108,20 @@ impl Action {
     fn caption(self) -> bool {
         matches!(self, Self::Minimize | Self::Maximize | Self::CloseWindow)
     }
+
+    fn in_menu(self) -> bool {
+        matches!(self, Self::Menu | Self::MenuItem(_) | Self::BookmarkItem(_))
+    }
 }
 
-const MENU_ITEMS: [(Action, &str); 3] = [
+const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::Home, "Start page"),
     (Action::NewTab, "New tab"),
+    (Action::Settings, "Settings"),
+    (Action::Bookmarks, "Bookmarks"),
+    (Action::TabHistory, "Tab history"),
     (Action::Version, "About Satin"),
+    (Action::ShortcutHelp, "Keyboard shortcuts"),
 ];
 
 struct Tab {
@@ -112,6 +140,7 @@ struct Tab {
     nested_scroll: HashMap<rust_browser_engine::dom::NodeId, ScrollOffset>,
     zoom: f32,
     loading: bool,
+    recovery: Recovery,
     navigation: u64,
     document_navigation: u64,
     cancel: CancelSignal,
@@ -140,6 +169,7 @@ impl Tab {
             nested_scroll: HashMap::new(),
             zoom: 1.,
             loading: false,
+            recovery: Recovery::default(),
             navigation: 0,
             document_navigation: 0,
             cancel: CancelSignal::new(),
@@ -175,7 +205,11 @@ pub fn run(
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
 ) -> Result<(), String> {
-    let (profile, session) = Profile::open(path)?;
+    let (profile, session) = Profile::open(path.clone())?;
+    let settings = settings::Store::open(&path);
+    let session = settings.initial_session(session);
+    let bookmarks_path = path.join(bookmarks::FILE_NAME);
+    let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let fonts = Fonts::new()?;
     let events = EventLoop::<()>::with_user_event()
         .build()
@@ -218,6 +252,9 @@ pub fn run(
         canvas: None,
         fonts,
         profile,
+        bookmarks,
+        settings,
+        settings_panel: None,
         tabs,
         active,
         next_id,
@@ -227,15 +264,15 @@ pub fn run(
         incoming,
         mouse: (0., 0.),
         modifiers: ModifiersState::empty(),
-        address: String::new(),
-        cursor: 0,
+        address: AddressBar::default(),
         address_focus: false,
-        select_all: false,
         preedit: false,
         select_popup: None,
         hits: vec![],
+        tab_hits_current: false,
         chrome_hover: None,
         chrome_menu: None,
+        history_menu: None,
         caption_pressed: None,
         last_title_press: None,
         hover: None,
@@ -297,6 +334,9 @@ struct App {
     canvas: Option<Canvas>,
     fonts: Fonts,
     profile: Profile,
+    bookmarks: Result<bookmarks::Bookmarks, String>,
+    settings: settings::Store,
+    settings_panel: Option<settings::Panel>,
     tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
@@ -306,15 +346,15 @@ struct App {
     incoming: Receiver<Message>,
     mouse: (f32, f32),
     modifiers: ModifiersState,
-    address: String,
-    cursor: usize,
+    address: AddressBar,
     address_focus: bool,
-    select_all: bool,
     preedit: bool,
     select_popup: Option<SelectPopup>,
     hits: Vec<(Rect, Action)>,
+    tab_hits_current: bool,
     chrome_hover: Option<Action>,
-    chrome_menu: Option<usize>,
+    chrome_menu: Option<Menu>,
+    history_menu: Option<history_ui::HistoryMenu>,
     caption_pressed: Option<Action>,
     last_title_press: Option<(Instant, f32, f32)>,
     hover: Option<String>,
@@ -346,18 +386,27 @@ impl App {
     }
 
     fn fail_page(&mut self, index: usize, error: &str) {
+        if index == self.active {
+            self.select_popup = None;
+            self.hover = None;
+        }
         let tab = &mut self.tabs[index];
         self.media.close_page(tab.id, tab.document_navigation);
         tab.cancel.cancel();
         tab.navigation = tab.navigation.wrapping_add(1);
         tab.document_navigation = tab.navigation;
-        let page = LoadedPage::error(&tab.url, error);
+        tab.recovery = tab.recovery.failed();
+        let page = tab.recovery.page(&tab.url, error);
         tab.title = page.title();
         tab.page = Some(Arc::new(page));
         tab.layout = None;
         tab.runtime = None;
         tab.document_session = None;
         tab.loading = false;
+        tab.history_scroll = None;
+        tab.scroll = 0.;
+        tab.scroll_x = 0.;
+        tab.nested_scroll.clear();
     }
 
     fn advance_page(&mut self, index: usize) -> bool {
@@ -550,12 +599,11 @@ impl App {
     }
     fn sync_address(&mut self) {
         let tab = &self.tabs[self.active];
-        self.address = if tab.is_home() {
+        self.address.set_text(if tab.is_home() {
             String::new()
         } else {
             tab.url.clone()
-        };
-        self.cursor = self.address.len();
+        });
     }
     fn set_title(&self) {
         if let Some(w) = &self.window {
@@ -723,6 +771,16 @@ impl App {
         };
         tab.history.visit(parsed.clone(), mode, scroll);
         tab.history_scroll = restore.or_else(|| parsed.fragment().map(|_| HistoryScroll::Fragment));
+        if tab.recovery.is_error_page() {
+            // Do not leave a stale retry action in the viewport during a new load.
+            tab.page = None;
+            tab.layout = None;
+            tab.title.clone_from(&url);
+            if index == self.active {
+                self.hover = None;
+            }
+        }
+        tab.recovery = Recovery::for_navigation(&parsed, request.as_ref());
         tab.cancel.cancel();
         tab.cancel = CancelSignal::new();
         tab.runtime = None;
@@ -736,10 +794,15 @@ impl App {
         tab.url = url.clone();
         if index == self.active {
             self.address_focus = false;
-            self.select_all = false;
             self.status.clear();
         }
-        if url.starts_with("about:") {
+        if let Some(page) = shortcuts::help_page(&parsed) {
+            // Browser-owned help is static: do not create a script realm for it.
+            tab.title = page.title();
+            tab.page = Some(Arc::new(page));
+            tab.layout = None;
+            tab.loading = false;
+        } else if url.starts_with("about:") {
             self.start_page(index, OpenedPage::internal(&parsed, self.profile.cookies()));
             self.advance_page(index);
         } else {
@@ -830,6 +893,7 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        self.tab_hits_current = false;
         self.active = index;
         self.address_focus = false;
         self.sync_address();
@@ -842,7 +906,7 @@ impl App {
         self.redraw();
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
-        if !matches!(action, Action::Menu | Action::MenuItem(_)) {
+        if !action.in_menu() {
             self.chrome_menu = None;
         }
         match action {
@@ -855,8 +919,7 @@ impl App {
                 self.sync_runtime(self.active);
                 self.select_popup = None;
                 self.address_focus = true;
-                self.select_all = true;
-                self.cursor = self.address.len();
+                self.address.select_all();
                 self.redraw();
             }
             Action::Back => self.traverse_history(self.active, -1),
@@ -890,15 +953,27 @@ impl App {
                 }
             }
             Action::Home => self.navigate("about:home".into(), true),
+            Action::Settings => self.open_settings(),
             Action::Version => self.navigate("about:version".into(), true),
+            Action::Bookmarks => self.show_bookmarks(),
+            Action::ShortcutHelp => self.navigate(shortcuts::HELP_URL.into(), true),
+            Action::TabHistory => self.open_history_menu(),
             Action::Menu => {
                 self.select_popup = None;
-                self.chrome_menu = self.chrome_menu.is_none().then_some(0);
+                self.chrome_menu = self.chrome_menu.is_none().then_some(Menu::Main(0));
                 self.redraw();
             }
             Action::MenuItem(index) => {
-                self.chrome_menu = None;
-                self.action(MENU_ITEMS[index].0, event_loop);
+                if matches!(self.chrome_menu, Some(Menu::Main(_)))
+                    && let Some((action, _)) = MENU_ITEMS.get(index).copied()
+                {
+                    self.action(action, event_loop);
+                }
+            }
+            Action::BookmarkItem(index) => {
+                if matches!(self.chrome_menu, Some(Menu::Bookmarks(_))) {
+                    self.pick_bookmark_row(index);
+                }
             }
             Action::Minimize => {
                 if let Some(window) = &self.window {
@@ -958,6 +1033,9 @@ impl App {
         event_loop.exit();
     }
     fn scroll(&mut self, dy: f32) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         self.address_focus = false;
         self.ensure_layout();
         let tab = &mut self.tabs[self.active];
@@ -1009,6 +1087,12 @@ impl App {
         self.redraw();
     }
     fn insert(&mut self, text: &str) {
+        if self.settings_panel.is_some()
+            || self.history_menu.is_some()
+            || matches!(self.chrome_menu, Some(Menu::Bookmarks(_)))
+        {
+            return;
+        }
         if !self.address_focus {
             if let Some(runtime) = &mut self.tabs[self.active].runtime {
                 if let Err(error) = runtime.insert_form_text(text) {
@@ -1018,21 +1102,50 @@ impl App {
             }
             return;
         }
-        if self.select_all {
-            self.address.clear();
-            self.cursor = 0;
-            self.select_all = false;
+        if self.address.insert(text) {
+            self.redraw();
         }
-        let filtered = text.chars().filter(|c| !c.is_control()).collect::<String>();
-        if self.address.len() + filtered.len() > 16384 {
+    }
+    fn run_shortcut(&mut self, command: Command, event_loop: &ActiveEventLoop) {
+        match command {
+            Command::Address => self.action(Action::Address, event_loop),
+            Command::NewTab => self.action(Action::NewTab, event_loop),
+            Command::CloseTab => self.action(Action::Close(self.active), event_loop),
+            Command::NextTab => self.activate((self.active + 1) % self.tabs.len()),
+            Command::PreviousTab => {
+                self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
+            }
+            // The keyboard reloads even if a load is in progress. The chrome
+            // button's Action::Reload can instead stop the current load.
+            Command::Reload => self.navigate(self.tabs[self.active].url.clone(), false),
+            Command::Back => self.action(Action::Back, event_loop),
+            Command::Forward => self.action(Action::Forward, event_loop),
+            Command::Menu => self.action(Action::Menu, event_loop),
+            Command::BookmarkPage => self.save_current_bookmark(),
+            Command::ZoomIn | Command::ZoomOut | Command::ResetZoom => {
+                let tab = &mut self.tabs[self.active];
+                tab.zoom = match command {
+                    Command::ZoomIn => tab.zoom * 1.1,
+                    Command::ZoomOut => tab.zoom / 1.1,
+                    _ => 1.,
+                }
+                .clamp(0.5, 3.);
+                tab.layout = None;
+                self.ensure_layout();
+                self.redraw();
+            }
+        }
+    }
+
+    fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_key(key);
             return;
         }
-        self.address.insert_str(self.cursor, &filtered);
-        self.cursor += filtered.len();
-        self.redraw();
-    }
-    fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
-        if let Some(selected) = self.chrome_menu {
+        if self.handle_history_key(&key) || self.bookmark_panel_key(&key) {
+            return;
+        }
+        if let Some(Menu::Main(selected)) = self.chrome_menu {
             match key {
                 Key::Named(NamedKey::Escape) => {
                     self.chrome_menu = None;
@@ -1043,7 +1156,7 @@ impl App {
                     let previous = key == Key::Named(NamedKey::ArrowUp)
                         || (key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
                     let step = if previous { MENU_ITEMS.len() - 1 } else { 1 };
-                    self.chrome_menu = Some((selected + step) % MENU_ITEMS.len());
+                    self.chrome_menu = Some(Menu::Main((selected + step) % MENU_ITEMS.len()));
                     self.redraw();
                     return;
                 }
@@ -1068,28 +1181,16 @@ impl App {
                 return;
             }
         }
+        if let Some(command) = shortcuts::command(&key, self.modifiers) {
+            self.run_shortcut(command, event_loop);
+            return;
+        }
         let ctrl = self.modifiers.control_key() && !self.modifiers.alt_key();
         if ctrl {
             if let Key::Character(c) = &key {
                 match c.to_lowercase().as_str() {
-                    "l" => {
-                        self.action(Action::Address, event_loop);
-                        return;
-                    }
-                    "t" => {
-                        self.action(Action::NewTab, event_loop);
-                        return;
-                    }
-                    "w" => {
-                        self.action(Action::Close(self.active), event_loop);
-                        return;
-                    }
-                    "r" => {
-                        self.navigate(self.tabs[self.active].url.clone(), false);
-                        return;
-                    }
                     "a" if self.address_focus => {
-                        self.select_all = true;
+                        self.address.select_all();
                         self.redraw();
                         return;
                     }
@@ -1099,7 +1200,7 @@ impl App {
                     }
                     "c" => {
                         let value = if self.address_focus {
-                            Some(self.address.clone())
+                            self.address.selected_text().map(str::to_owned)
                         } else {
                             self.tabs[self.active]
                                 .runtime
@@ -1113,14 +1214,14 @@ impl App {
                         }
                         return;
                     }
-                    "x" if self.address_focus && self.select_all => {
-                        if let Some(cb) = &mut self.clipboard {
-                            let _ = cb.set_text(self.address.clone());
+                    "x" if self.address_focus => {
+                        if let (Some(cb), Some(value)) =
+                            (&mut self.clipboard, self.address.selected_text())
+                            && cb.set_text(value).is_ok()
+                        {
+                            self.address.delete_selection();
+                            self.redraw();
                         }
-                        self.address.clear();
-                        self.cursor = 0;
-                        self.select_all = false;
-                        self.redraw();
                         return;
                     }
                     "x" if !self.address_focus => {
@@ -1148,53 +1249,15 @@ impl App {
                         }
                         return;
                     }
-                    "+" | "=" | "-" | "0" => {
-                        let t = &mut self.tabs[self.active];
-                        t.zoom = match c.as_str() {
-                            "-" => t.zoom / 1.1,
-                            "0" => 1.,
-                            _ => t.zoom * 1.1,
-                        }
-                        .clamp(0.5, 3.);
-                        t.layout = None;
-                        self.ensure_layout();
-                        self.redraw();
-                        return;
-                    }
                     _ => {}
                 }
             }
-            if key == Key::Named(NamedKey::Tab) {
-                let direction = if self.modifiers.shift_key() {
-                    self.tabs.len() - 1
-                } else {
-                    1
-                };
-                self.activate((self.active + direction) % self.tabs.len());
-                return;
-            }
         }
-        if self.modifiers.alt_key() {
-            if let Key::Character(c) = &key
-                && c.eq_ignore_ascii_case("f")
-            {
-                self.action(Action::Menu, event_loop);
-                return;
+        if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
+            if let Some(window) = &self.window {
+                window.show_window_menu(LogicalPosition::new(0., TAB_H));
             }
-            if WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
-                if let Some(window) = &self.window {
-                    window.show_window_menu(LogicalPosition::new(0., TAB_H));
-                }
-                return;
-            }
-            if key == Key::Named(NamedKey::ArrowLeft) {
-                self.action(Action::Back, event_loop);
-                return;
-            }
-            if key == Key::Named(NamedKey::ArrowRight) {
-                self.action(Action::Forward, event_loop);
-                return;
-            }
+            return;
         }
         if !self.address_focus {
             if key == Key::Named(NamedKey::Tab)
@@ -1228,7 +1291,6 @@ impl App {
             }
         }
         match key {
-            Key::Named(NamedKey::F5) => self.navigate(self.tabs[self.active].url.clone(), false),
             Key::Named(NamedKey::Escape) => {
                 if self.address_focus {
                     self.address_focus = false;
@@ -1239,72 +1301,27 @@ impl App {
                 self.redraw();
             }
             Key::Named(NamedKey::Enter) if self.address_focus => {
-                self.navigate(omnibox_target(&self.address), true)
+                self.navigate(omnibox_target(self.address.text()), true)
             }
-            Key::Named(NamedKey::Backspace) if self.address_focus => {
-                if self.select_all {
-                    self.address.clear();
-                    self.cursor = 0;
-                } else if self.cursor > 0 {
-                    let previous = self.address[..self.cursor]
-                        .char_indices()
-                        .last()
-                        .map_or(0, |(i, _)| i);
-                    self.address.drain(previous..self.cursor);
-                    self.cursor = previous;
-                }
-                self.select_all = false;
+            Key::Named(edit @ (NamedKey::Backspace | NamedKey::Delete)) if self.address_focus => {
+                self.address.delete(edit == NamedKey::Backspace);
                 self.redraw();
             }
-            Key::Named(NamedKey::Delete) if self.address_focus => {
-                if self.select_all {
-                    self.address.clear();
-                    self.cursor = 0;
-                } else if self.cursor < self.address.len() {
-                    let next = self.cursor
-                        + self.address[self.cursor..]
-                            .chars()
-                            .next()
-                            .unwrap()
-                            .len_utf8();
-                    self.address.drain(self.cursor..next);
-                }
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::ArrowLeft) if self.address_focus => {
-                self.cursor = if self.select_all {
-                    0
-                } else {
-                    self.address[..self.cursor]
-                        .char_indices()
-                        .last()
-                        .map_or(0, |(i, _)| i)
+            Key::Named(
+                direction @ (NamedKey::ArrowLeft
+                | NamedKey::ArrowRight
+                | NamedKey::Home
+                | NamedKey::End),
+            ) if self.address_focus => {
+                let movement = match direction {
+                    NamedKey::ArrowLeft => Movement::Left,
+                    NamedKey::ArrowRight => Movement::Right,
+                    NamedKey::Home => Movement::Start,
+                    NamedKey::End => Movement::End,
+                    _ => unreachable!(),
                 };
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::ArrowRight) if self.address_focus => {
-                self.cursor = if self.select_all {
-                    self.address.len()
-                } else {
-                    self.cursor
-                        + self.address[self.cursor..]
-                            .chars()
-                            .next()
-                            .map_or(0, char::len_utf8)
-                };
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::Home) if self.address_focus => {
-                self.cursor = 0;
-                self.select_all = false;
-                self.redraw();
-            }
-            Key::Named(NamedKey::End) if self.address_focus => {
-                self.cursor = self.address.len();
-                self.select_all = false;
+                self.address
+                    .move_caret(movement, self.modifiers.shift_key());
                 self.redraw();
             }
             Key::Named(NamedKey::Home | NamedKey::End) => {
@@ -1473,6 +1490,9 @@ impl App {
                 );
             }
         }
+        if let Some(panel) = &self.settings_panel {
+            panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
+        }
         let presented = (|| -> Result<(), String> {
             let graphics = self
                 .graphics
@@ -1491,10 +1511,14 @@ impl App {
         })();
         match presented {
             Ok(()) => {
+                self.tab_hits_current = true;
                 self.presented_frames += 1;
                 self.last_present_error = None;
             }
-            Err(e) => self.last_present_error = Some(e),
+            Err(e) => {
+                self.tab_hits_current = false;
+                self.last_present_error = Some(e);
+            }
         }
         self.canvas = Some(canvas);
     }
@@ -1522,6 +1546,7 @@ impl App {
         self.draw_toolbar(canvas, width);
         self.draw_footer(canvas, width, height);
         self.draw_chrome_menu(canvas, width);
+        self.draw_history_menu(canvas, width);
     }
 
     fn draw_tabs(&mut self, canvas: &mut Canvas, width: f32) {
@@ -1531,49 +1556,45 @@ impl App {
         } else {
             0.
         };
-        let available = (width - caption - 18. - 58.).max(0.);
-        let count = self.tabs.len() as f32;
-        let extra = (available / count - 80.).clamp(0., 32.);
-        let slot = ((available - extra) / count).min(216.);
+        let strip = TabStrip::new(width, caption, self.tabs.len(), self.active);
+        let compact = strip.slot < 62.;
+        let full_canvas = scaled_rect(1., 0., 0., canvas.width as f32, canvas.height as f32);
         let pointer = self.chrome_hover;
-        let bounds = |index: usize| {
-            let offset = if index > self.active { extra } else { 0. };
-            let bonus = if index == self.active { extra } else { 0. };
-            (
-                18. + index as f32 * slot + offset,
-                (slot + bonus - 4.).max(1.),
-            )
-        };
 
-        // The active shoulders join the toolbar and sit over adjacent tab edges.
+        // The normal active shoulders join the toolbar and overlap adjacent edges.
         for index in 0..self.tabs.len() {
             if index != self.active {
-                let (x, face) = bounds(index);
+                let tab = strip.tab(index);
                 let hover =
                     matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-                draw_tab_face(canvas, x, face, u, false, hover);
+                draw_tab_face(canvas, tab.x, tab.face, u, false, hover);
             }
         }
-        let (x, face) = bounds(self.active);
-        draw_tab_face(canvas, x, face, u, true, true);
+        let active_slot = strip.tab(self.active);
+        if compact {
+            // Don't paint the active shoulders over narrow neighbours' targets.
+            canvas.clip(scaled_rect(
+                u,
+                active_slot.x - 2.,
+                0.,
+                active_slot.face + 4.,
+                TAB_H,
+            ));
+        }
+        draw_tab_face(canvas, active_slot.x, active_slot.face, u, true, true);
+        if compact {
+            canvas.clip(full_canvas);
+        }
 
         for (index, tab) in self.tabs.iter().enumerate() {
-            let (x, face) = bounds(index);
-            let close_width = (face * 0.42).clamp(5., 42.);
-            let close_x = x + face - close_width;
+            let slot = strip.tab(index);
+            let select = slot.select();
+            let x = slot.x;
             let close = Action::Close(index);
             let active = index == self.active;
             let hovered =
                 matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-            if pointer == Some(close) {
-                rounded_chrome_rect(
-                    canvas,
-                    scaled_rect(u, close_x, 21., close_width, 25.),
-                    8. * u,
-                    CHROME_HOVER,
-                );
-            }
-            let icon = if slot >= 94. {
+            let icon = if strip.slot >= 94. {
                 built_in_site_icon(&tab.url)
             } else {
                 None
@@ -1581,32 +1602,62 @@ impl App {
             let padding = if let Some(icon) = icon {
                 canvas.image(scaled_rect(u, x + 14., 22., 24., 24.), icon);
                 48.
-            } else if slot < 62. {
+            } else if compact {
                 5.
             } else if active {
                 24.
             } else {
                 16.
             };
-            let font = if slot < 62. { 12. } else { 17. } * u;
-            let text_width = (close_x - x - padding - 3.) * u;
+            let font = if compact { 12. } else { 17. } * u;
+            let text_width = (select.end - x - padding - 3.) * u;
             if text_width >= 7. * u {
                 let title = if tab.is_home() { "New tab" } else { &tab.title };
                 let title = elide(&self.fonts, title, text_width, font);
-                canvas.label(
-                    &title,
-                    (x + padding) * u,
-                    40. * u,
-                    font,
-                    CHROME_TEXT,
-                    false,
-                    &mut self.fonts,
-                );
+                if !compact
+                    || title != "…"
+                    || self.fonts.shape(&title, font, false, false, false).advance <= text_width
+                {
+                    if compact {
+                        canvas.clip(scaled_rect(u, x + padding, 0., text_width / u, TAB_H));
+                    }
+                    canvas.label(
+                        &title,
+                        (x + padding) * u,
+                        40. * u,
+                        font,
+                        CHROME_TEXT,
+                        false,
+                        &mut self.fonts,
+                    );
+                    if compact {
+                        canvas.clip(full_canvas);
+                    }
+                }
             }
-            let mark = close_width.min(18.);
-            if mark >= 6. || active || hovered {
+            self.hits.push((
+                Rect {
+                    x,
+                    y: 8.,
+                    width: select.end - select.start,
+                    height: TAB_H - 8.,
+                },
+                Action::Select(index),
+            ));
+            if let Some(target) = slot.close() {
+                let close_x = target.start;
+                let close_width = target.end - target.start;
+                if pointer == Some(close) {
+                    rounded_chrome_rect(
+                        canvas,
+                        scaled_rect(u, close_x, 21., close_width, 25.),
+                        8. * u,
+                        CHROME_HOVER,
+                    );
+                }
+                let mark = 18.;
                 let icon_scale = mark / 20.;
-                let offset = if slot >= 90. { 5. } else { 0. };
+                let offset = if strip.slot >= 90. { 5. } else { 0. };
                 chrome_icon(
                     canvas,
                     (close_x + (close_width - mark) / 2. - offset) / icon_scale,
@@ -1620,37 +1671,28 @@ impl App {
                         CHROME_MUTED
                     },
                 );
+                self.hits.push((
+                    Rect {
+                        x: close_x,
+                        y: 13.,
+                        width: close_width,
+                        height: TAB_H - 13.,
+                    },
+                    close,
+                ));
             }
-            self.hits.push((
-                Rect {
-                    x,
-                    y: 8.,
-                    width: close_x - x,
-                    height: TAB_H - 8.,
-                },
-                Action::Select(index),
-            ));
-            self.hits.push((
-                Rect {
-                    x: close_x,
-                    y: 13.,
-                    width: close_width,
-                    height: TAB_H - 13.,
-                },
-                close,
-            ));
         }
-        let plus_x = 29. + count * slot + extra;
+        let plus_x = strip.new_tab_x;
         let button = Rect {
             x: plus_x,
             y: 12.,
-            width: 42.,
+            width: NEW_TAB_WIDTH,
             height: 43.,
         };
         if pointer == Some(Action::NewTab) {
             rounded_chrome_rect(
                 canvas,
-                scaled_rect(u, plus_x, 12., 42., 43.),
+                scaled_rect(u, plus_x, 12., NEW_TAB_WIDTH, 43.),
                 10. * u,
                 CHROME_HOVER,
             );
@@ -1811,31 +1853,43 @@ impl App {
             available,
             row_height - 8.,
         ));
-        let cursor_width = if self.address_focus {
-            let prefix = self.address.get(..self.cursor).unwrap_or(&self.address);
+        let address = self.address.text();
+        let measure = |index| {
             self.fonts
-                .shape(prefix, font_size, false, false, false)
+                .shape(&address[..index], font_size, false, false, false)
                 .advance
                 / u
+        };
+        let caret = self.address.caret();
+        let cursor_width = if self.address_focus {
+            measure(caret)
         } else {
             0.
         };
         let shift = (cursor_width - available + 8.).max(0.);
-        if self.select_all && self.address_focus {
-            let run = self
-                .fonts
-                .shape(&self.address, font_size, false, false, false);
+        let selected = self.address.selection();
+        if self.address_focus && !selected.is_empty() {
+            let start = if selected.start == caret {
+                cursor_width
+            } else {
+                measure(selected.start)
+            };
+            let end = if selected.end == caret {
+                cursor_width
+            } else {
+                measure(selected.end)
+            };
             canvas.fill_rect(
-                scaled_rect(u, text_x - shift, row_y + 10., run.advance / u, 26.),
+                scaled_rect(u, text_x + start - shift, row_y + 10., end - start, 26.),
                 Color(67, 87, 105, 255),
             );
         }
-        let empty = self.address.is_empty();
+        let empty = address.is_empty();
         canvas.label(
             if empty {
                 "Search or enter an address"
             } else {
-                &self.address
+                address
             },
             (text_x - shift) * u,
             (row_y + 30.) * u,
@@ -1848,7 +1902,7 @@ impl App {
             false,
             &mut self.fonts,
         );
-        if self.address_focus && (!self.select_all || empty) {
+        if self.address_focus && selected.is_empty() {
             canvas.fill_rect(
                 scaled_rect(u, text_x + cursor_width - shift, row_y + 12., 1., 22.),
                 CHROME_TEXT,
@@ -1918,8 +1972,10 @@ impl App {
     }
 
     fn draw_chrome_menu(&mut self, canvas: &mut Canvas, width: f32) {
-        let Some(selected) = self.chrome_menu else {
-            return;
+        let selected = match self.chrome_menu {
+            Some(Menu::Main(selected)) => selected,
+            Some(Menu::Bookmarks(_)) => return self.draw_bookmarks(canvas, width),
+            None => return,
         };
         let u = self.scale;
         let x = width - 212.;
@@ -1937,19 +1993,22 @@ impl App {
             9. * u,
             CHROME_PANEL,
         );
-        for (index, (_, label)) in MENU_ITEMS.iter().enumerate() {
+        for (index, (item, label)) in MENU_ITEMS.iter().enumerate() {
             let item_y = y + 6. + index as f32 * 35.;
             let action = Action::MenuItem(index);
-            if self.chrome_hover == Some(action)
-                || (index == selected && !matches!(self.chrome_hover, Some(Action::MenuItem(_))))
-            {
-                rounded_chrome_rect(
-                    canvas,
-                    scaled_rect(u, x + 6., item_y, 188., 35.),
-                    7. * u,
-                    CHROME_HOVER,
-                );
-            }
+            let bounds = Rect {
+                x: x + 6.,
+                y: item_y,
+                width: 188.,
+                height: 35.,
+            };
+            chrome_menu::draw_row_highlight(
+                canvas,
+                bounds,
+                u,
+                self.chrome_hover == Some(action),
+                index == selected,
+            );
             canvas.label(
                 label,
                 (x + 17.) * u,
@@ -1959,15 +2018,21 @@ impl App {
                 false,
                 &mut self.fonts,
             );
-            self.hits.push((
-                Rect {
-                    x: x + 6.,
-                    y: item_y,
-                    width: 188.,
-                    height: 35.,
-                },
-                action,
-            ));
+            if *item == Action::NewTab {
+                let hint = shortcuts::label(Command::NewTab);
+                let size = 13. * u;
+                let advance = self.fonts.shape(hint, size, false, false, false).advance;
+                canvas.label(
+                    hint,
+                    (x + 183.) * u - advance,
+                    (item_y + 23.) * u,
+                    size,
+                    CHROME_MUTED,
+                    false,
+                    &mut self.fonts,
+                );
+            }
+            self.hits.push((bounds, action));
         }
     }
 
@@ -2122,6 +2187,13 @@ impl App {
     }
 
     fn left_press(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_press();
+            return;
+        }
+        if self.handle_history_click() {
+            return;
+        }
         if let Some(edge) = self.frame_resize_at_pointer() {
             if let Some(window) = &self.window {
                 let _ = window.drag_resize_window(edge);
@@ -2129,8 +2201,12 @@ impl App {
             return;
         }
         let action = self.chrome_action_at_pointer();
-        if self.chrome_menu.is_some() && !matches!(action, Some(Action::Menu | Action::MenuItem(_)))
-        {
+        // A keyboard tab switch/close or resize can precede the next frame.
+        // Don't apply an old tab hit to the new layout or tab indices.
+        if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
+            return;
+        }
+        if self.chrome_menu.is_some() && !action.is_some_and(Action::in_menu) {
             self.chrome_menu = None;
             self.redraw();
         }
@@ -2164,6 +2240,10 @@ impl App {
     }
 
     fn left_release(&mut self, event_loop: &ActiveEventLoop) {
+        if self.settings_panel.is_some() {
+            self.settings_release();
+            return;
+        }
         if let Some(action) = self.caption_pressed.take() {
             if self.chrome_action_at_pointer() == Some(action) {
                 self.action(action, event_loop);
@@ -2173,8 +2253,12 @@ impl App {
     }
 
     fn pointer_link(&self) -> Option<String> {
+        if self.settings_panel.is_some() {
+            return None;
+        }
         let tab = &self.tabs[self.active];
-        if self.mouse.1 < TOP
+        if self.history_menu.is_some()
+            || self.mouse.1 < TOP
             || self.window.as_ref().is_some_and(|window| {
                 self.mouse.1 >= window.inner_size().height as f32 / self.scale - tab.footer_height()
             })
@@ -2293,6 +2377,9 @@ impl App {
         }
     }
     fn content_click(&mut self) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         if let Some(popup) = self.select_popup.take() {
             if popup.rect.contains(self.mouse.0, self.mouse.1) {
                 let index = popup.first
@@ -2324,6 +2411,11 @@ impl App {
         }
         let mut link = self.pointer_link();
         let tab = &mut self.tabs[self.active];
+        if tab.recovery.is_retry_link(link.as_deref(), &tab.url) {
+            let url = tab.url.clone();
+            self.navigate(url, false);
+            return;
+        }
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
         let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
         let target = tab
@@ -2826,17 +2918,31 @@ impl ApplicationHandler<()> for App {
             WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => {
+                self.tab_hits_current = false;
                 self.ensure_layout();
                 self.redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.tab_hits_current = false;
                 self.scale = scale_factor as f32;
                 self.ensure_layout();
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Focused(false) => self.dismiss_history_menu(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.key(event.logical_key, event.text.as_deref(), event_loop)
+                let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
+                let changes_panel = match event.logical_key {
+                    Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                        self.settings_panel.is_some() || self.history_menu.is_some() || bookmarks_open
+                    }
+                    Key::Named(NamedKey::Delete) => bookmarks_open,
+                    _ => false,
+                };
+                if event.repeat && changes_panel {
+                    return;
+                }
+                self.key(event.logical_key, event.text.as_deref(), event_loop);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
@@ -2848,6 +2954,13 @@ impl ApplicationHandler<()> for App {
                     position.x as f32 / self.scale,
                     position.y as f32 / self.scale,
                 );
+                if self.settings_panel.is_some() {
+                    self.settings_cursor();
+                    return;
+                }
+                if self.update_history_pointer() {
+                    return;
+                }
                 let chrome = self.chrome_action_at_pointer();
                 let link = if chrome.is_none() {
                     self.pointer_link()
@@ -2878,6 +2991,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                self.clear_history_hover();
                 self.chrome_hover = None;
                 self.caption_pressed = None;
                 self.hover = None;
@@ -2891,7 +3005,9 @@ impl ApplicationHandler<()> for App {
                 if button == MouseButton::Left {
                     self.left_press(event_loop);
                 } else if button == MouseButton::Right
+                    && self.history_menu.is_none()
                     && WINDOW_FRAME
+                    && self.settings_panel.is_none()
                     && self.mouse.1 < TAB_H
                     && self.chrome_action_at_pointer().is_none()
                     && let Some(window) = &self.window
@@ -2910,13 +3026,17 @@ impl ApplicationHandler<()> for App {
                 ..
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.history_menu.is_some() {
+                    return;
+                }
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * 54.,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.scale,
                 };
                 self.scroll(amount / self.tabs[self.active].zoom);
             }
-            WindowEvent::DroppedFile(path) => {
+            WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
+                self.dismiss_history_menu();
                 if let Ok(url) = url::Url::from_file_path(path) {
                     self.navigate(url.into(), true);
                 }
@@ -3106,16 +3226,9 @@ fn chrome_icon(
         )
     };
     match action {
-        Action::Back => {
-            line(3., 10., 17., 10.);
-            line(3., 10., 9., 4.);
-            line(3., 10., 9., 16.);
-        }
-        Action::Forward => {
-            line(3., 10., 17., 10.);
-            line(17., 10., 11., 4.);
-            line(17., 10., 11., 16.);
-        }
+        Action::Back => paint_glyph(canvas, x, y, scale, icons::Glyph::Back, color),
+        Action::Forward => paint_glyph(canvas, x, y, scale, icons::Glyph::Forward, color),
+        Action::Address => paint_glyph(canvas, x, y, scale, icons::Glyph::Search, color),
         Action::Home => {
             line(2., 9., 10., 2.);
             line(10., 2., 18., 9.);
@@ -3130,20 +3243,7 @@ fn chrome_icon(
             line(5., 5., 15., 15.);
             line(15., 5., 5., 15.);
         }
-        Action::Reload => {
-            for i in 0..24 {
-                let a = 0.25 + i as f32 / 24. * std::f32::consts::PI * 1.65;
-                let b = 0.25 + (i + 1) as f32 / 24. * std::f32::consts::PI * 1.65;
-                line(
-                    10. + 7. * a.cos(),
-                    10. + 7. * a.sin(),
-                    10. + 7. * b.cos(),
-                    10. + 7. * b.sin(),
-                );
-            }
-            line(17., 2., 17., 8.);
-            line(17., 8., 11., 8.);
-        }
+        Action::Reload => paint_glyph(canvas, x, y, scale, icons::Glyph::Reload, color),
         Action::Close(_) => {
             line(4.5, 4.5, 15.5, 15.5);
             line(15.5, 4.5, 4.5, 15.5);
@@ -3165,19 +3265,6 @@ fn chrome_icon(
             }
             line(10., 9., 10., 14.);
             line(10., 6.5, 10., 6.75);
-        }
-        Action::Address => {
-            for step in 0..24 {
-                let a = step as f32 * std::f32::consts::TAU / 24.;
-                let b = (step + 1) as f32 * std::f32::consts::TAU / 24.;
-                line(
-                    8. + 7. * a.cos(),
-                    8. + 7. * a.sin(),
-                    8. + 7. * b.cos(),
-                    8. + 7. * b.sin(),
-                );
-            }
-            line(13., 13., 19., 19.);
         }
         Action::Minimize => line(4., 10., 16., 10.),
         Action::Maximize if loading => {
@@ -3203,8 +3290,36 @@ fn chrome_icon(
                 line(offset, 9., offset, 10.);
             }
         }
-        Action::Select(_) | Action::MenuItem(_) => {}
+        Action::Settings
+        | Action::Select(_)
+        | Action::Bookmarks
+        | Action::ShortcutHelp
+        | Action::TabHistory
+        | Action::MenuItem(_)
+        | Action::BookmarkItem(_) => {}
     }
+}
+
+fn paint_glyph(canvas: &mut Canvas, x: f32, y: f32, scale: f32, glyph: icons::Glyph, color: Color) {
+    glyph.rasterize(
+        x * scale,
+        y * scale,
+        scale,
+        canvas.width,
+        canvas.height,
+        |x, y, coverage| {
+            let alpha = (u16::from(color.3) * u16::from(coverage) + 127) / 255;
+            canvas.fill_rect(
+                Rect {
+                    x: x as f32,
+                    y: y as f32,
+                    width: 1.,
+                    height: 1.,
+                },
+                Color(color.0, color.1, color.2, alpha as u8),
+            );
+        },
+    );
 }
 
 fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {

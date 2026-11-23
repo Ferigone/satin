@@ -46,6 +46,7 @@ Enter an address below in Satin.
 | `about:graphics` | Explore layout, SVG, and scrolling |
 | `about:canvas` | Draw on a canvas and inspect the result |
 | `about:version` | See browser features and known gaps |
+| `about:shortcuts` | See [browser keyboard commands](docs/SHORTCUTS.md), also available from the Satin menu |
 
 ## Build from source
 
