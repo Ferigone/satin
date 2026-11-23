@@ -37,6 +37,10 @@ intended behavior without changing the public ES5.1 suite.
   and host roots. A live callable may retain a removed frame's realm; once
   no such refs remain, the realm and its intrinsics must be collectible.
   Avoid permanent roots for each frame's intrinsics and DOM wrappers.
+  Ordinary native functions now trace their defining global environment,
+  including when only an exported callback keeps the owner alive. This is a
+  lifetime edge, not realm switching; a traced intrinsic table and ownership
+  for other callable kinds are still needed.
 
 ## Host boundaries
 

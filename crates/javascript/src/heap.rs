@@ -52,6 +52,8 @@ pub(crate) enum ObjectKind {
     Native {
         callback: NativeCallback,
         construct: Option<NativeConstruct>,
+        // A native callback has no lexical environment to trace automatically.
+        realm_environment: EnvId,
     },
     Bound {
         target: Value,
@@ -588,6 +590,9 @@ impl Heap {
                             pending.push(module.0);
                         }
                     }
+                    ObjectKind::Native {
+                        realm_environment, ..
+                    } => pending.push(realm_environment.0),
                     ObjectKind::Bound { target, this, args } => {
                         pending.value(target);
                         pending.value(this);

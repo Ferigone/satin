@@ -242,10 +242,16 @@ impl Vm {
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
         let mut heap = Heap::default();
         let object_prototype = heap.allocate(Cell::Object(Object::new(ObjectKind::Ordinary, None)));
+        let global_object = heap.allocate(Cell::Object(Object::new(
+            ObjectKind::Ordinary,
+            Some(object_prototype),
+        )));
+        let global_env = heap.allocate_env(Environment::new_global(global_object, global_object));
         let function_prototype = heap.allocate(Cell::Object(Object::new(
             ObjectKind::Native {
                 callback: Rc::new(|_, _, _| Ok(Value::Undefined)),
                 construct: None,
+                realm_environment: global_env,
             },
             Some(object_prototype),
         )));
@@ -272,11 +278,6 @@ impl Vm {
             ObjectKind::Ordinary,
             Some(object_prototype),
         )));
-        let global_object = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Ordinary,
-            Some(object_prototype),
-        )));
-        let global_env = heap.allocate_env(Environment::new_global(global_object, global_object));
         let mut vm = Self {
             heap,
             global_object,
@@ -776,6 +777,7 @@ impl Vm {
             ObjectKind::Native {
                 callback,
                 construct,
+                realm_environment: self.global_env,
             },
             Some(self.function_prototype),
         );
