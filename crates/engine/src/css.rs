@@ -2701,10 +2701,13 @@ impl Stylesheet {
             let mut raw = (*parent.custom).clone();
             for (name, (decl, _)) in custom {
                 match decl.value.trim() {
-                    "initial" => {
+                    value if value.eq_ignore_ascii_case("initial") => {
                         raw.remove(name);
                     }
-                    "inherit" | "unset" => {
+                    value
+                        if value.eq_ignore_ascii_case("inherit")
+                            || value.eq_ignore_ascii_case("unset") =>
+                    {
                         if let Some(v) = parent.custom.get(name) {
                             raw.insert(name.into(), v.clone());
                         } else {

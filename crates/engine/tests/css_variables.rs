@@ -41,3 +41,21 @@ fn var_function_name_is_ascii_case_insensitive() {
         ],
     );
 }
+
+#[test]
+fn custom_property_css_wide_keywords_are_ascii_case_insensitive() {
+    let green = Color::rgb(0, 128, 0);
+    let purple = Color::rgb(128, 0, 128);
+    let red = Color::rgb(255, 0, 0);
+    assert_colors(
+        include_str!("fixtures/css-custom-wide-keywords.html"),
+        &[
+            ("initial", green),
+            ("inherit", red),
+            ("unset", red),
+            ("absent", green),
+            ("quoted", purple),
+            ("multiple-tokens", purple),
+        ],
+    );
+}
