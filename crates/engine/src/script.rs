@@ -5,6 +5,7 @@ mod blobs;
 mod canvas;
 mod collections;
 mod dom_api;
+mod element_interface;
 mod event_target;
 mod fetch;
 mod file_list;
@@ -63,6 +64,7 @@ struct State {
     styles: HashMap<NodeId, Value>,
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
+    element_prototype: Value,
     script_prototype: Value,
     canvas_prototype: Value,
     media_prototypes: media::Prototypes,
@@ -238,6 +240,8 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             NodeKind::Text(_) | NodeKind::Comment(_)
         ) {
             state.character_data_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
+            state.element_prototype.clone()
         } else {
             state.prototype.clone()
         }
@@ -566,14 +570,16 @@ impl ScriptRuntime {
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
-        let script_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        let element_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(element_prototype.clone());
+        let script_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(script_prototype.clone());
-        let canvas_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        let canvas_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(canvas_prototype.clone());
-        let media_prototypes = media::Prototypes::new(&mut vm, &prototype)?;
-        let input_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        let media_prototypes = media::Prototypes::new(&mut vm, &element_prototype)?;
+        let input_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(input_prototype.clone());
-        let image_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        let image_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(character_data_prototype.clone());
@@ -593,6 +599,7 @@ impl ScriptRuntime {
             styles: HashMap::new(),
             nodes: HashMap::new(),
             prototype: prototype.clone(),
+            element_prototype: element_prototype.clone(),
             script_prototype: script_prototype.clone(),
             canvas_prototype: canvas_prototype.clone(),
             media_prototypes,
@@ -629,7 +636,7 @@ impl ScriptRuntime {
             canvases,
             media: media::Store::default(),
         }));
-        install_node(&mut vm, &state, prototype.clone())?;
+        install_node(&mut vm, &state, prototype.clone(), &element_prototype)?;
         image_element::install(&mut vm, &state, image_prototype)?;
         install_character_data(&mut vm, &state, prototype.clone(), character_data_prototype)?;
         dynamic_scripts::install(&mut vm, &state, script_prototype)?;
@@ -787,7 +794,7 @@ impl ScriptRuntime {
         let forms = forms::FormHost::install(
             &mut vm,
             &state,
-            prototype,
+            prototype.clone(),
             document.clone(),
             file_lists.clone(),
         )?;
@@ -810,6 +817,7 @@ impl ScriptRuntime {
         url_api::install(&mut vm)?;
         text_encoding::install(&mut vm)?;
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
+        element_interface::install(&mut vm, prototype, element_prototype)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;
         let blobs = blobs::install(&mut vm, streams.clone())?;
@@ -1528,7 +1536,12 @@ fn new_detached(state: &Shared, kind: NodeKind) -> Result<NodeId, JsError> {
     Ok(id)
 }
 
-fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
+fn install_node(
+    vm: &mut Vm,
+    state: &Shared,
+    prototype: Value,
+    element_prototype: &Value,
+) -> Result<(), JsError> {
     for (property, attr_name) in [
         ("id", "id"),
         ("className", "class"),
@@ -1550,7 +1563,7 @@ fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsE
             set_attribute(vm, &set_state, id, attr_name, Some(value))?;
             Ok(Value::Undefined)
         });
-        vm.define_accessor(prototype.clone(), property, Some(get), Some(set))?;
+        vm.define_accessor(element_prototype.clone(), property, Some(get), Some(set))?;
     }
     for property in [
         "parentNode",
@@ -1590,8 +1603,18 @@ fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsE
     }
     for property in ["nodeType", "nodeName", "tagName"] {
         let state = state.clone();
-        getter(vm, prototype.clone(), property, move |_, this, _| {
-            let id = node(&state, &this)?;
+        let element_only = property == "tagName";
+        let owner = if element_only {
+            element_prototype
+        } else {
+            &prototype
+        };
+        getter(vm, owner.clone(), property, move |_, this, _| {
+            let id = if element_only {
+                element(&state, &this)?
+            } else {
+                node(&state, &this)?
+            };
             let state = state.borrow();
             let (number, name) = match &state.document.nodes[id.0].kind {
                 NodeKind::Document if id != state.document.root => {
@@ -1612,8 +1635,6 @@ fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsE
             };
             Ok(if property == "nodeType" {
                 number.into()
-            } else if property == "tagName" && number != 1 {
-                Value::Undefined
             } else {
                 name.into()
             })
@@ -1626,7 +1647,8 @@ fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsE
         "hasAttribute",
     ] {
         let state = state.clone();
-        method(vm, prototype.clone(), name, move |vm, this, args| {
+        let owner = element_prototype.clone();
+        method(vm, owner, name, move |vm, this, args| {
             let id = element(&state, &this)?;
             let key = text(vm, arg(args, 0))?;
             let key = if state.borrow().document.namespace(id) == crate::dom::Namespace::Html {
@@ -1656,8 +1678,18 @@ fn install_node(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsE
     }
     for name in ["querySelector", "querySelectorAll", "matches", "closest"] {
         let state = state.clone();
-        method(vm, prototype.clone(), name, move |vm, this, args| {
-            let id = node(&state, &this)?;
+        let element_only = matches!(name, "matches" | "closest");
+        let owner = if element_only {
+            element_prototype
+        } else {
+            &prototype
+        };
+        method(vm, owner.clone(), name, move |vm, this, args| {
+            let id = if element_only {
+                element(&state, &this)?
+            } else {
+                node(&state, &this)?
+            };
             let selector = text(vm, arg(args, 0))?;
             let ids = {
                 let state = state.borrow();

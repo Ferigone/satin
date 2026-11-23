@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head><title>Element prototype pending</title></head>
+<body>
+  <div id="sample" data-probe="parsed"></div>
+  <script>
+    function throwsTypeError(run) {
+      try { run(); } catch (error) { return error instanceof TypeError; }
+      return false;
+    }
+
+    const elementPrototype = window.Element.prototype;
+    const detached = document.createElement('div');
+    detached.setAttribute('data-probe', 'detached');
+    const parsed = document.getElementById('sample');
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('data-probe', 'svg');
+
+    // A library may install a method after some of the wrappers already exist.
+    elementPrototype.readFixtureAttribute = function () {
+      return elementPrototype.getAttribute.call(this, 'data-probe');
+    };
+    const clone = detached.cloneNode();
+    const text = document.createTextNode('text');
+    const fragment = document.createDocumentFragment();
+    const checks = [
+      Object.getPrototypeOf(elementPrototype) === Node.prototype &&
+        Object.getPrototypeOf(Node.prototype) === EventTarget.prototype,
+      Object.getPrototypeOf(Element) === Node && Object.getPrototypeOf(Node) === EventTarget,
+      elementPrototype.constructor === Element && Node.prototype.constructor === Node,
+      throwsTypeError(function () { new Element(); }) && throwsTypeError(function () { Element(); }) &&
+        throwsTypeError(function () { new Node(); }) && throwsTypeError(function () { Node(); }),
+      parsed.readFixtureAttribute() === 'parsed' && clone.readFixtureAttribute() === 'detached' &&
+        detached.readFixtureAttribute() === 'detached' && svg.readFixtureAttribute() === 'svg',
+      [parsed, detached, clone, svg, document.createElement('script'),
+        document.createElement('canvas'), document.createElement('video'),
+        document.createElement('audio'), document.createElement('img'),
+        document.createElement('input')].every(function (node) {
+          return node instanceof Element && node instanceof Node && node instanceof EventTarget &&
+            node.readFixtureAttribute === elementPrototype.readFixtureAttribute;
+        }),
+      [document, text, fragment, document.createComment('comment'), document.firstChild].every(function (node) {
+        return node instanceof Node && node instanceof EventTarget &&
+          !(node instanceof Element) && !('readFixtureAttribute' in node);
+      }),
+      !(window instanceof Node) && !('readFixtureAttribute' in window),
+      Node.ELEMENT_NODE === parsed.nodeType && parsed.ELEMENT_NODE === parsed.nodeType &&
+        Node.TEXT_NODE === text.nodeType,
+      Object.prototype.hasOwnProperty.call(elementPrototype, 'getAttribute') &&
+        Object.prototype.hasOwnProperty.call(elementPrototype, 'matches') &&
+        !('getAttribute' in Node.prototype) && parsed.matches('#sample'),
+      throwsTypeError(function () { elementPrototype.readFixtureAttribute.call(document); }) &&
+        throwsTypeError(function () { elementPrototype.readFixtureAttribute.call(Object.create(elementPrototype)); }),
+      parsed.tagName === 'DIV' && svg.tagName === 'svg' && !('tagName' in text),
+    ];
+    delete elementPrototype.readFixtureAttribute;
+    checks.push(!('readFixtureAttribute' in detached));
+    document.body.setAttribute('data-checks', JSON.stringify(checks));
+    document.title = checks.every(Boolean) ? 'Element prototype OK' : 'Element prototype failed';
+  </script>
+</body>
+</html>
