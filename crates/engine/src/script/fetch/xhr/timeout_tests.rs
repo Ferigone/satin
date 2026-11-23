@@ -200,6 +200,110 @@ fn timeout_idl_defaults_conversion_and_synchronous_window_restrictions() {
 }
 
 #[test]
+fn timeout_idl_unsigned_long_truncates_then_wraps_and_normalizes_zero() {
+    let mut rt = realm();
+    assert_eq!(
+        rt.eval(
+            r#"
+            var xhr=new XMLHttpRequest(), checked=0, failures=[];
+            var cases=[
+                [0.99,0], [17.99,17], [-0.99,0], [-1.99,4294967295],
+                [4294967295.75,4294967295], [4294967296.75,0],
+                [4294967297.75,1], [-4294967297.75,4294967295],
+                [NaN,0], [Infinity,0], [-Infinity,0], [-0,0],
+                [undefined,0], ['12.75',12]
+            ];
+            for (var i=0;i<cases.length;i++) {
+                xhr.timeout=cases[i][0];
+                var actual=xhr.timeout, expected=cases[i][1];
+                if (actual===expected && (expected!==0 || 1/actual===Infinity)) checked++;
+                else failures.push(i+':'+actual);
+            }
+            [checked,failures.join(',')].join('|');
+            "#,
+        )
+        .unwrap(),
+        Value::from("14|"),
+    );
+}
+
+#[test]
+fn timeout_idl_setter_checks_receiver_then_coerces_then_checks_current_mode() {
+    let mut rt = realm();
+    assert_eq!(
+        rt.eval(
+            r#"
+            var xhr=new XMLHttpRequest(), trace=[], marker={};
+            var setter=Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype,'timeout').set;
+            var zero={valueOf:function(){trace.push('coerced'); return -0.5;}};
+            xhr.open('GET','/sync',false);
+            try { setter.call({},zero); } catch(e) { trace.push('receiver:'+e.name); }
+            try {
+                xhr.timeout={valueOf:function(){trace.push('throwing'); throw marker;}};
+            } catch(e) { trace.push('original:'+(e===marker)); }
+            try { xhr.timeout=zero; } catch(e) { trace.push(e.name); }
+            trace.push(xhr.timeout);
+
+            // Coercion may reopen this XHR. The setter tests the resulting mode.
+            xhr.timeout={valueOf:function(){
+                xhr.open('GET','/async');
+                return 7.9;
+            }};
+            trace.push(xhr.timeout);
+            xhr.timeout=0;
+            try {
+                xhr.timeout={valueOf:function(){
+                    xhr.open('GET','/sync-again',false);
+                    return 3;
+                }};
+            } catch(e) { trace.push(e.name); }
+            trace.push(xhr.timeout);
+            trace.join('|');
+            "#,
+        )
+        .unwrap(),
+        Value::from(
+            "receiver:TypeError|throwing|original:true|coerced|InvalidAccessError|0|7|InvalidAccessError|0"
+        ),
+    );
+}
+
+#[test]
+fn timeout_idl_open_validates_arguments_before_rejecting_a_nonzero_sync_timeout() {
+    let mut rt = realm();
+    assert_eq!(
+        rt.eval(
+            r#"
+            var xhr=new XMLHttpRequest(), trace=[], states=[], marker={};
+            xhr.onreadystatechange=function(){states.push(xhr.readyState);};
+            xhr.timeout=-1.9;
+            try { xhr.open('bad method','/sync',false); } catch(e) { trace.push(e.name); }
+            try { xhr.open('GET','http://[',false); } catch(e) { trace.push(e.name); }
+            try {
+                xhr.open('GET',{toString:function(){throw marker;}},false);
+            } catch(e) { trace.push('original:'+(e===marker)); }
+            try { xhr.open('GET','/sync',false); } catch(e) { trace.push(e.name); }
+            trace.push(xhr.readyState,xhr.timeout,states.length);
+
+            // Omission means async; explicit undefined is converted to false.
+            xhr.open('GET','/async');
+            try { xhr.open('GET','/sync',undefined); } catch(e) { trace.push(e.name); }
+            trace.push(xhr.readyState,xhr.timeout);
+            xhr.timeout=-0.99; // The failed open left the previous async mode intact.
+            xhr.open('GET','/sync',false);
+            try { xhr.timeout=NaN; } catch(e) { trace.push(e.name); }
+            trace.push(xhr.readyState,xhr.timeout,states.join(','));
+            trace.join('|');
+            "#,
+        )
+        .unwrap(),
+        Value::from(
+            "SyntaxError|SyntaxError|original:true|InvalidAccessError|0|4294967295|0|InvalidAccessError|1|4294967295|InvalidAccessError|1|0|1"
+        ),
+    );
+}
+
+#[test]
 fn shortening_below_elapsed_time_defers_timeout_and_reopen_can_retire_it() {
     for reopen in [false, true] {
         let mut rt = realm();
