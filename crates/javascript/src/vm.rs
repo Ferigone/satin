@@ -22,6 +22,8 @@ use crate::dynamic_import::{DynamicImportHook, SourceReferrer};
 
 #[cfg(test)]
 mod global_environment_tests;
+#[cfg(test)]
+mod global_reference_tests;
 
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
@@ -163,7 +165,7 @@ pub struct Vm {
 #[derive(Clone)]
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
-    Global(JsString),
+    Global(ObjectId, JsString),
     Property(Value, Value),
     Private(Value, crate::private::PrivateId),
     Super(Value, Value, Value),
@@ -1959,10 +1961,13 @@ impl Vm {
             if e.bindings.contains_key(key) {
                 return Ok(Reference::Binding(env, key.clone()));
             }
-            if matches!(e.kind, EnvKind::Global { .. }) && self.has(&self.global(), key)? {
-                return Ok(Reference::Global(key.clone()));
+            let parent = e.parent;
+            if let EnvKind::Global { binding_object } = e.kind
+                && self.has(&Value::Object(binding_object), key)?
+            {
+                return Ok(Reference::Global(binding_object, key.clone()));
             }
-            if let Some(p) = e.parent {
+            if let Some(p) = parent {
                 env = p;
             } else {
                 return Ok(Reference::Unresolvable(key.clone()));
@@ -2020,7 +2025,7 @@ impl Vm {
                 let key = self.to_property_key(&key)?;
                 self.get_from(base, &key, receiver)
             }
-            Reference::Global(key) => self.get(self.global(), &key),
+            Reference::Global(object, key) => self.get(Value::Object(object), &key),
             Reference::Property(object, key) => {
                 let key = self.property_reference_key(&object, &key)?;
                 self.get_property_key(object, key)
@@ -2073,8 +2078,8 @@ impl Vm {
                 }
                 Ok(())
             }
-            Reference::Global(key) => {
-                let global = self.global();
+            Reference::Global(object, key) => {
+                let global = Value::Object(object);
                 // A getter, coercion, or right-hand side may have removed a
                 // binding since the identifier was resolved.
                 if strict && !self.has(&global, &key)? {
@@ -3081,8 +3086,8 @@ impl Vm {
                         let key = self.property_reference_key(&object, &key)?;
                         self.delete_key(object, &key, strict)?
                     }
-                    Item::Reference(Reference::Global(key)) => {
-                        self.delete(self.global(), &key, strict)?
+                    Item::Reference(Reference::Global(object, key)) => {
+                        self.delete(Value::Object(object), &key, strict)?
                     }
                     Item::Reference(Reference::Binding(_, _) | Reference::Import(_, _)) => false,
                     Item::Reference(Reference::Super(..)) => {
@@ -3291,7 +3296,7 @@ impl Vm {
                     && match &callee {
                         Item::Reference(
                             Reference::Binding(_, name)
-                            | Reference::Global(name)
+                            | Reference::Global(_, name)
                             | Reference::Unresolvable(name),
                         ) => name == &JsString::from("eval"),
                         _ => false,

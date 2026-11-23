@@ -194,7 +194,11 @@ fn visit_operand(item: &Item, visit: &mut impl FnMut(&Value)) {
                 visit(&Value::Object(env.0));
                 visit(&Value::String(name.clone()));
             }
-            Reference::Global(name) | Reference::Unresolvable(name) => {
+            Reference::Global(object, name) => {
+                visit(&Value::Object(*object));
+                visit(&Value::String(name.clone()));
+            }
+            Reference::Unresolvable(name) => {
                 visit(&Value::String(name.clone()));
             }
             Reference::Property(receiver, key) => {
@@ -209,6 +213,20 @@ fn visit_operand(item: &Item, visit: &mut impl FnMut(&Value)) {
             }
         },
     }
+}
+
+#[cfg(test)]
+#[test]
+fn resolved_global_operand_traces_its_binding_object() {
+    let mut vm = Vm::new();
+    let global = vm.new_object();
+    let operand = Item::Reference(Reference::Global(
+        global.as_object().unwrap(),
+        "binding".into(),
+    ));
+    let mut edges = Vec::new();
+    visit_operand(&operand, &mut |value| edges.push(value.clone()));
+    assert_eq!(edges, [global, Value::from("binding")]);
 }
 
 fn reserve_one<T>(vm: &mut Vm, elements: &mut Vec<T>) -> Result<(), JsError> {

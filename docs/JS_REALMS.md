@@ -25,8 +25,10 @@ intended behavior without changing the public ES5.1 suite.
   and errors; entering a realm must not reset the surrounding task budget.
 - Entry into a function uses its owning realm (including built-ins); jobs
   and suspended execution preserve the realm they need when resumed.
-  Global references held across execution boundaries must carry their
-  resolved binding object, not look up the ambient global again.
+  Resolved global identifier references now capture the binding object of
+  their own environment for read, write and delete. Suspended operands trace
+  that object. Unresolvable sloppy writes still use the active global, per
+  `PutValue`; this requires correct owner-realm entry.
   `GetPrototypeFromConstructor` must use the realm of `newTarget` for
   intrinsic fallback, not the realm of the active constructor. Verify this
   with pinned `built-ins/Promise/proto-from-ctor-realm.js` after wiring
