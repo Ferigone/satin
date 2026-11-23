@@ -70,6 +70,16 @@ external script runs, its writes precede the remaining input. Source EOF is
 processed only after these insertion points and their written input are
 resolved. [HTML insertion points](https://html.spec.whatwg.org/multipage/parsing.html#insertion-point), [document.write steps](https://html.spec.whatwg.org/multipage/dynamic-markup-insertion.html#document-write-steps)
 
+In a browsing session, `document.open()` replaces the connected tree in
+place, keeping the document, window and detached node identities.
+An outside-parser `document.write()` opens that stream implicitly unless
+destructive writes are suppressed. Classic inline scripts execute as their
+end tags arrive, including across multiple writes. `document.close()` marks
+EOF; if a parser-blocking script is pending, parsing and readiness resume
+after its resource settles. Calling `open()` from a currently executing
+parser script leaves its stream untouched. The window-opening overload and
+cross-document calls are outside this support.
+
 ## Resource budgets
 
 | Resource | Limit |

@@ -1,5 +1,6 @@
 use super::*;
 
+mod document_write;
 mod wasm_csp;
 
 const PAGE: &str = "https://example.test/path/index.html";

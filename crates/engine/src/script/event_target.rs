@@ -242,6 +242,29 @@ fn remove(vm: &mut Vm, object: &Value, serial: u64) -> Result<(), JsError> {
     Ok(())
 }
 
+pub(super) fn clear_listeners(vm: &mut Vm, object: &Value) -> Result<(), JsError> {
+    let Some((table, data)) = target_table(vm, object) else {
+        return Ok(());
+    };
+    let listeners = std::mem::take(&mut *data.listeners.borrow_mut());
+    if let Some(count) = &data.dom_count {
+        count.set(count.get() - listeners.len());
+    }
+    for listener in listeners {
+        store_listener(vm, &table, listener.slot, Value::Undefined)?;
+        if listener._abort.is_some() {
+            store_listener(
+                vm,
+                &table,
+                DOM_LISTENER_LIMIT + listener.slot,
+                Value::Undefined,
+            )?;
+        }
+        data.free_slots.borrow_mut().push(listener.slot);
+    }
+    update_abort_liveness(vm, object, &data)
+}
+
 fn update_abort_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Result<(), JsError> {
     let has_listener = data.listeners.borrow().iter().any(|listener| {
         listener

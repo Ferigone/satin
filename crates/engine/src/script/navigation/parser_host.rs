@@ -1,8 +1,8 @@
 //! The parser temporarily borrows the actual DOM arena from the realm. A
 //! pending parser script never holds that borrow while running JavaScript.
 use super::super::{
-    Shared, fatal, mark_dirty, media, mutation_observers, restrict_document_policy, run_classic,
-    text, unsupported,
+    Shared, dispatch_checked, event_target, fatal, mark_dirty, media, mutation_observers,
+    restrict_document_policy, run_classic, text, unsupported,
 };
 use super::dynamic_scripts::{self, Flags};
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
 use rust_browser_javascript::{ErrorKind, JsError, Value, Vm};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -175,6 +175,7 @@ impl ParserHost {
                 .dynamic_scripts
                 .flags
                 .extend(std::mem::take(&mut self.script_flags));
+            state.parser_connect_policy = self.connect_policy.clone();
             if self.stream.report() != before || matches!(result, Ok(Step::Truncated)) {
                 mark_dirty(state);
             }
@@ -413,15 +414,24 @@ impl ParserHost {
             .stream
             .write(value)
             .map_err(parser_error)?;
-        if handle.borrow().nested_blocked.is_some() {
+        Self::pump(handle, vm, state, Some(id)).map(|_| ())
+    }
+
+    fn pump(
+        handle: &Rc<RefCell<Self>>,
+        vm: &mut Vm,
+        state: &Shared,
+        write: Option<WriteId>,
+    ) -> Result<bool, JsError> {
+        if handle.borrow().stream.has_pending_script() {
             // The rest of these bytes stay queued ahead of original source.
-            return Ok(());
+            return Ok(false);
         }
         loop {
             let (step, work, policy) = {
                 let mut parser = handle.borrow_mut();
                 let before = parser.stream.report().work;
-                let step = parser.advance(Some(state), Some(id));
+                let step = parser.advance(Some(state), write);
                 let work = parser.stream.report().work - before;
                 (step, work, parser.meta_policy())
             };
@@ -436,7 +446,7 @@ impl ParserHost {
                 handle.borrow_mut().nested_blocked = Some(tag);
                 vm.charge_work(work)?;
                 if external {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let Some(ScriptTag {
                     source: Source::Inline(source),
@@ -464,18 +474,94 @@ impl ParserHost {
                     super::super::diagnostic(state, format!("Written inline script: {error}"));
                 }
                 if handle.borrow().nested_blocked.is_some() {
-                    return Ok(());
+                    return Ok(false);
                 }
             } else {
                 vm.charge_work(work)?;
                 match step {
                     Step::Yield => {}
                     Step::Truncated => return Err(parser_error(HtmlStreamError::ResourceLimit)),
-                    _ => return Ok(()),
+                    Step::Complete => return Ok(true),
+                    _ => return Ok(false),
                 }
             }
         }
     }
+}
+
+fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
+    let mut state = host.borrow_mut();
+    if state
+        .parser
+        .upgrade()
+        .is_some_and(|parser| parser.borrow().stream.script_nesting() != 0)
+    {
+        return Ok(());
+    }
+    if !state.navigation_attached {
+        return Err(unsupported("Opening an HTML stream requires a browsing session"));
+    }
+
+    let doc = &state.document;
+    vm.charge_work(doc.nodes.len().saturating_add(state.handlers.len()))?;
+    let connected: HashSet<_> = doc.connected_nodes().collect();
+    event_target::clear_listeners(vm, &state.window)?;
+    for node in &connected {
+        if let Some(object) = state.wrappers.get(node) {
+            event_target::clear_listeners(vm, object)?;
+        }
+    }
+    state.handlers.retain(|(target, _), (_, root)| {
+        let keep = target.is_some_and(|target| !connected.contains(&target));
+        if !keep {
+            vm.unroot(*root);
+        }
+        keep
+    });
+
+    let mut parser = ParserHost::new(Arc::new(state.url.clone()));
+    parser.stream = HtmlStream::script_created(state.document.scripting_enabled);
+    parser.connect_policy = state.parser_connect_policy.clone();
+    // Establish the loan before using the live DOM. The original arena
+    // remains in the realm, so old nodes still have their original identities.
+    parser.stream.take_document().map_err(parser_error)?;
+    let parser = Rc::new(RefCell::new(parser));
+    let root = state.document.root;
+    let removed = std::mem::take(&mut state.document.nodes[root.0].children);
+    for node in &removed {
+        state.document.nodes[node.0].parent = None;
+    }
+    if !removed.is_empty() {
+        mutation_observers::note(
+            &state,
+            crate::dom::mutation::Mutation::Children {
+                target: root,
+                added: &[],
+                removed: &removed,
+                previous: None,
+                next: None,
+            },
+        );
+    }
+    state.document.quirks_mode = crate::dom::QuirksMode::NoQuirks;
+    state.document.truncated = false;
+    state.ready_state = "loading";
+    state.dynamic_scripts.pending.clear();
+    state.image_updates.retain(|node| !connected.contains(node));
+    state.parser = Rc::downgrade(&parser);
+    state.replacement_parser = Some(parser);
+    state.parser_wakeup = true;
+    mark_dirty(&mut state);
+    drop(state);
+    mutation_observers::schedule(vm, host);
+    Ok(())
+}
+
+fn require_document(host: &Shared, receiver: &Value) -> Result<(), JsError> {
+    if super::super::target(host, receiver)? != Some(host.borrow().document.root) {
+        return Err(JsError::type_error("Document receiver required"));
+    }
+    Ok(())
 }
 
 pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<(), JsError> {
@@ -484,12 +570,51 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<()
         let node = current.borrow().current_script;
         super::super::wrap(vm, &current, node)
     })?;
+    let host = state.clone();
+    super::super::method(vm, document.clone(), "open", move |vm, receiver, args| {
+        require_document(&host, &receiver)?;
+        if args.len() >= 3 {
+            return Err(unsupported(
+                "The window-opening overload of document.open is not implemented",
+            ));
+        }
+        for value in args {
+            vm.to_string(value)?;
+        }
+        open(vm, &host)?;
+        Ok(receiver)
+    })?;
+    let host = state.clone();
+    super::super::method(vm, document.clone(), "close", move |vm, receiver, _| {
+        require_document(&host, &receiver)?;
+        let Some(parser) = host
+            .borrow()
+            .parser
+            .upgrade()
+            .filter(|parser| {
+                let parser = parser.borrow();
+                parser.stream.is_script_created() && parser.stream.has_insertion_point()
+            })
+        else {
+            return Ok(Value::Undefined);
+        };
+        parser.borrow_mut().stream.finish().map_err(parser_error)?;
+        host.borrow_mut().parser_wakeup = true;
+        let idle = parser.borrow().stream.script_nesting() == 0;
+        if idle && ParserHost::pump(&parser, vm, &host, None)? {
+            let root = {
+                let mut state = host.borrow_mut();
+                state.ready_state = "interactive";
+                state.document.root
+            };
+            dispatch_checked(vm, &host, Some(root), "readystatechange", false, false, &[])?;
+        }
+        Ok(Value::Undefined)
+    })?;
     for (method, line_feed) in [("write", false), ("writeln", true)] {
         let host = state.clone();
         super::super::method(vm, document.clone(), method, move |vm, receiver, args| {
-            if super::super::target(&host, &receiver)? != Some(host.borrow().document.root) {
-                return Err(JsError::type_error("Document receiver required"));
-            }
+            require_document(&host, &receiver)?;
             let mut string = String::new();
             for arg in args {
                 let piece = text(vm, arg.clone())?;
@@ -509,15 +634,23 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<()
                 let host = host.borrow();
                 (host.parser.upgrade(), host.ignore_destructive_writes != 0)
             };
-            if let Some(parser) =
+            let parser = if let Some(parser) =
                 parser.filter(|parser| parser.borrow().stream.has_insertion_point())
             {
-                ParserHost::write(&parser, vm, &host, &string)?;
-            } else if !ignore {
-                return Err(unsupported(
-                    "Destructive document.write/document.open is not implemented",
-                ));
+                parser
+            } else if ignore {
+                return Ok(Value::Undefined);
+            } else {
+                open(vm, &host)?;
+                let Some(parser) = host.borrow().parser.upgrade() else {
+                    return Ok(Value::Undefined);
+                };
+                parser
+            };
+            if parser.borrow().stream.is_script_created() {
+                host.borrow_mut().parser_wakeup = true;
             }
+            ParserHost::write(&parser, vm, &host, &string)?;
             Ok(Value::Undefined)
         })?;
     }

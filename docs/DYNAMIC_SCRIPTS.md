@@ -79,6 +79,6 @@ probe. The shared browser fixture covers direct child insertion.
 
 Open work includes dynamic import-map registration, import attributes and
 non-JavaScript module types, SVG script execution, cross-document adoption,
-destructive document.open and document.write, CSP and Trusted Types, and
-global ErrorEvent reporting for script exceptions. Lifecycle and security
+cross-document stream writes, CSP and Trusted Types, and global ErrorEvent
+reporting for script exceptions. Lifecycle and security
 coverage is limited to the cases recorded by the verifier.

@@ -101,6 +101,7 @@ pub struct HtmlStream {
     tree: Tree,
     tokenizer: IncrementalTokenizer,
     input: VecDeque<Input>,
+    script_created: bool,
     closed: bool,
     previous_cr: bool,
     next_id: u64,
@@ -116,6 +117,7 @@ impl HtmlStream {
             tree: Tree::new(scripting_enabled),
             tokenizer: IncrementalTokenizer::new(),
             input: VecDeque::new(),
+            script_created: false,
             closed: false,
             previous_cr: false,
             next_id: 1,
@@ -125,6 +127,14 @@ impl HtmlStream {
             lease: None,
             report: HtmlStreamReport::default(),
         }
+    }
+    pub(crate) fn script_created(scripting_enabled: bool) -> Self {
+        let mut stream = Self::new(scripting_enabled);
+        stream.script_created = true;
+        stream
+    }
+    pub(crate) fn is_script_created(&self) -> bool {
+        self.script_created
     }
     pub fn report(&self) -> HtmlStreamReport {
         HtmlStreamReport {
@@ -149,8 +159,13 @@ impl HtmlStream {
     pub fn script_nesting(&self) -> usize {
         self.active.len()
     }
+    pub(crate) fn has_pending_script(&self) -> bool {
+        self.pending.is_some()
+    }
     pub fn has_insertion_point(&self) -> bool {
-        !self.active.is_empty() && !self.report.completed && !self.report.truncated
+        (!self.active.is_empty() || self.script_created)
+            && !self.report.completed
+            && !self.report.truncated
     }
 
     fn halt(&mut self) {
@@ -465,9 +480,8 @@ impl HtmlStream {
         }
         Ok(())
     }
-    /// Insert before the executing script's relative insertion-point marker,
-    /// after earlier unconsumed writes from that same script. Pump next_event()
-    /// until this WriteComplete, or a nested external script pauses tokenization.
+    /// Insert before the executing script's marker, or at the end of a
+    /// script-created stream. Pump until WriteComplete or a blocking script.
     pub fn write(&mut self, text: &str) -> Result<WriteId> {
         if !self.has_insertion_point() {
             return Err(HtmlStreamError::NoInsertionPoint);
@@ -479,13 +493,13 @@ impl HtmlStream {
             self.halt();
             return Err(HtmlStreamError::ResourceLimit);
         }
-        let point = self.active.last().unwrap().point;
-        let Some(index) = self
-            .input
-            .iter()
-            .position(|piece| matches!(piece,Input::Point(id) if *id==point))
-        else {
-            return Err(HtmlStreamError::NoInsertionPoint);
+        let index = if let Some(script) = self.active.last() {
+            self.input
+                .iter()
+                .position(|piece| matches!(piece, Input::Point(id) if *id == script.point))
+                .ok_or(HtmlStreamError::NoInsertionPoint)?
+        } else {
+            self.input.len()
         };
         self.work(index.saturating_mul(pieces + 1) + 1)?;
         self.bytes(text.len())?;

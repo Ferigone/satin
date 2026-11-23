@@ -84,6 +84,9 @@ struct State {
     current_script: Option<NodeId>,
     ignore_destructive_writes: usize,
     parser: std::rc::Weak<RefCell<navigation::ParserHost>>,
+    replacement_parser: Option<Rc<RefCell<navigation::ParserHost>>>,
+    parser_wakeup: bool,
+    parser_connect_policy: crate::loader::ConnectPolicy,
     document_policy: DocumentPolicy,
     navigation_attached: bool,
     dynamic_scripts: dynamic_scripts::DynamicScripts,
@@ -619,6 +622,9 @@ impl ScriptRuntime {
             current_script: None,
             ignore_destructive_writes: 0,
             parser: std::rc::Weak::new(),
+            replacement_parser: None,
+            parser_wakeup: false,
+            parser_connect_policy: page.meta_connect_policy.clone(),
             document_policy: page.document_policy,
             navigation_attached: false,
             dynamic_scripts,
@@ -1050,7 +1056,8 @@ impl ScriptRuntime {
     pub fn has_queued_script_tasks(&self) -> bool {
         let state = self.state.borrow();
         state.navigation_attached
-            && (state.dynamic_scripts.has_pending()
+            && (state.parser_wakeup
+                || state.dynamic_scripts.has_pending()
                 || state.import_requests.has_pending()
                 || !state.image_updates.is_empty())
     }

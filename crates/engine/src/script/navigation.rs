@@ -151,6 +151,20 @@ impl ResourceQueue {
             .values()
             .any(|(value, _)| !matches!(value, Consumer::Font(_) | Consumer::Module(..)))
     }
+    fn discard_markup_requests(&mut self) {
+        self.pending.retain(|_, (consumer, _)| {
+            !matches!(
+                consumer,
+                Consumer::Classic(_) | Consumer::Sheet { .. } | Consumer::Image(_)
+            )
+        });
+        self.active.retain(|id| self.pending.contains_key(id));
+        self.waiting
+            .retain(|load| self.pending.contains_key(&load.id));
+        if self.waiting.is_empty() {
+            self.retry_at = None;
+        }
+    }
 }
 
 enum ScriptCode {
@@ -182,6 +196,7 @@ enum Phase {
 
 pub struct DocumentSession {
     parser: Option<Rc<RefCell<ParserHost>>>,
+    script_replaced_input: bool,
     history: crate::history::SessionHistory,
     storage: crate::web_storage::TabStorage,
     phase: Phase,
@@ -251,6 +266,7 @@ impl DocumentSession {
             page,
             Self {
                 parser,
+                script_replaced_input: false,
                 history,
                 storage,
                 phase: Phase::Parsing,
@@ -315,6 +331,9 @@ impl DocumentSession {
             {
                 let mut state = realm.state.borrow_mut();
                 state.ready_state = "complete";
+                state.parser = std::rc::Weak::new();
+                state.replacement_parser = None;
+                state.parser_wakeup = false;
                 state.dynamic_scripts.pending.clear();
                 state.image_updates.clear();
             }
@@ -361,7 +380,7 @@ impl DocumentSession {
         self.resources.retry(load);
     }
     pub fn feed(&mut self, source: &str) -> Result<(), String> {
-        if let Some(parser) = &self.parser {
+        if let Some(parser) = self.parser.as_ref().filter(|_| !self.script_replaced_input) {
             match parser.borrow_mut().stream.feed(source) {
                 Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
                 Err(error) => return Err(error.to_string()),
@@ -371,7 +390,7 @@ impl DocumentSession {
         Ok(())
     }
     pub fn finish_input(&mut self) -> Result<(), String> {
-        if let Some(parser) = &self.parser {
+        if let Some(parser) = self.parser.as_ref().filter(|_| !self.script_replaced_input) {
             match parser.borrow_mut().stream.finish() {
                 Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
                 Err(error) => return Err(error.to_string()),
@@ -435,12 +454,35 @@ impl DocumentSession {
         Ok(())
     }
 
+    fn adopt_replacement_parser(&mut self, runtime: Option<&ScriptRuntime>) {
+        let Some(realm) = runtime else { return };
+        let mut state = realm.state.borrow_mut();
+        self.runnable |= std::mem::take(&mut state.parser_wakeup);
+        let Some(parser) = state.replacement_parser.take() else {
+            return;
+        };
+        self.parser = Some(parser);
+        self.script_replaced_input = true;
+        self.phase = Phase::Parsing;
+        self.blocking = None;
+        self.deferred.clear();
+        self.asynchronous.clear();
+        self.ordered_dynamic.clear();
+        self.cached_image_events.clear();
+        self.messages.clear();
+        self.images.clear();
+        self.resources.discard_markup_requests();
+        self.discarded = 0;
+        self.dirty = true;
+    }
+
     pub fn advance(
         &mut self,
         page: &mut LoadedPage,
         runtime: &mut Option<ScriptRuntime>,
         viewport: Viewport,
     ) -> Result<bool, String> {
+        self.adopt_replacement_parser(runtime.as_ref());
         let now = Instant::now();
         let end = now + Duration::from_millis(5);
         if self
@@ -476,6 +518,7 @@ impl DocumentSession {
         }
         self.runnable = true;
         for _ in 0..24 {
+            self.adopt_replacement_parser(runtime.as_ref());
             self.flush_dynamic_scripts(page, runtime, viewport)?;
             self.flush_parser_discoveries(page, runtime, viewport)?;
             if let Some(realm) = runtime {
@@ -572,7 +615,10 @@ impl DocumentSession {
                         }
                         self.phase = Phase::Deferred;
                         if let Some(realm) = runtime {
-                            realm.change_ready_state("interactive");
+                            let still_loading = realm.state.borrow().ready_state == "loading";
+                            if still_loading {
+                                realm.change_ready_state("interactive");
+                            }
                         }
                     }
                     Step::NeedInput => {
@@ -626,6 +672,7 @@ impl DocumentSession {
         }
         // NeedInput can arrive immediately after a discovery. Queue it even
         // if the server is waiting for that resource before it sends more.
+        self.adopt_replacement_parser(runtime.as_ref());
         self.flush_dynamic_scripts(page, runtime, viewport)?;
         self.flush_parser_discoveries(page, runtime, viewport)?;
         self.sync_fonts(page)?;
