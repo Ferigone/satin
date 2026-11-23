@@ -1127,6 +1127,23 @@ fn install_array(vm: &mut Vm) {
         })))
     });
     method(vm, array, "of", 0, |vm, _, a| vm.try_new_array(a));
+    method(vm, proto.clone(), "at", 1, |vm, this, args| {
+        let object = vm.coerce_object(this)?;
+        let length = vm.get_property(object.clone(), "length")?;
+        // LengthOfArrayLike: at needs at most one property, even on a huge
+        // generic receiver. The Array storage/traversal cap does not apply.
+        let length = integer(vm, length)?.clamp(0.0, 9_007_199_254_740_991.0);
+        let index = integer(vm, arg(args, 0))?;
+        let index = if index.is_finite() && index < 0.0 {
+            length + index
+        } else {
+            index
+        };
+        if index < 0.0 || index >= length {
+            return Ok(Value::Undefined);
+        }
+        vm.get_property(object, &(index as u64).to_string())
+    });
     method(vm, proto.clone(), "sort", 1, sort_array);
     method(vm, proto.clone(), "splice", 2, splice_array);
     method(vm, proto.clone(), "push", 1, |vm, this, a| {
