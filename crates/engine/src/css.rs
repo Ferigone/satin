@@ -7,7 +7,7 @@ pub(crate) mod inline_style;
 pub(crate) use grid::GRID_TRACK_LIMIT;
 pub use grid::{GridAreas, GridLine, GridTemplate};
 
-use crate::dom::{Document, NodeId};
+use crate::dom::{Document, Namespace, NodeId};
 use crate::fonts::{
     FontDisplay, FontFaceRule, FontFamily, FontFormat, FontSource, FontStyle, GenericFamily,
     UnicodeRange,
@@ -2062,10 +2062,10 @@ impl Compound {
                     return false;
                 };
                 let siblings = &doc.nodes[parent.0].children;
+                let same_type = of_type.then(|| (tag, doc.namespace(id)));
                 let mut position = 0i64;
                 let mut check = |&node: &NodeId| {
-                    let candidate = doc.tag(node);
-                    if !candidate.is_empty() && (!of_type || candidate == tag) {
+                    if nth_sibling_matches(doc, node, same_type) {
                         position += 1;
                     }
                     node == id
@@ -2092,10 +2092,11 @@ impl Compound {
                 }
             }
             Test::OnlyChild(of_type) => doc.nodes[id.0].parent.is_some_and(|p| {
+                let same_type = of_type.then(|| (tag, doc.namespace(id)));
                 doc.nodes[p.0]
                     .children
                     .iter()
-                    .filter(|&&n| !doc.tag(n).is_empty() && (!of_type || doc.tag(n) == tag))
+                    .filter(|&&n| nth_sibling_matches(doc, n, same_type))
                     .count()
                     == 1
             }),
@@ -2111,6 +2112,20 @@ impl Compound {
         })
     }
 }
+
+fn nth_sibling_matches(
+    doc: &Document,
+    sibling: NodeId,
+    same_type: Option<(&str, Namespace)>,
+) -> bool {
+    let tag = doc.tag(sibling);
+    // An expanded element type is its local name and its namespace, not
+    // just the local name (Selectors §14.4).
+    !tag.is_empty()
+        && same_type
+            .is_none_or(|(local, namespace)| tag == local && doc.namespace(sibling) == namespace)
+}
+
 fn attribute_matches(actual: &str, value: &str, op: AttrOp, insensitive: bool) -> bool {
     let eq = |a: &str, b: &str| {
         if insensitive {
