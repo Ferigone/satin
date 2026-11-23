@@ -268,10 +268,15 @@ fn install_object(vm: &mut Vm) {
     for (name, entries) in [("values", false), ("entries", true)] {
         method(vm, object.clone(), name, 1, move |vm, _, a| {
             let target = vm.coerce_object(arg(a, 0))?;
-            let keys = vm.own_keys(target.clone(), true)?;
+            let id = target.as_object().unwrap();
+            let keys = vm.own_keys(target.clone(), false)?;
             let mut values = Vec::new();
             for key in keys {
                 vm.tick()?;
+                // Previous getters can delete a key or change its enumerability.
+                if vm.own_enumerability(id, &PropertyKey::String(key.clone()))? != Some(true) {
+                    continue;
+                }
                 let value = vm.get(target.clone(), &key)?;
                 values.push(if entries {
                     vm.try_new_array(&[Value::String(key), value])?
