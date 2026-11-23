@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Suspended module fixture</title>
+<pre id="module-receipt"></pre>
+<script>
+var moduleTrace = [];
+var originalReason = { marker: 19 };
+var script = document.createElement('script');
+script.type = 'module';
+script.src = './element.mjs';
+script.onload = function () {
+  moduleTrace.push('element-load');
+  releaseElement();
+};
+document.body.appendChild(script);
+window.addEventListener('load', function () {
+  moduleTrace.push('window-load');
+  import('./reason.mjs').catch(function (reason) {
+    moduleTrace.push(reason === originalReason ? 'original-reason' : 'different reason');
+    var receipt = document.getElementById('module-receipt');
+    receipt.textContent = JSON.stringify(moduleTrace);
+    receipt.setAttribute('data-complete', 'yes');
+    document.title = 'Suspended module verified';
+  });
+});
+</script>

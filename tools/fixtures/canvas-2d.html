@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Canvas pending</title>
+<style>
+  body { margin: 0; }
+  #paint { display: block; width: 80px; height: 40px; background: #ffff00; }
+  #assets { display: none; }
+  #previews { display: flex; gap: 6px; margin: 8px 0; }
+  #previews canvas { display: block; background: #eee; }
+</style>
+<canvas id="paint" width="20" height="10"><div>Canvas fallback</div></canvas>
+<section id="previews" aria-label="Canvas operation previews">
+  <canvas id="statePreview" width="32" height="32" aria-label="Paths and styles"></canvas>
+  <canvas id="pixelPreview" width="32" height="32" aria-label="ImageData"></canvas>
+  <canvas id="imagePreview" width="32" height="32" aria-label="Image source"></canvas>
+  <canvas id="textPreview" width="80" height="50" aria-label="Text outlines"></canvas>
+  <canvas id="exportPreview" width="32" height="32" aria-label="PNG export"></canvas>
+</section>
+<div id="assets">
+  <img id="local" src="/green.png">
+  <img id="opaque" src="__CROSS__/green.png">
+  <img id="cors" crossorigin="anonymous" src="__CROSS__/green.png">
+  <img id="redirect" src="/cross-redirect">
+  <img id="bounce" src="/cross-bounce">
+  <img id="broken" src="/bad.png">
+  <img id="denied" crossorigin="anonymous" src="__CROSS__/refused.png">
+</div>
+<pre id="results"></pre>
+<script>
+const checks = {};
+const paint = document.getElementById('paint');
+const paintContext = paint.getContext('2d');
+
+function check(label, actual, expected) {
+    checks[label] = { actual, expected, pass: JSON.stringify(actual) === JSON.stringify(expected) };
+}
+
+function pixel(ctx, x, y) {
+    return Array.from(ctx.getImageData(x, y, 1, 1).data);
+}
+
+function errorName(action) {
+    try { action(); }
+    catch (error) { return error.name; }
+    return null;
+}
+
+function bitmap(width, height, settings) {
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    return canvas.getContext('2d', settings);
+}
+
+function writeResult(fault) {
+    const result = document.getElementById('results');
+    result.textContent = JSON.stringify({checks, fault});
+    result.setAttribute('data-complete', 'yes');
+    const pass = !fault && Object.keys(checks).every(key => checks[key].pass);
+    document.title = pass ? 'Canvas 2D OK' : 'Canvas 2D FAIL';
+}
+
+function verifyState() {
+    const blank = document.createElement('canvas');
+    check('default dimensions', [blank.width, blank.height], [300, 150]);
+    blank.setAttribute('height', '  +008px');
+    check('content dimensions', blank.height, 8);
+    check('unsupported context', blank.getContext('unsupported'), null);
+    const ctx = document.getElementById('statePreview').getContext('2d');
+    check('context identity', ctx.canvas.getContext('2d') === ctx, true);
+    check('Web IDL identity', [ctx.canvas instanceof HTMLCanvasElement, ctx instanceof CanvasRenderingContext2D], [true, true]);
+    check('default pixels', pixel(ctx, 4, 4), [0, 0, 0, 0]);
+    check('CSS dimensions', [paint.offsetWidth, paint.offsetHeight], [80, 40]);
+
+    ctx.fillStyle = '#f00';
+    ctx.fillRect(0, 0, 32, 32);
+    ctx.save();
+    ctx.translate(8, 8);
+    ctx.beginPath();
+    ctx.rect(0, 0, 8, 8);
+    ctx.clip();
+    ctx.fillStyle = 'lime';
+    ctx.fillRect(-2, -2, 16, 16);
+    ctx.restore();
+    check('transformed clip', [pixel(ctx, 7, 7), pixel(ctx, 8, 8), pixel(ctx, 15, 15), pixel(ctx, 16, 16)],
+        [[255, 0, 0, 255], [0, 255, 0, 255], [0, 255, 0, 255], [255, 0, 0, 255]]);
+    check('restored state', [ctx.fillStyle, ctx.getTransform().e], ['#ff0000', 0]);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'blue';
+    ctx.strokeRect(17, 17, 10, 10);
+    check('stroke and interior', [pixel(ctx, 17, 20), pixel(ctx, 20, 20)],
+        [[0, 0, 255, 255], [255, 0, 0, 255]]);
+    ctx.clearRect(2, 2, 5, 5);
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.fillStyle = 'blue';
+    ctx.fillRect(0, 0, 8, 8);
+    check('composite', [pixel(ctx, 3, 3), pixel(ctx, 0, 0)], [[0, 0, 255, 255], [255, 0, 0, 255]]);
+    ctx.canvas.width = ctx.canvas.width;
+    check('same width clears', [pixel(ctx, 3, 3), ctx.globalCompositeOperation, ctx.fillStyle],
+        [[0, 0, 0, 0], 'source-over', '#000000']);
+    const alpha = bitmap(4, 4, {alpha: false});
+    check('opaque canvas', [alpha.getContextAttributes().alpha, pixel(alpha, 0, 0)], [false, [0, 0, 0, 255]]);
+
+    const gradient = ctx.createLinearGradient(0, 0, 32, 0);
+    gradient.addColorStop(0, 'lime');
+    gradient.addColorStop(1, 'lime');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 4, 4);
+    check('linear gradient', [ctx.fillStyle === gradient, pixel(ctx, 2, 2)], [true, [0, 255, 0, 255]]);
+}
+
+function verifyPixels() {
+    const ctx = document.getElementById('pixelPreview').getContext('2d');
+    const data = new Uint8ClampedArray(new ArrayBuffer(12), 4, 4);
+    data.set([44, 188, 92, 255]);
+    const imageData = new ImageData(data, 1, 1);
+    ctx.translate(20, 20);
+    ctx.globalAlpha = 0;
+    ctx.putImageData(imageData, 1, 1);
+    check('clamped view and untransformed put', [imageData.data === data, imageData.data.byteOffset, pixel(ctx, 1, 1)],
+        [true, 4, [44, 188, 92, 255]]);
+    check('read outside bitmap', pixel(ctx, -1, -1), [0, 0, 0, 0]);
+}
+
+function verifyImages() {
+    const ctx = document.getElementById('imagePreview').getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(document.getElementById('local'), 0, 0, 8, 8);
+    ctx.drawImage(ctx.canvas, 0, 0, 8, 8, 8, 0, 8, 8);
+    check('same-origin image and self snapshot', [pixel(ctx, 1, 1), pixel(ctx, 9, 1)],
+        [[0, 255, 0, 255], [0, 255, 0, 255]]);
+    check('broken image', [errorName(() => ctx.drawImage(document.getElementById('broken'), 0, 0)),
+        errorName(() => ctx.drawImage(document.getElementById('denied'), 0, 0))],
+        ['InvalidStateError', 'InvalidStateError']);
+    check('unrequested image', errorName(() => ctx.drawImage(document.createElement('img'), 0, 0)), null);
+    for (const key of ['opaque', 'redirect', 'bounce']) {
+        const source = document.getElementById(key);
+        ctx.drawImage(source, 0, 0);
+        check(key + ' taints read and export',
+            [errorName(() => pixel(ctx, 0, 0)), errorName(() => ctx.canvas.toDataURL()),
+             errorName(() => ctx.canvas.toBlob(function() {}))],
+            ['SecurityError', 'SecurityError', 'SecurityError']);
+        if (key === 'opaque') {
+            const destination = bitmap(4, 4);
+            destination.drawImage(ctx.canvas, 0, 0);
+            check('canvas copy propagates taint', errorName(() => pixel(destination, 0, 0)), 'SecurityError');
+            destination.canvas.width = destination.canvas.width;
+            destination.fillStyle = destination.createPattern(source, 'repeat');
+            destination.fillRect(0, 0, 4, 4);
+            check('pattern propagates taint', errorName(() => pixel(destination, 0, 0)), 'SecurityError');
+        }
+        ctx.canvas.height = ctx.canvas.height;
+        check(key + ' resize restores read', pixel(ctx, 0, 0), [0, 0, 0, 0]);
+    }
+    ctx.drawImage(document.getElementById('cors'), 0, 0);
+    check('accepted CORS image', pixel(ctx, 0, 0), [0, 255, 0, 255]);
+}
+
+function verifyText() {
+    const texture = document.getElementById('textPreview').getContext('2d');
+    texture.font = '20px Arial';
+    const metrics = texture.measureText('Canvas');
+    check('TextMetrics', [metrics instanceof TextMetrics, metrics.width > 35, metrics.width < 100,
+        metrics.actualBoundingBoxAscent > 8], [true, true, true, true]);
+    texture.fillStyle = 'lime';
+    texture.fillText('A', 5, 25);
+    const ink = texture.getImageData(0, 0, 40, 30).data;
+    let green = 0;
+    for (let index = 0; index < ink.length; index += 4) {
+        if (ink[index + 1] === 255 && ink[index + 3] > 0) green++;
+    }
+    check('text raster', green > 35, true);
+}
+
+function verifyExports() {
+    const ctx = document.getElementById('exportPreview').getContext('2d');
+    ctx.fillRect(0, 0, 32, 32);
+    check('PNG URL', ctx.canvas.toDataURL('image/unsupported').startsWith('data:image/png;base64,iVBORw0KGgo'), true);
+    let synchronous = true;
+    ctx.canvas.toBlob(function(blob) {
+        check('PNG Blob callback', [synchronous, blob instanceof Blob, blob.type, blob.size > 32],
+            [false, true, 'image/png', true]);
+        setTimeout(finishPaint, 80);
+    });
+    synchronous = false;
+}
+
+function finishPaint() {
+    paintContext.fillStyle = 'lime';
+    paintContext.fillRect(0, 0, 10, 10);
+    setTimeout(reportReady, 30);
+}
+
+function reportReady() {
+    writeResult(null);
+    fetch('/fixture-ready' + location.search);
+}
+
+window.addEventListener('load', function() {
+    fetch('/fixture-hold' + location.search);
+    setTimeout(verifyState, 0);
+    setTimeout(verifyPixels, 0);
+    setTimeout(verifyImages, 0);
+    setTimeout(verifyText, 0);
+    setTimeout(verifyExports, 0);
+});
+</script>

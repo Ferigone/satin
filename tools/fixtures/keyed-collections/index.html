@@ -1,0 +1,96 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Keyed collections pending</title>
+<style>
+body { margin: 36px; background:#eff5f9; color:#142c46; font:18px sans-serif; }
+main { padding:24px; background:white; border:1px solid #a3bcca; }
+p { padding:8px; background:#edf4fa; }
+pre { white-space:pre-wrap; font:12px monospace; }
+</style>
+<main>
+<h1 id="heading">Keyed collections</h1>
+<p>Key identity, insertion order, and live iteration</p>
+<p>Iterator cleanup, grouping, and reentrant updates</p>
+<p>Set operations with a Map as the other operand</p>
+<pre id="receipt"></pre>
+</main>
+<script>
+function runCollections() {
+    var a = {}, b = {}, s1 = Symbol('x'), s2 = Symbol('x');
+    var map = new Map([[NaN,1],[0/0,2],[-0,3],[0,4],['0',5],
+        [a,6],[b,7],[s1,8],[s2,9],['\ud800',10],['\ud801',11]]);
+    var keys = map.keys();
+    var equal = [map.size, map.get(NaN), map.get(-0), map.get('0'), map.get(a), map.get(b),
+        map.get(s1), map.get(s2), map.get('\ud800'), map.get('\ud801'),
+        Number.isNaN(keys.next().value), Object.is(keys.next().value, +0)];
+
+    var mutable = new Map([['first',1],['delete',2],['third',3]]);
+    var iter = mutable.entries();
+    var first = iter.next().value.join(':');
+    mutable.delete('delete');
+    mutable.set('third', 33);
+    var third = iter.next().value.join(':');
+    mutable.clear();
+    mutable.set('late', 4);
+    var late = iter.next().value.join(':');
+    var done = iter.next().done;
+    mutable.set('too late', 5);
+    var iteration = [first, third, late, done, iter.next().done];
+
+    var left = new Set([3, 1, 2]);
+    var right = new Map([[2, 'a'], [3, 'b']]);
+    var algebra = [Array.from(left.union(right)).join(','),
+        Array.from(left.intersection(right)).join(','),
+        Array.from(left.difference(right)).join(','),
+        Array.from(left.symmetricDifference(right)).join(','),
+        left.isSubsetOf(right), left.isSupersetOf(right), left.isDisjointFrom(right)];
+    var visited = [], changing = new Set([1,2,3]);
+    changing.forEach(function(value, key, self) {
+        visited.push(value + ':' + key);
+        if (value === 1) { self.delete(2); self.add(4); }
+    });
+
+    var marker = {}, closed = 0, threw;
+    class RejectingMap extends Map { set() { throw marker; } }
+    var items = { [Symbol.iterator]() {
+        return {next() { return {value:['key','value'], done:false}; },
+            return() { closed++; return {}; } };
+    } };
+    try { new RejectingMap(items); } catch (error) { threw = error === marker; }
+    var groups = Map.groupBy([6,7,8,9], (value, index) => index % 2);
+    var updated = new Map(), positiveZero;
+    var final = updated.getOrInsertComputed(-0, function(key) {
+        positiveZero = Object.is(key, +0);
+        updated.set(key, 'first write');
+        return 'computed';
+    });
+    var weakSymbol = Symbol('weak');
+    var registered = Symbol.for('registered');
+    var weakMap = new WeakMap([[a, 11], [weakSymbol, 12], [Symbol.iterator, 13]]);
+    var weakSet = new WeakSet([a, weakSymbol]);
+    var invalidKey = false;
+    try { weakMap.set(registered, 14); }
+    catch (error) { invalidKey = error instanceof TypeError; }
+    var weak = [weakMap.get(a), weakMap.get(weakSymbol), weakMap.get(Symbol.iterator),
+        weakSet.has(weakSymbol), weakSet.delete(a), weakSet.has(a),
+        weakMap.has(Symbol('weak')), invalidKey, weakMap.has(registered),
+        weakMap.getOrInsertComputed(b, () => 15)];
+    return { equal:equal, iteration:iteration, algebra:algebra, visits:visited.join(','),
+        iteratorClose:[closed,threw], groups:[groups.get(0).join(','),groups.get(1).join(',')],
+        computed:[final,updated.get(0),positiveZero], weak:weak,
+        aliases:[Map.prototype[Symbol.iterator] === Map.prototype.entries,
+            Set.prototype.keys === Set.prototype.values,
+            Set.prototype[Symbol.iterator] === Set.prototype.values] };
+}
+var receipt = document.getElementById('receipt');
+try {
+    receipt.textContent = JSON.stringify(runCollections());
+    document.title = 'Keyed collections OK';
+    document.getElementById('heading').textContent = document.title;
+    receipt.setAttribute('data-complete', 'yes');
+} catch (error) {
+    receipt.textContent = error.name + ': ' + error.message;
+    document.title = 'Keyed collections FAIL';
+    receipt.setAttribute('data-complete', 'no');
+}
+</script>

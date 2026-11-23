@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Workspace plan</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 20px;
+    background: #e7edf2;
+    color: #12242f;
+    font: 16px/1.25 "Segoe UI", sans-serif;
+  }
+  #board {
+    --tile-minimum: 112px;
+    display: grid;
+    gap: 12px;
+    grid-template:
+      [mast-top] "mast mast" 68px [mast-bottom]
+      [main-top] "queue workspace" 122px [main-bottom]
+      [stock-top] "stock stock" 164px [stock-bottom]
+      [reserve-top] "reserve reserve" 128px [reserve-bottom]
+      / [outside-start] 180px [work-start] minmax(0, 1fr) [work-end outside-end];
+  }
+  @media (max-width: 600px) {
+    body { padding: 14px; }
+    #board {
+      grid-template:
+        "mast" 62px
+        "workspace" 112px
+        "queue" 96px
+        "stock" 146px
+        "reserve" 116px
+        / [outside-start work-start] minmax(0, 1fr) [work-end outside-end];
+    }
+  }
+  h1, h2, p { margin: 0; }
+  h1 { font: bold 26px/1.2 "Segoe UI", sans-serif; }
+  h2 { font: bold 17px/1.2 "Segoe UI", sans-serif; }
+  p { margin-top: 5px; }
+  #mast { grid-area: mast; padding: 15px; background: #152e40; color: #fff; }
+  #queue { grid-area: queue; padding: 14px; background: #d2e5ed; }
+  #workspace { grid-row: workspace; grid-column: work; padding: 14px; background: #fff; }
+  button { padding: 5px 10px; margin: 8px 0 0; font: inherit; background: #184c5c; color: #fff; }
+  #stock, #reserve {
+    display: grid;
+    padding: 12px;
+    gap: 6px;
+    grid-template: "label" 24px "shelf" minmax(0, 1fr) / minmax(0, 1fr);
+  }
+  #stock { grid-area: stock; background: #fff; }
+  #reserve { grid-area: reserve; background: #d7e3e9; }
+  .shelf-title { grid-area: label; }
+  #fitted, #filled {
+    display: grid;
+    grid-area: shelf;
+    grid-template-rows: minmax(0, 1fr);
+    gap: 10px;
+  }
+  #fitted {
+    grid-template-columns: repeat(auto-fit, [bin] minmax(var(--tile-minimum), 1fr) [edge]);
+  }
+  #filled {
+    grid-template-columns: repeat(auto-fill, [bin] minmax(var(--tile-minimum), 1fr) [edge]);
+  }
+  .card {
+    padding: 9px;
+    background: #a8d5ce;
+    border: 1px solid #477b75;
+  }
+  #fit-a { grid-row: 1; grid-column: 1 bin / span edge; }
+  #fit-b { grid-row: 1; grid-column: -1 bin / -1 edge; }
+  #added { grid-row: 1; grid-column: 2 bin / span edge; background: #f2d592; }
+  #filled .card { background: #c7d9e7; border-color: #6488a3; }
+  #measurements { display: none; }
+</style>
+<main id="board">
+  <header id="mast"><h1>Studio workspace</h1></header>
+  <aside id="queue"><h2>Queue</h2><p>Inspect incoming materials.</p></aside>
+  <section id="workspace"><h2>Workspace plan</h2><button id="add">Add a material</button></section>
+  <section id="stock">
+    <h2 class="shelf-title">Available materials</h2>
+    <div id="fitted">
+      <article class="card" id="fit-a"><strong>Oak</strong><p>Board stock</p></article>
+      <article class="card" id="fit-b"><strong>Walnut</strong><p>Veneer stock</p></article>
+    </div>
+  </section>
+  <section id="reserve">
+    <h2 class="shelf-title">Reserved slots</h2>
+    <div id="filled">
+      <article class="card" id="fill-a"><strong>Ash</strong><p>Incoming</p></article>
+      <article class="card" id="fill-b"><strong>Maple</strong><p>Incoming</p></article>
+    </div>
+  </section>
+</main>
+<pre id="measurements"></pre>
+<script>
+var ids = ['board','mast','queue','workspace','stock','reserve','fitted','filled',
+           'fit-a','fit-b','fill-a','fill-b'];
+var baseline;
+function measure(includeAdded) {
+  var result = {};
+  var targets = includeAdded ? ids.concat(['added']) : ids;
+  for (var id of targets) {
+    var box = document.getElementById(id).getBoundingClientRect();
+    result[id] = [box.x, box.y, box.width, box.height];
+  }
+  return result;
+}
+window.addEventListener('load',function() {
+  baseline = measure(false);
+  var add = document.getElementById('add');
+  add.onclick = function() {
+    var material = document.createElement('article');
+    material.id = 'added';
+    material.className = 'card';
+    material.innerHTML = '<strong>Birch</strong><p>Board stock</p>';
+    document.getElementById('fitted').appendChild(material);
+    var output = document.getElementById('measurements');
+    output.textContent = JSON.stringify({before:baseline,after:measure(true)});
+    output.setAttribute('data-phase','complete');
+    document.title = 'Grid workspace measured';
+  };
+  add.setAttribute('data-phase','ready');
+});
+</script>
+</html>

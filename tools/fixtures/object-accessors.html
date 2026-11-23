@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Object accessors pending</title>
+<pre id="receipt"></pre>
+<script>
+const trace = [];
+const key = {
+  get [Symbol.toPrimitive]() {
+    trace.push('key:get');
+    return function (hint) {
+      trace.push('key:' + hint);
+      return 'total';
+    };
+  },
+};
+const parent = {
+  get total() { return this.amount + 1; },
+  set total(value) { this.amount = value * 2; },
+};
+const subject = {
+  __proto__: parent,
+  amount: 2,
+  get [key]() { return super.total + 1; },
+  set total(value) { super.total = value; },
+};
+const property = Object.getOwnPropertyDescriptor(subject, 'total');
+const firstRead = subject.total;
+subject.total = 6;
+const copy = structuredClone({
+  get amount() {
+    trace.push('clone:get');
+    return subject.total;
+  },
+});
+const copied = Object.getOwnPropertyDescriptor(copy, 'amount');
+const dateResult = Date.prototype.toJSON.call({
+  get valueOf() {
+    trace.push('date:get valueOf');
+    return function () { trace.push('date:valueOf'); return 42; };
+  },
+  get toISOString() {
+    trace.push('date:get toISOString');
+    return function () { trace.push('date:toISOString'); return 'accessor-date'; };
+  },
+});
+
+const output = [];
+const sink = {
+  get write() {
+    trace.push('stream:get write');
+    return function (chunk) {
+      trace.push('stream:write');
+      output.push(chunk, this === sink);
+    };
+  },
+};
+const writer = new WritableStream(sink).getWriter();
+writer.write('value=' + subject.total).then(function () {
+  return writer.close();
+}).then(function () {
+  const receipt = document.getElementById('receipt');
+  receipt.textContent = JSON.stringify({
+    descriptor: [property.get.name, property.set.name, property.enumerable, property.configurable],
+    values: [firstRead, subject.total, subject.amount],
+    clone: [copied.value, copied.enumerable, copied.writable, 'get' in copied],
+    date: dateResult,
+    stream: output,
+    trace,
+  });
+  receipt.setAttribute('data-complete', 'yes');
+  document.title = 'Object accessors checked';
+});
+</script>

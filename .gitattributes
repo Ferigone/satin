@@ -1,0 +1,11 @@
+# Upstream fixtures are verified byte-for-byte; keep their original line endings.
+crates/engine/data/html5lib/** -text
+crates/engine/data/data-urls/data-urls.json -text
+crates/engine/src/svg/fixtures/*.svg -text
+crates/engine/src/svg/fixtures/LICENSE.md -text
+crates/engine/tests/fixtures/wpt-canvas/*.html -text
+crates/engine/tests/fixtures/wpt-canvas-pixels/*.html -text
+crates/engine/tests/fixtures/wpt-canvas-pixels/canvas-tests.js -text
+crates/engine/tests/fixtures/wpt-canvas-pixels/LICENSE.md -text
+crates/engine/tests/fixtures/wpt-sticky/upstream/** -text
+crates/engine/tests/fixtures/wpt-intersection-observer/upstream/** -text

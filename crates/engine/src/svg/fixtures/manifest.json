@@ -1,0 +1,82 @@
+{
+  "repository": "https://github.com/web-platform-tests/wpt",
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "license": "LICENSE.md",
+  "files": [
+    {
+      "file": "circle-01-ref.svg",
+      "upstream_path": "svg/shapes/circle-01-ref.svg",
+      "sha256": "0a0f67b9c6abf8618a5d00b67b14b4e79e85d7a283eb5c4f9a3121cf8438a40d"
+    },
+    {
+      "file": "circle-01.svg",
+      "upstream_path": "svg/shapes/circle-01.svg",
+      "sha256": "6901491f0d65e73ff958fa38ab8d5d4a569d00c1779b35bd5233fdc9cf485ec5"
+    },
+    {
+      "file": "ellipse-01-ref.svg",
+      "upstream_path": "svg/shapes/ellipse-01-ref.svg",
+      "sha256": "ecf403a7d5cbc90048f7d7ca5f2308a0a1dbbb64850ac2eefa5c4ed58dcef63a"
+    },
+    {
+      "file": "ellipse-01.svg",
+      "upstream_path": "svg/shapes/ellipse-01.svg",
+      "sha256": "8761caf6f44e3e48994cb53f65157eef7da9c1c27523c14ea60e457a4fa28f51"
+    },
+    {
+      "file": "ellipse-02-ref.svg",
+      "upstream_path": "svg/shapes/ellipse-02-ref.svg",
+      "sha256": "c896ac062b7c5b6c04b53b2c75e6e28cf5b409aa189d6089369a2d3b1c2f527e"
+    },
+    {
+      "file": "ellipse-02.svg",
+      "upstream_path": "svg/shapes/ellipse-02.svg",
+      "sha256": "f7658a3e7ef43581dc3bd248dafea64ea43cd4ad260959c61ea1e1085b0de628"
+    },
+    {
+      "file": "ellipse-03-ref.svg",
+      "upstream_path": "svg/shapes/ellipse-03-ref.svg",
+      "sha256": "bb6d2a73c21f9db73c1ba0e6a3508fbf0b49ef1231954203f893f82b2e8c4c22"
+    },
+    {
+      "file": "ellipse-03.svg",
+      "upstream_path": "svg/shapes/ellipse-03.svg",
+      "sha256": "b8347937dddd71095d87861fd6496047b56abc09d8f55a04232a45c910167c33"
+    },
+    {
+      "file": "ellipse-04-ref.svg",
+      "upstream_path": "svg/shapes/ellipse-04-ref.svg",
+      "sha256": "0a0f67b9c6abf8618a5d00b67b14b4e79e85d7a283eb5c4f9a3121cf8438a40d"
+    },
+    {
+      "file": "ellipse-04.svg",
+      "upstream_path": "svg/shapes/ellipse-04.svg",
+      "sha256": "3a25f8d7aa4126e8007757df32bf77bcdb86f8a9cbd08e9a35d526a872a7dd0a"
+    },
+    {
+      "file": "ellipse-07-ref.svg",
+      "upstream_path": "svg/shapes/ellipse-07-ref.svg",
+      "sha256": "10c40e3d0c5622b906b9a8a27c9b465e4693b8f6e9b975ad90ce2414eb271a70"
+    },
+    {
+      "file": "ellipse-07.svg",
+      "upstream_path": "svg/shapes/ellipse-07.svg",
+      "sha256": "df0a285d6e56a3cf6fba0f9ea1b413dceb632c5301a3b5e01d062c564bea7ea6"
+    },
+    {
+      "file": "LICENSE.md",
+      "upstream_path": "LICENSE.md",
+      "sha256": "5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570"
+    },
+    {
+      "file": "line-dasharray-ref.svg",
+      "upstream_path": "svg/shapes/line-dasharray-ref.svg",
+      "sha256": "ff41531681b55ed8b4c411deaf77b963ef6ce5781d9c305738b0494f60469845"
+    },
+    {
+      "file": "line-dasharray.svg",
+      "upstream_path": "svg/shapes/line-dasharray.svg",
+      "sha256": "d408bf7c3e1599b66f39276f700f7d77abc72793ccf0f7a64058d8e1856eb1a5"
+    }
+  ]
+}

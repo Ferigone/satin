@@ -1,0 +1,101 @@
+<h1>Pliki i strumienie</h1>
+<p>Odczytaj tekst jako bajty, sprawdź plik z formularza lub zmień litery na wielkie, przesyłając dane przez strumień.</p>
+<style>
+  form{padding:24px;background:#edf7f5;border:1px solid #b9d8d2;margin:20px 0}
+  label{display:block;font-weight:bold;margin-bottom:8px}
+  input{width:100%;padding:10px;font-size:17px;background:white;border:1px solid #a4bdb8;box-sizing:border-box}
+  button{margin-top:16px;padding:12px 18px;background:#126f5e;color:white;font-size:17px;border:1px solid #126f5e}
+  #binary-result{background:#e7eff3;padding:14px}
+</style>
+<form id="binary-form">
+  <label for="binary-source">Tekst pliku</label>
+  <input id="binary-source" name="tekst" value="Zażółć gęślą jaźń 🦀">
+  <button type="button" id="binary-run">Sprawdź bajty</button>
+  <button type="button" id="binary-pipe">Przekształć tekst</button>
+</form>
+<p id="binary-result" aria-live="polite">Wynik pojawi się po odczytaniu strumienia.</p>
+<p><a href="about:home">Wróć na start</a> · <a href="about:version">Zakres wydania</a></p>
+<script>
+  function* segments(text) {
+    yield new TextEncoder().encode(text + ' · ');
+    var marker = new ArrayBuffer(4);
+    new DataView(marker).setUint32(0, 0x52555354);
+    yield new Uint8Array(marker);
+  }
+  async function runBinary() {
+    var output = document.getElementById('binary-result');
+    var input = document.getElementById('binary-source').value;
+    var iterator = segments(input);
+    try {
+      var stream = new ReadableStream({
+        pull: function(controller) {
+          var entry = iterator.next();
+          if (entry.done) controller.close();
+          else controller.enqueue(entry.value);
+        }
+      }, {highWaterMark: 0});
+      var type = 'text/plain;charset=utf-8';
+      var response = new Response(stream, {headers: {'Content-Type': type}});
+      var copy = response.clone();
+      var reads = await Promise.all([response.text(), copy.bytes()]);
+      var fields = new FormData(document.getElementById('binary-form'));
+      fields.append('plik', new File([reads[1]], 'tekst.txt', {type: type}));
+      var decoded = await new Response(fields).formData();
+      var file = decoded.get('plik');
+      var text = await file.text();
+      if (text !== reads[0] || text !== input + ' · RUST' || decoded.get('tekst') !== input) {
+        throw new Error('Dane zmieniły się podczas odczytu.');
+      }
+      output.textContent = file.name + ' · ' + file.size + ' B · ' + text;
+      document.title = 'Dane binarne OK';
+    } catch (error) {
+      output.textContent = String(error);
+      document.title = 'Błąd danych binarnych';
+    }
+  }
+  async function runPipe() {
+    const output = document.getElementById('binary-result');
+    const input = document.getElementById('binary-source').value;
+    const encoded = new TextEncoder().encode(input);
+    const source = new Blob([encoded]);
+    try {
+      const reader = source.stream().getReader({mode: 'byob'});
+      const buffer = new Uint8Array(8);
+      const first = await reader.read(buffer);
+      const count = Math.min(encoded.byteLength, 8);
+      if (buffer.byteLength !== 0 || first.value.byteLength !== count ||
+          first.done !== (count === 0)) {
+        throw new Error('Czytnik zwrócił nieoczekiwany zakres bajtów.');
+      }
+      await reader.cancel();
+      reader.releaseLock();
+      const transferred = structuredClone(first.value, {transfer: [first.value.buffer]});
+      if (first.value.byteLength !== 0 || transferred.byteLength !== count ||
+          (count !== 0 && transferred[0] !== encoded[0])) {
+        throw new Error('Przeniesione bajty różnią się od danych źródłowych.');
+      }
+      const decoder = new TextDecoder();
+      const transform = new TransformStream({
+        transform(chunk, controller) {
+          controller.enqueue(decoder.decode(chunk, {stream: true}).toUpperCase());
+        },
+        flush(controller) {
+          controller.enqueue(decoder.decode().toUpperCase());
+        }
+      });
+      let text = '';
+      const sink = new WritableStream({write(chunk) { text += chunk; }});
+      await source.stream().pipeThrough(transform).pipeTo(sink);
+      if (text !== input.toUpperCase()) {
+        throw new Error('Wynik potoku różni się od oczekiwanego tekstu.');
+      }
+      output.textContent = text + ' · Odczyt BYOB: ' + count + ' B';
+      document.title = 'Potok gotowy';
+    } catch (error) {
+      output.textContent = String(error);
+      document.title = 'Błąd potoku';
+    }
+  }
+  document.getElementById('binary-run').addEventListener('click', runBinary);
+  document.getElementById('binary-pipe').addEventListener('click', runPipe);
+</script>

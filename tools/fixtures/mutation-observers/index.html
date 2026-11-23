@@ -1,0 +1,139 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MutationObserver fixture</title>
+<style>
+  body { color: #243039; background: #eef6f5; margin: 28px; font: 18px sans-serif; }
+  main { background: white; width: 740px; border: 1px solid #6e9689; padding: 22px; }
+  button { padding: 8px 14px; margin: 10px 0; color: white; background: #2e6759; }
+  pre { padding: 12px; border: 1px solid #6e9689; white-space: pre-wrap; }
+</style>
+<main>
+  <h1>Mutation observer delivery</h1>
+  <p>DOM mutations, parser insertions, and microtask order</p>
+  <p>The server releases the rest of this document after the first script reads the prefix.</p>
+  <button id="run" type="button">Run mutation checks</button>
+  <section id="target"><i id="before"></i><b id="child" data-key="original">old text</b><i id="after"></i></section>
+  <p>The receipt lists the observed record order and stable node identities.</p>
+  <pre id="receipt">Waiting</pre>
+</main>
+<script>
+var parserTrace=[];
+var sawWrite=false, sawTail=false, rewrote=false;
+var parserObserver=new MutationObserver(function(records) {
+  for (var i=0;i<records.length;i++) {
+    var nodes=records[i].addedNodes;
+    for (var j=0;j<nodes.length;j++) {
+      if (nodes[j].nodeType!==1) continue;
+      if (nodes[j].id==='written' && !sawWrite) {
+        sawWrite=true;
+        parserTrace.push('write-record');
+      }
+      if (nodes[j].id==='parser-tail' && !sawTail) {
+        sawTail=true;
+        parserTrace.push('tail-record');
+      }
+    }
+  }
+  var candidate=document.getElementById('prepared-script');
+  if (!rewrote && candidate && candidate.text.includes('ORIGINAL_SCRIPT_MARKER')) {
+    rewrote=true;
+    parserTrace.push('before-prepare');
+    candidate.type='text/javascript';
+    candidate.text='parserTrace.push("rewritten");';
+  }
+});
+parserObserver.observe(document.body,{childList:true,characterData:true,subtree:true});
+document.write('<p id="written">Written in the first script</p>');
+parserTrace.push(document.getElementById('parser-tail')===null && !sawWrite ? 'prefix' : 'unexpected prefix');
+fetch('./parser-ready',{method:'POST'});
+
+var callbackTrace=[];
+var checks={};
+var saved=[];
+var recordTrace=[];
+function finish() {
+  var receipt=document.getElementById('receipt');
+  receipt.textContent=JSON.stringify({parser:parserTrace, callbacks:callbackTrace, records:recordTrace, checks:checks});
+  fetch('./receipt',{method:'POST',body:receipt.textContent}).then(function(){
+    receipt.setAttribute('data-complete','yes');
+    document.title='Mutation observers verified';
+  });
+}
+function testObservers() {
+  checks.clickedAfterLoad=document.readyState==='complete';
+  var target=document.getElementById('target');
+  var child=document.getElementById('child');
+  var before=document.getElementById('before');
+  var after=document.getElementById('after');
+  var text=child.firstChild;
+  var fragment=document.createDocumentFragment();
+  var x=document.createElement('span'), y=document.createElement('small');
+  x.id='x';
+  y.id='y';
+  fragment.append(x,y);
+  var observer=new MutationObserver(function(){checks.unexpectedDelivery=true;});
+  observer.observe(target,{
+    childList:true, subtree:true, attributeFilter:['data-key','id'], attributeOldValue:true, characterDataOldValue:true
+  });
+  observer.observe(fragment,{childList:true});
+  text.data='new text';
+  child.setAttribute('data-key','new value');
+  child.setAttribute('data-ignored','skip');
+  child.remove();
+  child.id='detached';
+  target.insertBefore(fragment,after);
+  saved=observer.takeRecords();
+  for (var i=0;i<saved.length;i++) {
+    var item=saved[i];
+    recordTrace.push(item.type+':'+item.attributeName+':'+item.oldValue+':'+item.addedNodes.length+':'+item.removedNodes.length);
+  }
+  checks.snapshots=saved.length===6 &&
+    saved[0].target===text && saved[1].target===child && saved[2].target===target &&
+    saved[2].removedNodes instanceof NodeList && saved[2].removedNodes===saved[2].removedNodes &&
+    saved[2].removedNodes.item(0)===child && saved[2].previousSibling===before && saved[2].nextSibling===after &&
+    saved[3].target===child && child.parentNode===null && saved[4].target===fragment &&
+    saved[4].removedNodes[0]===x && saved[4].removedNodes[1]===y && saved[4].previousSibling===null &&
+    saved[5] instanceof MutationRecord && saved[5].target===target &&
+    saved[5].addedNodes[0]===x && saved[5].addedNodes[1]===y && saved[5].nextSibling===after;
+  observer.observe(target,{attributes:true,subtree:true});
+  child.setAttribute('data-key','after replacement');
+  checks.reobserveClearsTransient=observer.takeRecords().length===0;
+  observer.disconnect();
+
+  var firstTarget=document.createElement('p'), secondTarget=document.createElement('p');
+  var round=0;
+  var first=new MutationObserver(function(records, self){
+    ++round;
+    callbackTrace.push('first:'+records.length);
+    if (round===1) {
+      checks.callbackReceiver=this===first && self===first && Array.isArray(records);
+      firstTarget.id='second round';
+      secondTarget.id='appended during first';
+    } else {
+      checks.retainedRecord=saved[2].removedNodes[0]===child && saved[4].removedNodes[1].parentNode===target;
+      first.disconnect();
+      finish();
+    }
+  });
+  var second=new MutationObserver(function(records){
+    callbackTrace.push('second:'+records.length);
+    second.disconnect();
+  });
+  first.observe(firstTarget,{attributes:true});
+  second.observe(secondTarget,{attributes:true});
+  Promise.resolve().then(function(){callbackTrace.push('promise-before');});
+  secondTarget.id='first record';
+  queueMicrotask(function(){callbackTrace.push('promise-after');});
+  firstTarget.id='second record';
+}
+document.getElementById('run').addEventListener('click',testObservers,{once:true});
+window.addEventListener('load',function(){
+  parserObserver.disconnect();
+  document.getElementById('run').setAttribute('data-ready','yes');
+  document.title='Mutation observer fixture ready';
+});
+</script>
+<!-- split stream here -->
+<p id="parser-tail">The remaining document arrived after observation began.</p>
+<script id="prepared-script" type="application/json">parserTrace.push('ORIGINAL_SCRIPT_MARKER');</script>
+<script>parserTrace.push('after-script');</script>

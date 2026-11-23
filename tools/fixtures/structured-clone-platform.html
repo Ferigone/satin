@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Platform structured clone</title>
+<pre id="receipt"></pre>
+<script>
+  async function verify() {
+    const receipt = document.getElementById('receipt');
+    const result = {};
+    try {
+      const BlobType = Blob, FileType = File, Exception = DOMException, Picture = ImageData;
+      const raw = new Blob([new Uint8Array([4, 5, 6, 7])]);
+      const blob = raw.slice(1, 3, 'APPLICATION/X-CLONE');
+      const file = new File(['fo', new Uint8Array([111, 33])], 'żółć.txt',
+        {type: 'TEXT/PLAIN', lastModified: 42});
+      Object.defineProperty(blob, 'size', {get: () => { throw 'author getter'; }});
+      Object.defineProperty(file, 'name', {get: () => { throw 'author getter'; }});
+      delete globalThis.Blob;
+      delete globalThis.File;
+      let parts;
+      try { parts = structuredClone({blob, file, alias: file}); }
+      finally { globalThis.Blob = BlobType; globalThis.File = FileType; }
+      result.files = [
+        parts.blob instanceof BlobType, parts.file instanceof FileType, parts.blob !== blob,
+        parts.blob.size, parts.blob.type, new Uint8Array(await parts.blob.arrayBuffer()).join(),
+        parts.file.name, parts.file.lastModified, parts.file.type, await parts.file.text(),
+        parts.file === parts.alias,
+      ];
+
+      const error = new DOMException('przerwano połączenie', 'AbortError');
+      const clonedError = structuredClone({error, map: new Map([[error, error]])});
+      result.exception = [
+        clonedError.error instanceof Exception, clonedError.error !== error,
+        clonedError.error.name, clonedError.error.code, clonedError.error.message,
+        clonedError.map.get(clonedError.error) === clonedError.error,
+      ];
+      const lone = structuredClone(new DOMException('lone \uD800', 'AbortError'));
+      result.exceptionUtf16 = lone === null ? 'null' : lone.message.charCodeAt(5);
+      let nameCalls = 0;
+      Object.defineProperty(error, 'name', {get: () => { nameCalls++; throw 'author getter'; }});
+      function nameOfClone(value) {
+        try {
+          const cloned = structuredClone(value);
+          return cloned === null ? 'null' : cloned.name;
+        } catch (error) {
+          return String(error);
+        }
+      }
+      const shadowedName = nameOfClone(error);
+      globalThis.DOMException = () => { throw 'author constructor'; };
+      let alternate;
+      try { alternate = nameOfClone(new Exception('another', 'AbortError')); }
+      finally { globalThis.DOMException = Exception; }
+      result.exceptionIntrinsics = [shadowedName, alternate, nameCalls];
+
+      const buffer = new ArrayBuffer(12);
+      const values = new Uint8ClampedArray(buffer, 4, 4);
+      values.set([3, 9, 15, 255]);
+      const image = new Picture(values, 1, 1);
+      let dataReads = 0;
+      Object.defineProperty(image, 'data', {get: () => { dataReads++; throw 'author getter'; }});
+      const cloned = structuredClone({image, values, buffer});
+      let problem;
+      try { structuredClone({image, node: document.body}, {transfer: [buffer]}); }
+      catch (error) { problem = error.name; }
+      result.rollback = [problem, buffer.byteLength, values[0]];
+      const moved = structuredClone({buffer, values, image}, {transfer: [buffer]});
+      result.image = [
+        cloned.image instanceof Picture, cloned.image.width, cloned.image.height,
+        cloned.image.colorSpace, cloned.image.pixelFormat, cloned.image.data.join(),
+      ];
+      cloned.image.data[0] = 44;
+      result.imageGraph = [
+        cloned.image.data === cloned.values, cloned.image.data.buffer === cloned.buffer,
+        cloned.image.data.byteOffset, cloned.values[0],
+      ];
+      result.transfer = [
+        buffer.byteLength, moved.image.data.join(), moved.image.data === moved.values,
+        moved.image.data.buffer === moved.buffer, moved.values.byteOffset,
+      ];
+      const half = new Picture(new Float16Array([0.125, 0.5, 0.875, 1]), 1, 1,
+        {colorSpace: 'display-p3', pixelFormat: 'rgba-float16'});
+      globalThis.ImageData = () => { throw 'author constructor'; };
+      let halfClone;
+      try { halfClone = structuredClone(half); }
+      finally { globalThis.ImageData = Picture; }
+      result.float16 = [
+        halfClone.data instanceof Float16Array, halfClone.colorSpace, halfClone.pixelFormat,
+        halfClone.data.join(), dataReads,
+      ];
+    } catch (error) {
+      result.error = String(error);
+    }
+    receipt.textContent = JSON.stringify(result);
+    receipt.setAttribute('data-complete', 'yes');
+    document.title = result.error ? 'Platform clone failed' : 'Platform clone OK';
+  }
+  verify();
+</script>

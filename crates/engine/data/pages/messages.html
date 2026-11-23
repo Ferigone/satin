@@ -1,0 +1,40 @@
+<h1>Wiadomości między portami</h1>
+<p>Dwa kanały przekażą bufor bajtów i odeślą wynik przez przeniesiony port.</p>
+<style>
+  #message-run { padding: 12px 20px; color: white; background: #165b51; border: 1px solid #165b51; font-size: 16px; }
+  #message-status { max-width: 580px; padding: 16px; background: #e6f0ef; border: 1px solid #a5c8c2; }
+</style>
+<button id="message-run" type="button">Prześlij bajty</button>
+<p id="message-status" aria-live="polite">Gotowe do wysłania bajtów 19 i 23.</p>
+<p><a href="about:home">Start</a> · <a href="about:version">Możliwości przeglądarki</a></p>
+<script>
+  const button = document.getElementById("message-run");
+  const status = document.getElementById("message-status");
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    status.textContent = "Oczekiwanie na odpowiedź.";
+    const channel = new MessageChannel(), reply = new MessageChannel();
+    const bytes = new Uint8Array([19, 23]);
+    let released = false;
+    channel.port2.onmessage = event => {
+      const received = new Uint8Array(event.data.bytes);
+      const answer = event.ports[0];
+      answer.postMessage(received[0] + received[1]);
+      answer.close();
+      channel.port2.close();
+    };
+    reply.port2.onmessage = event => {
+      channel.port1.close();
+      reply.port2.close();
+      button.disabled = false;
+      if (event.data === 42 && event.isTrusted && released) {
+        status.textContent = "Odebrano 42. Bufor źródłowy został odłączony.";
+        document.title = "Odebrano 42";
+      } else {
+        status.textContent = "Odebrana wiadomość ma inne dane.";
+      }
+    };
+    channel.port1.postMessage({bytes: bytes.buffer}, {transfer: [bytes.buffer, reply.port1]});
+    released = bytes.byteLength === 0;
+  });
+</script>

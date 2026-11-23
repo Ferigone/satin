@@ -1,0 +1,75 @@
+<h1>Zegar i układ</h1>
+<p>Uruchom zegar, aby sprawdzić czas lokalny i znaczniki klatek. Zmień szerokość okna, by zobaczyć, jak pola zmieniają układ.</p>
+<style>
+  .clock{display:grid;grid-template-columns:[start] minmax(0,2fr) [side] minmax(0,1fr) [end];grid-template-areas:"time actions" "details details";gap:16px}
+  .time{grid-area:time;background:#edf7f5;border:1px solid #b9d8d2;padding:24px}
+  .actions{grid-area:actions;background:white;border:1px solid #d7e0e5;padding:20px}
+  .details{grid-area:details;display:grid;grid-template-columns:repeat(auto-fit,minmax(177px,1fr));gap:13px}
+  .details div{background:#e7eff3;padding:12px 16px;border:1px solid #d4e1e8}
+  #clock-reading{font-size:34px;margin:8px 0;color:#126f5e}
+  button{margin:0 6px 8px 0;padding:10px 14px;font-size:16px;border:1px solid #126f5e;color:white;background:#126f5e}
+  #stop-time{color:#126f5e;background:white}
+  @media(max-width:605px){.clock{grid-template-columns:[start] 1fr [end];grid-template-areas:"time" "actions" "details"}}
+</style>
+<div class="clock">
+  <section class="time">
+    <h2>Czas lokalny</h2>
+    <p id="clock-reading">—</p>
+    <p id="clock-date"></p>
+  </section>
+  <section class="actions">
+    <h2>Sterowanie</h2>
+    <button type="button" id="start-time">Uruchom zegar</button>
+    <button type="button" id="stop-time">Zatrzymaj</button>
+    <p id="clock-status" aria-live="polite">Zegar czeka.</p>
+  </section>
+  <section class="details">
+    <div><strong>Kolejka klatek</strong><p id="clock-frame">Czeka na uruchomienie</p></div>
+    <div><strong>Licznik odświeżeń</strong><p id="clock-ticks">0</p></div>
+    <div><strong>Strefa czasu</strong><p id="clock-zone">—</p></div>
+  </section>
+</div>
+<p><a href="about:home">Wróć na start</a> · <a href="about:version">Zakres wydania</a></p>
+<script>
+  function $(id) { return document.getElementById(id); }
+  function pair(value) { return String(value).padStart(2, '0'); }
+  class Clock {
+    #ticks = 0;
+    paint() {
+      const now = new Date();
+      $('clock-reading').textContent = [now.getHours(), now.getMinutes(), now.getSeconds()].map(pair).join(':');
+      $('clock-date').textContent = [now.getFullYear(), pair(now.getMonth() + 1), pair(now.getDate())].join('-');
+      const offset = -now.getTimezoneOffset();
+      $('clock-zone').textContent = 'UTC ' + (offset >= 0 ? '+' : '−') +
+        pair(Math.floor(Math.abs(offset) / 60)) + ':' + pair(Math.abs(offset) % 60);
+      $('clock-ticks').textContent = String(++this.#ticks);
+    }
+  }
+  const clock = new Clock();
+  var interval = 0;
+  var frame = 0;
+  function refresh() {
+    clock.paint();
+    frame = requestAnimationFrame(stamp => {
+      $('clock-frame').textContent = Math.round(stamp) + ' ms od początku nawigacji';
+      $('clock-frame').setAttribute('data-sampled', 'true');
+      frame = 0;
+    });
+  }
+  $('start-time').addEventListener('click', function() {
+    if (interval) return;
+    refresh();
+    interval = setInterval(refresh, 1000);
+    $('clock-status').textContent = 'Zegar aktualizuje czas co sekundę.';
+    document.title = 'Zegar aktywny';
+  });
+  $('stop-time').addEventListener('click', function() {
+    clearInterval(interval);
+    if (frame) cancelAnimationFrame(frame);
+    interval = 0;
+    frame = 0;
+    $('clock-status').textContent = 'Zegar zatrzymany.';
+    document.title = 'Zegar zatrzymany';
+  });
+  clock.paint();
+</script>

@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>History pending</title>
+<h1>Same-document navigation</h1>
+<button id="start" type="button">Change route</button>
+<pre id="receipt">Pending</pre>
+<script>
+const initialPath = location.pathname;
+const prefix = initialPath.slice(0, initialPath.lastIndexOf('/') + 1);
+const startup = history.length;
+const trace = [];
+let visits = 0;
+let result;
+let failed = false;
+function check(value, problem) {
+  if (!value) throw new Error(problem);
+}
+function failure(error) {
+  failed = true;
+  document.title = 'History failed';
+  document.getElementById('receipt').textContent = String(error);
+  document.getElementById('receipt').setAttribute('data-done', 'failed');
+}
+async function finish() {
+  try {
+    check(await (await fetch('relative')).text() === 'rewritten base', 'relative Fetch after pushState');
+    const base = document.createElement('base');
+    base.setAttribute('href', './assets/');
+    document.head.appendChild(base);
+    const frozen = document.baseURI;
+    history.replaceState({label:'final'}, '', prefix + 'finish?phase=done#three');
+    check(document.baseURI === frozen && new URL(frozen).pathname === prefix + 'nested/assets/', 'frozen HTML base');
+    check(await (await fetch('relative')).text() === 'frozen base', 'relative Fetch with frozen base');
+    result = { trace, length: history.length - startup, path: location.pathname.slice(prefix.length),
+      search: location.search, state: history.state.label, document: document.URL === location.href };
+    const response = await fetch(prefix + 'receipt', {method:'POST', body:JSON.stringify(result)});
+    check(response.ok, 'server receipt');
+    document.getElementById('receipt').textContent = JSON.stringify(result);
+    document.getElementById('receipt').setAttribute('data-done','yes');
+    document.title = 'History pipeline OK';
+  } catch (error) { failure(error); }
+}
+window.addEventListener('popstate', event => {
+  try {
+    check(event instanceof PopStateEvent && event instanceof Event && event.isTrusted, 'trusted popstate interface');
+    check(event.target === window && event.currentTarget === window && event.eventPhase === 2, 'popstate target');
+    check(event.state === history.state, 'popstate shares current state');
+    if (event.state) {
+      check(event.state.self === event.state && event.state.value === 7, 'stored object graph restored');
+    }
+    trace.push('pop:' + (event.state ? event.state.label : '-') + ':' + location.hash);
+  } catch (error) { failure(error); }
+});
+window.onhashchange = event => {
+  if (failed) return;
+  try {
+    check(event instanceof HashChangeEvent && event instanceof Event && event.isTrusted, 'trusted hashchange interface');
+    trace.push('hash:' + new URL(event.oldURL).hash + '>' + new URL(event.newURL).hash);
+    visits++;
+    if (visits === 1) history.back();
+    if (visits === 2) history.forward();
+    if (visits === 3) finish();
+  } catch (error) { failure(error); }
+};
+document.getElementById('start').addEventListener('click', () => {
+  try {
+    check(location === window.location && document.location === location, 'stable Location');
+    history.replaceState({label:'landing'}, '', '#one');
+    const value = {label:'nested', value:7};
+    value.self = value;
+    history.pushState(value, '', 'nested/index?route=1#two');
+    value.value = 22;
+    check(history.state.value === 7 && history.state.self === history.state, 'serialized copy');
+    history.state.value = 33;
+    check(history.length === startup + 1 && location.pathname === prefix + 'nested/index', 'same-document path rewrite');
+    check(document.URL === location.href && document.documentURI === document.URL && document.baseURI === document.URL, 'live document address');
+    try {
+      history.replaceState(null,'','//different.invalid/path');
+      throw new Error('cross-origin update succeeded');
+    } catch(error) {
+      check(error.name === 'SecurityError', 'same-origin verification');
+    }
+    trace.push('push');
+    Promise.resolve().then(() => trace.push('microtask'));
+    location.hash = 'three';
+    trace.push('sync:' + location.hash);
+  } catch(error) { failure(error); }
+});
+document.title = 'History ready';
+</script>

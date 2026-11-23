@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Binary data pending</title>
+<h1>Native byte views and text encoding</h1>
+<pre id="receipt">pending</pre>
+<script>
+const buffer = new ArrayBuffer(8);
+const words = new DataView(buffer, 1, 6);
+words.setUint16(0, 0x1234);
+words.setUint32(2, 0x87654321, true);
+const rawBytes = new Uint8Array(buffer).join(',');
+const floats = new DataView(new ArrayBuffer(2));
+floats.setFloat16(0, 1.0004882812500002);
+
+const raw = new Uint8Array([1, 2, 3, 4]);
+const alias = raw.subarray(1);
+alias[0] = 5;
+raw.set(raw.subarray(0, 3), 1);
+const shifted = raw.join(',');
+const copied = raw.slice(1);
+copied.fill(8);
+const isolated = raw.join(',');
+const current = new ArrayBuffer(4, {maxByteLength: 8});
+const growable = new Uint16Array(current);
+const fixed = new Uint16Array(current, 0, 2);
+growable[0] = 2050;
+current.resize(2);
+const afterShrink = [growable.length, fixed.length, growable[0]];
+const transferred = current.transferToFixedLength(4);
+
+const encoder = new TextEncoder();
+const encoded = encoder.encode('Pą😀\ud800');
+const target = new Uint8Array(8).fill(90);
+const progress = encoder.encodeInto('A😀Z', target.subarray(2, 7));
+const decoder = new TextDecoder(' UTF-8 \t');
+const utf8 = [
+    decoder.decode(new Uint8Array([0xef, 0xbb]), {stream: true}),
+    decoder.decode(new Uint8Array([0xbf, 0xf0, 0x9f]), {stream: true}),
+    decoder.decode(new Uint8Array([0x98, 0x80]))
+];
+const decoded = new TextDecoder('iso-8859-1').decode(new Uint8Array([0x80]));
+const fatal = new TextDecoder('utf-8', {fatal: true});
+let rejected = false;
+try { fatal.decode(new Uint8Array([0xff])); }
+catch (error) { rejected = error instanceof TypeError; }
+const output = {
+    words: [rawBytes, words.getUint16(0), words.getUint32(2, true), floats.getFloat16(0)],
+    aliasing: [shifted, isolated, copied.join(','), ArrayBuffer.isView(raw), Array.isArray(raw)],
+    resize: [afterShrink, current.detached, fixed.length, transferred.resizable, new Uint16Array(transferred).join(',')],
+    encoded: [encoded.join(','), progress.read, progress.written, target.join(',')],
+    decoded: [decoder.encoding, utf8.join(':'), decoded, rejected],
+    methods: new Float32Array([5, 2, 3]).toSorted().map((value) => value * 2).join(',')
+};
+const receipt = document.getElementById('receipt');
+receipt.textContent = JSON.stringify(output);
+receipt.setAttribute('data-complete', 'yes');
+document.title = 'Binary data OK';
+</script>

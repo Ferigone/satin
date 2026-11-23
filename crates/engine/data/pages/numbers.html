@@ -1,0 +1,75 @@
+<h1>Liczby całkowite</h1>
+<p>Oblicz dokładny kwadrat liczby i sprawdź jej zapis w ośmiu bajtach.</p>
+<style>
+  #number-form{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:18px;background:#edf7f5;border:1px solid #b9d8d2}
+  #number-form label{display:block;min-width:220px;flex:1;font-weight:600}
+  #number-input{box-sizing:border-box;display:block;width:100%;margin-top:5px;padding:10px;font:inherit;border:1px solid #95b2ab;background:#fff}
+  #number-run{padding:10px 18px;font:inherit;border:1px solid #155d53;background:#155d53;color:#fff}
+  #number-results{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:18px 0}
+  #number-results div{padding:14px;background:#e7eff3;border:1px solid #d1dee4}
+  #number-results dt{font-weight:650}
+  #number-results dd{margin:6px 0 0;overflow-wrap:anywhere}
+  #number-status{min-height:1.5em}
+</style>
+<form id="number-form">
+  <label for="number-input">Liczba całkowita
+    <input id="number-input" value="18446744073709551615" spellcheck="false">
+  </label>
+  <button type="submit" id="number-run">Oblicz</button>
+</form>
+<dl id="number-results">
+  <div><dt>Dokładny kwadrat</dt><dd id="number-square">—</dd></div>
+  <div><dt>64 bity bez znaku</dt><dd id="number-unsigned">—</dd></div>
+  <div><dt>64 bity ze znakiem</dt><dd id="number-signed">—</dd></div>
+  <div><dt>Osiem bajtów w kolejności sieciowej</dt><dd id="number-bytes">—</dd></div>
+</dl>
+<p id="number-status" role="status" data-verified="no"></p>
+<p class="muted"><a href="about:home">Start</a> · <a href="about:version">Możliwości przeglądarki</a></p>
+<script>
+  const readout = document.getElementById('number-status');
+  const results = {
+    square: document.getElementById('number-square'),
+    unsigned: document.getElementById('number-unsigned'),
+    signed: document.getElementById('number-signed'),
+    bytes: document.getElementById('number-bytes'),
+  };
+
+  document.getElementById('number-form').addEventListener('submit', function (event) {
+    event.preventDefault();
+    readout.setAttribute('data-verified', 'no');
+    try {
+      const input = document.getElementById('number-input').value.trim();
+      if (input === '') throw new Error('Wpisz liczbę całkowitą.');
+      const value = BigInt(input);
+      const unsigned = new BigUint64Array(1);
+      const signed = new BigInt64Array(1);
+      unsigned[0] = value;
+      signed[0] = value;
+      const packed = new ArrayBuffer(8);
+      new DataView(packed).setBigUint64(0, value);
+      const copy = structuredClone({
+        get square() { return value * value; },
+        unsigned, signed, packed,
+      });
+      const view = new DataView(copy.packed);
+      if (copy.unsigned[0] !== BigInt.asUintN(64, value) ||
+          copy.signed[0] !== BigInt.asIntN(64, value) ||
+          view.getBigUint64(0) !== copy.unsigned[0] ||
+          view.getBigInt64(0) !== copy.signed[0]) {
+        throw new Error('Odczyt bajtów różni się od wyniku.');
+      }
+      results.square.textContent = String(copy.square);
+      results.unsigned.textContent = String(copy.unsigned[0]);
+      results.signed.textContent = String(copy.signed[0]);
+      results.bytes.textContent = Array.from(new Uint8Array(copy.packed),
+        byte => byte.toString(16).padStart(2, '0')).join(' ');
+      readout.textContent = 'Odczyt po sklonowaniu zgadza się z obliczeniem.';
+      readout.setAttribute('data-verified', 'yes');
+      document.title = 'Liczby gotowe';
+    } catch (error) {
+      for (const key in results) results[key].textContent = '—';
+      readout.textContent = String(error);
+      document.title = 'Nieudane obliczenie';
+    }
+  });
+</script>

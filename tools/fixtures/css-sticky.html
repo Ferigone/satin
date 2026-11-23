@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sticky ready</title>
+<style>
+  body { margin: 0 }
+  #section { position: relative; margin-left: 20px; width: 360px; height: 440px; background: #f3f8f6 }
+  #start { height: 120px }
+  #sticky { position: sticky; top: 12px; left: 9px; width: 120px; height: 32px; background: #0d9346 }
+  #badge { position: absolute; left: 86px; top: 6px; width: 10px; height: 10px; background: #fff }
+  #following { height: 20px; background: #d7e7dc }
+  #scroller {
+    position: relative; overflow: auto; margin: 14px 0 0 170px;
+    width: 136px; height: 110px; border: 4px solid #223c37; padding: 10px 12px 15px 8px;
+    background: #f4f1ff;
+  }
+  #inner-start { height: 85px }
+  #inner { position: sticky; top: 50%; left: 6px; width: 45px; height: 25px; background: #3325c4 }
+  #inner-tail { height: 340px; width: 330px; background: #cbd8fb }
+  #tail { width: 1800px; height: 1400px; background: #fafafa }
+  #run { position: absolute; left: 400px; top: 20px }
+  #results { display: none }
+</style>
+<main id="section">
+  <div id="start"></div>
+  <div id="sticky"><div id="badge"></div></div>
+  <div id="following"></div>
+  <div id="scroller">
+    <div id="inner-start"></div>
+    <div id="inner"></div>
+    <div id="inner-tail"></div>
+  </div>
+</main>
+<div id="tail"></div>
+<button type="button" id="run">Check sticky</button>
+<pre id="results"></pre>
+<script>
+const sticky = document.getElementById('sticky');
+const badge = document.getElementById('badge');
+const following = document.getElementById('following');
+const scroller = document.getElementById('scroller');
+const inner = document.getElementById('inner');
+const checks = {};
+
+function check(label, actual, expected) {
+    checks[label] = { actual, expected, pass: JSON.stringify(actual) === JSON.stringify(expected) };
+}
+
+function position(element) {
+    const rect = element.getBoundingClientRect();
+    return [rect.left, rect.top];
+}
+
+function verify() {
+    window.scrollTo(0, 0);
+    check('computed position', getComputedStyle(sticky).position, 'sticky');
+    check('initial position', position(sticky), [20, 120]);
+    check('initial sibling offset', following.offsetTop, 152);
+
+    window.scrollTo(45, 180);
+    check('viewport pins on both axes', [window.scrollX, window.scrollY, ...position(sticky)], [45, 180, 9, 12]);
+    check('absolute descendant follows sticky', position(badge), [95, 18]);
+    check('sticky keeps sibling in flow', [following.offsetTop, position(following)[1]], [152, -28]);
+
+    const scrollWidth = scroller.scrollWidth;
+    const scrollHeight = scroller.scrollHeight;
+    scroller.scrollLeft = 45;
+    scroller.scrollTop = 140;
+    check('nested scroll offsets', [scroller.scrollLeft, scroller.scrollTop], [45, 140]);
+    const [outerLeft, outerTop] = position(scroller);
+    const [innerLeft, innerTop] = position(inner);
+    check('nested padding and both insets',
+        [innerLeft - outerLeft - scroller.clientLeft, innerTop - outerTop - scroller.clientTop], [14, 65]);
+    check('computed percentage inset', getComputedStyle(inner).top, '55px');
+    check('offsets include sticky movement', [inner.offsetLeft, inner.offsetTop], [59, 205]);
+    check('stable scroll extent', scroller.scrollWidth === scrollWidth && scroller.scrollHeight === scrollHeight, true);
+
+    window.scrollTo(45, 430);
+    check('containing-block end releases sticky', position(sticky)[1], -22);
+    window.scrollTo(45, 180);
+    sticky.style.position = 'static';
+    check('style change clears sticky displacement', position(sticky), [-25, -60]);
+    sticky.style.position = 'sticky';
+    check('style change re-enables sticky', position(sticky), [9, 12]);
+
+    const result = document.getElementById('results');
+    result.textContent = JSON.stringify({ checks, paint: [position(sticky), position(inner)] });
+    result.setAttribute('data-complete', 'yes');
+    document.title = Object.keys(checks).every(key => checks[key].pass) ? 'Sticky verified' : 'Sticky mismatch';
+}
+
+document.getElementById('run').addEventListener('click', verify);
+</script>

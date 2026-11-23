@@ -1,0 +1,191 @@
+{
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "files": [
+    {
+      "file": "2d.canvas.context.invalid.args.html",
+      "upstream": "html/canvas/element/canvas-context/2d.canvas.context.invalid.args.html",
+      "sha256": "bacb9157a8c04d82ebe1780f548cd26148765778f2b82f032bce3761fa2a76e4",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.color.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.color.html",
+      "sha256": "55afef40d38ba4ec6c5c65415cfa4d8153ffae1407fa9dcb47ca03aa1d554131",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.2dstate.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.2dstate.html",
+      "sha256": "382b9ab15b770938f8b2a192a02326df5b032347e7b09cdbbd015c74105ca8f5",
+      "subtests": 15
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.clip.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.clip.html",
+      "sha256": "880a09f458b7a00200b85ff4ab3f2ab2a778cf2e6e3e687df2df057516343f46",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.different.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.different.html",
+      "sha256": "b29fa8a4d4374d59e9802525fbaafeaa85126f64f18b442ccf004233c70ae87c",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.gradient.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.gradient.html",
+      "sha256": "4d0ee260f00d3f3ebc3ea0741dda0ccef5d35c8401f20ea8a0540d60635abad9",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.path.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.path.html",
+      "sha256": "a1a04e45fc2f0c3aa5a36c41343f184fca575f54b8e5fb894fb3d3dadc4ffdcb",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.same.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.same.html",
+      "sha256": "1d0584e24056c7c793fa2c98e3f6a569e0957c948a5b8399ddf07133284ac811",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.initial.reset.transform.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.initial.reset.transform.html",
+      "sha256": "28c7f53b23b38f79a8b325e47c51989f04d650f24685ce797f16cdc4f2e44e6e",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.size.attributes.reflect.setcontent.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.size.attributes.reflect.setcontent.html",
+      "sha256": "29fa8ef6ac404838ab60595ec7a5549fe3972bbb81c0d7583a1441a42846adc0",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.size.attributes.reflect.setidl.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.size.attributes.reflect.setidl.html",
+      "sha256": "bab9c85f1e812f38dd82cd8b31ac9a1b9c5b09d39cc637d1b495ab668d610e26",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.size.attributes.reflect.setidlzero.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.size.attributes.reflect.setidlzero.html",
+      "sha256": "6d8c02f45919cb11882d33599540277b9082606973ba4088e7c9cd6b8a768006",
+      "subtests": 1
+    },
+    {
+      "file": "2d.canvas.host.size.invalid.attributes.idl.html",
+      "upstream": "html/canvas/element/canvas-host/2d.canvas.host.size.invalid.attributes.idl.html",
+      "sha256": "a0e29463c763466db2cb3a565d48744a265b00074a794ed76f759d40029a36e8",
+      "subtests": 1
+    },
+    {
+      "file": "2d.clearRect.basic.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.clearRect.basic.html",
+      "sha256": "4d08dc4de3b128c14453f11784c54c6cfac14cb03e4ac20c23d35a7b3eece955",
+      "subtests": 1
+    },
+    {
+      "file": "2d.clearRect.negative.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.clearRect.negative.html",
+      "sha256": "d22c7ab44f43a825c64359827fb1b899afccb1ee1d16efc7be20d932a8296751",
+      "subtests": 1
+    },
+    {
+      "file": "2d.clearRect.zero.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.clearRect.zero.html",
+      "sha256": "dcae0bbfa9699bde03ffc8722ca47dd9672729ec5be261af44e5a1ed12f521a2",
+      "subtests": 1
+    },
+    {
+      "file": "2d.fillRect.basic.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.fillRect.basic.html",
+      "sha256": "9a19f59d4992ea01014fd1eec471e66cbf293f57b07f34570e5af69a5f888273",
+      "subtests": 1
+    },
+    {
+      "file": "2d.fillRect.negative.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.fillRect.negative.html",
+      "sha256": "7a3422534cdb3ad6064fee7c373fa71b745c2f9b41d1670cfa1de3ba52fa4c75",
+      "subtests": 1
+    },
+    {
+      "file": "2d.fillRect.zero.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.fillRect.zero.html",
+      "sha256": "1dc0e74bb9fa730cb78513ceecb074ab2349b29b0edd1338ff07a4e9d2253bca",
+      "subtests": 1
+    },
+    {
+      "file": "2d.strokeRect.basic.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.strokeRect.basic.html",
+      "sha256": "2c2d28ccb9b64ea53b72867e1f97a9dc2c41b4a76c777302358f9d8cfdbbcbee",
+      "subtests": 1
+    },
+    {
+      "file": "2d.strokeRect.negative.html",
+      "upstream": "html/canvas/element/drawing-rectangles-to-the-canvas/2d.strokeRect.negative.html",
+      "sha256": "fc078df4072d6c59f4317a044a5e914a90b39cce0f448abda5a88ba20c97fbe4",
+      "subtests": 1
+    },
+    {
+      "file": "2d.fillStyle.default.html",
+      "upstream": "html/canvas/element/fill-and-stroke-styles/2d.fillStyle.default.html",
+      "sha256": "8c36cb72e9907a315dd72975b30d137f3899dfaf47ca2637207bf9cb7301163a",
+      "subtests": 1
+    },
+    {
+      "file": "2d.fillStyle.invalidstring.html",
+      "upstream": "html/canvas/element/fill-and-stroke-styles/2d.fillStyle.invalidstring.html",
+      "sha256": "e27b814104270835258335b0fdb7b7c5c2e15b193a0cee2fe283b1f993d09a41",
+      "subtests": 1
+    },
+    {
+      "file": "2d.path.clip.basic.1.html",
+      "upstream": "html/canvas/element/path-objects/2d.path.clip.basic.1.html",
+      "sha256": "c128646a74f5e3c4733c4c1103ebc30b4832d7794eb82917c00dba8c95451adb",
+      "subtests": 1
+    },
+    {
+      "file": "2d.path.isPointInPath.basic.html",
+      "upstream": "html/canvas/element/path-objects/2d.path.isPointInPath.basic.html",
+      "sha256": "3bc9e545bf115c832c45a1e191fe50a9aee34016a96c80ee7e5637252befa5b3",
+      "subtests": 1
+    },
+    {
+      "file": "2d.reset.basic.html",
+      "upstream": "html/canvas/element/reset/2d.reset.basic.html",
+      "sha256": "8add40002281bcbeda9a41c7a048c5971ba35fac9d1440add80692814aa999d4",
+      "subtests": 1
+    },
+    {
+      "file": "2d.text.align.default.html",
+      "upstream": "html/canvas/element/text/2d.text.align.default.html",
+      "sha256": "d110606f201f95683dd7bf9c2b811161d077052c643802aa92de6da8c9b6e6f9",
+      "subtests": 1
+    },
+    {
+      "file": "2d.text.baseline.default.html",
+      "upstream": "html/canvas/element/text/2d.text.baseline.default.html",
+      "sha256": "a9b3724c2549bdbd33feb81bb341551bef7b5ef195abcada0e9c53d099776741",
+      "subtests": 1
+    },
+    {
+      "file": "2d.text.font.default.html",
+      "upstream": "html/canvas/element/text/2d.text.font.default.html",
+      "sha256": "e3081396143d3d453248bf190e6374cb163ed5b6fc3c210313ffea715dedf134",
+      "subtests": 1
+    },
+    {
+      "file": "2d.transformation.order.html",
+      "upstream": "html/canvas/element/transformations/2d.transformation.order.html",
+      "sha256": "5d977d50f6c57e158a7a82b3ca9e115e5ba59f0650f02632d58a6e7b287c5d64",
+      "subtests": 1
+    },
+    {
+      "file": "2d.transformation.scale.negative.html",
+      "upstream": "html/canvas/element/transformations/2d.transformation.scale.negative.html",
+      "sha256": "a53d7c331d578579cac5089fc88ccea5f954bb78c3c8a86e0b313390f2446aa2",
+      "subtests": 1
+    }
+  ]
+}

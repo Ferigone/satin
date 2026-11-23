@@ -1,0 +1,53 @@
+<h1>Podgląd pliku</h1>
+<p>Wybierz obraz PNG, JPEG, GIF lub WebP. Podgląd powstaje w tej karcie.</p>
+<style>
+  #image-form { max-width: 560px; padding: 16px; background: #e9f3f1; border: 1px solid #a5c8c2; }
+  #image-pick { display: block; margin-top: 8px; min-width: 245px; }
+  #image-status { margin-top: 16px; min-height: 20px; }
+  #image-preview { display: block; max-width: 100%; background: #eef2f4; }
+</style>
+<form id="image-form">
+  <label for="image-pick">Obraz</label>
+  <input id="image-pick" name="image" type="file" accept="image/png,image/jpeg,image/gif,image/webp">
+</form>
+<p id="image-status" aria-live="polite">Wybierz plik do wyświetlenia.</p>
+<canvas id="image-preview" width="0" height="0"></canvas>
+<p><a href="about:home">Start</a> · <a href="about:version">Możliwości przeglądarki</a></p>
+<script>
+  const input = document.getElementById("image-pick");
+  const preview = document.getElementById("image-preview");
+  const status = document.getElementById("image-status");
+  let revision = 0;
+  input.addEventListener("change", async () => {
+    const selection = ++revision;
+    const file = input.files.item(0);
+    if (!file) {
+      preview.width = 0;
+      preview.height = 0;
+      status.textContent = "Wybierz plik do wyświetlenia.";
+      document.title = "Podgląd pliku";
+      return;
+    }
+    status.textContent = "Odczytywanie " + file.name + ".";
+    try {
+      const entry = new FormData(document.getElementById("image-form")).get("image");
+      const bitmap = await createImageBitmap(entry, {resizeWidth: 480});
+      if (selection === revision) {
+        const scale = Math.min(1, 300 / bitmap.height);
+        preview.width = Math.max(1, Math.round(bitmap.width * scale));
+        preview.height = Math.max(1, Math.round(bitmap.height * scale));
+        preview.getContext("2d").drawImage(bitmap, 0, 0, preview.width, preview.height);
+        status.textContent = file.name + " · " + file.size + " B";
+        document.title = "Podgląd gotowy";
+      }
+      bitmap.close();
+    } catch (error) {
+      if (selection === revision) {
+        preview.width = 0;
+        preview.height = 0;
+        status.textContent = "Podgląd niedostępny dla " + file.name + ".";
+        document.title = "Podgląd pliku";
+      }
+    }
+  });
+</script>

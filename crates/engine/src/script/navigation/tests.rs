@@ -1,0 +1,439 @@
+use super::*;
+
+const PAGE: &str = "https://example.test/path/index.html";
+
+#[test]
+fn parser_records_are_visible_before_preparing_the_following_script() {
+    let (_, session, mut runtime) = start(
+        r#"<!doctype html><body><script>
+var trace=[];
+var changed=false;
+var watcher=new MutationObserver(function(records) {
+    var candidate=document.getElementById('candidate');
+    if (candidate && !changed) {
+        changed=true;
+        trace.push(records.some(function(r){return r.addedNodes.length && r.addedNodes[0]===candidate;}) ? 'parser' : 'missing-parser-record');
+        candidate.type='text/javascript';
+        candidate.text='trace.push("rewritten");';
+    }
+});
+watcher.observe(document.body,{childList:true,subtree:true});
+document.write('<b id="written">written</b>');
+trace.push('initial');
+</script><p id="later">late</p><script id="candidate" type="application/json">trace.push('old');</script><script>
+watcher.disconnect();
+trace.push(document.getElementById('written') && document.getElementById('later') ? 'tail' : 'missing');
+</script>"#,
+    );
+    assert!(session.done());
+    assert_eq!(
+        evaluate(&mut runtime, "trace.join('|')"),
+        "initial|parser|rewritten|tail".into()
+    );
+    assert!(runtime.unwrap().diagnostics().is_empty());
+}
+
+#[test]
+fn parser_attribute_merge_records_follow_source_order() {
+    let (_, session, mut runtime) = start(
+        r#"<!doctype html><body data-existing="kept"><script>
+var trace=[];
+var watcher=new MutationObserver(function(records) {
+    for (const r of records) trace.push(r.attributeName+':'+r.oldValue);
+});
+watcher.observe(document.body,{attributes:true,attributeOldValue:true});
+</script><body data-z="first" data-existing="ignored" data-a="second" data-z="duplicate"><script>
+trace.push(document.body.getAttribute('data-existing')+'|'+document.body.getAttribute('data-z'));
+</script>"#,
+    );
+    assert!(session.done());
+    assert_eq!(
+        evaluate(&mut runtime, "trace.join('/')"),
+        "data-z:null/data-a:null/kept|first".into()
+    );
+}
+
+fn start(source: &str) -> (LoadedPage, DocumentSession, Option<ScriptRuntime>) {
+    let (mut page, mut session) = DocumentSession::start(OpenedPage {
+        page: LoadedPage::from_html(PAGE, ""),
+        input: DocumentInput::Html(source.into()),
+        started: Instant::now(),
+    })
+    .unwrap();
+    let mut runtime = None;
+    advance_ready(&mut page, &mut session, &mut runtime);
+    (page, session, runtime)
+}
+
+fn advance_ready(
+    page: &mut LoadedPage,
+    session: &mut DocumentSession,
+    runtime: &mut Option<ScriptRuntime>,
+) {
+    for _ in 0..64 {
+        if !session.needs_advance(runtime.as_ref()) {
+            return;
+        }
+        session.advance(page, runtime, Viewport::default()).unwrap();
+    }
+    panic!("runnable session did not reach a wait point");
+}
+
+fn complete(
+    page: &mut LoadedPage,
+    session: &mut DocumentSession,
+    runtime: &mut Option<ScriptRuntime>,
+    id: u64,
+    source: Option<(&str, &str)>,
+) {
+    let result = source
+        .map(|(url, source)| DocumentResource {
+            url: Url::parse(PAGE).unwrap().join(url).unwrap(),
+            transferred: source.len(),
+            body: ResourceBody::Text(source.into()),
+            origin_clean: true,
+        })
+        .ok_or_else(|| "Fixture request failed".into());
+    session
+        .complete_resource(id, result, page, runtime, Viewport::default())
+        .unwrap();
+    advance_ready(page, session, runtime);
+}
+
+fn evaluate(runtime: &mut Option<ScriptRuntime>, expression: &str) -> Value {
+    runtime.as_mut().unwrap().eval(expression).unwrap()
+}
+
+#[test]
+fn inline_post_connection_is_synchronous_and_preserves_parser_and_fragment_state() {
+    let (_, session, mut runtime) = start(
+        r#"<!doctype html><template id="template"><script>log.push('parsed-template')</script></template>
+<script id="blank"></script><script id="space"> </script>
+<div id="sink"></div><div id="replacement"></div><script id="outer">
+var log = [];
+var parentScript = document.currentScript;
+var beforeWrite = document.createElement('script');
+beforeWrite.text = 'log.push(document.currentScript===beforeWrite ? "inline" : "bad"); document.write("<p id=written>from script</p>");';
+document.body.appendChild(beforeWrite);
+log.push(document.getElementById('written') && document.currentScript===parentScript ? 'restored' : 'bad');
+beforeWrite.remove();
+document.body.insertBefore(beforeWrite, document.body.firstChild);
+document.body.appendChild(beforeWrite.cloneNode(true));
+
+var parsed = document.getElementById('template');
+document.body.appendChild(parsed.content.cloneNode(true));
+var ending = '</scr'+'ipt>';
+var sink = document.getElementById('sink');
+sink.innerHTML = '<script>log.push("bad")'+ending+'<template><script>log.push("bad")'+ending+'</template>';
+document.body.appendChild(sink.firstChild.cloneNode(true));
+document.body.appendChild(sink.lastChild.content.cloneNode(true));
+sink.insertAdjacentHTML('afterbegin', '<script>log.push("bad")'+ending);
+document.getElementById('replacement').outerHTML = '<script>log.push("bad")'+ending;
+
+var blank = document.getElementById('blank');
+log.push(blank.async===true ? 'retryable' : 'bad');
+blank.text = 'log.push("blank")';
+document.getElementById('space').text = 'log.push("bad")';
+var script = document.createElement('script');
+document.body.appendChild(script);
+script.innerHTML = 'log.push("raw-html")';
+
+var later = document.createElement('script');
+var child = document.createTextNode('');
+later.appendChild(child);
+var wrapper = document.createElement('span');
+wrapper.textContent = 'log.push("bad")';
+later.appendChild(wrapper);
+document.body.appendChild(later);
+child.data = 'log.push("direct-data")';
+
+var first = document.createElement('script');
+var second = document.createElement('script');
+second.id = 'second';
+first.text = 'log.push(document.getElementById("second")===second ? "both-inserted" : "bad");second.remove();';
+second.text = 'log.push("reinserted")';
+document.body.append(first, second);
+log.push('after-append');
+document.body.appendChild(second);
+
+var t = document.createElement('template');
+var fragment = document.createDocumentFragment();
+var detached = document.createElement('script');
+detached.textContent = 'log.push("fragment")';
+fragment.appendChild(detached);
+t.content.appendChild(fragment);
+document.body.appendChild(t.content.cloneNode(true));
+</script>"#,
+    );
+    assert!(session.done());
+    assert!(session.parser.is_none());
+    assert!(session.next_deadline().is_none());
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "inline|restored|parsed-template|retryable|blank|raw-html|direct-data|both-inserted|after-append|reinserted|fragment".into()
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "document.currentScript"),
+        Value::Null
+    );
+    assert!(runtime.as_ref().unwrap().diagnostics().is_empty());
+}
+
+#[test]
+fn async_default_bypasses_ordered_scripts_and_failure_releases_the_front() {
+    let (mut page, mut session, mut runtime) = start(
+        r#"<!doctype html><script>
+var log = [];
+document.addEventListener('DOMContentLoaded', function () { log.push('dcl'); });
+window.addEventListener('load', function () { log.push('window-load'); });
+</script><body></body>"#,
+    );
+    assert!(session.done());
+    // The initial navigation deadline has expired when the user triggers this.
+    assert!(session.resources.initial_deadline.is_none());
+    let old_deadline = Instant::now() - Duration::from_secs(30);
+    session.started = old_deadline;
+    evaluate(
+        &mut runtime,
+        r#"var first = document.createElement('script');
+var second = document.createElement('script');
+var fast = document.createElement('script');
+first.async = false;
+first.src = 'first.js';
+first.onerror = function () { log.push(this===first ? 'first-error' : 'bad'); };
+second.setAttribute('async', '');
+second.removeAttribute('async');
+log.push(!first.async && !second.async && fast.async ? 'async-flags' : 'bad');
+second.src = 'second.js';
+second.onload = function () { log.push(this===second ? 'second-load' : 'bad'); };
+fast.onload = function () { log.push(this===fast ? 'fast-load' : 'bad'); };
+document.body.replaceChildren(first, second, fast);
+fast.setAttribute('src', 'fast.js');
+fast.remove();
+fast.src = 'never-fetch.js';"#,
+    );
+    assert!(runtime.as_ref().unwrap().has_queued_script_tasks());
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let first = session.next_resource().unwrap();
+    let second = session.next_resource().unwrap();
+    let fast = session.next_resource().unwrap();
+    assert_eq!(first.request.url.path(), "/path/first.js");
+    assert_eq!(second.request.url.path(), "/path/second.js");
+    assert_eq!(fast.request.url.path(), "/path/fast.js");
+    assert!(fast.request.deadline > Instant::now());
+    assert!(session.next_resource().is_none());
+    assert!(!session.done());
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        second.id,
+        Some((
+            "second.js",
+            "log.push(document.currentScript===second ? 'second' : 'bad');",
+        )),
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "dcl|window-load|async-flags".into()
+    );
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        fast.id,
+        Some((
+            "fast.js",
+            "document.write('<p id=unwanted>unwanted</p>'); log.push(document.currentScript===fast ? 'fast' : 'bad');",
+        )),
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "dcl|window-load|async-flags|fast|fast-load".into()
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "document.getElementById('unwanted')"),
+        Value::Null
+    );
+    complete(&mut page, &mut session, &mut runtime, first.id, None);
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "dcl|window-load|async-flags|fast|fast-load|first-error|second|second-load".into()
+    );
+    assert!(session.done());
+    assert!(session.next_deadline().is_none());
+}
+
+#[test]
+fn dynamic_module_reuses_the_navigation_graph_and_delays_load_only() {
+    let (mut page, mut session, mut runtime) = start(
+        r#"<!doctype html><script type="importmap">{"imports":{"leaf":"./leaf.js"}}</script>
+<script>
+var log = [];
+window.addEventListener('load', function () { log.push('window-load'); });
+document.addEventListener('DOMContentLoaded', function () { log.push('dcl'); });
+window.addEventListener('DOMContentLoaded', function () {
+    var s = document.createElement('script');
+    s.type = 'module';
+    s.src = 'entry.js';
+    s.onload = function () { log.push('module-load'); };
+    document.body.appendChild(s);
+});
+</script><body></body>"#,
+    );
+    assert!(!session.loaded());
+    assert_eq!(evaluate(&mut runtime, "log.join('|')"), "dcl".into());
+    let entry = session.next_resource().unwrap();
+    assert_eq!(entry.request.url.path(), "/path/entry.js");
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        entry.id,
+        Some((
+            "redirect/final.js",
+            "import { value } from 'leaf'; log.push(document.currentScript===null ? value : 'bad');",
+        )),
+    );
+    let leaf = session.next_resource().unwrap();
+    assert_eq!(leaf.request.url.path(), "/path/leaf.js");
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        leaf.id,
+        Some(("leaf.js", "export const value = 'module';")),
+    );
+    assert!(session.done());
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "dcl|module|module-load|window-load".into()
+    );
+    assert!(runtime.as_ref().unwrap().diagnostics().is_empty());
+}
+
+#[test]
+fn recursive_inline_insertions_stop_and_restore_current_script_on_one_mib_stack() {
+    std::thread::Builder::new()
+        .name("bounded-dynamic-inline".into())
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            let (_, _, mut runtime) = start("<!doctype html><body><script>var count=0;</script>");
+            let error = runtime
+                .as_mut()
+                .unwrap()
+                .eval(
+                    r#"var recursiveSource = "count++; var s=document.createElement('script'); s.text=recursiveSource; document.body.appendChild(s);";
+var first=document.createElement('script'); first.text=recursiveSource; document.body.appendChild(first);"#,
+                )
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+            assert!(error.message.contains("Nested dynamic inline script"), "{error}");
+            assert_eq!(evaluate(&mut runtime, "document.currentScript"), Value::Null);
+            assert_eq!(
+                evaluate(&mut runtime, "var next=document.createElement('script');next.text='count=99';document.body.appendChild(next);count"),
+                99.into()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn import_uses_a_delayed_classic_functions_response_url_and_waits_for_tla_once() {
+    let (mut page, mut session, mut runtime) =
+        start("<!doctype html><script src='start.js'></script>");
+    let classic = session.next_resource().unwrap();
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        classic.id,
+        Some((
+            "/scripts/final.js",
+            "var log=[]; function delayedImport(){return import('./later.mjs');}",
+        )),
+    );
+    assert!(session.done());
+    evaluate(
+        &mut runtime,
+        r#"var base = document.createElement('base'); base.href='/unrelated/';
+document.head.appendChild(base);
+var first=delayedImport(), second=delayedImport();
+Promise.all([first,second]).then(function(values) {
+    log.push(values[0]===values[1] ? values[0].value : 'different namespaces');
+});"#,
+    );
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let module = session.next_resource().unwrap();
+    assert_eq!(module.request.url.path(), "/scripts/later.mjs");
+    assert_eq!(module.request.cors, Some(CredentialsMode::SameOrigin));
+    assert!(session.next_resource().is_none());
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        module.id,
+        Some((
+            "/redirected/later.mjs",
+            "log.push('start'); export const value=await new Promise(function(resolve){window.release=resolve;}); log.push('finish');",
+        )),
+    );
+    assert_eq!(evaluate(&mut runtime, "log.join('|')"), "start".into());
+    assert!(session.next_deadline().is_none());
+    assert!(!session.needs_advance(runtime.as_ref()));
+    evaluate(&mut runtime, "release('answer');");
+    runtime.as_mut().unwrap().pump();
+    assert_eq!(
+        evaluate(&mut runtime, "log.join('|')"),
+        "start|finish|answer".into()
+    );
+    assert!(runtime.as_ref().unwrap().diagnostics().is_empty());
+    assert!(!session.needs_advance(runtime.as_ref()));
+}
+
+#[test]
+fn a_module_function_retains_credentials_for_its_later_import_and_rejects_with_the_reason() {
+    let (mut page, mut session, mut runtime) = start(
+        r#"<!doctype html><script>
+var reason = { code: 'test' };
+var imported;
+</script><script type="module" crossorigin="use-credentials" src="https://other.test/root.mjs"></script>"#,
+    );
+    let root = session.next_resource().unwrap();
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        root.id,
+        Some((
+            "https://other.test/final/root.mjs",
+            "window.imported = function(){return import('./failing.mjs');};",
+        )),
+    );
+    assert!(session.done());
+    evaluate(
+        &mut runtime,
+        "var gotReason=false; imported().catch(function(error){gotReason=error===reason;});",
+    );
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let dependency = session.next_resource().unwrap();
+    assert_eq!(
+        dependency.request.url.as_str(),
+        "https://other.test/final/failing.mjs"
+    );
+    assert_eq!(dependency.request.cors, Some(CredentialsMode::Include));
+    complete(
+        &mut page,
+        &mut session,
+        &mut runtime,
+        dependency.id,
+        Some((
+            "https://other.test/final/failing.mjs",
+            "await Promise.reject(reason);",
+        )),
+    );
+    assert_eq!(evaluate(&mut runtime, "gotReason"), true.into());
+    assert!(runtime.as_ref().unwrap().diagnostics().is_empty());
+}

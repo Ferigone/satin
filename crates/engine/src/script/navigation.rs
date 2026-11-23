@@ -1,0 +1,1208 @@
+//! Shared native/headless navigation driver. HTML, its resources, and the
+//! realm advance as separate bounded tasks; the DOM has one owner at a time.
+pub(in crate::script) mod dynamic_scripts;
+mod font_loads;
+mod import_map;
+mod module_graph;
+pub(in crate::script) mod module_tasks;
+mod parser_host;
+#[cfg(test)]
+mod tests;
+
+use super::*;
+use crate::{
+    html::ParserScriptKind,
+    layout::Viewport,
+    loader::{
+        DocumentInput, DocumentResource, OpenedPage, ResourceBody, ResourceKind, ResourceRequest,
+        image_asset_key,
+    },
+    network::CredentialsMode,
+};
+use font_loads::{FontKey, FontLoads};
+use module_graph::{ModuleGraph, ModuleKey, Readiness};
+use module_tasks::ModuleTasks;
+pub(super) use parser_host::ParserHost;
+use parser_host::{Discovery, ScriptTag, Source, Step, resource_request};
+use std::collections::{HashSet, VecDeque};
+use std::time::Duration;
+use url::Url;
+
+const RESOURCE_COUNT: usize = 768;
+const RESOURCE_URL_BYTES: usize = 24 * 1024 * 1024;
+const CONCURRENT_RESOURCES: usize = 4;
+const DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+const CLASSIC_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const STYLESHEET_BYTES: usize = 8 * 1024 * 1024;
+const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(18);
+
+pub struct ResourceLoad {
+    pub id: u64,
+    pub request: ResourceRequest,
+}
+
+enum Consumer {
+    Classic(NodeId),
+    Sheet { node: NodeId, media: Arc<str> },
+    Image(Arc<str>),
+    Module(ModuleKey, CredentialsMode),
+    Font(FontKey),
+}
+
+struct ResourceQueue {
+    initial_deadline: Option<Instant>,
+    next: u64,
+    url_bytes: usize,
+    waiting: VecDeque<ResourceLoad>,
+    pending: HashMap<u64, (Consumer, Instant)>,
+    active: HashSet<u64>,
+    retry_at: Option<Instant>,
+}
+impl ResourceQueue {
+    fn new() -> Self {
+        Self {
+            initial_deadline: Some(Instant::now() + DOCUMENT_RESOURCE_TIMEOUT),
+            next: 1,
+            url_bytes: 0,
+            waiting: VecDeque::new(),
+            pending: HashMap::new(),
+            active: HashSet::new(),
+            retry_at: None,
+        }
+    }
+    fn deadline(&self) -> Instant {
+        self.initial_deadline
+            .unwrap_or_else(|| Instant::now() + DOCUMENT_RESOURCE_TIMEOUT)
+    }
+    fn next_deadline(&self) -> Option<Instant> {
+        self.pending
+            .values()
+            .map(|(_, deadline)| *deadline)
+            .chain(
+                self.retry_at.filter(|_| {
+                    !self.waiting.is_empty() && self.active.len() < CONCURRENT_RESOURCES
+                }),
+            )
+            .min()
+    }
+    fn queue(&mut self, request: ResourceRequest, consumer: Consumer) -> Result<(), String> {
+        let size = request
+            .url
+            .as_str()
+            .len()
+            .saturating_add(request.integrity.as_ref().map_or(0, |source| source.len()));
+        if self.next > RESOURCE_COUNT as u64
+            || self.url_bytes.saturating_add(size) > RESOURCE_URL_BYTES
+            || Instant::now() >= request.deadline
+        {
+            return Err("Document resource count, URL bytes or time limit exceeded".into());
+        }
+        let id = self.next;
+        self.next += 1;
+        self.url_bytes += size;
+        self.pending.insert(id, (consumer, request.deadline));
+        self.waiting.push_back(ResourceLoad { id, request });
+        Ok(())
+    }
+    fn take(&mut self) -> Option<ResourceLoad> {
+        if self.active.len() >= CONCURRENT_RESOURCES
+            || self.retry_at.is_some_and(|next| next > Instant::now())
+        {
+            return None;
+        }
+        self.retry_at = None;
+        let load = self.waiting.pop_front()?;
+        self.active.insert(load.id);
+        Some(load)
+    }
+    fn retry(&mut self, load: ResourceLoad) {
+        if self.active.remove(&load.id) && self.pending.contains_key(&load.id) {
+            self.waiting.push_front(load);
+            self.retry_at = Some(Instant::now() + Duration::from_millis(8));
+        }
+    }
+    fn has_stylesheets(&self, width: f32) -> bool {
+        self.pending.values().any(|(value, _)| {
+            matches!(value, Consumer::Sheet { media, .. }
+            if css::stylesheet_media_applies(media, width))
+        })
+    }
+    fn blocks_load(&self) -> bool {
+        self.pending
+            .values()
+            .any(|(value, _)| !matches!(value, Consumer::Font(_) | Consumer::Module(..)))
+    }
+}
+
+enum ScriptCode {
+    Classic {
+        name: String,
+        source: String,
+        identifier: Arc<Url>,
+    },
+    FetchingClassic,
+    Module(ModuleKey),
+    Failed(Arc<str>),
+}
+struct Scheduled {
+    node: NodeId,
+    external: bool,
+    code: ScriptCode,
+}
+enum ImageState {
+    Pending(Vec<NodeId>),
+    Failed,
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Phase {
+    Parsing,
+    Deferred,
+    Loading,
+    Complete,
+}
+
+pub struct DocumentSession {
+    parser: Option<Rc<RefCell<ParserHost>>>,
+    history: crate::history::SessionHistory,
+    storage: crate::web_storage::TabStorage,
+    phase: Phase,
+    client: Arc<Url>,
+    started: Instant,
+    resources: ResourceQueue,
+    fonts: FontLoads,
+    modules: ModuleGraph,
+    module_tasks: ModuleTasks,
+    blocking: Option<Scheduled>,
+    deferred: VecDeque<Scheduled>,
+    asynchronous: VecDeque<Scheduled>,
+    ordered_dynamic: VecDeque<Scheduled>,
+    messages: Vec<(NodeId, String)>,
+    cached_image_events: Vec<(NodeId, bool)>,
+    images: HashMap<Arc<str>, ImageState>,
+    decoded_images: usize,
+    classic_bytes: usize,
+    css_bytes: usize,
+    runnable: bool,
+    dirty: bool,
+    resources_dirty: bool,
+    preview_at: Instant,
+    discarded: usize,
+    parser_script_count: usize,
+}
+
+impl DocumentSession {
+    pub fn start(opened: OpenedPage) -> Result<(LoadedPage, Self), String> {
+        let url = Url::parse(&opened.page.url).map_err(|e| e.to_string())?;
+        Self::start_with_history(opened, crate::history::SessionHistory::new(url))
+    }
+
+    pub fn start_with_history(
+        opened: OpenedPage,
+        history: crate::history::SessionHistory,
+    ) -> Result<(LoadedPage, Self), String> {
+        Self::start_in_tab(opened, history, crate::web_storage::TabStorage::default())
+    }
+
+    pub fn start_in_tab(
+        opened: OpenedPage,
+        history: crate::history::SessionHistory,
+        storage: crate::web_storage::TabStorage,
+    ) -> Result<(LoadedPage, Self), String> {
+        let OpenedPage {
+            page,
+            input,
+            started,
+        } = opened;
+        let client = Arc::new(Url::parse(&page.url).map_err(|e| e.to_string())?);
+        history.commit_address((*client).clone());
+        let parser = if !matches!(input, DocumentInput::Prepared) {
+            let mut parser = ParserHost::new(client.clone());
+            if let DocumentInput::Html(source) = input {
+                parser.stream.feed(&source).map_err(|e| e.to_string())?;
+                parser.stream.finish().map_err(|e| e.to_string())?;
+            }
+            Some(Rc::new(RefCell::new(parser)))
+        } else {
+            None
+        };
+        let decoded_images = page.images.values().map(|image| image.as_raw().len()).sum();
+        Ok((
+            page,
+            Self {
+                parser,
+                history,
+                storage,
+                phase: Phase::Parsing,
+                client,
+                started,
+                resources: ResourceQueue::new(),
+                fonts: FontLoads::default(),
+                modules: ModuleGraph::default(),
+                module_tasks: ModuleTasks::default(),
+                blocking: None,
+                deferred: VecDeque::new(),
+                asynchronous: VecDeque::new(),
+                ordered_dynamic: VecDeque::new(),
+                messages: vec![],
+                cached_image_events: vec![],
+                images: HashMap::new(),
+                decoded_images,
+                classic_bytes: 0,
+                css_bytes: 0,
+                runnable: true,
+                dirty: true,
+                resources_dirty: false,
+                preview_at: Instant::now(),
+                discarded: 0,
+                parser_script_count: 0,
+            },
+        ))
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.phase == Phase::Complete
+    }
+    pub fn done(&self) -> bool {
+        self.loaded()
+            && self.resources.pending.is_empty()
+            && self.asynchronous.is_empty()
+            && self.ordered_dynamic.is_empty()
+            && !self.module_tasks.waiting_on_graph()
+    }
+    pub fn next_deadline(&self) -> Option<Instant> {
+        if self.runnable {
+            Some(Instant::now())
+        } else {
+            self.resources.next_deadline()
+        }
+    }
+    pub fn needs_advance(&self, runtime: Option<&ScriptRuntime>) -> bool {
+        runtime.is_some_and(|realm| {
+            realm.has_queued_script_tasks() || self.module_tasks.ready(&self.modules, realm)
+        }) || self
+            .next_deadline()
+            .is_some_and(|next| next <= Instant::now())
+    }
+    pub fn next_resource(&mut self) -> Option<ResourceLoad> {
+        self.resources.take()
+    }
+    pub fn stop(&mut self, page: &mut LoadedPage, runtime: Option<&ScriptRuntime>) {
+        if let Some(realm) = runtime {
+            {
+                let mut state = realm.state.borrow_mut();
+                state.ready_state = "complete";
+                state.dynamic_scripts.pending.clear();
+            }
+            self.module_tasks.stop_queued(realm);
+            realm.snapshot(page);
+        } else if let Some(parser) = &self.parser
+            && let Ok(document) = parser.borrow_mut().stream.take_document()
+        {
+            page.base = live_base(&document, &self.client);
+            page.document = Arc::new(document);
+            page.refresh_stylesheets();
+        }
+        self.parser = None;
+        self.phase = Phase::Complete;
+        self.blocking = None;
+        self.deferred.clear();
+        self.asynchronous.clear();
+        self.ordered_dynamic.clear();
+        self.messages.clear();
+        self.cached_image_events.clear();
+        self.images
+            .retain(|_, state| matches!(state, ImageState::Failed));
+        page.stats.skipped_resources += self.resources.pending.len();
+        for (_, (consumer, _)) in self.resources.pending.drain() {
+            if let Consumer::Module(key, _) = consumer {
+                self.modules.fail(key, "Module fetch stopped".into());
+            }
+        }
+        self.resources.initial_deadline = None;
+        self.resources.waiting.clear();
+        self.resources.active.clear();
+        self.resources.retry_at = None;
+        self.runnable = false;
+        self.dirty = false;
+    }
+    pub fn retry_resource(&mut self, load: ResourceLoad) {
+        self.resources.retry(load);
+    }
+    pub fn feed(&mut self, source: &str) -> Result<(), String> {
+        if let Some(parser) = &self.parser {
+            match parser.borrow_mut().stream.feed(source) {
+                Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            self.runnable = true;
+        }
+        Ok(())
+    }
+    pub fn finish_input(&mut self) -> Result<(), String> {
+        if let Some(parser) = &self.parser {
+            match parser.borrow_mut().stream.finish() {
+                Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            self.runnable = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_realm(
+        &mut self,
+        page: &LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        if runtime.is_some() {
+            return Ok(());
+        }
+        let realm = if let Some(parser) = &self.parser {
+            let (document, bytes, script_flags) = {
+                let mut parser = parser.borrow_mut();
+                let bytes = parser.stream.document_bytes();
+                let document = parser.stream.take_document().map_err(|e| e.to_string())?;
+                (document, bytes, std::mem::take(&mut parser.script_flags))
+            };
+            let realm = ScriptRuntime::new_with_document(
+                page,
+                document,
+                bytes,
+                true,
+                self.history.clone(),
+                &self.storage,
+                self.started,
+            )
+            .map_err(|e| e.to_string())?;
+            {
+                let mut state = realm.state.borrow_mut();
+                state.parser = Rc::downgrade(parser);
+                state.dynamic_scripts.flags = script_flags;
+            }
+            realm
+        } else {
+            ScriptRuntime::new_for_history(page, self.history.clone(), &self.storage, self.started)
+                .map_err(|e| e.to_string())?
+        };
+        realm.state.borrow_mut().navigation_attached = true;
+        realm.set_viewport(viewport);
+        // This case is used when a late resource handler is the first caller.
+        if self.phase != Phase::Parsing {
+            realm.state.borrow_mut().ready_state = if self.loaded() {
+                "complete"
+            } else {
+                "interactive"
+            };
+        }
+        *runtime = Some(realm);
+        Ok(())
+    }
+
+    pub fn advance(
+        &mut self,
+        page: &mut LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<bool, String> {
+        let now = Instant::now();
+        let end = now + Duration::from_millis(5);
+        if self
+            .resources
+            .pending
+            .values()
+            .any(|(_, deadline)| now >= *deadline)
+        {
+            let mut expired = self
+                .resources
+                .pending
+                .iter()
+                .filter_map(|(&id, (_, deadline))| (now >= *deadline).then_some(id))
+                .collect::<Vec<_>>();
+            expired.sort_unstable();
+            self.resources
+                .waiting
+                .retain(|load| now < load.request.deadline);
+            for id in expired {
+                self.complete_resource(
+                    id,
+                    Err("Document resource deadline exceeded".into()),
+                    page,
+                    runtime,
+                    viewport,
+                )?;
+            }
+        }
+        self.runnable = true;
+        for _ in 0..24 {
+            self.flush_dynamic_scripts(page, runtime, viewport)?;
+            self.flush_parser_discoveries(page, runtime, viewport)?;
+            self.sync_fonts(page)?;
+            self.update_resources(page, runtime);
+            if !self.cached_image_events.is_empty() {
+                let events = std::mem::take(&mut self.cached_image_events);
+                self.deliver_events(page, runtime, viewport, events)?;
+            }
+            if let Some(realm) = runtime {
+                realm.set_viewport(viewport);
+                if self.module_tasks.progress(&self.modules, realm) {
+                    self.dirty = true;
+                    if Instant::now() >= end {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            let ready_async = if let Some(index) = self
+                .asynchronous
+                .iter()
+                .position(|script| self.ready(script))
+            {
+                self.asynchronous.remove(index)
+            } else if self
+                .ordered_dynamic
+                .front()
+                .is_some_and(|script| self.ready(script))
+            {
+                self.ordered_dynamic.pop_front()
+            } else {
+                None
+            };
+            if let Some(script) = ready_async {
+                self.execute(
+                    script,
+                    false,
+                    runtime.as_mut().expect("async script has a realm"),
+                )?;
+            } else if self.blocking.is_some() {
+                if self.resources.has_stylesheets(viewport.width)
+                    || self
+                        .blocking
+                        .as_ref()
+                        .is_some_and(|script| !self.ready(script))
+                {
+                    self.runnable = false;
+                    break;
+                }
+                let script = self.blocking.take().unwrap();
+                self.execute(
+                    script,
+                    true,
+                    runtime.as_mut().expect("blocking script has a realm"),
+                )?;
+            } else if self.phase == Phase::Parsing {
+                let step = self
+                    .parser
+                    .as_ref()
+                    .map_or(Ok(Step::Complete), |parser| {
+                        parser
+                            .borrow_mut()
+                            .advance(runtime.as_ref().map(|realm| &realm.state), None)
+                    })
+                    .map_err(|error| error.to_string())?;
+                if let Some(realm) = runtime {
+                    mutation_observers::schedule(&mut realm.vm, &realm.state);
+                }
+                self.dirty = true;
+                match step {
+                    Step::ScriptCheckpoint => {
+                        if let Some(realm) = runtime {
+                            realm.drain_microtasks();
+                        }
+                    }
+                    Step::Blocking(tag) => {
+                        self.flush_parser_discoveries(page, runtime, viewport)?;
+                        self.blocking = Some(self.schedule(tag, page, runtime, viewport)?);
+                    }
+                    Step::Complete | Step::Truncated => {
+                        self.flush_parser_discoveries(page, runtime, viewport)?;
+                        if self.wants_realm(page) {
+                            self.ensure_realm(page, runtime, viewport)?;
+                        }
+                        self.phase = Phase::Deferred;
+                        if let Some(realm) = runtime {
+                            realm.change_ready_state("interactive");
+                        }
+                    }
+                    Step::NeedInput => {
+                        self.runnable = false;
+                        break;
+                    }
+                    Step::Yield => {}
+                    Step::WriteComplete => unreachable!("only a write call sees its marker"),
+                }
+            } else if self.phase == Phase::Deferred {
+                if let Some(script) = self.deferred.front() {
+                    if self.resources.has_stylesheets(viewport.width) || !self.ready(script) {
+                        self.runnable = false;
+                        break;
+                    }
+                    let script = self.deferred.pop_front().unwrap();
+                    self.execute(
+                        script,
+                        false,
+                        runtime.as_mut().expect("deferred script has a realm"),
+                    )?;
+                } else {
+                    self.phase = Phase::Loading;
+                    if let Some(realm) = runtime {
+                        let root = realm.state.borrow().document.root;
+                        realm.lifecycle_event(Some(root), "DOMContentLoaded", true);
+                    }
+                }
+            } else {
+                if self.phase == Phase::Loading
+                    && self.asynchronous.is_empty()
+                    && self.ordered_dynamic.is_empty()
+                    && !self.resources.blocks_load()
+                {
+                    self.phase = Phase::Complete;
+                    self.resources.initial_deadline = None;
+                    self.dirty = true;
+                    page.stats.elapsed_ms = self.started.elapsed().as_millis();
+                    if let Some(realm) = runtime {
+                        realm.change_ready_state("complete");
+                        realm.lifecycle_event(None, "load", false);
+                        report_unhandled(&mut realm.vm, &realm.state);
+                        realm.vm.collect_garbage();
+                    }
+                }
+                self.runnable = false;
+                break;
+            }
+            if Instant::now() >= end {
+                break;
+            }
+        }
+        // NeedInput can arrive immediately after a discovery. Queue it even
+        // if the server is waiting for that resource before it sends more.
+        self.flush_dynamic_scripts(page, runtime, viewport)?;
+        self.flush_parser_discoveries(page, runtime, viewport)?;
+        self.sync_fonts(page)?;
+        self.update_resources(page, runtime);
+        if !self.cached_image_events.is_empty() {
+            let events = std::mem::take(&mut self.cached_image_events);
+            self.deliver_events(page, runtime, viewport, events)?;
+        }
+        page.stats.script_count = self.parser_script_count
+            + runtime
+                .as_ref()
+                .map_or(0, |realm| realm.state.borrow().dynamic_scripts.prepared);
+        if self.dirty && (!self.runnable || now >= self.preview_at) {
+            self.dirty = false;
+            self.preview_at = now + Duration::from_millis(16);
+            if let Some(realm) = runtime {
+                realm.snapshot(page);
+            } else if let Some(parser) = &self.parser {
+                let mut parser = parser.borrow_mut();
+                let document = if self.loaded() {
+                    parser
+                        .stream
+                        .take_document()
+                        .map_err(|error| error.to_string())?
+                } else {
+                    parser
+                        .stream
+                        .document()
+                        .expect("without a realm the parser owns the DOM")
+                        .clone()
+                };
+                page.base = live_base(&document, &self.client);
+                page.document = Arc::new(document);
+                page.refresh_stylesheets();
+            }
+            if self.loaded() {
+                // The DOM and realm remain live. Input and parser stacks are
+                // no longer needed, while the graph still serves new scripts.
+                self.parser = None;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn flush_dynamic_scripts(
+        &mut self,
+        page: &LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        let Some(realm) = runtime else {
+            return Ok(());
+        };
+        if self
+            .module_tasks
+            .begin(realm, &mut self.modules, &self.client, &mut self.resources)
+        {
+            self.runnable = true;
+        }
+        let pending = std::mem::take(&mut realm.state.borrow_mut().dynamic_scripts.pending);
+        for tag in pending {
+            let asynchronous = tag.asynchronous;
+            let script = self.schedule(tag, page, runtime, viewport)?;
+            if asynchronous {
+                self.asynchronous.push_back(script);
+            } else {
+                self.ordered_dynamic.push_back(script);
+            }
+            self.runnable = true;
+        }
+        Ok(())
+    }
+
+    fn wants_realm(&self, page: &LoadedPage) -> bool {
+        self.parser.as_ref().map_or_else(
+            || {
+                page.document.connected_nodes().any(|id| {
+                    matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
+                    if attrs.keys().any(|name| name.starts_with("on")))
+                })
+            },
+            |parser| parser.borrow().wants_realm,
+        )
+    }
+
+    fn flush_parser_discoveries(
+        &mut self,
+        page: &mut LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        let Some(parser) = self.parser.as_ref() else {
+            return Ok(());
+        };
+        let (discoveries, nested, discarded, script_count) = {
+            let mut parser = parser.borrow_mut();
+            (
+                std::mem::take(&mut parser.discoveries),
+                parser.nested_blocked.take(),
+                parser.discarded,
+                parser.stream.report().scripts_prepared,
+            )
+        };
+        page.stats.skipped_resources += discarded.saturating_sub(self.discarded);
+        self.discarded = discarded;
+        self.parser_script_count = script_count;
+        for event in discoveries {
+            match event {
+                Discovery::Script(tag) if tag.kind == ParserScriptKind::ImportMap => {
+                    match tag.source {
+                        Source::Inline(source) => {
+                            if let Err(message) = self.modules.imports.register(&source, &tag.base)
+                            {
+                                self.messages.push((tag.node, message));
+                            }
+                        }
+                        Source::External(_) => self
+                            .messages
+                            .push((tag.node, "Import maps must be inline".into())),
+                    }
+                }
+                Discovery::Script(tag) => {
+                    let is_async = tag.asynchronous;
+                    let script = self.schedule(tag, page, runtime, viewport)?;
+                    if is_async {
+                        self.asynchronous.push_back(script);
+                    } else {
+                        self.deferred.push_back(script);
+                    }
+                }
+                Discovery::Sheet {
+                    node,
+                    url,
+                    cors,
+                    integrity,
+                    media,
+                } => {
+                    let request = resource_request(
+                        url,
+                        &self.client,
+                        ResourceKind::Stylesheet,
+                        cors,
+                        integrity,
+                        self.resources.deadline(),
+                    );
+                    if let Err(message) = self
+                        .resources
+                        .queue(request, Consumer::Sheet { node, media })
+                    {
+                        self.messages.push((node, message));
+                    }
+                }
+                Discovery::InlineSheet { node, base } => {
+                    let sheet = |doc: &Document| {
+                        let active_type = doc.attr(node, "type").is_none_or(|ty| {
+                            ty.trim().is_empty() || ty.trim().eq_ignore_ascii_case("text/css")
+                        });
+                        (active_type
+                            && css::stylesheet_media_applies(
+                                doc.attr(node, "media").unwrap_or(""),
+                                viewport.width,
+                            ))
+                        .then(|| doc.text(node))
+                    };
+                    let source = if let Some(realm) = runtime {
+                        sheet(&realm.state.borrow().document)
+                    } else {
+                        sheet(
+                            self.parser
+                                .as_ref()
+                                .unwrap()
+                                .borrow()
+                                .stream
+                                .document()
+                                .unwrap(),
+                        )
+                    };
+                    if let Some(source) = source {
+                        self.fonts.register(
+                            node,
+                            &source,
+                            base,
+                            viewport.width,
+                            &self.client,
+                            &mut self.resources,
+                        );
+                    }
+                }
+                Discovery::Image {
+                    node,
+                    src,
+                    url,
+                    cors,
+                } => self.discover_image(page, node, src, url, cors),
+                Discovery::Error { node, message } => self.messages.push((node, message)),
+            }
+        }
+        if let Some(tag) = nested {
+            self.blocking = Some(self.schedule(tag, page, runtime, viewport)?);
+        }
+        if !self.messages.is_empty() {
+            if runtime.is_some() || self.wants_realm(page) {
+                self.ensure_realm(page, runtime, viewport)?;
+                let realm = runtime.as_mut().unwrap();
+                for (node, message) in self.messages.drain(..) {
+                    diagnostic(&realm.state, message);
+                    realm.lifecycle_event(Some(node), "error", false);
+                    page.stats.skipped_resources += 1;
+                }
+            } else {
+                page.stats.skipped_resources += self.messages.len();
+                self.messages.clear();
+            }
+        }
+        Ok(())
+    }
+
+    fn schedule(
+        &mut self,
+        tag: ScriptTag,
+        page: &LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<Scheduled, String> {
+        self.ensure_realm(page, runtime, viewport)?;
+        let external = tag.external();
+        let node = tag.node;
+        let code = if tag.kind == ParserScriptKind::Module {
+            let credentials = tag.cors.unwrap_or(CredentialsMode::SameOrigin);
+            let root = match tag.source {
+                Source::Inline(source) => self.modules.inline(
+                    source,
+                    tag.base,
+                    &self.client,
+                    credentials,
+                    &mut runtime.as_mut().unwrap().vm,
+                    &mut self.resources,
+                ),
+                Source::External(url) => url.and_then(|url| {
+                    self.modules.external(
+                        url,
+                        &self.client,
+                        credentials,
+                        tag.integrity,
+                        &mut self.resources,
+                    )
+                }),
+            };
+            match root {
+                Ok(key) => ScriptCode::Module(key),
+                Err(error) => ScriptCode::Failed(error.into()),
+            }
+        } else {
+            match tag.source {
+                Source::Inline(source) => {
+                    self.classic_code(source, format!("inline script #{}", node.0), tag.base)
+                }
+                Source::External(url) => {
+                    let result = url.and_then(|url| {
+                        let request = resource_request(
+                            url,
+                            &self.client,
+                            ResourceKind::ClassicScript,
+                            tag.cors,
+                            tag.integrity,
+                            self.resources.deadline(),
+                        );
+                        self.resources.queue(request, Consumer::Classic(node))
+                    });
+                    match result {
+                        Ok(()) => ScriptCode::FetchingClassic,
+                        Err(error) => ScriptCode::Failed(error.into()),
+                    }
+                }
+            }
+        };
+        Ok(Scheduled {
+            node,
+            external,
+            code,
+        })
+    }
+
+    fn classic_code(&mut self, source: String, name: String, identifier: Arc<Url>) -> ScriptCode {
+        if source.len() > 1024 * 1024 || self.classic_bytes + source.len() > CLASSIC_SOURCE_BYTES {
+            return ScriptCode::Failed("Classic script source budget exceeded".into());
+        }
+        self.classic_bytes += source.len();
+        ScriptCode::Classic {
+            name,
+            source,
+            identifier,
+        }
+    }
+
+    fn ready(&self, script: &Scheduled) -> bool {
+        match script.code {
+            ScriptCode::FetchingClassic => false,
+            ScriptCode::Module(key) => !matches!(self.modules.readiness(key), Readiness::Pending),
+            _ => true,
+        }
+    }
+    fn execute(
+        &mut self,
+        script: Scheduled,
+        blocking: bool,
+        realm: &mut ScriptRuntime,
+    ) -> Result<(), String> {
+        let node = script.node;
+        let result = match script.code {
+            ScriptCode::Classic {
+                name,
+                source,
+                identifier,
+            } => {
+                if blocking {
+                    self.parser
+                        .as_ref()
+                        .unwrap()
+                        .borrow_mut()
+                        .stream
+                        .begin_script(node)
+                        .map_err(|e| e.to_string())?;
+                }
+                realm.execute_classic(node, &source, &name, identifier.as_str(), script.external);
+                if blocking {
+                    self.parser
+                        .as_ref()
+                        .unwrap()
+                        .borrow_mut()
+                        .stream
+                        .resume_script(node)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+            ScriptCode::Failed(error) => {
+                if blocking {
+                    self.parser
+                        .as_ref()
+                        .unwrap()
+                        .borrow_mut()
+                        .stream
+                        .skip_script(node)
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(error)
+            }
+            ScriptCode::Module(key) => match self.modules.readiness(key) {
+                Readiness::Ready(module) => {
+                    self.module_tasks
+                        .execute_script(&self.modules, realm, module);
+                    Ok(())
+                }
+                Readiness::Failed(error) => Err(error),
+                Readiness::Pending => unreachable!("only ready modules execute"),
+            },
+            ScriptCode::FetchingClassic => unreachable!("only ready scripts execute"),
+        };
+        self.dirty = true;
+        if let Err(error) = result {
+            diagnostic(&realm.state, error.to_string());
+            realm.lifecycle_event(Some(node), "error", false);
+        } else if script.external {
+            realm.lifecycle_event(Some(node), "load", false);
+        }
+        Ok(())
+    }
+
+    fn discover_image(
+        &mut self,
+        page: &mut LoadedPage,
+        node: NodeId,
+        src: String,
+        url: Url,
+        cors: Option<CredentialsMode>,
+    ) {
+        if src != url.as_str() {
+            Arc::make_mut(&mut page.image_references).insert(node, (src, url.to_string()));
+            self.resources_dirty = true;
+        }
+        let key = image_asset_key(url.as_str(), cors);
+        if page.images.contains_key(&key) || page.svg_images.contains_key(&key) {
+            self.cached_image_events.push((node, true));
+            return;
+        }
+        let key: Arc<str> = Arc::from(key);
+        if let Some(state) = self.images.get_mut(&key) {
+            if let ImageState::Pending(waiters) = state {
+                waiters.push(node);
+            } else {
+                self.cached_image_events.push((node, false));
+            }
+            return;
+        }
+        let request = resource_request(
+            url,
+            &self.client,
+            ResourceKind::Image,
+            cors,
+            None,
+            self.resources.deadline(),
+        );
+        match self.resources.queue(request, Consumer::Image(key.clone())) {
+            Ok(()) => {
+                self.images.insert(key, ImageState::Pending(vec![node]));
+            }
+            Err(message) => {
+                Arc::make_mut(&mut page.image_availability)
+                    .insert(key.to_string(), crate::loader::ImageAvailability::Failed);
+                self.resources_dirty = true;
+                self.messages.push((node, message));
+            }
+        }
+    }
+
+    fn update_resources(&mut self, page: &mut LoadedPage, runtime: &mut Option<ScriptRuntime>) {
+        if self.resources_dirty {
+            self.resources_dirty = false;
+            self.dirty = true;
+            if let Some(realm) = runtime {
+                realm.update_resources(page);
+            } else {
+                page.refresh_stylesheets();
+            }
+        }
+    }
+    fn sync_fonts(&mut self, page: &mut LoadedPage) -> Result<(), String> {
+        if let Some(fonts) = self.fonts.take_set().map_err(|error| error.to_string())? {
+            page.fonts = Arc::new(fonts);
+            self.resources_dirty = true;
+        }
+        Ok(())
+    }
+
+    pub fn complete_resource(
+        &mut self,
+        id: u64,
+        result: Result<DocumentResource, String>,
+        page: &mut LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+    ) -> Result<(), String> {
+        let Some((consumer, _)) = self.resources.pending.remove(&id) else {
+            return Ok(());
+        };
+        self.resources.active.remove(&id);
+        self.runnable = true;
+        let transfer = result.as_ref().ok().map(|asset| asset.transferred);
+        let mut accepted = false;
+        let mut events = Vec::new();
+        match consumer {
+            Consumer::Classic(node) => {
+                let code = match result {
+                    Ok(DocumentResource {
+                        url,
+                        body: ResourceBody::Text(source),
+                        ..
+                    }) => {
+                        accepted = true;
+                        self.classic_code(
+                            source,
+                            url.as_str().chars().take(240).collect(),
+                            Arc::new(url),
+                        )
+                    }
+                    Err(error) => ScriptCode::Failed(error.into()),
+                    _ => return Err("Unexpected classic script resource payload".into()),
+                };
+                if let Some(script) = self
+                    .blocking
+                    .iter_mut()
+                    .chain(&mut self.deferred)
+                    .chain(&mut self.ordered_dynamic)
+                    .find(|script| script.node == node)
+                {
+                    script.code = code;
+                } else if let Some(index) = self
+                    .asynchronous
+                    .iter()
+                    .position(|script| script.node == node)
+                {
+                    // Preserve response arrival order across batched worker
+                    // completions before the next navigation task.
+                    let mut script = self.asynchronous.remove(index).unwrap();
+                    script.code = code;
+                    self.asynchronous.push_back(script);
+                }
+            }
+            Consumer::Module(key, credentials) => match result {
+                Ok(DocumentResource {
+                    url,
+                    body: ResourceBody::Text(source),
+                    ..
+                }) => {
+                    accepted = true;
+                    let realm = runtime.as_mut().expect("module fetch has a realm");
+                    self.modules.parsed_response(
+                        key,
+                        source,
+                        Arc::new(url),
+                        &self.client,
+                        credentials,
+                        &mut realm.vm,
+                        &mut self.resources,
+                    );
+                }
+                Err(error) => self.modules.fail(key, error),
+                _ => return Err("Unexpected module payload".into()),
+            },
+            Consumer::Sheet { node, media } => {
+                if let Ok(DocumentResource {
+                    url,
+                    body: ResourceBody::Text(source),
+                    ..
+                }) = result
+                    && self.css_bytes + source.len() <= STYLESHEET_BYTES
+                {
+                    self.css_bytes += source.len();
+                    if css::stylesheet_media_applies(&media, viewport.width) {
+                        self.fonts.register(
+                            node,
+                            &source,
+                            Arc::new(url),
+                            viewport.width,
+                            &self.client,
+                            &mut self.resources,
+                        );
+                    }
+                    page.linked_stylesheets.insert(node, Arc::from(source));
+                    accepted = true;
+                    self.resources_dirty = true;
+                }
+                events.push(node);
+            }
+            Consumer::Image(key) => {
+                if let Some(ImageState::Pending(waiters)) = self.images.remove(&key) {
+                    events = waiters;
+                }
+                let memory = DECODED_IMAGE_BYTES.saturating_sub(self.decoded_images);
+                let mut origin_clean = false;
+                if let Ok(DocumentResource {
+                    body,
+                    origin_clean: clean,
+                    ..
+                }) = result
+                {
+                    origin_clean = clean;
+                    match body {
+                        ResourceBody::Image(image) if image.as_raw().len() <= memory => {
+                            self.decoded_images += image.as_raw().len();
+                            page.images.insert(key.to_string(), image);
+                            accepted = true;
+                        }
+                        ResourceBody::Svg(svg) if svg.retained_bytes() <= memory => {
+                            self.decoded_images += svg.retained_bytes();
+                            page.svg_images.insert(key.to_string(), svg);
+                            accepted = true;
+                        }
+                        _ => {}
+                    }
+                }
+                let availability = if accepted {
+                    crate::loader::ImageAvailability::decoded(origin_clean)
+                } else {
+                    crate::loader::ImageAvailability::Failed
+                };
+                Arc::make_mut(&mut page.image_availability).insert(key.to_string(), availability);
+                if !accepted {
+                    self.images.insert(key, ImageState::Failed);
+                }
+                self.resources_dirty = true;
+            }
+            Consumer::Font(key) => {
+                if let Ok(DocumentResource {
+                    body: ResourceBody::Font(face),
+                    ..
+                }) = result
+                {
+                    accepted = self
+                        .fonts
+                        .admit(&key, face, &self.client, &mut self.resources);
+                } else {
+                    self.fonts.fail(&key, &self.client, &mut self.resources);
+                }
+                self.sync_fonts(page)?;
+            }
+        }
+        if let Some(bytes) = transfer.filter(|_| accepted) {
+            page.stats.bytes += bytes;
+            page.stats.resources += 1;
+        } else {
+            page.stats.skipped_resources += 1;
+        }
+        self.update_resources(page, runtime);
+        self.deliver_events(
+            page,
+            runtime,
+            viewport,
+            events.into_iter().map(|node| (node, accepted)).collect(),
+        )
+    }
+
+    fn deliver_events(
+        &mut self,
+        page: &LoadedPage,
+        runtime: &mut Option<ScriptRuntime>,
+        viewport: Viewport,
+        events: Vec<(NodeId, bool)>,
+    ) -> Result<(), String> {
+        if !events.is_empty() && (runtime.is_some() || self.wants_realm(page)) {
+            self.ensure_realm(page, runtime, viewport)?;
+            let realm = runtime.as_mut().unwrap();
+            for (node, accepted) in events {
+                realm.lifecycle_event(Some(node), if accepted { "load" } else { "error" }, false);
+            }
+            self.dirty = true;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn install_parser_methods(
+    vm: &mut Vm,
+    state: &Shared,
+    document: Value,
+) -> Result<(), JsError> {
+    parser_host::install(vm, state, document)
+}

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Navigation pending</title>
+  <base href="../assets/">
+  <link rel="stylesheet" href="block.css">
+  <script type="importmap">{"imports":{"navigation-shared":"./modules/shared.js"}}</script>
+</head>
+<body>
+<main>
+  <h1 id="before">Navigation verification</h1>
+  <pre id="result">Pending</pre>
+</main>
+<script id="outer">
+var trace = [];
+var observations = {};
+var issues = [];
+var resourceEvents = {};
+function check(name, condition) {
+  if (!condition) issues.push(name);
+}
+function current(id) {
+  return document.currentScript === document.getElementById(id);
+}
+function resourceEvent(id, event) {
+  check('one resource event for ' + id, resourceEvents[id] === undefined);
+  var node = document.getElementById(id);
+  resourceEvents[id] = [event.type, event.target === node, event.currentTarget === node];
+}
+trace.push('outer-start');
+observations.prefixOnly = document.getElementById('before') !== null && document.getElementById('after') === null;
+observations.blockingStyle = getComputedStyle(document.getElementById('before')).color;
+observations.base = document.baseURI === __BASE_JSON__;
+observations.outerCurrentScript = current('outer');
+observations.outerState = document.readyState;
+document.addEventListener('readystatechange', function() {
+  trace.push('ready-' + document.readyState);
+});
+document.addEventListener('DOMContentLoaded', function(event) {
+  trace.push('dom-content-loaded');
+  observations.domContentLoaded = [document.readyState, event.target === document, document.currentScript === null];
+  fetch(__RELEASE_JSON__, {method:'POST'}).catch(function(error) { issues.push(String(error)); });
+});
+window.addEventListener('load', function() {
+  trace.push('window-load');
+  observations.load = [document.readyState, document.currentScript === null];
+  var payload = {trace:trace, observations:observations, resourceEvents:resourceEvents, issues:issues};
+  var output = document.getElementById('result');
+  output.textContent = JSON.stringify(payload);
+  fetch(__RESULT_JSON__, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload)
+  }).then(function(response) {
+    var success = response.ok && issues.length === 0;
+    output.setAttribute('data-done', success ? 'yes' : 'fail');
+    document.title = success ? 'Navigation pipeline OK' : 'Navigation pipeline FAIL';
+  }, function(error) {
+    output.textContent = String(error);
+    output.setAttribute('data-done', 'fail');
+    document.title = 'Navigation pipeline FAIL';
+  });
+});
+document.write('<p id="wr');
+check('partial tag stays pending', document.getElementById('written') === null);
+document.write('itten">A &cop');
+observations.partialReference = document.getElementById('written').textContent;
+document.writeln('y;');
+observations.writeln = document.getElementById('written').textContent;
+document.write('</p><script id="nested-inline">trace.push("written-inline"); observations.nestedCurrentScript=current("nested-inline"); document.write("<b id=nested-text>inner</b>");</scr' + 'ipt><i id=written-tail>done</i>');
+observations.synchronousWrite = document.getElementById('nested-text').textContent === 'inner' && document.getElementById('written-tail').textContent === 'done';
+observations.restoredCurrentScript = current('outer');
+document.write('<script id="nested-external" src="written.js" onload="resourceEvent(\'nested-external\',event)" onerror="resourceEvent(\'nested-external\',event)"></scr' + 'ipt><strong id=external-tail>rest</strong>');
+observations.externalPending = document.getElementById('external-tail') === null;
+document.write('<em id=queued-write>queued</em>');
+trace.push('outer-end');
+queueMicrotask(function(){trace.push('outer-microtask');});
+</script>
+<script id="classic" src="classic-redirect.js" onload="resourceEvent('classic',event)" onerror="resourceEvent('classic',event)"></script>
+<script id="sri-good" src="sri-good.js" integrity="__SRI_GOOD__" onload="resourceEvent('sri-good',event)" onerror="resourceEvent('sri-good',event)"></script>
+<script id="sri-bad" src="sri-bad.js" integrity="__SRI_BAD__" onload="resourceEvent('sri-bad',event)" onerror="resourceEvent('sri-bad',event)"></script>
+<script id="cross-integrity" src="__CROSS_SRI__" crossorigin="anonymous" integrity="__SRI_CROSS__" onload="resourceEvent('cross-integrity',event)" onerror="resourceEvent('cross-integrity',event)"></script>
+<script id="mime-rejected" src="bad-mime.js" onload="resourceEvent('mime-rejected',event)" onerror="resourceEvent('mime-rejected',event)"></script>
+<script nomodule>trace.push('unexpected-nomodule');</script>
+<script type="application/json">trace.push('unexpected-data-script');</script>
+<template><script>trace.push('unexpected-template-script');</script></template>
+<script id="defer-first" defer src="defer-first.js" onload="resourceEvent('defer-first',event)" onerror="resourceEvent('defer-first',event)"></script>
+<script id="defer-second" defer src="defer-second.js" onload="resourceEvent('defer-second',event)" onerror="resourceEvent('defer-second',event)"></script>
+<script id="async-gate" async src="async-gate.js" onload="resourceEvent('async-gate',event)" onerror="resourceEvent('async-gate',event)"></script>
+<script id="module-root" type="module" src="module-redirect.js" onload="resourceEvent('module-root',event)" onerror="resourceEvent('module-root',event)"></script>
+<script id="cors-rejected" type="module" src="__CROSS_DENIED__" onload="resourceEvent('cors-rejected',event)" onerror="resourceEvent('cors-rejected',event)"></script>
+<script id="module-inline" type="module">
+  import * as shared from 'navigation-shared';
+  import { crossValue } from __CROSS_REDIRECT_JSON__;
+  observations.moduleInline = [shared.count, crossValue, document.readyState, document.currentScript === null];
+  trace.push('module-inline');
+</script>
+<div id="after">After the scripts</div>
+<script id="tail">
+trace.push('parser-tail');
+observations.tailState = [document.readyState, current('tail')];
+var order = document.querySelectorAll('#external-write, #external-tail, #queued-write, #after');
+observations.writeOrder = [order[0].id, order[1].id, order[2].id, order[3].id];
+</script>
+</body>
+</html>

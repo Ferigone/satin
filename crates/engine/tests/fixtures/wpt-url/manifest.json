@@ -1,0 +1,125 @@
+{
+  "repository": "https://github.com/web-platform-tests/wpt",
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "files": [
+    {
+      "file": "LICENSE.md",
+      "upstream_path": "LICENSE.md",
+      "bytes": 1500,
+      "git_blob": "39c46d03ac2988226f949ee7ab3c7347d5481bd8",
+      "sha256": "5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570"
+    },
+    {
+      "file": "url-searchparams.any.js",
+      "upstream_path": "url/url-searchparams.any.js",
+      "bytes": 2599,
+      "git_blob": "9bba12e89cefd1aa3a79e6de601cd37120f2297a",
+      "sha256": "c8aac0f9c4ddcb1c7acf2b5848315e237b7edf84d1d91d61cc4608a1a4d32302",
+      "subtests": 4
+    },
+    {
+      "file": "url-statics-canparse.any.js",
+      "upstream_path": "url/url-statics-canparse.any.js",
+      "bytes": 855,
+      "git_blob": "9b352029d8569bf5f2bbc66ff8a1ad9d273b7c94",
+      "sha256": "65aac5c10f153bc2ac851a0b88257a69dd5f4c92cb5e70a225b6fb06f1300de1",
+      "subtests": 8
+    },
+    {
+      "file": "url-statics-parse.any.js",
+      "upstream_path": "url/url-statics-parse.any.js",
+      "bytes": 1027,
+      "git_blob": "0822e9da07af6a69c2c5e5cc747d312891afbef2",
+      "sha256": "a0d32f83ad40a43682e3ffd6bf6f766932d84109785b428641f42b5ca3ccbf49",
+      "subtests": 8
+    },
+    {
+      "file": "urlsearchparams-append.any.js",
+      "upstream_path": "url/urlsearchparams-append.any.js",
+      "bytes": 1479,
+      "git_blob": "5a7376144d0637e52cd470491f88779220b43b99",
+      "sha256": "b3fdef26237562dee586c7768af5b484b3ff9d372595d8a8e59b7ebd1099c19b",
+      "subtests": 4
+    },
+    {
+      "file": "urlsearchparams-constructor.any.js",
+      "upstream_path": "url/urlsearchparams-constructor.any.js",
+      "bytes": 9891,
+      "git_blob": "d482911350ba0fabeb127d0fb78cbd1dd71d4d45",
+      "sha256": "165a7dcdff9a20b2bcef7e249e1609eb6383b6fdd74f85b4dac44d15ed12aa24",
+      "subtests": 27
+    },
+    {
+      "file": "urlsearchparams-delete.any.js",
+      "upstream_path": "url/urlsearchparams-delete.any.js",
+      "bytes": 3169,
+      "git_blob": "09a5dccb6487338bc69d6fb924472b1dc8b7899d",
+      "sha256": "946cf6e91d89a4d40ca848430ec8298e2de6fbbd3a9d1efd7b47425ce90a55c1",
+      "subtests": 8
+    },
+    {
+      "file": "urlsearchparams-foreach.any.js",
+      "upstream_path": "url/urlsearchparams-foreach.any.js",
+      "bytes": 2341,
+      "git_blob": "ff19643ac220d123be45f01af45fedde8d2d05c1",
+      "sha256": "93e1c9dc0b32d13cdf6de9a100ab9c92a197ac361d1a8d6f164d562b433a4b8d",
+      "subtests": 6
+    },
+    {
+      "file": "urlsearchparams-get.any.js",
+      "upstream_path": "url/urlsearchparams-get.any.js",
+      "bytes": 1050,
+      "git_blob": "a2610fc933a772b36157e04e90877e48b632327e",
+      "sha256": "0bfd999026f963ffc3f021cf509d1e8f3300cddd52c21ebffcd392d8d43bca34",
+      "subtests": 2
+    },
+    {
+      "file": "urlsearchparams-getall.any.js",
+      "upstream_path": "url/urlsearchparams-getall.any.js",
+      "bytes": 1318,
+      "git_blob": "5d1a35352acf2c7c35f372a6c0462e98948c6569",
+      "sha256": "f6501e719a9ab88c648d1bff0da30b2efda7aaa16d9e4220e95a952fdc17be8c",
+      "subtests": 2
+    },
+    {
+      "file": "urlsearchparams-has.any.js",
+      "upstream_path": "url/urlsearchparams-has.any.js",
+      "bytes": 1702,
+      "git_blob": "2133a5da2f8b91cbb070436f74be9a2b84f32699",
+      "sha256": "568dcc6cb4b4ff7c9fbf59482bcde7b38c1c9da4247dd121894e1fedb8ddf352",
+      "subtests": 4
+    },
+    {
+      "file": "urlsearchparams-set.any.js",
+      "upstream_path": "url/urlsearchparams-set.any.js",
+      "bytes": 986,
+      "git_blob": "eb24cac87b6dca1d3dd3bb2ed083745be3e1ca36",
+      "sha256": "41771dec1616c4715c33a2a77b3125483c4bce24998e344222e9b8d1f49d68de",
+      "subtests": 2
+    },
+    {
+      "file": "urlsearchparams-size.any.js",
+      "upstream_path": "url/urlsearchparams-size.any.js",
+      "bytes": 985,
+      "git_blob": "7b3abc7c0b421cdb327921712a965aaaa03278b2",
+      "sha256": "cc17292db2bc179bd2629be9867ded0b413de399a6ce1fbf8943d012894cac94",
+      "subtests": 4
+    },
+    {
+      "file": "urlsearchparams-sort.any.js",
+      "upstream_path": "url/urlsearchparams-sort.any.js",
+      "bytes": 1811,
+      "git_blob": "4fd8cef69239d26eb6241df180453aedf00cc050",
+      "sha256": "cdfc1ef89cfcefa5fae94ebdeaa2a869c47b47b47d08aba4c7db0b6e44b31fca",
+      "subtests": 17
+    },
+    {
+      "file": "urlsearchparams-stringifier.any.js",
+      "upstream_path": "url/urlsearchparams-stringifier.any.js",
+      "bytes": 4490,
+      "git_blob": "6187db64b1747d294a18cf0d2182b2f045d29a7b",
+      "sha256": "14f7b8871fec6a02dbbe324a5f8943932ecb149285e5cc149fdf34ae769d52c0",
+      "subtests": 14
+    }
+  ]
+}

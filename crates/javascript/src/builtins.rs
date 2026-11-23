@@ -1,0 +1,2192 @@
+use crate::{
+    ErrorKind, JsError, JsString, PropertyKey, Value, Vm,
+    binary::{NumericIndex, TypedDescriptor, numeric_index},
+    heap::{Cell, Object, ObjectKind, Property, PropertyKind},
+    parser::FunctionKind,
+    vm::{same_value, to_i32, to_u32},
+};
+use std::rc::Rc;
+
+pub(crate) fn install(vm: &mut Vm) {
+    for (name, value) in [
+        ("undefined", Value::Undefined),
+        ("NaN", Value::Number(f64::NAN)),
+        ("Infinity", Value::Number(f64::INFINITY)),
+    ] {
+        vm.define_data_property(vm.global(), name, value, false, false, false)
+            .unwrap();
+    }
+    vm.define_data_property(vm.global(), "globalThis", vm.global(), true, false, true)
+        .unwrap();
+    install_object(vm);
+    install_function(vm);
+    install_array(vm);
+    install_string(vm);
+    install_number(vm);
+    install_math(vm);
+    install_errors(vm);
+    crate::symbol::install(vm);
+    crate::bigint::install(vm);
+    crate::date::install(vm);
+    crate::regexp::install(vm);
+    install_async_function(vm);
+    crate::iterator::install(vm);
+    crate::generator::install(vm);
+    crate::binary::install(vm);
+    crate::regexp::install_protocols(vm);
+    crate::collections::install(vm);
+    crate::promise::install(vm);
+    crate::json::install(vm);
+    let global = vm.global();
+    let eval = method(vm, global, "eval", 1, |vm, _, a| {
+        vm.direct_eval(arg(a, 0), vm.global_env, false)
+    });
+    vm.intrinsic_eval = eval.as_object();
+}
+pub(crate) fn method<F>(vm: &mut Vm, object: Value, name: &str, length: usize, callback: F) -> Value
+where
+    F: Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError> + 'static,
+{
+    let function = vm.native(name, length, false, Rc::new(callback));
+    vm.define_data_property(object, name, function.clone(), true, false, true)
+        .unwrap();
+    function
+}
+pub(crate) fn constructor<F>(
+    vm: &mut Vm,
+    name: &str,
+    length: usize,
+    prototype: Value,
+    callback: F,
+) -> Value
+where
+    F: Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError> + 'static,
+{
+    let function = vm.native(name, length, true, Rc::new(callback));
+    vm.define_data_property(
+        function.clone(),
+        "prototype",
+        prototype.clone(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    vm.define_data_property(
+        prototype,
+        "constructor",
+        function.clone(),
+        true,
+        false,
+        true,
+    )
+    .unwrap();
+    vm.define_data_property(vm.global(), name, function.clone(), true, false, true)
+        .unwrap();
+    function
+}
+fn arg(args: &[Value], i: usize) -> Value {
+    args.get(i).cloned().unwrap_or_default()
+}
+pub(crate) fn replace_construct<F>(vm: &mut Vm, function: Value, callback: F)
+where
+    F: Fn(&mut Vm, Value, &[Value], Value) -> Result<Value, JsError> + 'static,
+{
+    let object = vm.heap.object_mut(function.as_object().unwrap()).unwrap();
+    if let ObjectKind::Native { construct, .. } = &mut object.kind {
+        *construct = Some(Rc::new(callback));
+    }
+}
+fn install_object(vm: &mut Vm) {
+    let proto = Value::Object(vm.object_prototype);
+    let object = constructor(vm, "Object", 1, proto.clone(), |vm, _, a| {
+        let v = arg(a, 0);
+        if v.is_nullish() {
+            Ok(vm.new_object())
+        } else {
+            vm.coerce_object(v)
+        }
+    });
+    replace_construct(vm, object.clone(), |vm, function, args, target| {
+        if target != function {
+            let prototype = vm.prototype_from_constructor(target, vm.object_prototype)?;
+            vm.allocate_constructed(ObjectKind::Ordinary, prototype)
+        } else {
+            let value = arg(args, 0);
+            if value.is_nullish() {
+                vm.allocate_constructed(ObjectKind::Ordinary, vm.object_prototype)
+            } else {
+                vm.coerce_object(value)
+            }
+        }
+    });
+    method(vm, proto.clone(), "toString", 0, |vm, this, _| {
+        let tag = match &this {
+            Value::Undefined => "Undefined",
+            Value::Null => "Null",
+            Value::String(_) => "String",
+            Value::Number(_) => "Number",
+            Value::BigInt(_) => "Object",
+            Value::Bool(_) => "Boolean",
+            Value::Symbol(_) => "Symbol",
+            Value::Object(id) => match &vm.heap.object(*id)?.kind {
+                ObjectKind::Array { .. } => "Array",
+                ObjectKind::Function { .. }
+                | ObjectKind::Native { .. }
+                | ObjectKind::Bound { .. }
+                | ObjectKind::PromiseFunction(_) => "Function",
+                ObjectKind::Boxed(Value::String(_)) => "String",
+                ObjectKind::Boxed(Value::Number(_)) => "Number",
+                ObjectKind::Boxed(Value::Bool(_)) => "Boolean",
+                ObjectKind::Boxed(Value::Symbol(_)) => "Symbol",
+                ObjectKind::RegExp(_) => "RegExp",
+                ObjectKind::Date(_) => "Date",
+                ObjectKind::Error(_) => "Error",
+                _ => "Object",
+            },
+        };
+        let tag = if !this.is_nullish() && vm.well_known_symbol("toStringTag").is_some() {
+            match vm.get_property_key(this, vm.well_known_key("toStringTag"))? {
+                Value::String(tag) => tag,
+                _ => tag.into(),
+            }
+        } else {
+            tag.into()
+        };
+        vm.ensure_string_allocation(tag.len().saturating_add(9))?;
+        let mut units: Vec<_> = "[object ".encode_utf16().collect();
+        vm.consume_work(tag.len().saturating_add(9))?;
+        units.extend_from_slice(tag.as_utf16());
+        units.push(93);
+        vm.finish_string(units)
+    });
+    method(vm, proto.clone(), "valueOf", 0, |vm, this, _| {
+        vm.coerce_object(this)
+    });
+    method(vm, proto.clone(), "toLocaleString", 0, |vm, this, _| {
+        let method = vm.get_property(this.clone(), "toString")?;
+        vm.invoke(method, this, &[])
+    });
+    method(vm, proto.clone(), "hasOwnProperty", 1, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let key = vm.to_property_key(&arg(a, 0))?;
+        Ok(Value::Bool(
+            vm.own_enumerability(object.as_object().unwrap(), &key)?
+                .is_some(),
+        ))
+    });
+    method(
+        vm,
+        proto.clone(),
+        "propertyIsEnumerable",
+        1,
+        |vm, this, a| {
+            let object = vm.coerce_object(this)?;
+            let key = vm.to_property_key(&arg(a, 0))?;
+            Ok(Value::Bool(
+                vm.own_enumerability(object.as_object().unwrap(), &key)?
+                    .unwrap_or(false),
+            ))
+        },
+    );
+    method(vm, proto.clone(), "isPrototypeOf", 1, |vm, this, a| {
+        let this = vm.coerce_object(this)?;
+        let mut current = arg(a, 0).as_object();
+        for _ in 0..1024 {
+            let Some(id) = current else {
+                return Ok(Value::Bool(false));
+            };
+            current = vm.heap.object(id)?.prototype;
+            if current == this.as_object() {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Err(JsError::new(
+            ErrorKind::RangeError,
+            "Prototype chain limit exceeded",
+        ))
+    });
+    let get = vm.new_native_function("get __proto__", |vm, this, _| {
+        let object = vm.coerce_object(this)?;
+        Ok(vm
+            .heap
+            .object(object.as_object().unwrap())?
+            .prototype
+            .map(Value::Object)
+            .unwrap_or(Value::Null))
+    });
+    let set = vm.new_native_function("set __proto__", |vm, this, a| {
+        let proto = arg(a, 0);
+        if let Some(id) = this.as_object()
+            && (proto == Value::Null || proto.as_object().is_some())
+        {
+            vm.set_prototype(id, proto.as_object())?;
+        }
+        Ok(Value::Undefined)
+    });
+    vm.define_property(
+        proto,
+        "__proto__".into(),
+        Property {
+            kind: PropertyKind::Accessor {
+                get: Some(get),
+                set: Some(set),
+            },
+            enumerable: false,
+            configurable: true,
+        },
+    )
+    .unwrap();
+    method(vm, object.clone(), "keys", 1, |vm, _, a| {
+        let keys = vm
+            .own_keys(arg(a, 0), true)?
+            .into_iter()
+            .map(Value::String)
+            .collect::<Vec<_>>();
+        vm.try_new_array(&keys)
+    });
+    method(vm, object.clone(), "getOwnPropertyNames", 1, |vm, _, a| {
+        let keys = vm
+            .own_keys(arg(a, 0), false)?
+            .into_iter()
+            .map(Value::String)
+            .collect::<Vec<_>>();
+        vm.try_new_array(&keys)
+    });
+    for (name, entries) in [("values", false), ("entries", true)] {
+        method(vm, object.clone(), name, 1, move |vm, _, a| {
+            let target = vm.coerce_object(arg(a, 0))?;
+            let keys = vm.own_keys(target.clone(), true)?;
+            let mut values = Vec::new();
+            for key in keys {
+                vm.tick()?;
+                let value = vm.get(target.clone(), &key)?;
+                values.push(if entries {
+                    vm.try_new_array(&[Value::String(key), value])?
+                } else {
+                    value
+                });
+            }
+            vm.try_new_array(&values)
+        });
+    }
+    method(vm, object.clone(), "hasOwn", 2, |vm, _, a| {
+        let target = vm.coerce_object(arg(a, 0))?;
+        let key = vm.to_property_key(&arg(a, 1))?;
+        Ok(Value::Bool(
+            vm.own_enumerability(target.as_object().unwrap(), &key)?
+                .is_some(),
+        ))
+    });
+    method(vm, object.clone(), "is", 2, |vm, _, a| {
+        let (a, b) = (arg(a, 0), arg(a, 1));
+        vm.charge_bigint_comparison(&a, &b)?;
+        Ok(Value::Bool(same_value(&a, &b)))
+    });
+    method(vm, object.clone(), "create", 2, |vm, _, a| {
+        let prototype = arg(a, 0);
+        if prototype != Value::Null && prototype.as_object().is_none() {
+            return Err(JsError::type_error(
+                "Object prototype must be an object or null",
+            ));
+        }
+        let object = Value::Object(vm.heap.allocate(Cell::Object(Object::new(
+            ObjectKind::Ordinary,
+            prototype.as_object(),
+        ))));
+        if !arg(a, 1).is_undefined() {
+            define_properties(vm, object.clone(), arg(a, 1))?;
+        }
+        Ok(object)
+    });
+    method(vm, object.clone(), "getPrototypeOf", 1, |vm, _, a| {
+        let object = vm.coerce_object(arg(a, 0))?;
+        Ok(vm
+            .heap
+            .object(object.as_object().unwrap())?
+            .prototype
+            .map(Value::Object)
+            .unwrap_or(Value::Null))
+    });
+    method(vm, object.clone(), "setPrototypeOf", 2, |vm, _, a| {
+        let target = arg(a, 0);
+        if target.is_nullish() {
+            return Err(JsError::type_error(
+                "Cannot set prototype of null or undefined",
+            ));
+        }
+        let proto = arg(a, 1);
+        if proto != Value::Null && proto.as_object().is_none() {
+            return Err(JsError::type_error("Prototype must be object or null"));
+        }
+        if let Some(id) = target.as_object() {
+            vm.set_prototype(id, proto.as_object())?;
+        }
+        Ok(target)
+    });
+    method(vm, object.clone(), "defineProperty", 3, |vm, _, a| {
+        let target = arg(a, 0);
+        let id = target
+            .as_object()
+            .ok_or_else(|| JsError::type_error("Property target is not an object"))?;
+        let key = vm.to_property_key(&arg(a, 1))?;
+        let descriptor = descriptor(vm, id, &key, arg(a, 2))?;
+        descriptor.apply(vm, target.clone(), key, true)?;
+        Ok(target)
+    });
+    method(vm, object.clone(), "defineProperties", 2, |vm, _, a| {
+        let target = arg(a, 0);
+        define_properties(vm, target.clone(), arg(a, 1))?;
+        Ok(target)
+    });
+    method(
+        vm,
+        object.clone(),
+        "getOwnPropertyDescriptor",
+        2,
+        |vm, _, a| {
+            let target = vm.coerce_object(arg(a, 0))?;
+            let key = vm.to_property_key(&arg(a, 1))?;
+            own_property_descriptor_value(vm, target.as_object().unwrap(), &key)
+        },
+    );
+    method(vm, object.clone(), "assign", 2, |vm, _, a| {
+        let target = vm.coerce_object(arg(a, 0))?;
+        for source in a.iter().skip(1) {
+            if source.is_nullish() {
+                continue;
+            }
+            let source = vm.coerce_object(source.clone())?;
+            for key in vm.own_property_keys(source.clone())? {
+                vm.tick()?;
+                if vm
+                    .own_enumerability(source.as_object().unwrap(), &key)?
+                    .unwrap_or(false)
+                {
+                    let v = vm.get_property_key(source.clone(), key.clone())?;
+                    vm.set_key(target.clone(), &key, v, true)?;
+                }
+            }
+        }
+        Ok(target)
+    });
+    for (name, seal, freeze) in [
+        ("preventExtensions", false, false),
+        ("seal", true, false),
+        ("freeze", true, true),
+    ] {
+        method(vm, object.clone(), name, 1, move |vm, _, a| {
+            let target = arg(a, 0);
+            if let Some(id) = target.as_object() {
+                if !vm.prevent_extensions(id)? {
+                    return Err(JsError::type_error("Object refuses to prevent extensions"));
+                }
+                if seal {
+                    for key in vm.own_property_keys(target.clone())? {
+                        let mut p = vm.own_descriptor_key(id, &key)?.unwrap();
+                        p.configurable = false;
+                        if freeze && let PropertyKind::Data { writable, .. } = &mut p.kind {
+                            *writable = false;
+                        }
+                        vm.define_key(target.clone(), key, p)?;
+                    }
+                }
+            }
+            Ok(target)
+        });
+    }
+    for (name, frozen) in [("isSealed", false), ("isFrozen", true)] {
+        method(vm, object.clone(), name, 1, move |vm, _, a| {
+            let value = arg(a, 0);
+            let Some(id) = value.as_object() else {
+                return Ok(Value::Bool(true));
+            };
+            if vm.heap.object(id)?.extensible {
+                return Ok(Value::Bool(false));
+            }
+            for key in vm.own_property_keys(value)? {
+                vm.tick()?;
+                if let Some(property) = vm.own_descriptor_key(id, &key)?
+                    && (property.configurable
+                        || (frozen
+                            && matches!(property.kind, PropertyKind::Data { writable: true, .. })))
+                {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        });
+    }
+    method(vm, object, "isExtensible", 1, |vm, _, a| {
+        Ok(Value::Bool(if let Some(id) = arg(a, 0).as_object() {
+            vm.heap.object(id)?.extensible
+        } else {
+            false
+        }))
+    });
+}
+pub(crate) fn own_property_descriptor_value(
+    vm: &mut Vm,
+    id: crate::ObjectId,
+    key: &PropertyKey,
+) -> Result<Value, JsError> {
+    let Some(property) = vm.own_descriptor_key(id, key)? else {
+        return Ok(Value::Undefined);
+    };
+    let result = vm.new_object();
+    let contents = match property.kind {
+        PropertyKind::Data { value, writable } => [("value", value), ("writable", writable.into())],
+        PropertyKind::Accessor { get, set } => [
+            ("get", get.unwrap_or_default()),
+            ("set", set.unwrap_or_default()),
+        ],
+    };
+    for (name, value) in contents.into_iter().chain([
+        ("enumerable", property.enumerable.into()),
+        ("configurable", property.configurable.into()),
+    ]) {
+        vm.define_property(result.clone(), name.into(), Property::data(value))?;
+    }
+    Ok(result)
+}
+pub(crate) enum Definition {
+    Ordinary(Property),
+    Typed(NumericIndex, TypedDescriptor),
+    Named(Option<Value>),
+}
+
+impl Definition {
+    pub(crate) fn apply(
+        self,
+        vm: &mut Vm,
+        target: Value,
+        key: PropertyKey,
+        throw: bool,
+    ) -> Result<bool, JsError> {
+        let id = target.as_object().unwrap();
+        match self {
+            Self::Named(value) => {
+                let PropertyKey::String(name) = key else {
+                    unreachable!()
+                };
+                let Some(value) = value else {
+                    if throw {
+                        return Err(JsError::type_error(
+                            "Named host properties require a data descriptor",
+                        ));
+                    }
+                    return Ok(false);
+                };
+                vm.host_named_definition(id, &name)?
+                    .expect("named provider persists after descriptor conversion")
+                    .set(vm, name, value)?;
+                Ok(true)
+            }
+            Self::Typed(index, descriptor) => {
+                let success = vm.apply_typed_descriptor(id, index, descriptor)?;
+                if !success && throw {
+                    return Err(JsError::type_error(
+                        "Invalid TypedArray property definition",
+                    ));
+                }
+                Ok(success)
+            }
+            Self::Ordinary(mut property) => {
+                if !throw
+                    && key == PropertyKey::from("length")
+                    && matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. })
+                    && let PropertyKind::Data { value, .. } = &mut property.kind
+                {
+                    *value = Value::Number(vm.to_number(value)?);
+                }
+                match vm.define_key(target, key, property) {
+                    Ok(()) => Ok(true),
+                    Err(error) if !throw && error.kind == ErrorKind::TypeError => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn descriptor(
+    vm: &mut Vm,
+    id: crate::ObjectId,
+    key: &PropertyKey,
+    descriptor: Value,
+) -> Result<Definition, JsError> {
+    if descriptor.as_object().is_none() {
+        return Err(JsError::type_error("Property descriptor must be an object"));
+    }
+    if let PropertyKey::String(name) = key
+        && matches!(vm.heap.object(id)?.kind, ObjectKind::TypedArray(_))
+        && let Some(index) = numeric_index(name)
+    {
+        return Ok(Definition::Typed(
+            index,
+            TypedDescriptor::read(vm, descriptor)?,
+        ));
+    }
+    let old = vm.own_descriptor_without_host(id, key)?;
+    let mut p = old.clone().unwrap_or(Property {
+        kind: PropertyKind::Data {
+            value: Value::Undefined,
+            writable: false,
+        },
+        enumerable: false,
+        configurable: false,
+    });
+    if vm.has(&descriptor, &"enumerable".into())? {
+        p.enumerable = vm
+            .get_property(descriptor.clone(), "enumerable")?
+            .is_truthy();
+    }
+    if vm.has(&descriptor, &"configurable".into())? {
+        p.configurable = vm
+            .get_property(descriptor.clone(), "configurable")?
+            .is_truthy();
+    }
+    let get = vm.has(&descriptor, &"get".into())?;
+    let set = vm.has(&descriptor, &"set".into())?;
+    let value = vm.has(&descriptor, &"value".into())?;
+    let writable = vm.has(&descriptor, &"writable".into())?;
+    if (get || set) && (value || writable) {
+        return Err(JsError::type_error(
+            "Descriptor cannot be both data and accessor",
+        ));
+    }
+    if get || set {
+        let (mut getter, mut setter) = match p.kind {
+            PropertyKind::Accessor { get, set } => (get, set),
+            _ => (None, None),
+        };
+        if get {
+            let v = vm.get_property(descriptor.clone(), "get")?;
+            if !v.is_undefined() && !vm.is_callable(&v) {
+                return Err(JsError::type_error("Getter must be callable or undefined"));
+            }
+            getter = if v.is_undefined() { None } else { Some(v) };
+        }
+        if set {
+            let v = vm.get_property(descriptor, "set")?;
+            if !v.is_undefined() && !vm.is_callable(&v) {
+                return Err(JsError::type_error("Setter must be callable or undefined"));
+            }
+            setter = if v.is_undefined() { None } else { Some(v) };
+        }
+        p.kind = PropertyKind::Accessor {
+            get: getter,
+            set: setter,
+        };
+    } else if value || writable {
+        let (mut v, mut w) = match p.kind {
+            PropertyKind::Data { value, writable } => (value, writable),
+            _ => (Value::Undefined, false),
+        };
+        if value {
+            v = vm.get_property(descriptor.clone(), "value")?;
+        }
+        if writable {
+            w = vm.get_property(descriptor, "writable")?.is_truthy();
+        }
+        p.kind = PropertyKind::Data {
+            value: v,
+            writable: w,
+        };
+    }
+    if let PropertyKey::String(name) = key
+        && vm.host_named_definition(id, name)?.is_some()
+    {
+        let item = match p.kind {
+            PropertyKind::Data { value: v, .. } if value || writable => Some(v),
+            _ => None,
+        };
+        return Ok(Definition::Named(item));
+    }
+    Ok(Definition::Ordinary(p))
+}
+fn define_properties(vm: &mut Vm, target: Value, properties: Value) -> Result<(), JsError> {
+    let id = target
+        .as_object()
+        .ok_or_else(|| JsError::type_error("Property target is not an object"))?;
+    let source = vm.coerce_object(properties)?;
+    let mut descriptors = Vec::new();
+    for key in vm.own_property_keys(source.clone())? {
+        if vm
+            .own_enumerability(source.as_object().unwrap(), &key)?
+            .unwrap_or(false)
+        {
+            let raw = vm.get_property_key(source.clone(), key.clone())?;
+            descriptors.push((key.clone(), descriptor(vm, id, &key, raw)?));
+        }
+    }
+    for (key, p) in descriptors {
+        p.apply(vm, target.clone(), key, true)?;
+    }
+    Ok(())
+}
+fn install_function(vm: &mut Vm) {
+    let proto = Value::Object(vm.function_prototype);
+    vm.define_data_property(proto.clone(), "length", Value::from(0), false, false, true)
+        .unwrap();
+    vm.define_data_property(proto.clone(), "name", Value::from(""), false, false, true)
+        .unwrap();
+    let function = constructor(vm, "Function", 1, proto.clone(), |vm, _, args| {
+        create_dynamic_function(vm, args, None, FunctionKind::Ordinary)
+    });
+    replace_construct(vm, function, |vm, _, args, target| {
+        create_dynamic_function(vm, args, Some(target), FunctionKind::Ordinary)
+    });
+    let throw_type_error = vm.native(
+        "",
+        0,
+        false,
+        Rc::new(|_, _, _| Err(JsError::type_error("Restricted function property"))),
+    );
+    vm.throw_type_error = throw_type_error.as_object();
+    vm.heap
+        .object_mut(throw_type_error.as_object().unwrap())
+        .unwrap()
+        .extensible = false;
+    for name in ["caller", "arguments"] {
+        vm.define_key(
+            proto.clone(),
+            name.into(),
+            Property {
+                kind: PropertyKind::Accessor {
+                    get: Some(throw_type_error.clone()),
+                    set: Some(throw_type_error.clone()),
+                },
+                enumerable: false,
+                configurable: true,
+            },
+        )
+        .unwrap();
+    }
+    method(vm, proto.clone(), "call", 1, |vm, this, a| {
+        vm.invoke(this, arg(a, 0), a.get(1..).unwrap_or_default())
+    });
+    method(vm, proto.clone(), "apply", 2, |vm, this, a| {
+        let args = arg(a, 1);
+        let values = if args.is_nullish() {
+            Vec::new()
+        } else {
+            let object = vm.coerce_object(args)?;
+            let len = length(vm, object.clone())?;
+            vm.reserve_allocation(len.saturating_mul(std::mem::size_of::<Value>()))?;
+            let mut values = Vec::with_capacity(len);
+            for i in 0..len {
+                vm.tick()?;
+                values.push(vm.get_property(object.clone(), &i.to_string())?);
+            }
+            values
+        };
+        vm.invoke(this, arg(a, 0), &values)
+    });
+    method(vm, proto.clone(), "bind", 1, |vm, this, a| {
+        if !vm.is_callable(&this) {
+            return Err(JsError::type_error("Bind target is not callable"));
+        }
+        let prototype = vm.heap.object(this.as_object().unwrap())?.prototype;
+        let target_length = vm.get_property(this.clone(), "length")?;
+        let n = vm.to_number(&target_length)?.max(0.0) as usize;
+        let name = vm.get_property(this.clone(), "name")?;
+        let name = vm.to_string(&name)?;
+        vm.ensure_string_allocation(name.len().saturating_add(6))?;
+        vm.consume_work(name.len().saturating_mul(4))?;
+        let name = name.to_string_lossy();
+        vm.ensure_allocation(
+            a.len()
+                .saturating_mul(std::mem::size_of::<Value>())
+                .saturating_add(256),
+        )?;
+        let bound = Value::Object(vm.heap.allocate(Cell::Object(Object::new(
+            ObjectKind::Bound {
+                target: this,
+                this: arg(a, 0),
+                args: a.get(1..).unwrap_or_default().to_vec(),
+            },
+            prototype,
+        ))));
+        vm.define_data_property(
+            bound.clone(),
+            "length",
+            Value::from(n.saturating_sub(a.len().saturating_sub(1))),
+            false,
+            false,
+            true,
+        )?;
+        vm.define_data_property(
+            bound.clone(),
+            "name",
+            Value::from(format!("bound {name}")),
+            false,
+            false,
+            true,
+        )?;
+        Ok(bound)
+    });
+    method(vm, proto, "toString", 0, |vm, this, _| {
+        if !vm.is_callable(&this) {
+            return Err(JsError::type_error(
+                "Function.toString receiver is not callable",
+            ));
+        }
+        let name = vm.get_property(this, "name")?;
+        let name = vm.to_string(&name)?;
+        vm.ensure_string_allocation(name.len().saturating_add(64))?;
+        vm.consume_work(name.len().saturating_mul(4))?;
+        Ok(Value::from(format!(
+            "function {}() {{ [independent bytecode] }}",
+            name.to_string_lossy()
+        )))
+    });
+}
+fn install_async_function(vm: &mut Vm) {
+    let prototype = vm
+        .new_object_with_prototype(Value::Object(vm.function_prototype))
+        .unwrap();
+    vm.async_function_prototype = prototype.as_object();
+    let constructor = vm.native(
+        "AsyncFunction",
+        1,
+        false,
+        Rc::new(|vm, _, args| create_dynamic_function(vm, args, None, FunctionKind::Async)),
+    );
+    replace_construct(vm, constructor.clone(), |vm, _, args, target| {
+        create_dynamic_function(vm, args, Some(target), FunctionKind::Async)
+    });
+    let function = vm.get_global("Function").unwrap();
+    vm.set_prototype(constructor.as_object().unwrap(), function.as_object())
+        .unwrap();
+    vm.define_data_property(
+        constructor.clone(),
+        "prototype",
+        prototype.clone(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    vm.define_data_property(
+        prototype.clone(),
+        "constructor",
+        constructor,
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+    vm.define_data_property_key(
+        prototype,
+        vm.well_known_key("toStringTag"),
+        Value::from("AsyncFunction"),
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+}
+
+pub(crate) fn create_dynamic_function(
+    vm: &mut Vm,
+    a: &[Value],
+    new_target: Option<Value>,
+    kind: FunctionKind,
+) -> Result<Value, JsError> {
+    let mut params = Vec::new();
+    let mut source_units = 0usize;
+    for value in a.iter().take(a.len().saturating_sub(1)) {
+        vm.tick()?;
+        let s = vm.to_string(value)?;
+        source_units = source_units.saturating_add(s.len()).saturating_add(1);
+        vm.ensure_dynamic_source(source_units)?;
+        vm.consume_work(s.len().saturating_mul(3))?;
+        params.push(String::from_utf16(s.as_utf16()).map_err(|_| {
+            JsError::new(
+                ErrorKind::UnsupportedFeature,
+                "Function parameters containing isolated surrogates are not implemented",
+            )
+        })?);
+    }
+    let body = if let Some(value) = a.last() {
+        let s = vm.to_string(value)?;
+        vm.ensure_dynamic_source(source_units.saturating_add(s.len()))?;
+        vm.consume_work(s.len().saturating_mul(3))?;
+        String::from_utf16(s.as_utf16()).map_err(|_| {
+            JsError::new(
+                ErrorKind::UnsupportedFeature,
+                "Function source containing isolated surrogates is not implemented",
+            )
+        })?
+    } else {
+        String::new()
+    };
+    vm.dynamic_function(&params.join(","), &body, new_target, kind)
+}
+fn length(vm: &mut Vm, object: Value) -> Result<usize, JsError> {
+    let value = vm.get_property(object, "length")?;
+    let n = vm.to_number(&value)?;
+    let n = if n.is_nan() || n <= 0.0 {
+        0.0
+    } else {
+        n.floor()
+    };
+    if n > vm.limits.max_array_length as f64 {
+        return Err(JsError::new(
+            ErrorKind::ExecutionLimit,
+            "Array-like length budget exhausted",
+        ));
+    }
+    Ok(n as usize)
+}
+fn integer(vm: &mut Vm, value: Value) -> Result<f64, JsError> {
+    let n = vm.to_number(&value)?;
+    Ok(if n.is_nan() { 0.0 } else { n.trunc() })
+}
+fn relative(n: f64, len: usize) -> usize {
+    if n < 0.0 {
+        (len as f64 + n).max(0.0) as usize
+    } else {
+        n.min(len as f64) as usize
+    }
+}
+fn create_array(vm: &mut Vm, args: &[Value], prototype: crate::ObjectId) -> Result<Value, JsError> {
+    if args.len() == 1 && matches!(args[0], Value::Number(_)) {
+        let array = vm.try_new_array_with_prototype(&[], prototype)?;
+        vm.set_property(array.clone(), "length", args[0].clone())?;
+        Ok(array)
+    } else {
+        vm.try_new_array_with_prototype(args, prototype)
+    }
+}
+fn install_array(vm: &mut Vm) {
+    let proto = Value::Object(vm.array_prototype);
+    let array = constructor(vm, "Array", 1, proto.clone(), |vm, _, args| {
+        create_array(vm, args, vm.array_prototype)
+    });
+    replace_construct(vm, array.clone(), |vm, _, args, target| {
+        let prototype = vm.prototype_from_constructor(target, vm.array_prototype)?;
+        create_array(vm, args, prototype)
+    });
+    method(vm, array.clone(), "isArray", 1, |vm, _, a| {
+        Ok(Value::Bool(arg(a, 0).as_object().is_some_and(|id| {
+            vm.heap
+                .object(id)
+                .is_ok_and(|o| matches!(o.kind, ObjectKind::Array { .. }))
+        })))
+    });
+    method(vm, array, "of", 0, |vm, _, a| vm.try_new_array(a));
+    method(vm, proto.clone(), "push", 1, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        if len.saturating_add(a.len()) > vm.limits.max_array_length as usize {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Array length budget exhausted",
+            ));
+        }
+        for (i, value) in a.iter().enumerate() {
+            vm.tick()?;
+            vm.set_property(object.clone(), &(len + i).to_string(), value.clone())?;
+        }
+        vm.set_property(object, "length", Value::from(len + a.len()))?;
+        Ok(Value::from(len + a.len()))
+    });
+    method(vm, proto.clone(), "pop", 0, |vm, this, _| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        if len == 0 {
+            vm.set_property(object, "length", Value::from(0))?;
+            return Ok(Value::Undefined);
+        }
+        let key = JsString::from((len - 1).to_string());
+        let value = vm.get(object.clone(), &key)?;
+        vm.delete(object.clone(), &key, true)?;
+        vm.set_property(object, "length", Value::from(len - 1))?;
+        Ok(value)
+    });
+    method(vm, proto.clone(), "shift", 0, |vm, this, _| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        let value = vm.get_property(object.clone(), "0")?;
+        for i in 1..len {
+            vm.tick()?;
+            let from = JsString::from(i.to_string());
+            let to = JsString::from((i - 1).to_string());
+            if vm.has(&object, &from)? {
+                let v = vm.get(object.clone(), &from)?;
+                vm.set(object.clone(), &to, v, true)?;
+            } else {
+                vm.delete(object.clone(), &to, true)?;
+            }
+        }
+        if len > 0 {
+            vm.delete(object.clone(), &(len - 1).to_string().into(), true)?;
+        }
+        vm.set_property(object, "length", Value::from(len.saturating_sub(1)))?;
+        Ok(value)
+    });
+    method(vm, proto.clone(), "unshift", 1, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        if len.saturating_add(a.len()) > vm.limits.max_array_length as usize {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Array length budget exhausted",
+            ));
+        }
+        for i in (0..len).rev() {
+            vm.tick()?;
+            let from = JsString::from(i.to_string());
+            let to = JsString::from((i + a.len()).to_string());
+            if vm.has(&object, &from)? {
+                let value = vm.get(object.clone(), &from)?;
+                vm.set(object.clone(), &to, value, true)?;
+            } else {
+                vm.delete(object.clone(), &to, true)?;
+            }
+        }
+        for (i, v) in a.iter().enumerate() {
+            vm.set_property(object.clone(), &i.to_string(), v.clone())?;
+        }
+        vm.set_property(object, "length", Value::from(len + a.len()))?;
+        Ok(Value::from(len + a.len()))
+    });
+    method(vm, proto.clone(), "join", 1, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        let separator = if arg(a, 0).is_undefined() {
+            JsString::from(",")
+        } else {
+            vm.to_string(&arg(a, 0))?
+        };
+        join_indexed_properties(vm, len, &separator, None, |vm, index| {
+            vm.get_property(object.clone(), &index.to_string())
+        })
+    });
+    method(vm, proto.clone(), "toLocaleString", 0, |vm, this, _| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        join_indexed_properties(vm, len, &",".into(), Some("toLocaleString"), |vm, index| {
+            vm.get_property(object.clone(), &index.to_string())
+        })
+    });
+    method(vm, proto.clone(), "toString", 0, |vm, this, _| {
+        let join = vm.get_property(this.clone(), "join")?;
+        if vm.is_callable(&join) {
+            vm.invoke(join, this, &[])
+        } else {
+            let method = vm.get_property(Value::Object(vm.object_prototype), "toString")?;
+            vm.invoke(method, this, &[])
+        }
+    });
+    method(vm, proto.clone(), "slice", 2, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        let start = relative(integer(vm, arg(a, 0))?, len);
+        let end = if arg(a, 1).is_undefined() {
+            len
+        } else {
+            relative(integer(vm, arg(a, 1))?, len)
+        };
+        let count = end.saturating_sub(start);
+        let array = vm.array_species_create(object.clone(), count)?;
+        for i in 0..count {
+            vm.tick()?;
+            let key = JsString::from((start + i).to_string());
+            if vm.has(&object, &key)? {
+                let v = vm.get(object.clone(), &key)?;
+                vm.define_data_property(array.clone(), &i.to_string(), v, true, true, true)?;
+            }
+        }
+        vm.set_property(array.clone(), "length", Value::from(count))?;
+        Ok(array)
+    });
+    method(vm, proto.clone(), "concat", 1, |vm, this, a| {
+        let target = vm.coerce_object(this)?;
+        vm.ensure_allocation(
+            a.len()
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<Value>()),
+        )?;
+        let array = vm.array_species_create(target.clone(), 0)?;
+        let mut sources = vec![target];
+        sources.extend_from_slice(a);
+        let mut offset = 0;
+        for source in sources {
+            let spread = if source.as_object().is_some() {
+                let spread =
+                    vm.get_property_key(source.clone(), vm.well_known_key("isConcatSpreadable"))?;
+                if spread.is_undefined() {
+                    vm.is_array(&source)
+                } else {
+                    spread.is_truthy()
+                }
+            } else {
+                false
+            };
+            if spread {
+                let len = length(vm, source.clone())?;
+                if offset + len > vm.limits.max_array_length as usize {
+                    return Err(JsError::new(
+                        ErrorKind::ExecutionLimit,
+                        "Array length budget exhausted",
+                    ));
+                }
+                for i in 0..len {
+                    vm.tick()?;
+                    let key = JsString::from(i.to_string());
+                    if vm.has(&source, &key)? {
+                        let v = vm.get(source.clone(), &key)?;
+                        vm.define_data_property(
+                            array.clone(),
+                            &(offset + i).to_string(),
+                            v,
+                            true,
+                            true,
+                            true,
+                        )?;
+                    }
+                }
+                offset += len;
+            } else {
+                if offset >= vm.limits.max_array_length as usize {
+                    return Err(JsError::new(
+                        ErrorKind::ExecutionLimit,
+                        "Array concat length budget exhausted",
+                    ));
+                }
+                vm.define_data_property(
+                    array.clone(),
+                    &offset.to_string(),
+                    source,
+                    true,
+                    true,
+                    true,
+                )?;
+                offset += 1;
+            }
+        }
+        vm.set_property(array.clone(), "length", Value::from(offset))?;
+        Ok(array)
+    });
+    for (name, includes) in [("indexOf", false), ("includes", true)] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            let object = vm.coerce_object(this)?;
+            let len = length(vm, object.clone())?;
+            let start = relative(integer(vm, arg(a, 1))?, len);
+            let needle = arg(a, 0);
+            for i in start..len {
+                vm.tick()?;
+                let key = JsString::from(i.to_string());
+                if includes || vm.has(&object, &key)? {
+                    let v = vm.get(object.clone(), &key)?;
+                    vm.charge_bigint_comparison(&v, &needle)?;
+                    if v == needle
+                        || (includes
+                            && matches!((&v,&needle),(Value::Number(a),Value::Number(b))if a.is_nan()&&b.is_nan()))
+                    {
+                        return Ok(if includes {
+                            Value::Bool(true)
+                        } else {
+                            Value::from(i)
+                        });
+                    }
+                }
+            }
+            Ok(if includes {
+                Value::Bool(false)
+            } else {
+                Value::from(-1)
+            })
+        });
+    }
+    for name in [
+        "forEach",
+        "map",
+        "filter",
+        "some",
+        "every",
+        "find",
+        "findIndex",
+    ] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            let object = vm.coerce_object(this)?;
+            let len = length(vm, object.clone())?;
+            let callback = arg(a, 0);
+            if !vm.is_callable(&callback) {
+                return Err(JsError::type_error("Array callback is not callable"));
+            }
+            let result = if name == "map" {
+                vm.array_species_create(object.clone(), len)?
+            } else if name == "filter" {
+                vm.array_species_create(object.clone(), 0)?
+            } else {
+                Value::Undefined
+            };
+            let mut count = 0;
+            for i in 0..len {
+                vm.tick()?;
+                let key = JsString::from(i.to_string());
+                if matches!(name, "find" | "findIndex") || vm.has(&object, &key)? {
+                    let value = vm.get(object.clone(), &key)?;
+                    let mapped = vm.invoke(
+                        callback.clone(),
+                        arg(a, 1),
+                        &[value.clone(), Value::from(i), object.clone()],
+                    )?;
+                    match name {
+                        "map" => vm.define_data_property(
+                            result.clone(),
+                            &i.to_string(),
+                            mapped,
+                            true,
+                            true,
+                            true,
+                        )?,
+                        "filter" if mapped.is_truthy() => {
+                            vm.define_data_property(
+                                result.clone(),
+                                &count.to_string(),
+                                value,
+                                true,
+                                true,
+                                true,
+                            )?;
+                            count += 1;
+                        }
+                        "some" if mapped.is_truthy() => return Ok(Value::Bool(true)),
+                        "every" if !mapped.is_truthy() => return Ok(Value::Bool(false)),
+                        "find" if mapped.is_truthy() => return Ok(value),
+                        "findIndex" if mapped.is_truthy() => return Ok(Value::from(i)),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(match name {
+                "map" => result,
+                "filter" => result,
+                "some" => Value::Bool(false),
+                "every" => Value::Bool(true),
+                "findIndex" => Value::from(-1),
+                _ => Value::Undefined,
+            })
+        });
+    }
+    method(vm, proto.clone(), "reduce", 1, |vm, this, a| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        let callback = arg(a, 0);
+        if !vm.is_callable(&callback) {
+            return Err(JsError::type_error("Reduce callback is not callable"));
+        }
+        let mut accumulator = if a.len() > 1 {
+            Some(a[1].clone())
+        } else {
+            None
+        };
+        for i in 0..len {
+            vm.tick()?;
+            let key = JsString::from(i.to_string());
+            if vm.has(&object, &key)? {
+                let value = vm.get(object.clone(), &key)?;
+                accumulator = Some(if let Some(accumulator) = accumulator {
+                    vm.invoke(
+                        callback.clone(),
+                        Value::Undefined,
+                        &[accumulator, value, Value::from(i), object.clone()],
+                    )?
+                } else {
+                    value
+                });
+            }
+        }
+        accumulator
+            .ok_or_else(|| JsError::type_error("Reduce of empty array without initial value"))
+    });
+    method(vm, proto, "reverse", 0, |vm, this, _| {
+        let object = vm.coerce_object(this)?;
+        let len = length(vm, object.clone())?;
+        for i in 0..len / 2 {
+            vm.tick()?;
+            let left = JsString::from(i.to_string());
+            let right = JsString::from((len - i - 1).to_string());
+            let has_left = vm.has(&object, &left)?;
+            let has_right = vm.has(&object, &right)?;
+            let a = vm.get(object.clone(), &left)?;
+            let b = vm.get(object.clone(), &right)?;
+            if has_right {
+                vm.set(object.clone(), &left, b, true)?;
+            } else {
+                vm.delete(object.clone(), &left, true)?;
+            }
+            if has_left {
+                vm.set(object.clone(), &right, a, true)?;
+            } else {
+                vm.delete(object.clone(), &right, true)?;
+            }
+        }
+        Ok(object)
+    });
+}
+fn string_this(vm: &mut Vm, this: Value) -> Result<JsString, JsError> {
+    if this.is_nullish() {
+        return Err(JsError::type_error(
+            "String method called on null or undefined",
+        ));
+    }
+    if let Some(id) = this.as_object()
+        && let ObjectKind::Boxed(Value::String(s)) = &vm.heap.object(id)?.kind
+    {
+        return Ok(s.clone());
+    }
+    vm.to_string(&this)
+}
+fn equal_units(vm: &mut Vm, a: &[u16], b: &[u16]) -> Result<bool, JsError> {
+    if a.len() != b.len() {
+        return Ok(false);
+    }
+    for (a, b) in a.iter().zip(b) {
+        vm.tick()?;
+        if a != b {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+pub(crate) fn find_units(
+    vm: &mut Vm,
+    haystack: &[u16],
+    needle: &[u16],
+    start: usize,
+) -> Result<Option<usize>, JsError> {
+    if start > haystack.len() {
+        return Ok(None);
+    }
+    if needle.is_empty() {
+        return Ok(Some(start));
+    }
+    if needle.len() > haystack.len() - start {
+        return Ok(None);
+    }
+    for i in start..=haystack.len() - needle.len() {
+        vm.tick()?;
+        if equal_units(vm, &haystack[i..i + needle.len()], needle)? {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+pub(crate) fn join_indexed_properties(
+    vm: &mut Vm,
+    length: usize,
+    separator: &JsString,
+    method: Option<&str>,
+    mut get_element: impl FnMut(&mut Vm, usize) -> Result<Value, JsError>,
+) -> Result<Value, JsError> {
+    let mut units = Vec::new();
+    for index in 0..length {
+        vm.tick()?;
+        if index > 0 {
+            append_units(vm, &mut units, separator.as_utf16())?;
+        }
+        let mut value = get_element(vm, index)?;
+        if value.is_nullish() {
+            continue;
+        }
+        if let Some(name) = method {
+            let formatter = vm.get_property(value.clone(), name)?;
+            value = vm.invoke(formatter, value, &[])?;
+        }
+        let string = vm.to_string(&value)?;
+        append_units(vm, &mut units, string.as_utf16())?;
+    }
+    vm.finish_string(units)
+}
+
+fn append_units(vm: &mut Vm, out: &mut Vec<u16>, units: &[u16]) -> Result<(), JsError> {
+    vm.tick()?;
+    vm.ensure_string_allocation(out.len().saturating_add(units.len()))?;
+    vm.consume_work(units.len())?;
+    out.extend_from_slice(units);
+    Ok(())
+}
+fn install_string(vm: &mut Vm) {
+    let proto = Value::Object(vm.string_prototype);
+    let string = constructor(vm, "String", 1, proto.clone(), |vm, _, a| {
+        Ok(Value::String(if a.is_empty() {
+            JsString::default()
+        } else if matches!(a[0], Value::Symbol(_)) {
+            vm.descriptive_symbol(a[0].clone())?
+        } else {
+            vm.to_string(&a[0])?
+        }))
+    });
+    replace_construct(vm, string.clone(), |vm, _, a, target| {
+        let string = if a.is_empty() {
+            JsString::default()
+        } else {
+            vm.to_string(&a[0])?
+        };
+        let prototype = vm.prototype_from_constructor(target, vm.string_prototype)?;
+        vm.allocate_constructed(ObjectKind::Boxed(Value::String(string)), prototype)
+    });
+    method(vm, string.clone(), "raw", 1, |vm, _, args| {
+        let cooked = vm.coerce_object(arg(args, 0))?;
+        let raw = vm.get_property(cooked, "raw")?;
+        let raw = vm.coerce_object(raw)?;
+        let count = length(vm, raw.clone())?;
+        let mut out = Vec::new();
+        for index in 0..count {
+            vm.tick()?;
+            let value = vm.get_property(raw.clone(), &index.to_string())?;
+            let value = vm.to_string(&value)?;
+            append_units(vm, &mut out, value.as_utf16())?;
+            if index + 1 < count && index + 1 < args.len() {
+                let value = vm.to_string(&args[index + 1])?;
+                append_units(vm, &mut out, value.as_utf16())?;
+            }
+        }
+        vm.finish_string(out)
+    });
+    method(vm, string.clone(), "fromCharCode", 1, |vm, _, a| {
+        vm.ensure_string_allocation(a.len())?;
+        vm.consume_work(a.len())?;
+        let mut units = Vec::with_capacity(a.len());
+        for value in a {
+            units.push(to_u32(vm.to_number(value)?) as u16);
+        }
+        vm.finish_string(units)
+    });
+    method(vm, string, "fromCodePoint", 1, |vm, _, a| {
+        let mut units = Vec::new();
+        for value in a {
+            let n = vm.to_number(value)?;
+            vm.tick()?;
+            if !n.is_finite() || n.fract() != 0.0 || !(0.0..=0x10ffff as f64).contains(&n) {
+                return Err(JsError::new(ErrorKind::RangeError, "Invalid code point"));
+            }
+            let n = n as u32;
+            if n <= 0xffff {
+                units.push(n as u16);
+            } else {
+                let n = n - 0x10000;
+                units.push((0xd800 + (n >> 10)) as u16);
+                units.push((0xdc00 + (n & 1023)) as u16);
+            }
+        }
+        vm.finish_string(units)
+    });
+    for name in ["toString", "valueOf"] {
+        method(vm, proto.clone(), name, 0, |vm, this, _| match this {
+            Value::String(_) => Ok(this),
+            Value::Object(id) => match &vm.heap.object(id)?.kind {
+                ObjectKind::Boxed(Value::String(s)) => Ok(Value::String(s.clone())),
+                _ => Err(JsError::type_error("String receiver is not a string")),
+            },
+            _ => Err(JsError::type_error("String receiver is not a string")),
+        });
+    }
+    for name in ["charAt", "charCodeAt", "codePointAt", "at"] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            let s = string_this(vm, this)?;
+            let mut index = integer(vm, arg(a, 0))?;
+            if name == "at" && index < 0.0 {
+                index += s.len() as f64;
+            }
+            if index < 0.0 || index >= s.len() as f64 {
+                return Ok(match name {
+                    "charCodeAt" => Value::Number(f64::NAN),
+                    "charAt" => Value::from(""),
+                    _ => Value::Undefined,
+                });
+            }
+            let index = index as usize;
+            let unit = s.as_utf16()[index];
+            if matches!(name, "charAt" | "at") {
+                return vm.copy_string(&[unit]);
+            }
+            let mut code = unit as u32;
+            if name == "codePointAt"
+                && (0xd800..=0xdbff).contains(&unit)
+                && let Some(low) = s.as_utf16().get(index + 1)
+                && (0xdc00..=0xdfff).contains(low)
+            {
+                code = 0x10000 + (((unit as u32) - 0xd800) << 10) + (*low as u32 - 0xdc00);
+            }
+            Ok(Value::from(code))
+        });
+    }
+    for name in ["slice", "substring", "substr"] {
+        method(vm, proto.clone(), name, 2, move |vm, this, a| {
+            let s = string_this(vm, this)?;
+            let start = integer(vm, arg(a, 0))?;
+            let mut start = if name == "substring" {
+                start.max(0.0).min(s.len() as f64) as usize
+            } else {
+                relative(start, s.len())
+            };
+            let mut end = if arg(a, 1).is_undefined() {
+                s.len()
+            } else {
+                let end = integer(vm, arg(a, 1))?;
+                match name {
+                    "substring" => end.max(0.0).min(s.len() as f64) as usize,
+                    "substr" => start
+                        .saturating_add(end.max(0.0).min(s.len() as f64) as usize)
+                        .min(s.len()),
+                    _ => relative(end, s.len()),
+                }
+            };
+            if name == "substring" && end < start {
+                std::mem::swap(&mut start, &mut end);
+            }
+            end = end.max(start);
+            vm.copy_string(&s.as_utf16()[start..end])
+        });
+    }
+    for name in [
+        "indexOf",
+        "includes",
+        "startsWith",
+        "endsWith",
+        "lastIndexOf",
+    ] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            if this.is_nullish() {
+                return Err(JsError::type_error(
+                    "String method called on null or undefined",
+                ));
+            }
+            let s = vm.to_string(&this)?;
+            let needle = arg(a, 0);
+            if matches!(name, "startsWith" | "endsWith" | "includes") {
+                crate::regexp::reject_regexp(vm, &needle)?;
+            }
+            let needle = vm.to_string(&needle)?;
+            let position = if name == "endsWith" || name == "lastIndexOf" {
+                if arg(a, 1).is_undefined() {
+                    s.len()
+                } else {
+                    integer(vm, arg(a, 1))?.max(0.0).min(s.len() as f64) as usize
+                }
+            } else {
+                integer(vm, arg(a, 1))?.max(0.0).min(s.len() as f64) as usize
+            };
+            let found = match name {
+                "startsWith" => {
+                    if let Some(units) = s
+                        .as_utf16()
+                        .get(position..position.saturating_add(needle.len()))
+                    {
+                        equal_units(vm, units, needle.as_utf16())?.then_some(position)
+                    } else {
+                        None
+                    }
+                }
+                "endsWith" => {
+                    if let Some(start) = position.checked_sub(needle.len()) {
+                        equal_units(vm, &s.as_utf16()[start..position], needle.as_utf16())?
+                            .then_some(start)
+                    } else {
+                        None
+                    }
+                }
+                "lastIndexOf" => {
+                    if needle.is_empty() {
+                        Some(position)
+                    } else {
+                        let mut found = None;
+                        if needle.len() <= s.len() {
+                            for i in (0..=position.min(s.len() - needle.len())).rev() {
+                                vm.tick()?;
+                                if equal_units(
+                                    vm,
+                                    &s.as_utf16()[i..i + needle.len()],
+                                    needle.as_utf16(),
+                                )? {
+                                    found = Some(i);
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    }
+                }
+                _ => find_units(vm, s.as_utf16(), needle.as_utf16(), position)?,
+            };
+            Ok(if matches!(name, "indexOf" | "lastIndexOf") {
+                Value::Number(found.map(|i| i as f64).unwrap_or(-1.0))
+            } else {
+                Value::Bool(found.is_some())
+            })
+        });
+    }
+    method(vm, proto.clone(), "split", 2, |vm, this, a| {
+        let separator = arg(a, 0);
+        let limit = arg(a, 1);
+        if let Some(value) =
+            crate::regexp::string_hook(vm, &this, &separator, "split", Some(&limit), false)?
+        {
+            return Ok(value);
+        }
+        let s = vm.to_string(&this)?;
+        let limit = if limit.is_undefined() {
+            u32::MAX
+        } else {
+            to_u32(vm.to_number(&limit)?)
+        } as usize;
+        let delimiter = vm.to_string(&separator)?;
+        if limit == 0 {
+            return vm.try_new_array(&[]);
+        }
+        if separator.is_undefined() {
+            return vm.try_new_array(&[Value::String(s)]);
+        }
+        let result = vm.try_new_array(&[])?;
+        if delimiter.is_empty() {
+            let requested = s.len().min(limit);
+            if requested > vm.limits.max_array_length as usize {
+                return Err(JsError::new(
+                    ErrorKind::ExecutionLimit,
+                    "Split array length budget exhausted",
+                ));
+            }
+            vm.ensure_allocation(requested.saturating_mul(320))?;
+            for unit in s.as_utf16().iter().take(limit) {
+                vm.tick()?;
+                let piece = vm.copy_string(&[*unit])?;
+                vm.append_array_literal(result.clone(), Some(piece))?;
+            }
+        } else {
+            let mut start = 0;
+            for _ in 0..limit {
+                vm.tick()?;
+                let end = find_units(vm, s.as_utf16(), delimiter.as_utf16(), start)?;
+                let piece = vm.copy_string(&s.as_utf16()[start..end.unwrap_or(s.len())])?;
+                vm.append_array_literal(result.clone(), Some(piece))?;
+                if let Some(end) = end {
+                    start = end + delimiter.len();
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(result)
+    });
+    method(vm, proto.clone(), "concat", 1, |vm, this, a| {
+        let s = string_this(vm, this)?;
+        vm.ensure_string_allocation(s.len())?;
+        vm.consume_work(s.len())?;
+        let mut units = s.as_utf16().to_vec();
+        for value in a {
+            let s = vm.to_string(value)?;
+            if units.len().saturating_add(s.len()) > vm.limits.max_string_units {
+                return Err(JsError::new(
+                    ErrorKind::ExecutionLimit,
+                    "String code-unit budget exhausted",
+                ));
+            }
+            append_units(vm, &mut units, s.as_utf16())?;
+        }
+        vm.finish_string(units)
+    });
+    for (name, upper) in [("toLowerCase", false), ("toUpperCase", true)] {
+        method(vm, proto.clone(), name, 0, move |vm, this, _| {
+            let s = string_this(vm, this)?;
+            let mut units = Vec::new();
+            for decoded in char::decode_utf16(s.as_utf16().iter().copied()) {
+                vm.tick()?;
+                match decoded {
+                    Err(error) => append_units(vm, &mut units, &[error.unpaired_surrogate()])?,
+                    Ok(c) => {
+                        if upper {
+                            for c in c.to_uppercase() {
+                                let mut buffer = [0; 2];
+                                append_units(vm, &mut units, c.encode_utf16(&mut buffer))?;
+                            }
+                        } else {
+                            for c in c.to_lowercase() {
+                                let mut buffer = [0; 2];
+                                append_units(vm, &mut units, c.encode_utf16(&mut buffer))?;
+                            }
+                        }
+                    }
+                }
+            }
+            vm.finish_string(units)
+        });
+    }
+    for name in ["trim", "trimStart", "trimEnd"] {
+        method(vm, proto.clone(), name, 0, move |vm, this, _| {
+            let s = string_this(vm, this)?;
+            let units = s.as_utf16();
+            let mut start = 0;
+            let mut end = units.len();
+            if name != "trimEnd" {
+                while start < end && js_whitespace(units[start]) {
+                    vm.tick()?;
+                    start += 1;
+                }
+            }
+            if name != "trimStart" {
+                while end > start && js_whitespace(units[end - 1]) {
+                    vm.tick()?;
+                    end -= 1;
+                }
+            }
+            vm.copy_string(&units[start..end])
+        });
+    }
+    method(vm, proto.clone(), "repeat", 1, |vm, this, a| {
+        let s = string_this(vm, this)?;
+        let count = integer(vm, arg(a, 0))?;
+        if count < 0.0 || !count.is_finite() {
+            return Err(JsError::new(ErrorKind::RangeError, "Invalid repeat count"));
+        }
+        let count = count as usize;
+        if s.len()
+            .checked_mul(count)
+            .is_none_or(|len| len > vm.limits.max_string_units)
+        {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "String code-unit budget exhausted",
+            ));
+        }
+        vm.ensure_string_allocation(s.len().saturating_mul(count))?;
+        vm.consume_work(s.len().saturating_mul(count))?;
+        vm.finish_string(s.as_utf16().repeat(count))
+    });
+    for (name, start) in [("padStart", true), ("padEnd", false)] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            let s = string_this(vm, this)?;
+            let target = integer(vm, arg(a, 0))?.max(0.0);
+            if target > vm.limits.max_string_units as f64 {
+                return Err(JsError::new(
+                    ErrorKind::ExecutionLimit,
+                    "String code-unit budget exhausted",
+                ));
+            }
+            let target = target as usize;
+            if target <= s.len() {
+                return Ok(Value::String(s));
+            }
+            let pad = if arg(a, 1).is_undefined() {
+                JsString::from(" ")
+            } else {
+                vm.to_string(&arg(a, 1))?
+            };
+            if pad.is_empty() {
+                return Ok(Value::String(s));
+            }
+            let missing = target - s.len();
+            vm.ensure_string_allocation(target)?;
+            vm.consume_work(target)?;
+            let mut units = Vec::with_capacity(target);
+            if !start {
+                units.extend_from_slice(s.as_utf16());
+            }
+            for i in 0..missing {
+                units.push(pad.as_utf16()[i % pad.len()]);
+            }
+            if start {
+                units.extend_from_slice(s.as_utf16());
+            }
+            vm.finish_string(units)
+        });
+    }
+}
+pub(crate) fn js_whitespace(c: u16) -> bool {
+    matches!(c,0x0009..=0x000d|0x0020|0x00a0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
+}
+fn install_number(vm: &mut Vm) {
+    let proto = Value::Object(vm.number_prototype);
+    let number = constructor(vm, "Number", 1, proto.clone(), |vm, _, a| {
+        Ok(Value::Number(if a.is_empty() {
+            0.0
+        } else {
+            vm.number_constructor_value(&a[0])?
+        }))
+    });
+    replace_construct(vm, number.clone(), |vm, _, a, target| {
+        let number = if a.is_empty() {
+            0.0
+        } else {
+            vm.number_constructor_value(&a[0])?
+        };
+        let prototype = vm.prototype_from_constructor(target, vm.number_prototype)?;
+        vm.allocate_constructed(ObjectKind::Boxed(Value::Number(number)), prototype)
+    });
+    for (name, value) in [
+        ("NaN", f64::NAN),
+        ("POSITIVE_INFINITY", f64::INFINITY),
+        ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
+        ("MAX_VALUE", f64::MAX),
+        ("MIN_VALUE", f64::from_bits(1)),
+        ("MAX_SAFE_INTEGER", 9007199254740991.0),
+        ("MIN_SAFE_INTEGER", -9007199254740991.0),
+        ("EPSILON", f64::EPSILON),
+    ] {
+        vm.define_data_property(
+            number.clone(),
+            name,
+            Value::Number(value),
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+    for name in ["isNaN", "isFinite", "isInteger", "isSafeInteger"] {
+        method(vm, number.clone(), name, 1, move |_, _, a| {
+            let yes = if let Value::Number(n) = arg(a, 0) {
+                match name {
+                    "isNaN" => n.is_nan(),
+                    "isFinite" => n.is_finite(),
+                    "isInteger" => n.is_finite() && n.fract() == 0.0,
+                    _ => n.is_finite() && n.fract() == 0.0 && n.abs() <= 9007199254740991.0,
+                }
+            } else {
+                false
+            };
+            Ok(Value::Bool(yes))
+        });
+    }
+    method(vm, proto.clone(), "valueOf", 0, |vm, this, _| {
+        number_this(vm, this).map(Value::Number)
+    });
+    method(vm, proto.clone(), "toLocaleString", 0, |vm, this, _| {
+        Ok(crate::vm::number_string(number_this(vm, this)?).into())
+    });
+    method(vm, proto.clone(), "toString", 1, |vm, this, a| {
+        let n = number_this(vm, this)?;
+        let radix = if arg(a, 0).is_undefined() {
+            10
+        } else {
+            integer(vm, arg(a, 0))? as i32
+        };
+        if !(2..=36).contains(&radix) {
+            return Err(JsError::new(ErrorKind::RangeError, "Invalid radix"));
+        }
+        if radix == 10 || !n.is_finite() {
+            return Ok(Value::from(crate::vm::number_string(n)));
+        }
+        if n.fract() != 0.0 || n.abs() > u64::MAX as f64 {
+            return Err(JsError::new(
+                ErrorKind::UnsupportedFeature,
+                "Non-decimal fractional number formatting is not implemented",
+            ));
+        }
+        let mut value = n.abs() as u64;
+        let mut out = Vec::new();
+        loop {
+            let digit = (value % radix as u64) as u8;
+            out.push(if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            });
+            value /= radix as u64;
+            if value == 0 {
+                break;
+            }
+        }
+        if n < 0.0 {
+            out.push(b'-');
+        }
+        out.reverse();
+        Ok(Value::from(String::from_utf8(out).unwrap()))
+    });
+    method(vm, proto, "toFixed", 1, |vm, this, a| {
+        let n = number_this(vm, this)?;
+        let digits = integer(vm, arg(a, 0))?;
+        if !(0.0..=100.0).contains(&digits) {
+            return Err(JsError::new(
+                ErrorKind::RangeError,
+                "Invalid fraction digits",
+            ));
+        }
+        if !n.is_finite() || n.abs() >= 1e21 {
+            Ok(Value::from(crate::vm::number_string(n)))
+        } else {
+            Ok(Value::from(format!("{:.*}", digits as usize, n)))
+        }
+    });
+    let boolean_proto = Value::Object(vm.boolean_prototype);
+    let boolean = constructor(vm, "Boolean", 1, boolean_proto.clone(), |_, _, a| {
+        Ok(Value::Bool(arg(a, 0).is_truthy()))
+    });
+    replace_construct(vm, boolean, |vm, _, a, target| {
+        let prototype = vm.prototype_from_constructor(target, vm.boolean_prototype)?;
+        vm.allocate_constructed(
+            ObjectKind::Boxed(Value::Bool(arg(a, 0).is_truthy())),
+            prototype,
+        )
+    });
+    method(vm, boolean_proto.clone(), "valueOf", 0, |vm, this, _| {
+        bool_this(vm, this).map(Value::Bool)
+    });
+    method(vm, boolean_proto, "toString", 0, |vm, this, _| {
+        Ok(Value::from(if bool_this(vm, this)? {
+            "true"
+        } else {
+            "false"
+        }))
+    });
+    let global = vm.global();
+    method(vm, global.clone(), "isNaN", 1, |vm, _, a| {
+        Ok(Value::Bool(vm.to_number(&arg(a, 0))?.is_nan()))
+    });
+    method(vm, global.clone(), "isFinite", 1, |vm, _, a| {
+        Ok(Value::Bool(vm.to_number(&arg(a, 0))?.is_finite()))
+    });
+    let parse_int = method(vm, global.clone(), "parseInt", 2, |vm, _, a| {
+        let text = vm.to_string(&arg(a, 0))?;
+        let text = text.to_string_lossy();
+        let text = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let (negative, mut text) = if let Some(s) = text.strip_prefix('-') {
+            (true, s)
+        } else {
+            (false, text.strip_prefix('+').unwrap_or(text))
+        };
+        let mut radix = to_i32(vm.to_number(&arg(a, 1))?);
+        if radix != 0 && !(2..=36).contains(&radix) {
+            return Ok(Value::Number(f64::NAN));
+        }
+        if (radix == 0 || radix == 16) && (text.starts_with("0x") || text.starts_with("0X")) {
+            text = &text[2..];
+            radix = 16;
+        }
+        if radix == 0 {
+            radix = 10;
+        }
+        let mut value = 0f64;
+        let mut any = false;
+        for c in text.chars() {
+            let Some(d) = c.to_digit(radix as u32) else {
+                break;
+            };
+            value = value * radix as f64 + d as f64;
+            any = true;
+        }
+        Ok(Value::Number(if !any {
+            f64::NAN
+        } else if negative {
+            -value
+        } else {
+            value
+        }))
+    });
+    vm.define_data_property(number.clone(), "parseInt", parse_int, true, false, true)
+        .unwrap();
+    let parse_float = method(vm, global, "parseFloat", 1, |vm, _, a| {
+        let text = vm.to_string(&arg(a, 0))?;
+        let text = text.to_string_lossy();
+        let text = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let sign = if text.starts_with(['+', '-']) { 1 } else { 0 };
+        if text[sign..].starts_with("Infinity") {
+            return Ok(Value::Number(if text.starts_with('-') {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }));
+        }
+        let bytes = text.as_bytes();
+        let mut i = sign;
+        let mut digits = 0;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+        if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+                digits += 1;
+            }
+        }
+        if digits == 0 {
+            return Ok(Value::Number(f64::NAN));
+        }
+        let before = i;
+        if matches!(bytes.get(i), Some(b'e' | b'E')) {
+            i += 1;
+            if matches!(bytes.get(i), Some(b'+' | b'-')) {
+                i += 1;
+            }
+            let exp = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i == exp {
+                i = before;
+            }
+        }
+        Ok(Value::Number(text[..i].parse().unwrap_or(f64::NAN)))
+    });
+    vm.define_data_property(number, "parseFloat", parse_float, true, false, true)
+        .unwrap();
+}
+fn number_this(vm: &Vm, this: Value) -> Result<f64, JsError> {
+    match this {
+        Value::Number(n) => Ok(n),
+        Value::Object(id) => match vm.heap.object(id)?.kind {
+            ObjectKind::Boxed(Value::Number(n)) => Ok(n),
+            _ => Err(JsError::type_error("Number receiver is not a number")),
+        },
+        _ => Err(JsError::type_error("Number receiver is not a number")),
+    }
+}
+fn bool_this(vm: &Vm, this: Value) -> Result<bool, JsError> {
+    match this {
+        Value::Bool(n) => Ok(n),
+        Value::Object(id) => match vm.heap.object(id)?.kind {
+            ObjectKind::Boxed(Value::Bool(n)) => Ok(n),
+            _ => Err(JsError::type_error("Boolean receiver is not a boolean")),
+        },
+        _ => Err(JsError::type_error("Boolean receiver is not a boolean")),
+    }
+}
+fn install_math(vm: &mut Vm) {
+    let math = vm.new_object();
+    vm.define_data_property(vm.global(), "Math", math.clone(), true, false, true)
+        .unwrap();
+    for (name, n) in [
+        ("E", std::f64::consts::E),
+        ("PI", std::f64::consts::PI),
+        ("LN2", std::f64::consts::LN_2),
+        ("LN10", std::f64::consts::LN_10),
+        ("LOG2E", std::f64::consts::LOG2_E),
+        ("LOG10E", std::f64::consts::LOG10_E),
+        ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
+        ("SQRT2", std::f64::consts::SQRT_2),
+    ] {
+        vm.define_data_property(math.clone(), name, Value::Number(n), false, false, false)
+            .unwrap();
+    }
+    for name in [
+        "abs", "floor", "ceil", "round", "trunc", "sqrt", "cbrt", "sin", "cos", "tan", "asin",
+        "acos", "atan", "exp", "expm1", "log", "log2", "log10", "log1p", "sign", "fround", "clz32",
+    ] {
+        method(vm, math.clone(), name, 1, move |vm, _, a| {
+            let n = vm.to_number(&arg(a, 0))?;
+            Ok(Value::Number(match name {
+                "abs" => n.abs(),
+                "floor" => n.floor(),
+                "ceil" => n.ceil(),
+                "round" => {
+                    if (-0.5..0.0).contains(&n) {
+                        -0.0
+                    } else {
+                        (n + 0.5).floor()
+                    }
+                }
+                "trunc" => n.trunc(),
+                "sqrt" => n.sqrt(),
+                "cbrt" => n.cbrt(),
+                "sin" => n.sin(),
+                "cos" => n.cos(),
+                "tan" => n.tan(),
+                "asin" => n.asin(),
+                "acos" => n.acos(),
+                "atan" => n.atan(),
+                "exp" => n.exp(),
+                "expm1" => n.exp_m1(),
+                "log" => n.ln(),
+                "log2" => n.log2(),
+                "log10" => n.log10(),
+                "log1p" => n.ln_1p(),
+                "sign" => {
+                    if n == 0.0 || n.is_nan() {
+                        n
+                    } else if n > 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
+                "fround" => (n as f32) as f64,
+                _ => to_u32(n).leading_zeros() as f64,
+            }))
+        });
+    }
+    for name in ["pow", "atan2", "imul"] {
+        method(vm, math.clone(), name, 2, move |vm, _, a| {
+            let x = vm.to_number(&arg(a, 0))?;
+            let y = vm.to_number(&arg(a, 1))?;
+            Ok(Value::Number(match name {
+                "pow" => x.powf(y),
+                "atan2" => x.atan2(y),
+                _ => to_i32(x).wrapping_mul(to_i32(y)) as f64,
+            }))
+        });
+    }
+    for (name, max) in [("min", false), ("max", true)] {
+        method(vm, math.clone(), name, 2, move |vm, _, a| {
+            let mut result = if max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            for value in a {
+                let n = vm.to_number(value)?;
+                if n.is_nan() {
+                    return Ok(Value::Number(n));
+                }
+                result = if max {
+                    if n == 0.0 && result == 0.0 {
+                        if n.is_sign_positive() || result.is_sign_positive() {
+                            0.0
+                        } else {
+                            -0.0
+                        }
+                    } else {
+                        result.max(n)
+                    }
+                } else if n == 0.0 && result == 0.0 {
+                    if n.is_sign_negative() || result.is_sign_negative() {
+                        -0.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    result.min(n)
+                };
+            }
+            Ok(Value::Number(result))
+        });
+    }
+    let seed = std::rc::Rc::new(std::cell::Cell::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x4a53)
+            .max(1),
+    ));
+    method(vm, math, "random", 0, move |_, _, _| {
+        let mut x = seed.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        seed.set(x);
+        Ok(Value::Number((x >> 11) as f64 / (1u64 << 53) as f64))
+    });
+}
+fn install_errors(vm: &mut Vm) {
+    let error_proto = Value::Object(vm.error_prototype);
+    vm.define_data_property(
+        error_proto.clone(),
+        "name",
+        Value::from("Error"),
+        true,
+        false,
+        true,
+    )
+    .unwrap();
+    vm.define_data_property(
+        error_proto.clone(),
+        "message",
+        Value::from(""),
+        true,
+        false,
+        true,
+    )
+    .unwrap();
+    method(vm, error_proto.clone(), "toString", 0, |vm, this, _| {
+        if this.as_object().is_none() {
+            return Err(JsError::type_error("Error.toString requires an object"));
+        }
+        let name = vm.get_property(this.clone(), "name")?;
+        let name = if name.is_undefined() {
+            JsString::from("Error")
+        } else {
+            vm.to_string(&name)?
+        };
+        let message = vm.get_property(this, "message")?;
+        let message = if message.is_undefined() {
+            JsString::default()
+        } else {
+            vm.to_string(&message)?
+        };
+        Ok(Value::String(if name.is_empty() {
+            message
+        } else if message.is_empty() {
+            name
+        } else {
+            let length = name.len().saturating_add(message.len()).saturating_add(2);
+            vm.ensure_string_allocation(length)?;
+            vm.consume_work(
+                name.len()
+                    .saturating_add(2)
+                    .saturating_add(length)
+                    .saturating_mul(2),
+            )?;
+            name.concat(&JsString::from(": ")).concat(&message)
+        }))
+    });
+    for kind in [
+        ErrorKind::Error,
+        ErrorKind::TypeError,
+        ErrorKind::ReferenceError,
+        ErrorKind::RangeError,
+        ErrorKind::SyntaxError,
+        ErrorKind::EvalError,
+        ErrorKind::UriError,
+    ] {
+        let proto = if kind == ErrorKind::Error {
+            error_proto.clone()
+        } else {
+            vm.new_object_with_prototype(error_proto.clone()).unwrap()
+        };
+        vm.error_prototypes.insert(kind, proto.as_object().unwrap());
+        vm.define_data_property(
+            proto.clone(),
+            "name",
+            Value::from(kind.name()),
+            true,
+            false,
+            true,
+        )
+        .unwrap();
+        let constructor = constructor(vm, kind.name(), 1, proto, move |vm, _, args| {
+            create_error(vm, kind, args, vm.error_prototypes[&kind])
+        });
+        if kind != ErrorKind::Error {
+            let error = vm.get_global("Error").unwrap();
+            vm.set_prototype(constructor.as_object().unwrap(), error.as_object())
+                .unwrap();
+        }
+        replace_construct(vm, constructor, move |vm, _, args, target| {
+            let prototype = vm.prototype_from_constructor(target, vm.error_prototypes[&kind])?;
+            create_error(vm, kind, args, prototype)
+        });
+    }
+}
+fn create_error(
+    vm: &mut Vm,
+    kind: ErrorKind,
+    args: &[Value],
+    prototype: crate::ObjectId,
+) -> Result<Value, JsError> {
+    let error = vm.allocate_constructed(ObjectKind::Error(kind), prototype)?;
+    let message = arg(args, 0);
+    if !message.is_undefined() {
+        let message = vm.to_string(&message)?;
+        vm.define_data_property(
+            error.clone(),
+            "message",
+            Value::String(message),
+            true,
+            false,
+            true,
+        )?;
+    }
+    let options = arg(args, 1);
+    if options.as_object().is_some() && vm.has(&options, &"cause".into())? {
+        let cause = vm.get_property(options, "cause")?;
+        vm.define_data_property(error.clone(), "cause", cause, true, false, true)?;
+    }
+    Ok(error)
+}

@@ -1,0 +1,8 @@
+/target/
+/dist/
+*.log
+node_modules/
+
+
+# Machine-specific test receipts
+/docs/evidence/

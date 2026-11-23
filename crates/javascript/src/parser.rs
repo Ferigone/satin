@@ -1,0 +1,2177 @@
+mod classes;
+pub(crate) mod modules;
+use crate::{
+    ErrorKind, JsError, JsString, Value,
+    lexer::{Lexer, Token, TokenKind},
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+// These are independent budgets: recursive grammar calls and the resulting AST
+// can have different depths (e.g. a flat left-associative operator chain). Keep
+// both bounded before an unsafe-to-drop tree can be constructed. The limits are
+// verified together with compilation and destruction on a 1 MiB native stack.
+const MAX_PARSER_DEPTH: usize = 24;
+const MAX_AST_DEPTH: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum VarKind {
+    Var,
+    Let,
+    Const,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FunctionKind {
+    Ordinary,
+    Async,
+    Generator,
+    AsyncGenerator,
+}
+
+impl FunctionKind {
+    pub(crate) fn is_generator(self) -> bool {
+        matches!(self, Self::Generator | Self::AsyncGenerator)
+    }
+
+    fn await_context(self, context: KeywordContext) -> KeywordContext {
+        if matches!(self, Self::Async | Self::AsyncGenerator) {
+            context
+        } else {
+            KeywordContext::None
+        }
+    }
+
+    fn yield_context(self, context: KeywordContext) -> KeywordContext {
+        if self.is_generator() {
+            context
+        } else {
+            KeywordContext::None
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Function {
+    pub name: Option<JsString>,
+    pub params: Vec<Parameter>,
+    pub body: Vec<Stmt>,
+    pub arrow: bool,
+    pub kind: FunctionKind,
+    pub strict: bool,
+    pub self_binding: bool,
+    pub method: bool,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Class {
+    pub name: Option<JsString>,
+    pub heritage: Option<Box<Expr>>,
+    pub elements: Vec<ClassElement>,
+    pub private_names: Vec<JsString>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MethodKind {
+    Method,
+    Getter,
+    Setter,
+}
+#[derive(Clone, Debug)]
+pub(crate) enum ClassKey {
+    Public(Expr),
+    Private(JsString),
+}
+#[derive(Clone, Debug)]
+pub(crate) enum ClassElement {
+    Method {
+        key: ClassKey,
+        function: Function,
+        kind: MethodKind,
+        is_static: bool,
+        constructor: bool,
+    },
+    Field {
+        key: ClassKey,
+        value: Option<Expr>,
+        is_static: bool,
+    },
+    StaticBlock(Vec<Stmt>),
+}
+#[derive(Clone, Debug)]
+pub(crate) enum Pattern {
+    Name(JsString),
+    Target(Box<Expr>),
+    Array(Vec<Option<Pattern>>, Option<Box<Pattern>>),
+    // Property key, target, computed: ContainsExpression must distinguish a
+    // computed literal key from an otherwise identical static property name.
+    Object(Vec<(Expr, Pattern, bool)>, Option<Box<Pattern>>),
+    Default(Box<Pattern>, Box<Expr>),
+}
+#[derive(Clone, Debug)]
+pub(crate) struct Parameter {
+    pub pattern: Pattern,
+    pub rest: bool,
+}
+pub(crate) fn bound_names(pattern: &Pattern) -> Vec<JsString> {
+    let mut out = Vec::new();
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        match pattern {
+            Pattern::Name(name) => out.push(name.clone()),
+            Pattern::Target(_) => {}
+            Pattern::Array(items, rest) => {
+                pending.extend(rest.iter().map(Box::as_ref));
+                pending.extend(items.iter().rev().flatten());
+            }
+            Pattern::Object(properties, rest) => {
+                pending.extend(rest.iter().map(Box::as_ref));
+                pending.extend(properties.iter().rev().map(|(_, p, _)| p));
+            }
+            Pattern::Default(p, _) => pending.push(p),
+        }
+    }
+    out
+}
+pub(crate) fn simple_parameter(parameter: &Parameter) -> bool {
+    !parameter.rest && matches!(parameter.pattern, Pattern::Name(_))
+}
+#[derive(Clone, Debug)]
+pub(crate) enum ObjectEntry {
+    Property {
+        key: Expr,
+        value: Expr,
+        prototype: bool,
+        infer_name: bool,
+        cover: bool,
+        computed: bool,
+        method: Option<MethodKind>,
+    },
+    Spread(Expr),
+}
+#[derive(Clone, Debug)]
+pub(crate) struct TemplatePart {
+    pub raw: JsString,
+    pub cooked: Option<JsString>,
+}
+#[derive(Clone, Debug)]
+pub(crate) enum ChainLink {
+    Member(Expr, bool),
+    PrivateMember(JsString, bool),
+    Call(Vec<Expr>, bool),
+}
+#[derive(Clone, Debug)]
+pub(crate) enum Expr {
+    Literal(Value),
+    RegExp(std::rc::Rc<crate::regexp::Program>),
+    Identifier(JsString),
+    This,
+    Super,
+    NewTarget,
+    ImportMeta,
+    DynamicImport(Box<Expr>),
+    Await(Box<Expr>),
+    Yield {
+        value: Option<Box<Expr>>,
+        delegate: bool,
+        asynchronous: bool,
+    },
+    Class(Class),
+    Array(Vec<Option<Expr>>, bool),
+    Object(Vec<ObjectEntry>, bool),
+    Destructure(Pattern, Box<Expr>),
+    Template(Vec<TemplatePart>, Vec<Expr>, Option<Box<Expr>>),
+    Chain(Box<Expr>, Vec<ChainLink>),
+    Group(Box<Expr>),
+    Spread(Box<Expr>),
+    Function(Function),
+    Member(Box<Expr>, Box<Expr>),
+    PrivateMember(Box<Expr>, JsString),
+    PrivateIn(JsString, Box<Expr>),
+    Call(Box<Expr>, Vec<Expr>),
+    New(Box<Expr>, Vec<Expr>),
+    Unary(&'static str, Box<Expr>),
+    Binary(&'static str, Box<Expr>, Box<Expr>),
+    Assign(&'static str, Box<Expr>, Box<Expr>),
+    Update(&'static str, Box<Expr>, bool),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    Sequence(Box<Expr>, Box<Expr>),
+}
+#[derive(Clone, Debug)]
+pub(crate) enum Stmt {
+    Empty,
+    Expression(Expr),
+    Block(Vec<Stmt>),
+    Variable(VarKind, Vec<(Pattern, Option<Expr>)>),
+    Function(Function),
+    Class(JsString, Class),
+    DefaultExport(Expr),
+    DefaultFunction(Function),
+    If(Expr, Box<Stmt>, Option<Box<Stmt>>),
+    While(Expr, Box<Stmt>),
+    DoWhile(Box<Stmt>, Expr),
+    For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
+    ForIn(VarKind, Pattern, Expr, Box<Stmt>),
+    ForOf(VarKind, Pattern, Expr, Box<Stmt>, bool),
+    Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
+    Return(Option<Expr>),
+    Break,
+    Continue,
+    Throw(Expr),
+    Try(
+        Box<Stmt>,
+        Option<(Option<Pattern>, Box<Stmt>)>,
+        Option<Box<Stmt>>,
+    ),
+}
+#[derive(Default)]
+pub(crate) struct EvalContext {
+    pub super_property: bool,
+    pub super_call: bool,
+    pub new_target: bool,
+    pub class_initializer: bool,
+    pub private_names: BTreeSet<JsString>,
+}
+pub(crate) fn parse(source: &str) -> Result<Vec<Stmt>, JsError> {
+    parse_script(source, EvalContext::default())
+}
+pub(crate) fn parse_script(source: &str, context: EvalContext) -> Result<Vec<Stmt>, JsError> {
+    let mut p = Parser {
+        tokens: Vec::new(),
+        lexer: Lexer::new(source),
+        pos: 0,
+        function_depth: 0,
+        loop_depth: 0,
+        switch_depth: 0,
+        depth: 0,
+        allow_in: true,
+        super_property: context.super_property,
+        super_call: context.super_call,
+        new_target: context.new_target,
+        class_initializer: context.class_initializer,
+        eval_private_names: context.private_names,
+        private_scopes: Vec::new(),
+        module_goal: false,
+        static_block: false,
+        await_context: KeywordContext::None,
+        await_count: 0,
+        yield_context: KeywordContext::None,
+        yield_count: 0,
+    };
+    p.fill();
+    let mut body = Vec::new();
+    while !p.is_eof() {
+        body.push(p.statement()?);
+    }
+    Ok(body)
+}
+pub(crate) fn has_strict_directive(body: &[Stmt]) -> bool {
+    for stmt in body {
+        match stmt {
+            Stmt::Expression(Expr::Literal(Value::String(s))) => {
+                if s == &JsString::from("use strict") {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum KeywordContext {
+    None,
+    Parameters,
+    Body,
+}
+
+#[derive(Default)]
+struct PrivateScope {
+    declarations: BTreeMap<JsString, PrivateDeclaration>,
+    uses: BTreeMap<JsString, (usize, usize)>,
+    names: Vec<JsString>,
+}
+
+struct PrivateDeclaration {
+    static_element: bool,
+    getter: bool,
+    setter: bool,
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    lexer: Lexer,
+    pos: usize,
+    function_depth: usize,
+    loop_depth: usize,
+    switch_depth: usize,
+    depth: usize,
+    allow_in: bool,
+    super_property: bool,
+    super_call: bool,
+    new_target: bool,
+    class_initializer: bool,
+    eval_private_names: BTreeSet<JsString>,
+    private_scopes: Vec<PrivateScope>,
+    module_goal: bool,
+    static_block: bool,
+    await_context: KeywordContext,
+    // Cover grammar must remember `await` before a following arrow selects
+    // the formal-parameter goal. Property names and nested function bodies
+    // do not contribute to this count.
+    await_count: usize,
+    yield_context: KeywordContext,
+    yield_count: usize,
+}
+impl Parser {
+    fn fill(&mut self) {
+        while self.tokens.len() <= self.pos + 2 {
+            if self
+                .tokens
+                .last()
+                .is_some_and(|t| matches!(t.kind, TokenKind::Eof | TokenKind::Invalid))
+            {
+                break;
+            }
+            // The parser chooses the lexical goal at a slash before lexing past it.
+            // Otherwise apparent comments or strings inside a pattern could scan
+            // arbitrarily far ahead, then be rescanned from the slash.
+            if self.tokens.len() > self.pos
+                && self
+                    .tokens
+                    .last()
+                    .is_some_and(|t| matches!(t.kind, TokenKind::Punct("/" | "/=")))
+            {
+                break;
+            }
+            self.tokens.push(self.lexer.next());
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        self.pos += count;
+        self.fill();
+    }
+
+    fn current(&self) -> &Token {
+        &self.tokens[self.pos]
+    }
+    fn is_eof(&self) -> bool {
+        self.current().kind == TokenKind::Eof
+    }
+    fn at(&self, s: &str) -> bool {
+        match &self.current().kind {
+            TokenKind::Word(w) => w == s,
+            TokenKind::Punct(p) => *p == s,
+            _ => false,
+        }
+    }
+    fn let_declaration(&self) -> bool {
+        self.at("let")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|token| match &token.kind {
+                    TokenKind::Word(word) | TokenKind::EscapedWord(word) => !reserved(word),
+                    TokenKind::Punct("[" | "{") => true,
+                    _ => false,
+                })
+    }
+    fn eat(&mut self, s: &str) -> bool {
+        if self.at(s) {
+            self.advance(1);
+            true
+        } else {
+            false
+        }
+    }
+    fn error(&self, message: impl Into<String>) -> JsError {
+        if let Some(error) = &self.current().error {
+            return (**error).clone();
+        }
+        let message = message.into();
+        let mut error = JsError::syntax(&message, self.current().line, self.current().column);
+        if message.contains("not implemented")
+            || message.contains("unsupported")
+            || message.contains("Labels")
+        {
+            error.kind = ErrorKind::UnsupportedFeature;
+        }
+        if message.contains("nesting limit") {
+            error.kind = ErrorKind::ExecutionLimit;
+        }
+        error
+    }
+    fn expect(&mut self, s: &str) -> Result<(), JsError> {
+        if self.eat(s) {
+            Ok(())
+        } else {
+            Err(self.error(format!("Expected '{s}'")))
+        }
+    }
+    fn identifier_allowed(&self, word: &str) -> bool {
+        !reserved(word)
+            && !(word == "yield" && self.yield_context != KeywordContext::None)
+            && !(word == "await"
+                && (self.module_goal
+                    || self.static_block
+                    || self.await_context != KeywordContext::None))
+    }
+    fn name(&mut self) -> Result<JsString, JsError> {
+        if self.at("{") || self.at("[") || self.at("...") {
+            return Err(self.error("Destructuring/rest bindings are not implemented"));
+        }
+        match self.current().kind.clone() {
+            TokenKind::Word(w) | TokenKind::EscapedWord(w) if self.identifier_allowed(&w) => {
+                self.await_count += usize::from(w == "await");
+                self.advance(1);
+                Ok(w.into())
+            }
+            _ => Err(self.error("Expected an identifier")),
+        }
+    }
+    fn property_name(&mut self) -> Result<JsString, JsError> {
+        if self.at("[") {
+            return Err(self.error("Computed property names are not implemented"));
+        }
+        if self.at("...") {
+            return Err(self.error("Object spread syntax is not implemented"));
+        }
+        match self.current().kind.clone() {
+            TokenKind::Word(w) | TokenKind::EscapedWord(w) => {
+                self.advance(1);
+                Ok(w.into())
+            }
+            TokenKind::String(s) => {
+                self.advance(1);
+                Ok(s)
+            }
+            TokenKind::Number(n) => {
+                self.advance(1);
+                Ok(number_key(n).into())
+            }
+            TokenKind::BigInt(value) => {
+                let key = self.lexer.bigint_property_name(&value)?;
+                self.advance(1);
+                Ok(key)
+            }
+            _ => Err(self.error("Expected a property name")),
+        }
+    }
+    fn semi(&mut self) -> Result<(), JsError> {
+        if self.eat(";") || self.at("}") || self.is_eof() || self.current().newline {
+            Ok(())
+        } else {
+            Err(self.error("Expected ';' or a line terminator"))
+        }
+    }
+    fn statement(&mut self) -> Result<Stmt, JsError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(self.error("Parser nesting limit exceeded"));
+        }
+        self.depth += 1;
+        let result = self.statement_inner();
+        self.depth -= 1;
+        let statement = result?;
+        self.check_ast(Ast::Statement(&statement))?;
+        Ok(statement)
+    }
+    fn statement_inner(&mut self) -> Result<Stmt, JsError> {
+        if (matches!(&self.current().kind, TokenKind::Word(_))
+            || matches!(&self.current().kind, TokenKind::EscapedWord(w) if self.identifier_allowed(w)))
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::Punct(":"))
+        {
+            return Err(self.error("Labels are not implemented"));
+        }
+        if self.eat(";") {
+            return Ok(Stmt::Empty);
+        }
+        if self.eat("{") {
+            return Ok(Stmt::Block(self.block_contents()?));
+        }
+        if self.eat("var") {
+            let d = self.declarations(VarKind::Var)?;
+            self.semi()?;
+            return Ok(Stmt::Variable(VarKind::Var, d));
+        }
+        if self.let_declaration() {
+            self.advance(1);
+            let d = self.declarations(VarKind::Let)?;
+            self.semi()?;
+            return Ok(Stmt::Variable(VarKind::Let, d));
+        }
+        if self.eat("const") {
+            let d = self.declarations(VarKind::Const)?;
+            self.semi()?;
+            return Ok(Stmt::Variable(VarKind::Const, d));
+        }
+        if self.eat("class") {
+            let class = self.class(true)?;
+            return Ok(Stmt::Class(class.name.clone().unwrap(), class));
+        }
+        if self.async_function_ahead() {
+            self.advance(2);
+            return self.function(true, true).map(Stmt::Function);
+        }
+        if self.eat("function") {
+            return self.function(false, true).map(Stmt::Function);
+        }
+        if self.eat("if") {
+            self.expect("(")?;
+            let test = self.expression(1)?;
+            self.expect(")")?;
+            let yes = Box::new(self.statement()?);
+            let no = if self.eat("else") {
+                Some(Box::new(self.statement()?))
+            } else {
+                None
+            };
+            return Ok(Stmt::If(test, yes, no));
+        }
+        if self.eat("while") {
+            self.expect("(")?;
+            let test = self.expression(1)?;
+            self.expect(")")?;
+            self.loop_depth += 1;
+            let body = self.statement();
+            self.loop_depth -= 1;
+            return Ok(Stmt::While(test, Box::new(body?)));
+        }
+        if self.eat("do") {
+            self.loop_depth += 1;
+            let body = self.statement();
+            self.loop_depth -= 1;
+            let body = Box::new(body?);
+            self.expect("while")?;
+            self.expect("(")?;
+            let test = self.expression(1)?;
+            self.expect(")")?;
+            self.eat(";");
+            return Ok(Stmt::DoWhile(body, test));
+        }
+        if self.eat("for") {
+            return self.for_statement();
+        }
+        if self.eat("return") {
+            if self.function_depth == 0 {
+                return Err(self.error("Return outside a function"));
+            }
+            let expr = if self.at(";") || self.at("}") || self.is_eof() || self.current().newline {
+                None
+            } else {
+                let value = self.expression(1)?;
+                let value = if self.yield_context == KeywordContext::Body
+                    && self.await_context == KeywordContext::Body
+                {
+                    self.checked_expression(Expr::Await(Box::new(value)))?
+                } else {
+                    value
+                };
+                Some(value)
+            };
+            self.semi()?;
+            return Ok(Stmt::Return(expr));
+        }
+        if self.eat("break") {
+            if self.loop_depth == 0 && self.switch_depth == 0 {
+                return Err(self.error("Break outside a loop or switch"));
+            }
+            if !self.current().newline && !self.at(";") && !self.at("}") && !self.is_eof() {
+                return Err(self.error("Labels are not implemented"));
+            }
+            self.semi()?;
+            return Ok(Stmt::Break);
+        }
+        if self.eat("continue") {
+            if self.loop_depth == 0 {
+                return Err(self.error("Continue outside a loop"));
+            }
+            if !self.current().newline && !self.at(";") && !self.at("}") && !self.is_eof() {
+                return Err(self.error("Labels are not implemented"));
+            }
+            self.semi()?;
+            return Ok(Stmt::Continue);
+        }
+        if self.eat("throw") {
+            if self.current().newline {
+                return Err(self.error("Line terminator after throw"));
+            }
+            let expr = self.expression(1)?;
+            self.semi()?;
+            return Ok(Stmt::Throw(expr));
+        }
+        if self.eat("try") {
+            self.expect("{")?;
+            let body = Box::new(Stmt::Block(self.block_contents()?));
+            let catch = if self.eat("catch") {
+                let binding = if self.eat("(") {
+                    let name = self.binding_pattern()?;
+                    self.expect(")")?;
+                    Some(name)
+                } else {
+                    None
+                };
+                self.expect("{")?;
+                Some((binding, Box::new(Stmt::Block(self.block_contents()?))))
+            } else {
+                None
+            };
+            let finally = if self.eat("finally") {
+                self.expect("{")?;
+                Some(Box::new(Stmt::Block(self.block_contents()?)))
+            } else {
+                None
+            };
+            if catch.is_none() && finally.is_none() {
+                return Err(self.error("Try requires catch or finally"));
+            }
+            return Ok(Stmt::Try(body, catch, finally));
+        }
+        if self.eat("switch") {
+            self.expect("(")?;
+            let test = self.expression(1)?;
+            self.expect(")")?;
+            self.expect("{")?;
+            let mut cases = Vec::new();
+            let mut default = false;
+            self.switch_depth += 1;
+            while !self.eat("}") {
+                let test = if self.eat("case") {
+                    Some(self.expression(1)?)
+                } else if self.eat("default") {
+                    if default {
+                        return Err(self.error("Duplicate default clause"));
+                    }
+                    default = true;
+                    None
+                } else {
+                    return Err(self.error("Expected switch case or default"));
+                };
+                self.expect(":")?;
+                let mut body = Vec::new();
+                while !self.at("case") && !self.at("default") && !self.at("}") {
+                    body.push(self.statement()?);
+                }
+                cases.push((test, body));
+            }
+            self.switch_depth -= 1;
+            return Ok(Stmt::Switch(test, cases));
+        }
+        if self.eat("debugger") {
+            self.semi()?;
+            return Ok(Stmt::Empty);
+        }
+        if self.module_goal && self.at("with") {
+            return Err(self.error("with is forbidden in strict module code"));
+        }
+        if self.module_goal
+            && (self.at("export")
+                || (self.at("import")
+                    && !self
+                        .tokens
+                        .get(self.pos + 1)
+                        .is_some_and(|t| matches!(t.kind, TokenKind::Punct("." | "(")))))
+        {
+            return Err(self.error("Module declaration outside module top level"));
+        }
+        for unsupported in ["with", "export"] {
+            if self.at(unsupported) {
+                return Err(self.error(format!("'{unsupported}' is not implemented")));
+            }
+        }
+        let e = self.expression(1)?;
+        self.semi()?;
+        Ok(Stmt::Expression(e))
+    }
+    fn block_contents(&mut self) -> Result<Vec<Stmt>, JsError> {
+        let mut stmts = Vec::new();
+        while !self.eat("}") {
+            if self.is_eof() {
+                return Err(self.error("Unterminated block"));
+            }
+            stmts.push(self.statement()?);
+        }
+        Ok(stmts)
+    }
+    fn declarations(&mut self, kind: VarKind) -> Result<Vec<(Pattern, Option<Expr>)>, JsError> {
+        let mut values = Vec::new();
+        loop {
+            let name = self.binding_pattern()?;
+            if kind != VarKind::Var
+                && bound_names(&name)
+                    .iter()
+                    .any(|name| name == &JsString::from("let"))
+            {
+                return Err(self.error("let cannot be a lexical binding name"));
+            }
+            let init = if self.eat("=") {
+                Some(self.expression(2)?)
+            } else {
+                None
+            };
+            if kind == VarKind::Const && init.is_none() && !self.at("in") && !self.at("of") {
+                return Err(self.error("Const requires an initializer"));
+            }
+            if !matches!(name, Pattern::Name(_))
+                && init.is_none()
+                && !self.at("in")
+                && !self.at("of")
+            {
+                return Err(self.error("Destructuring declaration requires an initializer"));
+            }
+            values.push((name, init));
+            if !self.eat(",") {
+                break;
+            }
+        }
+        Ok(values)
+    }
+    fn for_statement(&mut self) -> Result<Stmt, JsError> {
+        let asynchronous = self.eat("await");
+        if asynchronous && (self.await_context != KeywordContext::Body || self.static_block) {
+            return Err(self.error("for await requires an asynchronous body or a module"));
+        }
+        self.expect("(")?;
+        let previous = self.allow_in;
+        self.allow_in = false;
+        let kind = if self.eat("var") {
+            Some(VarKind::Var)
+        } else if self.let_declaration() {
+            self.advance(1);
+            Some(VarKind::Let)
+        } else if self.eat("const") {
+            Some(VarKind::Const)
+        } else {
+            None
+        };
+        let init = if let Some(k) = kind {
+            Some(Box::new(Stmt::Variable(k, self.declarations(k)?)))
+        } else if self.at(";") {
+            None
+        } else {
+            Some(Box::new(Stmt::Expression(self.expression(1)?)))
+        };
+        self.allow_in = previous;
+        if self.eat("in") {
+            if asynchronous {
+                return Err(self.error("for await requires of"));
+            }
+            let Some(stmt) = init else {
+                return Err(self.error("Missing for-in binding"));
+            };
+            let (k, name) = match *stmt {
+                Stmt::Variable(k, mut d) if d.len() == 1 && d[0].1.is_none() => (k, d.remove(0).0),
+                Stmt::Expression(_) => {
+                    return Err(self.error("Assignment targets in for-in are not implemented"));
+                }
+                _ => return Err(self.error("Invalid for-in declaration")),
+            };
+            let object = self.expression(1)?;
+            self.expect(")")?;
+            self.loop_depth += 1;
+            let body = self.statement();
+            self.loop_depth -= 1;
+            return Ok(Stmt::ForIn(k, name, object, Box::new(body?)));
+        }
+        if self.eat("of") {
+            let Some(stmt) = init else {
+                return Err(self.error("Missing for-of binding"));
+            };
+            let (k, name) = match *stmt {
+                Stmt::Variable(k, mut declarations)
+                    if declarations.len() == 1 && declarations[0].1.is_none() =>
+                {
+                    (k, declarations.remove(0).0)
+                }
+                Stmt::Expression(_) => {
+                    return Err(self.error("Assignment targets in for-of are not implemented"));
+                }
+                _ => return Err(self.error("Invalid for-of declaration")),
+            };
+            let iterable = self.expression(2)?;
+            self.expect(")")?;
+            self.loop_depth += 1;
+            let body = if asynchronous {
+                self.for_await_body()
+            } else {
+                self.statement()
+            };
+            self.loop_depth -= 1;
+            return Ok(Stmt::ForOf(
+                k,
+                name,
+                iterable,
+                Box::new(body?),
+                asynchronous,
+            ));
+        }
+        if asynchronous {
+            return Err(self.error("for await requires of"));
+        }
+        self.expect(";")?;
+        let test = if self.at(";") {
+            None
+        } else {
+            Some(self.expression(1)?)
+        };
+        self.expect(";")?;
+        let update = if self.at(")") {
+            None
+        } else {
+            Some(self.expression(1)?)
+        };
+        self.expect(")")?;
+        self.loop_depth += 1;
+        let body = self.statement();
+        self.loop_depth -= 1;
+        Ok(Stmt::For(init, test, update, Box::new(body?)))
+    }
+    fn for_await_body(&mut self) -> Result<Stmt, JsError> {
+        // This position admits Statement, with a distinct lookahead for `let [`.
+        // It cannot consume a lexical declaration from a surrounding statement list.
+        if self.at("let") {
+            if self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.kind == TokenKind::Punct("["))
+            {
+                return Err(self.error("let [ cannot start a for-await body statement"));
+            }
+            let expression = self.expression(1)?;
+            self.semi()?;
+            return Ok(Stmt::Expression(expression));
+        }
+        if self.at("const")
+            || self.at("class")
+            || self.at("function")
+            || self.async_function_ahead()
+        {
+            return Err(self.error("Declaration requires a block in a for-await body"));
+        }
+        self.statement()
+    }
+    fn function_kind(&mut self, is_async: bool) -> FunctionKind {
+        match (is_async, self.eat("*")) {
+            (true, true) => FunctionKind::AsyncGenerator,
+            (true, false) => FunctionKind::Async,
+            (false, true) => FunctionKind::Generator,
+            (false, false) => FunctionKind::Ordinary,
+        }
+    }
+    fn function(&mut self, is_async: bool, require_name: bool) -> Result<Function, JsError> {
+        let kind = self.function_kind(is_async);
+        let old_counts = (self.await_count, self.yield_count);
+        let name = if !self.at("(") {
+            let outer = (self.await_context, self.yield_context, self.static_block);
+            if !require_name {
+                self.static_block = false;
+                self.await_context = kind.await_context(KeywordContext::Parameters);
+                self.yield_context = kind.yield_context(KeywordContext::Parameters);
+            }
+            let name = self.name();
+            (self.await_context, self.yield_context, self.static_block) = outer;
+            Some(name?)
+        } else if require_name {
+            return Err(self.error("Function declaration requires a name"));
+        } else {
+            None
+        };
+        let old = (
+            self.super_property,
+            self.super_call,
+            self.new_target,
+            self.class_initializer,
+            self.static_block,
+            self.await_context,
+            self.yield_context,
+        );
+        self.super_property = false;
+        self.super_call = false;
+        self.new_target = true;
+        self.class_initializer = false;
+        self.static_block = false;
+        self.await_context = kind.await_context(KeywordContext::Parameters);
+        self.yield_context = kind.yield_context(KeywordContext::Parameters);
+        let result = (|| {
+            self.expect("(")?;
+            let params = self.parameters()?;
+            let mut f = self.function_body(name, params, false, kind)?;
+            f.self_binding = !require_name && f.name.is_some();
+            Ok(f)
+        })();
+        (
+            self.super_property,
+            self.super_call,
+            self.new_target,
+            self.class_initializer,
+            self.static_block,
+            self.await_context,
+            self.yield_context,
+        ) = old;
+        (self.await_count, self.yield_count) = old_counts;
+        result
+    }
+    fn function_body(
+        &mut self,
+        name: Option<JsString>,
+        params: Vec<Parameter>,
+        arrow: bool,
+        kind: FunctionKind,
+    ) -> Result<Function, JsError> {
+        let old_loop = self.loop_depth;
+        let old_switch = self.switch_depth;
+        let old_static_block = self.static_block;
+        let old_await_context = self.await_context;
+        let old_await_count = self.await_count;
+        let old_yield_context = self.yield_context;
+        let old_yield_count = self.yield_count;
+        self.loop_depth = 0;
+        self.switch_depth = 0;
+        self.static_block = false;
+        self.await_context = kind.await_context(KeywordContext::Body);
+        self.yield_context = kind.yield_context(KeywordContext::Body);
+        self.function_depth += 1;
+        let result = if self.eat("{") {
+            let previous = self.allow_in;
+            self.allow_in = true;
+            let result = self.block_contents();
+            self.allow_in = previous;
+            result
+        } else if arrow {
+            self.expression(2)
+                .map(|expr| vec![Stmt::Return(Some(expr))])
+        } else {
+            Err(self.error("Expected function body"))
+        };
+        self.function_depth -= 1;
+        self.loop_depth = old_loop;
+        self.switch_depth = old_switch;
+        self.static_block = old_static_block;
+        self.await_context = old_await_context;
+        self.await_count = old_await_count;
+        self.yield_context = old_yield_context;
+        self.yield_count = old_yield_count;
+        let body = result?;
+        let strict = has_strict_directive(&body);
+        if strict && !params.iter().all(simple_parameter) {
+            return Err(self.error("Use strict directive with a non-simple parameter list"));
+        }
+        if strict {
+            let mut seen = std::collections::BTreeSet::new();
+            for p in params.iter().flat_map(|p| bound_names(&p.pattern)) {
+                if !seen.insert(p.clone())
+                    || matches!(p.to_string_lossy().as_str(), "eval" | "arguments")
+                {
+                    return Err(self.error("Invalid strict-mode function parameter"));
+                }
+            }
+        }
+        Ok(Function {
+            name,
+            params,
+            body,
+            arrow,
+            kind,
+            strict,
+            self_binding: false,
+            method: false,
+        })
+    }
+    fn identifier_arrow_at(&self, at: usize) -> bool {
+        self.tokens.get(at).is_some_and(|token| {
+            matches!(&token.kind,
+                TokenKind::Word(word) | TokenKind::EscapedWord(word) if !reserved(word))
+        }) && self
+            .tokens
+            .get(at + 1)
+            .is_some_and(|token| token.kind == TokenKind::Punct("=>") && !token.newline)
+    }
+
+    /// Parse the shared grouped-expression, call, and arrow-parameter grammar
+    /// once. Slash literals inside it are read at their expression site.
+    fn cover(&mut self) -> Result<(Vec<Expr>, bool), JsError> {
+        let mut parts = Vec::new();
+        if self.eat(")") {
+            return Ok((parts, false));
+        }
+        loop {
+            let spread = self.eat("...");
+            let value = self.expression_in(2)?;
+            parts.push(if spread {
+                self.checked_expression(Expr::Spread(Box::new(value)))?
+            } else {
+                value
+            });
+            if self.eat(")") {
+                return Ok((parts, false));
+            }
+            self.expect(",")?;
+            if self.eat(")") {
+                return Ok((parts, true));
+            }
+        }
+    }
+
+    fn arrow_from_cover(
+        &mut self,
+        parts: Vec<Expr>,
+        trailing: bool,
+        is_async: bool,
+    ) -> Result<Expr, JsError> {
+        let count = parts.len();
+        let mut params = Vec::with_capacity(count);
+        let mut seen = std::collections::BTreeSet::new();
+        for (index, value) in parts.into_iter().enumerate() {
+            let (value, rest) = match value {
+                Expr::Spread(value) => {
+                    if index + 1 != count || trailing {
+                        return Err(
+                            self.error("Rest parameter must be last without a trailing comma")
+                        );
+                    }
+                    (*value, true)
+                }
+                value => (value, false),
+            };
+            let pattern = self.pattern(value, true)?;
+            if rest && matches!(pattern, Pattern::Default(..)) {
+                return Err(self.error("Rest parameter cannot have a default"));
+            }
+            for name in bound_names(&pattern) {
+                if name == JsString::from("await")
+                    && (is_async
+                        || self.module_goal
+                        || self.static_block
+                        || self.await_context != KeywordContext::None)
+                {
+                    return Err(self.error("Invalid await binding in arrow parameters"));
+                }
+                if !seen.insert(name) {
+                    return Err(self.error("Duplicate arrow parameter"));
+                }
+            }
+            params.push(Parameter { pattern, rest });
+        }
+        let kind = if is_async {
+            FunctionKind::Async
+        } else {
+            FunctionKind::Ordinary
+        };
+        let function = self.function_body(None, params, true, kind)?;
+        self.checked_expression(Expr::Function(function))
+    }
+
+    fn parameter(&mut self, rest: bool) -> Result<Parameter, JsError> {
+        let expression = self.expression_in(2)?;
+        let pattern = self.pattern(expression, true)?;
+        if rest && matches!(pattern, Pattern::Default(..)) {
+            return Err(self.error("Rest parameter cannot have a default"));
+        }
+        Ok(Parameter { pattern, rest })
+    }
+
+    fn parameters(&mut self) -> Result<Vec<Parameter>, JsError> {
+        let mut params = Vec::new();
+        if self.eat(")") {
+            return Ok(params);
+        }
+        loop {
+            let rest = self.eat("...");
+            params.push(self.parameter(rest)?);
+            if self.eat(")") {
+                break;
+            }
+            self.expect(",")?;
+            if rest {
+                return Err(self.error("Rest parameter must be last without a trailing comma"));
+            }
+            if self.eat(")") {
+                break;
+            }
+        }
+        Ok(params)
+    }
+    fn binding_pattern(&mut self) -> Result<Pattern, JsError> {
+        if self.at("[") || self.at("{") {
+            let expression = self.primary()?;
+            self.pattern(expression, true)
+        } else {
+            Ok(Pattern::Name(self.name()?))
+        }
+    }
+    fn pattern(&self, e: Expr, binding: bool) -> Result<Pattern, JsError> {
+        let pattern = match e {
+            Expr::Identifier(name) => Pattern::Name(name),
+            Expr::Member(..) | Expr::PrivateMember(..) if !binding => Pattern::Target(Box::new(e)),
+            Expr::Array(items, trailing) => {
+                let count = items.len();
+                let mut out = Vec::new();
+                let mut rest = None;
+                for (index, item) in items.into_iter().enumerate() {
+                    match item {
+                        Some(Expr::Spread(value)) => {
+                            if index + 1 != count || trailing || matches!(*value, Expr::Assign(..))
+                            {
+                                return Err(self.error("Rest element must be last without an initializer or trailing comma"));
+                            }
+                            let value = self.pattern(*value, binding)?;
+                            if matches!(value, Pattern::Default(..)) {
+                                return Err(self.error("Rest element cannot have a default"));
+                            }
+                            rest = Some(Box::new(value));
+                        }
+                        Some(value) => out.push(Some(self.pattern(value, binding)?)),
+                        None => out.push(None),
+                    }
+                }
+                Pattern::Array(out, rest)
+            }
+            Expr::Object(entries, trailing) => {
+                let count = entries.len();
+                let mut properties = Vec::new();
+                let mut rest = None;
+                for (index, entry) in entries.into_iter().enumerate() {
+                    match entry {
+                        ObjectEntry::Spread(value) => {
+                            if index + 1 != count || trailing {
+                                return Err(self
+                                    .error("Rest property must be last without a trailing comma"));
+                            }
+                            let value = self.pattern(value, binding)?;
+                            if !matches!(value, Pattern::Name(_))
+                                && !(matches!(value, Pattern::Target(_)) && !binding)
+                            {
+                                return Err(self.error("Invalid object rest target"));
+                            }
+                            rest = Some(Box::new(value));
+                        }
+                        ObjectEntry::Property {
+                            key,
+                            value,
+                            computed,
+                            method,
+                            ..
+                        } => {
+                            if method.is_some() {
+                                return Err(self.error("Invalid method in a destructuring target"));
+                            }
+                            properties.push((key, self.pattern(value, binding)?, computed));
+                        }
+                    }
+                }
+                Pattern::Object(properties, rest)
+            }
+            Expr::Assign("=", target, value) => {
+                Pattern::Default(Box::new(self.pattern(*target, binding)?), value)
+            }
+            Expr::Destructure(pattern, value) => Pattern::Default(Box::new(pattern), value),
+            Expr::Group(value) if !binding && assignable(&value) => self.pattern(*value, false)?,
+            _ => return Err(self.error("Invalid destructuring target")),
+        };
+        if binding {
+            let mut pending = vec![&pattern];
+            while let Some(p) = pending.pop() {
+                match p {
+                    Pattern::Target(_) => {
+                        return Err(self.error("Member expression is not a binding target"));
+                    }
+                    Pattern::Array(items, rest) => {
+                        pending.extend(items.iter().flatten());
+                        pending.extend(rest.iter().map(Box::as_ref));
+                    }
+                    Pattern::Object(properties, rest) => {
+                        pending.extend(properties.iter().map(|(_, p, _)| p));
+                        pending.extend(rest.iter().map(Box::as_ref));
+                    }
+                    Pattern::Default(p, _) => pending.push(p),
+                    _ => {}
+                }
+            }
+        }
+        Ok(pattern)
+    }
+    fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(self.error("Expression nesting limit exceeded"));
+        }
+        self.depth += 1;
+        let result = self.expression_inner(min);
+        self.depth -= 1;
+        self.checked_expression(result?)
+    }
+    fn check_ast(&self, root: Ast<'_>) -> Result<(), JsError> {
+        if ast_within_budget(root) {
+            Ok(())
+        } else {
+            Err(self.error("AST nesting limit exceeded"))
+        }
+    }
+    fn checked_expression(&self, expression: Expr) -> Result<Expr, JsError> {
+        self.check_ast(Ast::Expression(&expression))?;
+        Ok(expression)
+    }
+    fn expression_inner(&mut self, min: u8) -> Result<Expr, JsError> {
+        let async_prefix = min <= 2
+            && self.at("async")
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|next| !next.newline);
+        let async_word_arrow = async_prefix && self.identifier_arrow_at(self.pos + 1);
+        if min <= 2 && (async_word_arrow || self.identifier_arrow_at(self.pos)) {
+            if async_word_arrow {
+                self.advance(1);
+            }
+            let name = self.name()?;
+            self.expect("=>")?;
+            return self.arrow_from_cover(vec![Expr::Identifier(name)], false, async_word_arrow);
+        }
+
+        let async_parens = async_prefix
+            && self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|next| next.kind == TokenKind::Punct("("));
+        let mut left = if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
+            if min > 10 || !self.allow_in {
+                return Err(self.error("Unexpected private identifier"));
+            }
+            let name = self.private_use()?;
+            self.expect("in")?;
+            let object = self.expression(11)?;
+            self.checked_expression(Expr::PrivateIn(name, Box::new(object)))?
+        } else if min <= 2 && self.yield_context == KeywordContext::Body && self.at("yield") {
+            self.yield_expression()?
+        } else if min <= 2 && (self.at("(") || async_parens) {
+            self.advance(if async_parens { 2 } else { 1 });
+            let awaits = self.await_count;
+            let yields = self.yield_count;
+            let (parts, trailing) = self.cover()?;
+            if self.at("=>") && !self.current().newline {
+                if self.yield_count != yields {
+                    return Err(self.error("yield is not allowed in arrow parameters"));
+                }
+                if self.await_count != awaits
+                    && (async_parens || self.await_context != KeywordContext::None)
+                {
+                    return Err(self.error("await is not allowed in arrow parameters"));
+                }
+                self.advance(1);
+                return self.arrow_from_cover(parts, trailing, async_parens);
+            }
+            let primary = if async_parens {
+                Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
+            } else {
+                if parts.is_empty()
+                    || trailing
+                    || parts.iter().any(|part| matches!(part, Expr::Spread(_)))
+                {
+                    return Err(self.error("Invalid parenthesized expression"));
+                }
+                let mut parts = parts.into_iter();
+                let mut inner = parts.next().unwrap();
+                for part in parts {
+                    inner =
+                        self.checked_expression(Expr::Sequence(Box::new(inner), Box::new(part)))?;
+                }
+                Expr::Group(Box::new(inner))
+            };
+            self.finish_unary(self.checked_expression(primary)?)?
+        } else {
+            self.unary()?
+        };
+        loop {
+            if min <= 3 && !matches!(left, Expr::Yield { .. }) && self.eat("?") {
+                let yes = self.expression_in(2)?;
+                self.expect(":")?;
+                let no = self.expression(2)?;
+                left = self.checked_expression(Expr::Conditional(
+                    Box::new(left),
+                    Box::new(yes),
+                    Box::new(no),
+                ))?;
+                continue;
+            }
+            let Some((op, prec, right_assoc)) = self.operator() else {
+                break;
+            };
+            if prec < min || matches!(left, Expr::Yield { .. }) && op != "," {
+                break;
+            }
+            if op == "**" && matches!(left, Expr::Await(_)) {
+                return Err(
+                    self.error("Await on the left side of exponentiation requires parentheses")
+                );
+            }
+            self.advance(1);
+            let right = self.expression(if right_assoc { prec } else { prec + 1 })?;
+            let mixing = |value: &Expr, operators: &[&str]| matches!(value,Expr::Binary(operator,..)if operators.contains(operator));
+            if (op == "??" && (mixing(&left, &["&&", "||"]) || mixing(&right, &["&&", "||"])))
+                || (matches!(op, "&&" | "||")
+                    && (mixing(&left, &["??"]) || mixing(&right, &["??"])))
+            {
+                return Err(self.error(
+                    "Nullish coalescing cannot mix with logical operators without parentheses",
+                ));
+            }
+            left = self.checked_expression(if prec == 1 {
+                Expr::Sequence(Box::new(left), Box::new(right))
+            } else if prec == 2 {
+                if op == "=" && matches!(left, Expr::Array(..) | Expr::Object(..)) {
+                    let pattern = self.pattern(left, false)?;
+                    Expr::Destructure(pattern, Box::new(right))
+                } else {
+                    if !assignable(&left) {
+                        return Err(self.error("Invalid assignment target"));
+                    }
+                    Expr::Assign(op, Box::new(left), Box::new(right))
+                }
+            } else {
+                Expr::Binary(op, Box::new(left), Box::new(right))
+            })?;
+        }
+        Ok(left)
+    }
+    fn yield_expression(&mut self) -> Result<Expr, JsError> {
+        self.advance(1);
+        self.yield_count += 1;
+        let asynchronous = self.await_context == KeywordContext::Body;
+        if self.current().newline {
+            return Ok(Expr::Yield {
+                value: None,
+                delegate: false,
+                asynchronous,
+            });
+        }
+        let delegate = self.eat("*");
+        let has_operand = delegate
+            || !matches!(
+                self.current().kind,
+                TokenKind::Eof
+                    | TokenKind::Punct(";" | "," | ":" | ")" | "]" | "}")
+                    | TokenKind::Template { head: false, .. }
+            );
+        let value = has_operand
+            .then(|| self.expression(2).map(Box::new))
+            .transpose()?;
+        self.checked_expression(Expr::Yield {
+            value,
+            delegate,
+            asynchronous,
+        })
+    }
+    fn expression_in(&mut self, min: u8) -> Result<Expr, JsError> {
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let result = self.expression(min);
+        self.allow_in = previous;
+        result
+    }
+    fn operator(&self) -> Option<(&'static str, u8, bool)> {
+        let s = match &self.current().kind {
+            TokenKind::Punct(s) => *s,
+            TokenKind::Word(w) if w == "in" && self.allow_in => "in",
+            TokenKind::Word(w) if w == "instanceof" => "instanceof",
+            _ => return None,
+        };
+        Some(match s {
+            "," => (s, 1, false),
+            "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | ">>>=" | "&="
+            | "|=" | "^=" | "&&=" | "||=" | "??=" => (s, 2, true),
+            "??" | "||" => (s, 4, false),
+            "&&" => (s, 5, false),
+            "|" => (s, 6, false),
+            "^" => (s, 7, false),
+            "&" => (s, 8, false),
+            "==" | "!=" | "===" | "!==" => (s, 9, false),
+            "<" | ">" | "<=" | ">=" | "in" | "instanceof" => (s, 10, false),
+            "<<" | ">>" | ">>>" => (s, 11, false),
+            "+" | "-" => (s, 12, false),
+            "*" | "/" | "%" => (s, 13, false),
+            "**" => (s, 14, true),
+            _ => return None,
+        })
+    }
+    fn unary(&mut self) -> Result<Expr, JsError> {
+        if self.at("await") {
+            match self.await_context {
+                KeywordContext::None => {}
+                KeywordContext::Parameters => {
+                    return Err(
+                        self.error("await is not allowed in this initializer or parameter list")
+                    );
+                }
+                KeywordContext::Body if !self.static_block => {
+                    self.await_count += 1;
+                    self.advance(1);
+                    let value = self.expression(15)?;
+                    return self.checked_expression(Expr::Await(Box::new(value)));
+                }
+                KeywordContext::Body => {}
+            }
+        }
+        for op in ["!", "~", "+", "-", "typeof", "void", "delete", "++", "--"] {
+            if self.eat(op) {
+                let e = self.expression(14)?;
+                if matches!(op, "++" | "--") {
+                    if !assignable(&e) {
+                        return Err(self.error("Invalid update target"));
+                    }
+                    return self.checked_expression(Expr::Update(op, Box::new(e), true));
+                }
+                if op == "delete" && private_reference(&e) {
+                    return Err(self.error("Cannot delete a private element"));
+                }
+                return self.checked_expression(Expr::Unary(op, Box::new(e)));
+            }
+        }
+        let e = if self.eat("new") {
+            if self.eat(".") {
+                self.expect("target")?;
+                if !self.new_target {
+                    return Err(self.error("new.target outside a function"));
+                }
+                return self.postfix(Expr::NewTarget, true);
+            }
+            let primary = self.primary()?;
+            if matches!(primary, Expr::DynamicImport(_)) {
+                return Err(self.error("A dynamic import call cannot follow new"));
+            }
+            let constructor = self.postfix(primary, false)?;
+            let args = if self.eat("(") {
+                self.arguments()?
+            } else {
+                Vec::new()
+            };
+            self.checked_expression(Expr::New(Box::new(constructor), args))?
+        } else {
+            self.primary()?
+        };
+        self.finish_unary(e)
+    }
+    fn finish_unary(&mut self, primary: Expr) -> Result<Expr, JsError> {
+        let e = self.postfix(primary, true)?;
+        if !self.current().newline {
+            for op in ["++", "--"] {
+                if self.eat(op) {
+                    if !assignable(&e) {
+                        return Err(self.error("Invalid update target"));
+                    }
+                    return self.checked_expression(Expr::Update(op, Box::new(e), false));
+                }
+            }
+        }
+        Ok(e)
+    }
+    fn postfix(&mut self, mut e: Expr, calls: bool) -> Result<Expr, JsError> {
+        loop {
+            if self.eat("?.") {
+                if matches!(e, Expr::Super) {
+                    return Err(self.error("Optional super chain"));
+                }
+                if !calls {
+                    return Err(self.error("Optional chain cannot be the constructor of new"));
+                }
+                let link = if self.eat("[") {
+                    let key = self.expression_in(1)?;
+                    self.expect("]")?;
+                    ChainLink::Member(key, true)
+                } else if self.eat("(") {
+                    ChainLink::Call(self.arguments()?, true)
+                } else if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
+                    ChainLink::PrivateMember(self.private_use()?, true)
+                } else {
+                    ChainLink::Member(Expr::Literal(Value::String(self.property_name()?)), true)
+                };
+                e = self.chain_link(e, link)?;
+            } else if matches!(self.current().kind, TokenKind::Template { head: true, .. }) {
+                if matches!(e, Expr::Chain(..)) {
+                    return Err(self.error("An optional chain cannot be a template tag"));
+                }
+                e = self.template(Some(e))?;
+            } else if self.eat(".") {
+                e = if matches!(self.current().kind, TokenKind::PrivateIdentifier(_)) {
+                    if matches!(e, Expr::Super) {
+                        return Err(self.error("Private names cannot be used with super"));
+                    }
+                    let name = self.private_use()?;
+                    if matches!(e, Expr::Chain(..)) {
+                        self.chain_link(e, ChainLink::PrivateMember(name, false))?
+                    } else {
+                        self.checked_expression(Expr::PrivateMember(Box::new(e), name))?
+                    }
+                } else {
+                    let key = Expr::Literal(Value::String(self.property_name()?));
+                    if matches!(e, Expr::Chain(..)) {
+                        self.chain_link(e, ChainLink::Member(key, false))?
+                    } else {
+                        self.checked_expression(Expr::Member(Box::new(e), Box::new(key)))?
+                    }
+                };
+            } else if self.eat("[") {
+                let key = self.expression_in(1)?;
+                self.expect("]")?;
+                e = if matches!(e, Expr::Chain(..)) {
+                    self.chain_link(e, ChainLink::Member(key, false))?
+                } else {
+                    self.checked_expression(Expr::Member(Box::new(e), Box::new(key)))?
+                };
+            } else if calls && self.eat("(") {
+                let args = self.arguments()?;
+                e = if matches!(e, Expr::Chain(..)) {
+                    self.chain_link(e, ChainLink::Call(args, false))?
+                } else {
+                    self.checked_expression(Expr::Call(Box::new(e), args))?
+                };
+            } else {
+                break;
+            }
+        }
+        Ok(e)
+    }
+    fn chain_link(&self, e: Expr, link: ChainLink) -> Result<Expr, JsError> {
+        let e = if let Expr::Chain(base, mut links) = e {
+            if links.len() >= MAX_AST_DEPTH {
+                return Err(self.error("Optional chain nesting limit exceeded"));
+            }
+            links.push(link);
+            Expr::Chain(base, links)
+        } else {
+            Expr::Chain(Box::new(e), vec![link])
+        };
+        self.checked_expression(e)
+    }
+    fn template(&mut self, tag: Option<Expr>) -> Result<Expr, JsError> {
+        let mut parts = Vec::new();
+        let mut substitutions = Vec::new();
+        loop {
+            let TokenKind::Template {
+                raw, cooked, tail, ..
+            } = self.current().kind.clone()
+            else {
+                return Err(self.error("Expected template continuation"));
+            };
+            if tag.is_none() && cooked.is_none() {
+                return Err(self.error("Invalid escape in untagged template"));
+            }
+            parts.push(TemplatePart { raw, cooked });
+            self.advance(1);
+            if tail {
+                break;
+            }
+            substitutions.push(self.expression_in(1)?);
+        }
+        self.checked_expression(Expr::Template(parts, substitutions, tag.map(Box::new)))
+    }
+    fn arguments(&mut self) -> Result<Vec<Expr>, JsError> {
+        self.cover().map(|(items, _)| items)
+    }
+    fn async_function_ahead(&self) -> bool {
+        self.at("async")
+            && self.tokens.get(self.pos + 1).is_some_and(|next| {
+                !next.newline && matches!(&next.kind, TokenKind::Word(word) if word == "function")
+            })
+    }
+
+    fn async_method_ahead(&self) -> bool {
+        self.at("async")
+            && self.tokens.get(self.pos + 1).is_some_and(|next| {
+                !next.newline
+                    && matches!(
+                        next.kind,
+                        TokenKind::Word(_)
+                            | TokenKind::EscapedWord(_)
+                            | TokenKind::String(_)
+                            | TokenKind::Number(_)
+                            | TokenKind::BigInt(_)
+                            | TokenKind::PrivateIdentifier(_)
+                            | TokenKind::Punct("[" | "*")
+                    )
+            })
+    }
+
+    fn accessor_ahead(&self, allow_private: bool) -> Option<MethodKind> {
+        let kind = if self.at("get") {
+            MethodKind::Getter
+        } else if self.at("set") {
+            MethodKind::Setter
+        } else {
+            return None;
+        };
+        match &self.tokens.get(self.pos + 1)?.kind {
+            TokenKind::Word(_)
+            | TokenKind::EscapedWord(_)
+            | TokenKind::String(_)
+            | TokenKind::Number(_)
+            | TokenKind::BigInt(_)
+            | TokenKind::Punct("[") => Some(kind),
+            TokenKind::PrivateIdentifier(_) if allow_private => Some(kind),
+            _ => None,
+        }
+    }
+
+    fn primary(&mut self) -> Result<Expr, JsError> {
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let result = self.primary_inner();
+        self.allow_in = previous;
+        result
+    }
+    fn primary_inner(&mut self) -> Result<Expr, JsError> {
+        if self.at("yield") && self.yield_context != KeywordContext::None {
+            return Err(self.error(
+                "yield is only allowed here as an assignment expression in a generator body",
+            ));
+        }
+        if matches!(self.current().kind, TokenKind::Template { head: true, .. }) {
+            return self.template(None);
+        }
+        if self.at("/") || self.at("/=") {
+            let slash = &self.tokens[self.pos];
+            let (source, flags) = self.lexer.read_regexp(slash)?;
+            let program = crate::regexp::compile(source, flags).map_err(|mut error| {
+                error.line = Some(slash.line);
+                error.column = Some(slash.column);
+                error
+            })?;
+            self.tokens.truncate(self.pos);
+            self.fill();
+            return Ok(Expr::RegExp(program));
+        }
+        if self.at("...") {
+            return Err(self.error("Spread syntax is not implemented"));
+        }
+        if self.eat("class") {
+            return self.class(false).map(Expr::Class);
+        }
+        if self.eat("super") {
+            if !self.super_property && !self.super_call {
+                return Err(self.error("super outside a method"));
+            }
+            if self.at("(") && !self.super_call {
+                return Err(self.error("super call outside a derived constructor"));
+            }
+            if !self.at("(") && !self.at(".") && !self.at("[") {
+                return Err(self.error("Invalid super expression"));
+            }
+            return Ok(Expr::Super);
+        }
+        if self.eat("import") {
+            if self.eat("(") {
+                if self.at("...") {
+                    return Err(self.error("Dynamic import does not accept spread arguments"));
+                }
+                let specifier = self.expression_in(2)?;
+                if self.eat(",") && !self.at(")") {
+                    return Err(self.error("Dynamic import options are not implemented"));
+                }
+                self.expect(")")?;
+                return self.checked_expression(Expr::DynamicImport(Box::new(specifier)));
+            }
+            if self.at(".") && self.tokens.get(self.pos + 1).is_some_and(|token| {
+                matches!(&token.kind, TokenKind::Word(phase) if phase == "defer" || phase == "source")
+            }) {
+                return Err(self.error("Deferred and source-phase dynamic imports are not implemented"));
+            }
+            if !self.module_goal {
+                return Err(self.error("import.meta outside a module"));
+            }
+            self.expect(".")?;
+            self.expect("meta")?;
+            return Ok(Expr::ImportMeta);
+        }
+        if self.static_block && self.at("await") {
+            return Err(self.error("await in a class static block"));
+        }
+        if self.module_goal && self.at("await") {
+            return Err(self.error("await is reserved in module code"));
+        }
+        if self.eat("(") {
+            let e = self.expression(1)?;
+            self.expect(")")?;
+            return self.checked_expression(Expr::Group(Box::new(e)));
+        }
+        if self.eat("[") {
+            let mut items = Vec::new();
+            let mut trailing = false;
+            while !self.eat("]") {
+                if self.eat(",") {
+                    items.push(None);
+                    continue;
+                }
+                items.push(Some(if self.eat("...") {
+                    let value = self.expression(2)?;
+                    self.checked_expression(Expr::Spread(Box::new(value)))?
+                } else {
+                    self.expression(2)?
+                }));
+                if self.eat("]") {
+                    break;
+                }
+                self.expect(",")?;
+                trailing = self.at("]");
+            }
+            return self.checked_expression(Expr::Array(items, trailing));
+        }
+        if self.eat("{") {
+            let mut pairs = Vec::new();
+            let mut trailing = false;
+            while !self.eat("}") {
+                if self.eat("...") {
+                    pairs.push(ObjectEntry::Spread(self.expression(2)?));
+                    if self.eat("}") {
+                        break;
+                    }
+                    self.expect(",")?;
+                    trailing = self.at("}");
+                    continue;
+                }
+                let is_async = self.async_method_ahead();
+                if is_async {
+                    self.advance(1);
+                }
+                let function_kind = self.function_kind(is_async);
+                let accessor = if function_kind == FunctionKind::Ordinary {
+                    self.accessor_ahead(false)
+                } else {
+                    None
+                };
+                if accessor.is_some() {
+                    self.advance(1);
+                }
+                let computed = self.eat("[");
+                let shorthand = !computed
+                    && matches!(&self.current().kind,
+                        TokenKind::Word(word) | TokenKind::EscapedWord(word) if !reserved(word));
+                let key = if computed {
+                    let key = self.expression_in(2)?;
+                    self.expect("]")?;
+                    key
+                } else {
+                    Expr::Literal(Value::String(self.property_name()?))
+                };
+                let literal_key = if let Expr::Literal(Value::String(key)) = &key {
+                    Some(key.clone())
+                } else {
+                    None
+                };
+                let mut prototype = false;
+                let mut cover = false;
+                let method = accessor.or_else(|| self.at("(").then_some(MethodKind::Method));
+                if function_kind != FunctionKind::Ordinary && !self.at("(") {
+                    return Err(self.error("Method requires a body"));
+                }
+                let value = if let Some(method) = method {
+                    let function = self.method_function(
+                        if computed { None } else { literal_key.clone() },
+                        false,
+                        function_kind,
+                        method,
+                    )?;
+                    self.checked_expression(Expr::Function(function))?
+                } else if self.eat(":") {
+                    prototype = !computed
+                        && literal_key
+                            .as_ref()
+                            .is_some_and(|key| key == &JsString::from("__proto__"));
+                    self.expression(2)?
+                } else {
+                    let Some(key) = literal_key else {
+                        return Err(self.error("Computed property requires a value or method"));
+                    };
+                    if !shorthand {
+                        return Err(self.error("Invalid shorthand property"));
+                    }
+                    if self.class_initializer && key == JsString::from("arguments") {
+                        return Err(self.error("arguments in a class initializer"));
+                    }
+                    if key == JsString::from("yield") && self.yield_context != KeywordContext::None
+                    {
+                        return Err(self.error("yield is not a shorthand identifier here"));
+                    }
+                    if key == JsString::from("await") {
+                        if self.static_block
+                            || self.module_goal
+                            || self.await_context != KeywordContext::None
+                        {
+                            return Err(self.error("await is not a shorthand identifier here"));
+                        }
+                        self.await_count += 1;
+                    }
+                    let value = Expr::Identifier(key.clone());
+                    if self.eat("=") {
+                        cover = true;
+                        let default = self.expression(2)?;
+                        Expr::Assign("=", Box::new(value), Box::new(default))
+                    } else {
+                        value
+                    }
+                };
+                let infer_name =
+                    matches!(&value,Expr::Function(function) if function.name.is_none());
+                pairs.push(ObjectEntry::Property {
+                    key,
+                    value,
+                    prototype,
+                    infer_name,
+                    cover,
+                    computed,
+                    method,
+                });
+                if self.eat("}") {
+                    break;
+                }
+                self.expect(",")?;
+                trailing = self.at("}");
+            }
+            return self.checked_expression(Expr::Object(pairs, trailing));
+        }
+        if self.async_function_ahead() {
+            self.advance(2);
+            let function = self.function(true, false)?;
+            return self.checked_expression(Expr::Function(function));
+        }
+        if self.eat("function") {
+            let function = self.function(false, false)?;
+            return self.checked_expression(Expr::Function(function));
+        }
+        if self.eat("this") {
+            return Ok(Expr::This);
+        }
+        if self.eat("true") {
+            return Ok(Expr::Literal(Value::Bool(true)));
+        }
+        if self.eat("false") {
+            return Ok(Expr::Literal(Value::Bool(false)));
+        }
+        if self.eat("null") {
+            return Ok(Expr::Literal(Value::Null));
+        }
+        match self.current().kind.clone() {
+            TokenKind::Number(n) => {
+                self.advance(1);
+                Ok(Expr::Literal(Value::Number(n)))
+            }
+            TokenKind::BigInt(value) => {
+                self.advance(1);
+                Ok(Expr::Literal(Value::BigInt(value)))
+            }
+            TokenKind::String(s) => {
+                self.advance(1);
+                Ok(Expr::Literal(Value::String(s)))
+            }
+            TokenKind::Word(w) | TokenKind::EscapedWord(w) if self.identifier_allowed(&w) => {
+                if self.class_initializer && w == "arguments" {
+                    return Err(self.error("arguments in a class initializer"));
+                }
+                self.await_count += usize::from(w == "await");
+                self.advance(1);
+                Ok(Expr::Identifier(w.into()))
+            }
+            _ => Err(self.error("Expected an expression")),
+        }
+    }
+}
+enum Ast<'a> {
+    Expression(&'a Expr),
+    Statement(&'a Stmt),
+    Pattern(&'a Pattern),
+    Class(&'a Class),
+}
+
+/// Iterative inspection is intentional: a depth guard must not itself recurse.
+/// Children were checked when constructed; each wrapper can exceed the budget
+/// by only one node before it is rejected, keeping error-path destruction safe.
+fn ast_within_budget(root: Ast<'_>) -> bool {
+    let mut pending = vec![(root, 1usize)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth > MAX_AST_DEPTH {
+            return false;
+        }
+        let child_depth = depth + 1;
+        match node {
+            Ast::Class(class) => push_class_ast(class, child_depth, &mut pending),
+            Ast::Pattern(pattern) => match pattern {
+                Pattern::Name(_) => {}
+                Pattern::Target(target) => pending.push((Ast::Expression(target), child_depth)),
+                Pattern::Default(pattern, value) => {
+                    pending.push((Ast::Pattern(pattern), child_depth));
+                    pending.push((Ast::Expression(value), child_depth));
+                }
+                Pattern::Array(items, rest) => {
+                    pending.extend(
+                        items
+                            .iter()
+                            .flatten()
+                            .map(|p| (Ast::Pattern(p), child_depth)),
+                    );
+                    pending.extend(rest.iter().map(|p| (Ast::Pattern(p), child_depth)));
+                }
+                Pattern::Object(properties, rest) => {
+                    for (key, pattern, _) in properties {
+                        pending.push((Ast::Expression(key), child_depth));
+                        pending.push((Ast::Pattern(pattern), child_depth));
+                    }
+                    pending.extend(rest.iter().map(|p| (Ast::Pattern(p), child_depth)));
+                }
+            },
+            Ast::Expression(expression) => match expression {
+                Expr::Literal(_)
+                | Expr::RegExp(_)
+                | Expr::Identifier(_)
+                | Expr::This
+                | Expr::Super
+                | Expr::NewTarget
+                | Expr::ImportMeta => {}
+                Expr::Class(class) => push_class_ast(class, child_depth, &mut pending),
+                Expr::Array(items, _) => pending.extend(
+                    items
+                        .iter()
+                        .flatten()
+                        .map(|e| (Ast::Expression(e), child_depth)),
+                ),
+                Expr::Object(items, _) => {
+                    for entry in items {
+                        match entry {
+                            ObjectEntry::Property { key, value, .. } => {
+                                pending.push((Ast::Expression(key), child_depth));
+                                pending.push((Ast::Expression(value), child_depth));
+                            }
+                            ObjectEntry::Spread(value) => {
+                                pending.push((Ast::Expression(value), child_depth))
+                            }
+                        }
+                    }
+                }
+                Expr::Destructure(pattern, value) => {
+                    pending.push((Ast::Pattern(pattern), child_depth));
+                    pending.push((Ast::Expression(value), child_depth));
+                }
+                Expr::Template(_, substitutions, tag) => {
+                    pending.extend(
+                        substitutions
+                            .iter()
+                            .map(|e| (Ast::Expression(e), child_depth)),
+                    );
+                    pending.extend(tag.iter().map(|e| (Ast::Expression(e), child_depth)));
+                }
+                Expr::Chain(base, links) => {
+                    pending.push((Ast::Expression(base), child_depth));
+                    for link in links {
+                        match link {
+                            ChainLink::Member(key, _) => {
+                                pending.push((Ast::Expression(key), child_depth))
+                            }
+                            ChainLink::Call(args, _) => pending
+                                .extend(args.iter().map(|e| (Ast::Expression(e), child_depth))),
+                            ChainLink::PrivateMember(..) => {}
+                        }
+                    }
+                }
+                Expr::Function(function) => {
+                    pending.extend(
+                        function
+                            .body
+                            .iter()
+                            .map(|s| (Ast::Statement(s), child_depth)),
+                    );
+                    pending.extend(
+                        function
+                            .params
+                            .iter()
+                            .map(|p| (Ast::Pattern(&p.pattern), child_depth)),
+                    );
+                }
+                Expr::Member(a, b)
+                | Expr::Binary(_, a, b)
+                | Expr::Assign(_, a, b)
+                | Expr::Sequence(a, b) => {
+                    pending.push((Ast::Expression(a), child_depth));
+                    pending.push((Ast::Expression(b), child_depth));
+                }
+                Expr::Call(target, args) | Expr::New(target, args) => {
+                    pending.push((Ast::Expression(target), child_depth));
+                    pending.extend(args.iter().map(|e| (Ast::Expression(e), child_depth)));
+                }
+                Expr::Unary(_, e)
+                | Expr::Update(_, e, _)
+                | Expr::Spread(e)
+                | Expr::Group(e)
+                | Expr::Await(e)
+                | Expr::DynamicImport(e)
+                | Expr::PrivateMember(e, _)
+                | Expr::PrivateIn(_, e) => pending.push((Ast::Expression(e), child_depth)),
+                Expr::Yield { value, .. } => {
+                    pending.extend(value.iter().map(|e| (Ast::Expression(e), child_depth)));
+                }
+                Expr::Conditional(a, b, c) => {
+                    pending.push((Ast::Expression(a), child_depth));
+                    pending.push((Ast::Expression(b), child_depth));
+                    pending.push((Ast::Expression(c), child_depth));
+                }
+            },
+            Ast::Statement(statement) => match statement {
+                Stmt::Empty | Stmt::Break | Stmt::Continue => {}
+                Stmt::Class(_, class) => push_class_ast(class, child_depth, &mut pending),
+                Stmt::DefaultExport(value) => pending.push((Ast::Expression(value), child_depth)),
+                Stmt::Expression(e) | Stmt::Throw(e) => {
+                    pending.push((Ast::Expression(e), child_depth))
+                }
+                Stmt::Block(body) => {
+                    pending.extend(body.iter().map(|s| (Ast::Statement(s), child_depth)))
+                }
+                Stmt::Function(function) | Stmt::DefaultFunction(function) => {
+                    pending.extend(
+                        function
+                            .body
+                            .iter()
+                            .map(|s| (Ast::Statement(s), child_depth)),
+                    );
+                    pending.extend(
+                        function
+                            .params
+                            .iter()
+                            .map(|p| (Ast::Pattern(&p.pattern), child_depth)),
+                    );
+                }
+                Stmt::Variable(_, declarations) => {
+                    for (pattern, value) in declarations {
+                        pending.push((Ast::Pattern(pattern), child_depth));
+                        pending.extend(value.iter().map(|e| (Ast::Expression(e), child_depth)));
+                    }
+                }
+                Stmt::If(test, yes, no) => {
+                    pending.push((Ast::Expression(test), child_depth));
+                    pending.push((Ast::Statement(yes), child_depth));
+                    pending.extend(no.iter().map(|s| (Ast::Statement(s), child_depth)));
+                }
+                Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
+                    pending.push((Ast::Expression(test), child_depth));
+                    pending.push((Ast::Statement(body), child_depth));
+                }
+                Stmt::ForIn(_, pattern, test, body) | Stmt::ForOf(_, pattern, test, body, _) => {
+                    pending.push((Ast::Pattern(pattern), child_depth));
+                    pending.push((Ast::Expression(test), child_depth));
+                    pending.push((Ast::Statement(body), child_depth));
+                }
+                Stmt::For(initial, test, update, body) => {
+                    pending.extend(initial.iter().map(|s| (Ast::Statement(s), child_depth)));
+                    pending.extend(
+                        test.iter()
+                            .chain(update.iter())
+                            .map(|e| (Ast::Expression(e), child_depth)),
+                    );
+                    pending.push((Ast::Statement(body), child_depth));
+                }
+                Stmt::Switch(test, cases) => {
+                    pending.push((Ast::Expression(test), child_depth));
+                    for (test, body) in cases {
+                        pending.extend(test.iter().map(|e| (Ast::Expression(e), child_depth)));
+                        pending.extend(body.iter().map(|s| (Ast::Statement(s), child_depth)));
+                    }
+                }
+                Stmt::Return(expression) => {
+                    pending.extend(expression.iter().map(|e| (Ast::Expression(e), child_depth)))
+                }
+                Stmt::Try(body, catch, finally) => {
+                    pending.push((Ast::Statement(body), child_depth));
+                    pending.extend(catch.iter().map(|(_, s)| (Ast::Statement(s), child_depth)));
+                    if let Some((Some(pattern), _)) = catch {
+                        pending.push((Ast::Pattern(pattern), child_depth));
+                    }
+                    pending.extend(finally.iter().map(|s| (Ast::Statement(s), child_depth)));
+                }
+            },
+        }
+    }
+    true
+}
+
+fn assignable(e: &Expr) -> bool {
+    match e {
+        Expr::Identifier(_) | Expr::Member(..) | Expr::PrivateMember(..) => true,
+        Expr::Group(e) => assignable(e),
+        _ => false,
+    }
+}
+fn private_reference(mut expression: &Expr) -> bool {
+    while let Expr::Group(inner) = expression {
+        expression = inner;
+    }
+    match expression {
+        Expr::PrivateMember(..) => true,
+        Expr::Chain(_, links) => matches!(links.last(), Some(ChainLink::PrivateMember(..))),
+        _ => false,
+    }
+}
+fn number_key(n: f64) -> String {
+    crate::vm::number_string(n)
+}
+fn reserved(s: &str) -> bool {
+    matches!(
+        s,
+        "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "enum"
+    )
+}
+
+fn push_class_ast<'a>(class: &'a Class, depth: usize, pending: &mut Vec<(Ast<'a>, usize)>) {
+    pending.extend(class.heritage.iter().map(|e| (Ast::Expression(e), depth)));
+    for element in &class.elements {
+        match element {
+            ClassElement::Method { key, function, .. } => {
+                if let ClassKey::Public(key) = key {
+                    pending.push((Ast::Expression(key), depth));
+                }
+                pending.extend(
+                    function
+                        .params
+                        .iter()
+                        .map(|p| (Ast::Pattern(&p.pattern), depth)),
+                );
+                pending.extend(function.body.iter().map(|s| (Ast::Statement(s), depth)));
+            }
+            ClassElement::Field { key, value, .. } => {
+                if let ClassKey::Public(key) = key {
+                    pending.push((Ast::Expression(key), depth));
+                }
+                pending.extend(value.iter().map(|v| (Ast::Expression(v), depth)));
+            }
+            ClassElement::StaticBlock(body) => {
+                pending.extend(body.iter().map(|s| (Ast::Statement(s), depth)))
+            }
+        }
+    }
+}

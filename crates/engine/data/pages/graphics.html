@@ -1,0 +1,43 @@
+<p class="eyebrow">RUST BROWSER · ALFA.5</p>
+<h1>Grafika i układ reagują.</h1>
+<p>Przesuwaj kartę, kliknij koło i przewijaj zawartość panelu. Wymiary pod spodem
+pochodzą z układu, który przeglądarka wykorzystuje do rysowania.</p>
+<style>
+  .controls{display:flex;gap:12px;flex-wrap:wrap;margin:18px 0}
+  button{font-size:16px;padding:10px 18px;background:#16735e;color:white;border:1px solid #0b5948}
+  #stage{position:relative;height:170px;background:#eaf3ef;border:1px solid #bed4ca;overflow:hidden}
+  #moving{position:absolute;left:24px;top:22px;width:200px;height:90px;padding:14px;background:#157861;color:white;transform-origin:50% 50%}
+  #moving p{font-size:14px;line-height:1.35;margin:8px 0}
+  #scroll-panel{height:110px;overflow:auto;border:1px solid #bed4ca;padding:12px;margin-top:16px}
+  #scroll-panel p{margin:8px 0}#measurement{white-space:pre-wrap;background:#eef3f7;padding:14px}
+  svg{display:block;max-width:100%;margin:22px 0;background:#eff5fa}
+  #click-shape{fill:#15826a;stroke:white;stroke-width:4}
+</style>
+<div class="controls"><button id="move" type="button">Przesuń kartę</button><button id="measure" type="button">Zmierz układ</button><button id="reset" type="button">Wyzeruj</button></div>
+<div id="stage"><div id="moving"><strong>Pozycja i transformacja</strong><p>Obrót nie zmienia miejsca zajmowanego w przepływie.</p></div></div>
+<pre id="measurement">Przygotowywanie pomiaru…</pre>
+<svg id="art" xmlns="http://www.w3.org/2000/svg" width="600" height="180" viewBox="0 0 600 180">
+  <defs><linearGradient id="paint" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4abda1"/><stop offset="1" stop-color="#146c9f"/></linearGradient>
+  <clipPath id="curve-clip"><rect x="18" y="18" width="400" height="144" rx="12"/></clipPath></defs>
+  <g clip-path="url(#curve-clip)"><path d="M 0 120 C 65 25 130 175 210 90 S 345 20 440 85 L 440 180 L 0 180 Z" fill="url(#paint)"/>
+  <path d="M 0 120 C 65 25 130 175 210 90 S 345 20 440 85" fill="none" stroke="#185d55" stroke-width="5"/></g>
+  <circle id="click-shape" cx="510" cy="90" r="45"/>
+  <path d="M 495 90 L 506 101 L 526 78" fill="none" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+<p id="svg-result">Koło SVG czeka na kliknięcie.</p>
+<div id="scroll-panel"><p>Ten panel przewija się osobno od strony.</p><p>Własny układ oblicza obszar przewijania.</p><p>Przycinanie działa także po transformacji rodzica.</p><p>Wartość scrollTop jest dostępna w JavaScript.</p><p>Koniec panelu.</p></div>
+<p class="muted">To nadal podzbiór SVG, CSS i JavaScriptu. <a href="about:version">Możliwości i braki</a> · <a href="about:home">Start</a></p>
+<script>
+let steps=0;
+const box=document.getElementById('moving');
+function measure(){
+  const {width,height,x,y}=box.getBoundingClientRect();
+  const style=getComputedStyle(box);
+  document.getElementById('measurement').textContent=`Pozycja: ${Math.round(x)}, ${Math.round(y)} · Obrys: ${Math.round(width)} × ${Math.round(height)} px · Szerokość przed transformacją: ${box.offsetWidth} px · ${style.position}`;
+}
+document.getElementById('move').addEventListener('click',function(){steps++;box.style.transform=`translate(${(steps%4)*65}px, 0px) rotate(${(steps%3)*6}deg)`;measure();document.title=`Grafika: ${steps}`;});
+document.getElementById('measure').addEventListener('click',measure);
+document.getElementById('reset').addEventListener('click',function(){steps=0;box.style.transform='none';measure();document.title='Grafika: 0';});
+document.getElementById('click-shape').addEventListener('click',function(){document.getElementById('svg-result').textContent='Koło SVG odebrało kliknięcie.';document.title='SVG: OK';});
+measure();
+</script>

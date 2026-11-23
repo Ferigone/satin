@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fetch upload</title>
+<h1>Fetch request streaming</h1>
+<ul>
+  <li>HTTP/1.1 rejects a streamed request before sending headers</li>
+  <li>HTTP/2 delivers initial bytes while the producer is paused</li>
+  <li>Aborting an in-flight upload resets the HTTP/2 stream</li>
+</ul>
+<pre id="receipt"></pre>
+<script>
+  const post = body => ({ method: 'POST', body, duplex: 'half' });
+  const text = url => fetch(url).then(response => response.text());
+
+  async function http1() {
+    let pulls = 0;
+    const source = new ReadableStream({
+      pull(c) {
+        pulls++;
+        c.enqueue(new Uint8Array([11, 12, 13]));
+        c.close();
+      },
+    }, { highWaterMark: 0 });
+    const request = new Request('/wire/stream', post(source));
+    const sameBody = request.body === source;
+    const usedBefore = request.bodyUsed;
+    let error;
+    try { await fetch(request); } catch (reason) { error = reason.name; }
+    const buffered = await fetch('/wire/buffered', post('control')).then(response => response.text());
+
+    let canceled, rejected;
+    const abort = new AbortController();
+    const reason = { stage: 'preabort' };
+    abort.abort(reason);
+    const abandoned = new ReadableStream({ cancel(value) { canceled = value; } }, { highWaterMark: 0 });
+    const pending = fetch('/wire/preabort', { ...post(abandoned), signal: abort.signal });
+    const canceledSynchronously = canceled === reason;
+    try { await pending; } catch (value) { rejected = value; }
+    return {
+      duplex: request.duplex, sameBody, usedBefore, usedAfter: request.bodyUsed, lockedAfter: source.locked,
+      pulls, error, buffered, rejectedWithReason: rejected === reason, canceledSynchronously,
+    };
+  }
+
+  async function http2() {
+    let resume;
+    const gate = new Promise(resolve => resume = resolve);
+    let pulls = 0;
+    let settled = false;
+    const source = new ReadableStream({
+      pull(c) {
+        if (++pulls === 1) {
+          c.enqueue(new Uint8Array([11, 12, 13]));
+          return;
+        }
+        return gate.then(() => {
+          c.enqueue(new Uint8Array([14, 15, 16]));
+          c.close();
+        });
+      },
+    }, { highWaterMark: 0 });
+    const pend = fetch('/wire/stream', post(source)).then(response => {
+      settled = true;
+      return response.text();
+    });
+    const first = await text('/wire/first');
+    const waitedForEof = !settled;
+    resume();
+    const received = await pend;
+
+    const control = new AbortController();
+    const reason = { stage: 'in-flight' };
+    let canceled, rejected;
+    const held = new ReadableStream({
+      pull(c) {
+        c.enqueue(new Uint8Array([77]));
+        return new Promise(() => {});
+      },
+      cancel(value) { canceled = value; },
+    }, { highWaterMark: 0 });
+    const stopped = fetch('/wire/abort-stream', { ...post(held), signal: control.signal })
+      .catch(value => rejected = value);
+    const firstAborted = await text('/wire/abort-data');
+    control.abort(reason);
+    await stopped;
+    const reset = await text('/wire/reset');
+    return {
+      pulls, first, received, waitedForEof, firstAborted, reset,
+      rejectedWithReason: rejected === reason, canceledWithReason: canceled === reason,
+    };
+  }
+
+  async function run() {
+    const result = document.getElementById('receipt');
+    try {
+      result.textContent = JSON.stringify(await (location.protocol === 'https:' ? http2() : http1()));
+      document.title = 'Fetch upload verified';
+    } catch (error) {
+      result.textContent = JSON.stringify({ error: String(error) });
+    }
+    result.setAttribute('data-complete', 'yes');
+  }
+  run();
+</script>

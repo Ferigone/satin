@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Binary forms ready</title>
+<style>
+  body { margin: 28px; font: 16px sans-serif; }
+  label, textarea, button { display: block; margin: 8px 0; }
+  button { padding: 7px 12px; }
+</style>
+<input form="upload" type="hidden" name="outside" value="outer">
+<form id="upload" method="post" enctype="multipart/form-data">
+  <label>Token <input id="token" name="token" value="initial"></label>
+  <textarea name="memo">mañana
+line</textarea>
+  <input name="empty" type="file">
+  <button type="button" id="run">Verify files and Fetch</button>
+  <button type="submit" name="commit" value="send" id="send">Submit multipart form</button>
+</form>
+<p id="status"></p>
+<script>
+var form = document.getElementById('upload');
+var run = document.getElementById('run');
+var send = document.getElementById('send');
+var receiptStatus = document.getElementById('status');
+var mode = new URLSearchParams(location.search).get('mode');
+var suffix = '?mode=' + mode;
+var payload;
+var captured;
+var formEventCount = 0;
+var expectedBytes = '0,255,13,10,128';
+form.action = '/submit' + suffix;
+
+function check(condition, name) {
+  if (!condition) throw new Error(name);
+}
+
+function signature(view) {
+  return Array.from(view).join(',');
+}
+
+async function readStream(stream) {
+  var reader = stream.getReader();
+  var all = [];
+  var item = await reader.read();
+  while (!item.done) {
+    for (var i = 0; i < item.value.length; i++) all.push(item.value[i]);
+    item = await reader.read();
+  }
+  reader.releaseLock();
+  return all.join(',');
+}
+
+async function makeFile() {
+  var original = new Uint8Array([73,0,255,13,10,128,74]);
+  var view = new DataView(original.buffer,1,5);
+  var blob = new Blob([view,'é','\ud800'], {type:'Application/X-Binary'});
+  original[2] = 19;
+  check(blob.size === 10 && blob.type === 'application/x-binary', 'Blob size and type');
+  var bound = blob.slice(0,5,'APPLICATION/X-BINARY');
+  var copy = new Uint8Array(await bound.arrayBuffer());
+  check(signature(copy) === expectedBytes, 'view extent');
+  copy[1] = 88;
+  check(signature(await bound.bytes()) === expectedBytes, 'immutable bytes');
+  check(await readStream(bound.stream()) === expectedBytes, 'Blob byte stream');
+  var text = new Blob(['\ufeffé',new Uint8Array([255,0])]);
+  check(await text.text() === 'é\ufffd\u0000', 'UTF-8 decode');
+  var file = new File([bound],'first.bin',{type:'APPLICATION/X-BINARY',lastModified:1234});
+  check(file instanceof Blob && file instanceof File, 'File inheritance');
+  check(file.name === 'first.bin' && file.lastModified === 1234, 'File metadata');
+  return file;
+}
+
+function decorate(event) {
+  check(event instanceof FormDataEvent && event instanceof Event, 'FormDataEvent brand');
+  check(event.target === form && event.bubbles && !event.cancelable, 'FormDataEvent flags');
+  captured = event.formData;
+  captured.append('dupe','first');
+  captured.append('dupe','second');
+  captured.append('quoted"\nfield','one\rtwo\nthree');
+  captured.append('upload',payload,'café.bin');
+  formEventCount++;
+}
+
+function formRecord() {
+  document.getElementById('token').value = 'a 🦀';
+  form.onformdata = decorate;
+  var data = new FormData(form,send);
+  check(data !== captured && data.get('commit') === 'send', 'constructor submitter and copy');
+  check(data.get('empty') instanceof File && data.get('empty').name === '', 'empty file control');
+  var file = data.get('upload');
+  check(file !== payload && file.lastModified === 1234 && file.name === 'café.bin', 'File alias');
+  captured.delete('dupe');
+  check(data.getAll('dupe').join('|') === 'first|second', 'FormData copy');
+  var iter = data.keys();
+  check(iter.next().value === 'outside', 'external form control');
+  var trace = [];
+  for (var field of iter) trace.push(field);
+  check(trace.join('|') === 'token|memo|empty|commit|dupe|dupe|quoted"\nfield|upload', 'ordered fields');
+  data.append('live','yes');
+  check(iter.next().value === 'live', 'live iterator');
+  data.delete('live');
+  return data;
+}
+
+async function verifyFormFetch(data) {
+  var response = await fetch('/multipart' + suffix, {method:'POST',body:data});
+  check(response.ok, 'multipart Fetch');
+  var fields = await response.formData();
+  var file = fields.get('upload');
+  check(file instanceof File && file.name === 'café.bin', 'multipart decoded File');
+  check(file.type === 'application/x-binary', 'multipart decoded MIME');
+  check(signature(await file.bytes()) === expectedBytes, 'multipart decoded raw bytes');
+  check(fields.getAll('dupe').join('|') === 'first|second', 'multipart duplicate fields');
+  check(fields.get('memo') === 'mañana\r\nline', 'multipart newline conversion');
+}
+
+async function verifyBlobFetch() {
+  var response = await fetch('/binary' + suffix,{method:'POST',body:payload});
+  check(response.ok, 'Blob Fetch');
+  var file = await response.blob();
+  check(file instanceof Blob && file.type === 'application/x-binary', 'Fetch Blob factory');
+  check(signature(await file.bytes()) === expectedBytes, 'Fetch Blob bytes');
+}
+
+function allowSubmit() {
+  receiptStatus.textContent = 'Blob and Fetch checks passed';
+  send.setAttribute('data-verified','yes');
+  document.title = 'Binary forms can submit';
+}
+
+run.onclick = async function() {
+  try {
+    if (mode === 'native') fetch('/native-ready' + suffix);
+    payload = await makeFile();
+    var data = formRecord();
+    await verifyFormFetch(data);
+    await verifyBlobFetch();
+    var receipt = {phase:'bindings',blob:true,formData:true,formEvents:formEventCount,bytes:expectedBytes};
+    if (mode === 'native') allowSubmit();
+    await fetch('/receipt' + suffix, {method:'POST',body:JSON.stringify(receipt)});
+    if (mode !== 'native') allowSubmit();
+    if (mode === 'headless') setTimeout(function(){ send.click(); },0);
+  } catch (error) {
+    receiptStatus.textContent = String(error);
+    receiptStatus.setAttribute('data-failed','yes');
+    document.title = 'Binary forms failed';
+    fetch('/failure' + suffix,{method:'POST',body:String(error)});
+  }
+};
+run.setAttribute('data-ready','yes');
+</script>
+</html>

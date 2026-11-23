@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dynamic scripts fixture</title>
+<style>
+  body { background: #e9f1f5; color: #203142; font: 18px sans-serif; margin: 30px; }
+  main { width: 700px; padding: 24px; background: white; border: 1px solid #58778f; }
+  button { background: #21536d; color: white; margin: 10px 0; padding: 8px 16px; }
+  p { margin: 8px 0; }
+  pre { white-space: pre-wrap; border: 1px solid #58778f; padding: 12px; }
+</style>
+<script type="importmap">{"imports":{"shared":"./shared.js"}}</script>
+<template id="parsed-template"><script>inlineLog.push('parsed-template');</script></template>
+<script id="empty-parser-script"></script>
+<main>
+  <h1>Dynamic script execution</h1>
+  <p>Inline preparation and connected DOM mutations</p>
+  <p>Ordered scripts and independent asynchronous fetches</p>
+  <button id="trigger" type="button">Run dynamic scripts</button>
+  <p>Module graphs use the navigation import map.</p>
+  <p>The final receipt contains the observed event order.</p>
+  <div id="sink"></div>
+  <pre id="receipt">Waiting</pre>
+</main>
+<script id="setup">
+var inlineLog = [];
+var life = [];
+var ordered = [];
+var modules = [];
+var imports = [];
+var checks = {};
+var outcomes = {};
+var fast;
+var second;
+var boot;
+var rootModule;
+var crossModule;
+var importsDone = false;
+var setup = document.currentScript;
+var inline = document.createElement('script');
+inline.text = 'inlineLog.push(document.currentScript===inline ? "inline" : "wrong currentScript"); document.write("<p id=inserted>Written markup</p>");';
+document.body.appendChild(inline);
+checks.restored = document.currentScript === setup && document.getElementById('inserted') !== null;
+document.body.appendChild(inline.cloneNode(true));
+inline.remove();
+document.body.appendChild(inline);
+
+var empty = document.getElementById('empty-parser-script');
+checks.emptyParserAsync = empty.async;
+empty.textContent = 'inlineLog.push("empty-parser-script");';
+document.body.appendChild(document.getElementById('parsed-template').content.cloneNode(true));
+var endTag = '</scr' + 'ipt>';
+var sink = document.getElementById('sink');
+sink.innerHTML = '<script>inlineLog.push("unexpected")' + endTag +
+  '<template><script>inlineLog.push("unexpected")' + endTag + '</template>';
+document.body.appendChild(sink.firstChild.cloneNode(true));
+document.body.appendChild(sink.lastChild.content.cloneNode(true));
+
+var cluster = document.createDocumentFragment();
+var removeOther = document.createElement('script');
+var other = document.createElement('script');
+other.id = 'remove-before-preparation';
+removeOther.text = 'checks.atomic = document.getElementById("remove-before-preparation")===other; other.remove(); inlineLog.push("first");';
+other.text = 'inlineLog.push("second");';
+cluster.append(removeOther, other);
+document.body.appendChild(cluster);
+inlineLog.push('after-fragment');
+document.body.appendChild(other);
+
+var lateText = document.createElement('script');
+document.body.appendChild(lateText);
+lateText.appendChild(document.createTextNode('inlineLog.push("late-text");'));
+var disabled = document.createElement('script');
+disabled.noModule = true;
+disabled.text = 'inlineLog.push("unexpected")';
+document.body.appendChild(disabled);
+disabled.noModule = false;
+disabled.text = 'inlineLog.push("unexpected")';
+
+boot = document.createElement('script');
+boot.src = './boot.js';
+boot.onload = function (event) {
+  checks.boot = this === boot && event.target === boot && document.currentScript === null;
+  life.push('boot-load');
+};
+document.head.appendChild(boot);
+document.addEventListener('DOMContentLoaded', function () {
+  life.push('dcl:' + document.readyState);
+  fetch('./release-boot', {method: 'POST'});
+});
+window.addEventListener('load', function () {
+  life.push('load:' + document.readyState);
+  document.getElementById('trigger').setAttribute('data-ready', 'yes');
+  document.title = 'Dynamic script fixture ready';
+});
+
+function remember(name, kind, event, expected, receiver) {
+  outcomes[name] = [kind, event.target === expected && receiver === expected, document.currentScript === null];
+  finish();
+}
+
+function finish() {
+  if (Object.keys(outcomes).length === 6 && importsDone) {
+    checks.writeIgnored = document.getElementById('must-not-exist') === null;
+    var value = {inline: inlineLog, life: life, ordered: ordered, modules: modules, imports: imports, checks: checks, outcomes: outcomes};
+    var receipt = document.getElementById('receipt');
+    receipt.textContent = JSON.stringify(value);
+    fetch('./receipt', {method: 'POST', body: receipt.textContent}).then(function () {
+      receipt.setAttribute('data-complete', 'yes');
+      document.title = 'Dynamic scripts verified';
+    });
+  }
+}
+
+function startImports() {
+  var a = import('./lazy-redirect.mjs');
+  var b = import('./lazy-redirect.mjs');
+  Promise.all([a, b]).then(function (pair) {
+    checks.namespaceIdentity = pair[0] === pair[1] && pair[0].answer === 37;
+    imports.push('namespace');
+    return pair[0].leaf();
+  }).then(function (leaf) {
+    checks.importReferrer = leaf.value === 'correct redirect base';
+    return import('unmapped-fixture-name');
+  }).catch(function (error) {
+    checks.importRejection = error instanceof TypeError;
+    importsDone = true;
+    finish();
+  });
+}
+
+function afterInlineModule() {
+  crossModule = document.createElement('script');
+  crossModule.type = 'module';
+  crossModule.src = '__CROSS_ROOT__/allowed.mjs';
+  crossModule.onload = function (event) {
+    remember('cross', 'load', event, crossModule, this);
+  };
+  document.body.appendChild(crossModule);
+
+  var denied = document.createElement('script');
+  denied.type = 'module';
+  denied.src = '__CROSS_ROOT__/denied.mjs';
+  denied.onerror = function (event) {
+    remember('cors', 'error', event, denied, this);
+  };
+  document.body.appendChild(denied);
+
+  var rejected = document.createElement('script');
+  rejected.src = './integrity-mismatch.js';
+  rejected.integrity = 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+  rejected.onerror = function (event) {
+    remember('sri', 'error', event, rejected, this);
+  };
+  document.body.appendChild(rejected);
+  startImports();
+}
+
+function startModules() {
+  rootModule = document.createElement('script');
+  rootModule.type = 'module';
+  rootModule.src = './module-redirect.mjs';
+  rootModule.onload = function (event) {
+    modules.push(event.target === rootModule && this === rootModule ? 'root-load' : 'wrong module load');
+    var nested = document.createElement('script');
+    nested.type = 'module';
+    nested.async = false;
+    nested.text = 'import { shared } from "shared"; modules.push("inline:" + shared + ":" + (document.currentScript===null)); afterInlineModule();';
+    document.body.appendChild(nested);
+  };
+  document.body.appendChild(rootModule);
+}
+
+document.getElementById('trigger').addEventListener('click', function () {
+  life.push('click:' + document.readyState);
+  checks.clickCurrent = document.currentScript === null;
+  var first = document.createElement('script');
+  second = document.createElement('script');
+  fast = document.createElement('script');
+  first.async = false;
+  first.src = './first.js';
+  first.onerror = function (event) {
+    ordered.push('first-error');
+    remember('first', 'error', event, first, this);
+  };
+  second.setAttribute('async', '');
+  second.removeAttribute('async');
+  second.src = './second.js';
+  second.onload = function (event) {
+    ordered.push('second-load');
+    remember('second', 'load', event, second, this);
+    startModules();
+  };
+  fast.type = 'application/x-inert';
+  fast.src = './must-not-fetch.js';
+  fast.onload = function (event) {
+    ordered.push('fast-load');
+    remember('fast', 'load', event, fast, this);
+    fetch('./release-first', {method: 'POST'});
+  };
+  checks.async = !first.async && !second.async && fast.async;
+  document.body.append(first, second, fast);
+  fast.type = '';
+  fast.setAttribute('src', './fast.js');
+  checks.srcReflection = fast.src.endsWith('/fast.js');
+  fast.remove();
+  fast.src = './must-not-fetch.js';
+  document.body.appendChild(fast.cloneNode(true));
+}, {once: true});
+</script>

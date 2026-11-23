@@ -1,0 +1,135 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS calc() geometry</title>
+<style>
+  html { font-size: 20px; overflow: hidden; }
+  body { margin: 0; }
+  #viewport { width: calc(50vw + 20px); height: calc(100vh + 100px); background: #2876ae; }
+  #container { width: 320px; height: 240px; }
+  #percent {
+    width: calc(50% + 20px);
+    height: calc(25% + 10px);
+    padding: calc(2.5% + 2px) calc(5% + 1px);
+    background: #319679;
+  }
+  #math {
+    font-size: 24px;
+    width: calc((2em + 1rem) * 2 / 4 + calc(8px * 3));
+    height: calc(1in - 2.54cm + 25.4mm + 72pt - 6pc + 101.6q);
+  }
+  #font { font-size: calc(1rem + 2px); width: calc(2em + 10px); line-height: calc(1em + 3px); }
+  #scalar { width: CaLc(2 * (4px + 3px) - 8px / 2); height: calc(1e1px + .5px); }
+  #negative {
+    width: 127px;
+    width: calc(20px - 30px);
+    height: calc(20px - 50%);
+    min-width: calc(5px - 10px);
+    padding-left: calc(1px - 5px);
+    margin-left: calc(2px - 9px);
+  }
+  #constraints {
+    width: 160px;
+    height: 80px;
+    min-width: calc(40px + 12px);
+    max-width: calc(30px - 50px);
+    min-height: calc(12px + 3px);
+    max-height: calc(25% - 75px);
+  }
+  #indefinite-percent { height: calc(50% + 10px); }
+  #indefinite-zero { height: calc(40% - 40% + 10px); }
+  .invalid { width: 73px; height: 6px; }
+  #wrong-type { width: calc(10px + 2); }
+  #wrong-unit { width: calc(10px + 2s); }
+  #wrong-spacing { width: calc(10px+ 2px); }
+  #wrong-sign { width: calc(10px -2px); }
+  #wrong-product { width: calc(10px * 2px); }
+  #wrong-arity { width: calc(10px +); }
+  #wrong-trailing { width: calc(10px + 2px) tail; }
+  #wrong-zero { width: calc(0); }
+  #valid-after-invalid { width: calc(10px +); width: calc(5px + 6px); }
+  #calc-receipt { display: none; }
+</style>
+<div id="viewport"></div>
+<div id="container">
+  <div id="percent"></div>
+  <div id="negative"></div>
+  <div id="constraints"></div>
+</div>
+<div id="math"></div>
+<div id="font"></div>
+<div id="scalar"></div>
+<div id="indefinite-percent"><div style="height: 14px"></div></div>
+<div id="indefinite-zero"><div style="height: 17px"></div></div>
+<div id="wrong-type" class="invalid"></div>
+<div id="wrong-unit" class="invalid"></div>
+<div id="wrong-spacing" class="invalid"></div>
+<div id="wrong-sign" class="invalid"></div>
+<div id="wrong-product" class="invalid"></div>
+<div id="wrong-arity" class="invalid"></div>
+<div id="wrong-trailing" class="invalid"></div>
+<div id="wrong-zero" class="invalid"></div>
+<div id="valid-after-invalid" class="invalid"></div>
+<pre id="calc-receipt"></pre>
+<script>
+  function calcElement(id) {
+    return document.getElementById(id);
+  }
+
+  var viewportBox = calcElement('viewport');
+  var viewportStyle = getComputedStyle(viewportBox);
+  var initialViewportRect = viewportBox.getBoundingClientRect();
+  var percentStyle = getComputedStyle(calcElement('percent'));
+  var fontStyle = getComputedStyle(calcElement('font'));
+
+  function calcRect(id) {
+    var rect = calcElement(id).getBoundingClientRect();
+    return [rect.width, rect.height];
+  }
+
+  function calcSnapshot() {
+    var negative = calcElement('negative').getBoundingClientRect();
+    var negativeStyle = getComputedStyle(calcElement('negative'));
+    var invalid = [];
+    var invalidIds = [
+      'wrong-type', 'wrong-unit', 'wrong-spacing', 'wrong-sign', 'wrong-product',
+      'wrong-arity', 'wrong-trailing', 'wrong-zero', 'valid-after-invalid'
+    ];
+    for (var i = 0; i < invalidIds.length; i++) {
+      invalid.push(calcRect(invalidIds[i])[0]);
+    }
+    return {
+      viewport: [innerWidth, innerHeight],
+      viewportRect: calcRect('viewport'),
+      viewportStyle: [viewportStyle.width, viewportStyle.height],
+      initialViewportRect: [initialViewportRect.width, initialViewportRect.height],
+      parentRect: calcRect('container'),
+      percentRect: calcRect('percent'),
+      percentStyle: [percentStyle.width, percentStyle.height, percentStyle.paddingTop, percentStyle.paddingLeft],
+      math: calcRect('math'),
+      font: [calcRect('font')[0], fontStyle.fontSize, fontStyle.lineHeight],
+      scalar: calcRect('scalar'),
+      negative: [negative.width, negative.height, negative.left, negativeStyle.paddingLeft],
+      constraints: calcRect('constraints'),
+      indefinite: [calcRect('indefinite-percent')[1], calcRect('indefinite-zero')[1]],
+      invalid: invalid
+    };
+  }
+
+  function changeCalcContainer() {
+    var container = calcElement('container');
+    container.style.width = '480px';
+    container.style.height = '320px';
+  }
+
+  function changeCalcRootFont() {
+    document.documentElement.style.fontSize = '18px';
+  }
+
+  function publishCalcReceipt() {
+    var receipt = calcElement('calc-receipt');
+    receipt.textContent = JSON.stringify(calcSnapshot());
+    receipt.setAttribute('data-ready', 'yes');
+  }
+
+  publishCalcReceipt();
+</script>

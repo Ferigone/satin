@@ -1,0 +1,39 @@
+<h1>Moduły i żywy dokument.</h1>
+<p>Ten licznik korzysta z importu JavaScriptu, klasy i bieżącego stanu DOM.</p>
+<style>
+  .panel{padding:24px;border:1px solid #b4d8cd;background:#eef8f4;margin:18px 0}
+  button{padding:12px 18px;background:#127461;color:#fff;border:1px solid #0f614f;font-size:17px}
+  #module-status{font-weight:650;color:#0f614f}
+</style>
+<div class="panel">
+  <p id="module-status">Wczytywanie modułu…</p>
+  <button type="button" id="module-increment">Dodaj 1</button>
+  <script id="during-parse">
+    var parserSawTail = document.getElementById('after-parse') !== null;
+    var parserScriptId = document.currentScript.id;
+    document.write('<p id="write-result">Ten akapit został wstawiony w trakcie parsowania.</p>');
+  </script>
+</div>
+<p id="after-parse">Obsługa kolejnych elementów zaczyna się po skrypcie powyżej.</p>
+<script type="importmap">
+  {"imports":{"demo-counter":"data:text/javascript,export%20let%20count%3D0%3Bexport%20class%20Counter%20%7Bstep()%7Breturn%20%2B%2Bcount%7D%7D"}}
+</script>
+<script type="module">
+  import { Counter, count } from 'demo-counter';
+  class ButtonCounter extends Counter {
+    step() { return super.step(); }
+  }
+  const counter = new ButtonCounter();
+  const status = document.getElementById('module-status');
+  const button = document.getElementById('module-increment');
+  const ready = !parserSawTail && parserScriptId === 'during-parse' &&
+    document.getElementById('write-result') !== null && document.currentScript === null;
+  if (ready) status.textContent = 'Moduł gotowy. Licznik: ' + count;
+  document.title = ready ? 'Moduły: gotowe' : 'Moduły: błąd';
+  button.addEventListener('click', () => {
+    const value = counter.step();
+    status.textContent = 'Licznik: ' + count;
+    document.title = 'Moduły: ' + value;
+  });
+</script>
+<p><a href="about:home">Wróć na start</a> · <a href="about:version">Zakres tej wersji</a></p>

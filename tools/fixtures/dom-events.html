@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>EventTarget fixture</title>
+<button id="run-events" type="button">Run events</button>
+<section id="parent"><span id="child">Target</span></section>
+<pre id="events-report" data-state="waiting"></pre>
+<script>
+  document.getElementById('run-events').addEventListener('click', function () {
+    const parent = document.getElementById('parent');
+    const child = document.getElementById('child');
+    const report = document.getElementById('events-report');
+    const checks = [];
+    function check(condition) { checks.push(condition === true); }
+    try {
+      check(window instanceof EventTarget && document instanceof EventTarget &&
+        child instanceof EventTarget && child.dispatchEvent === EventTarget.prototype.dispatchEvent);
+      check(Object.getPrototypeOf(CustomEvent) === Event && new CustomEvent('empty').detail === null);
+      const trace = [];
+      const data = {label: 'identity'};
+      const event = new CustomEvent('fixture', {bubbles: true, cancelable: true, composed: true, detail: data});
+      let pathOK = false;
+      let invalidState = false;
+      window.addEventListener('fixture', function (e) {
+        trace.push('window:' + e.eventPhase);
+        const path = e.composedPath();
+        pathOK = path.length === 6 && path[0] === child && path[1] === parent &&
+          path[2] === document.body && path[3] === document.documentElement &&
+          path[4] === document && path[5] === window;
+        path.length = 0;
+      }, true);
+      document.addEventListener('fixture', e => trace.push('document:' + e.eventPhase), true);
+      parent.addEventListener('fixture', e => trace.push('parent:' + e.eventPhase), true);
+      child.addEventListener('fixture', e => trace.push('target:' + e.eventPhase), true);
+      const passive = { handleEvent(e) {
+        trace.push('object:' + e.eventPhase);
+        check(this === passive && e === event && e.detail === data && e.composed &&
+          e.target === child && e.currentTarget === child && e.srcElement === child && !e.isTrusted);
+        check(e.composedPath()[1] === parent);
+        e.preventDefault();
+        check(!e.defaultPrevented);
+        try { window.dispatchEvent(e); } catch (error) {
+          invalidState = error instanceof DOMException && error.name === 'InvalidStateError';
+        }
+        parent.removeChild(child);
+      } };
+      child.addEventListener('fixture', passive, {once: true, passive: true});
+      const controller = new AbortController();
+      parent.addEventListener('fixture', function (e) {
+        trace.push('bubble:' + e.eventPhase);
+        controller.abort();
+        e.returnValue = false;
+      });
+      parent.addEventListener('fixture', () => trace.push('aborted'), {signal: controller.signal});
+      window.addEventListener('fixture', e => trace.push('tail:' + e.eventPhase));
+      check(child.dispatchEvent(event) === false);
+      check(pathOK && invalidState);
+      check(trace.join('|') === 'window:1|document:1|parent:1|target:2|object:2|bubble:3|tail:3');
+      check(event.target === child && event.currentTarget === null && event.eventPhase === Event.NONE &&
+        event.composedPath().length === 0 && !event.returnValue);
+      child.dispatchEvent(new Event('fixture'));
+      check(trace[trace.length - 1] === 'target:2' && trace.length === 8 && child.parentNode === null);
+      parent.appendChild(child);
+
+      const stopped = [];
+      child.addEventListener('stop', e => { stopped.push(1); e.stopPropagation(); }, true);
+      child.addEventListener('stop', () => stopped.push(2), true);
+      child.addEventListener('stop', () => stopped.push(3));
+      const stopEvent = new Event('stop', {bubbles: true});
+      child.dispatchEvent(stopEvent);
+      check(stopped.join() === '1,2' && !stopEvent.cancelBubble);
+
+      const detached = document.createElement('div');
+      let direct = false;
+      detached.addEventListener('detach', function (e) {
+        direct = e.composedPath().length === 1 && e.currentTarget === detached;
+      });
+      detached.dispatchEvent(new Event('detach', {bubbles: true}));
+      check(direct);
+
+      let unicode = 0;
+      detached.addEventListener('\uD800', () => unicode++);
+      detached.dispatchEvent(new Event('\uD801'));
+      detached.dispatchEvent(new Event('\uD800'));
+      check(unicode === 1);
+
+      let bare = 0;
+      addEventListener('bare', () => bare++, {once: true});
+      dispatchEvent(new Event('bare'));
+      check(bare === 1);
+    } catch (error) {
+      report.textContent = JSON.stringify({checks, error: String(error)});
+      report.setAttribute('data-state', 'failed');
+      document.title = 'EventTarget failed';
+      return;
+    }
+    const ok = checks.every(result => result);
+    report.textContent = JSON.stringify({checks});
+    report.setAttribute('data-state', ok ? 'passed' : 'failed');
+    document.title = ok ? 'EventTarget OK' : 'EventTarget failed';
+  });
+</script>

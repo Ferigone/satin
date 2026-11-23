@@ -1,0 +1,63 @@
+<h1>Zadanie asynchroniczne</h1>
+<p>Uruchom zadanie, aby odczytać dane i dołączyć skrypt po wczytaniu strony. W trakcie oczekiwania możesz je anulować.</p>
+<style>
+  .panel{padding:24px;border:1px solid #b4d8cd;background:#eef8f4;margin:18px 0}
+  .actions{display:flex;gap:12px;flex-wrap:wrap}
+  button{padding:12px 18px;font-size:17px;background:#127461;color:white;border:1px solid #0f614f}
+  #cancel-async{background:white;color:#0f614f}
+  #async-result{font-weight:650;color:#0f614f}
+</style>
+<div class="panel">
+  <div class="actions">
+    <button type="button" id="run-async">Uruchom</button>
+    <button type="button" id="cancel-async">Anuluj</button>
+  </div>
+  <p id="async-result" aria-live="polite">Zadanie oczekuje.</p>
+</div>
+<p><a href="about:home">Wróć na start</a></p>
+<script>
+  var currentJob = null;
+  var output = document.getElementById('async-result');
+  function pause(signal) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 650);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      }, {once:true});
+    });
+  }
+  async function start() {
+    if (currentJob) return;
+    const controller = new AbortController();
+    currentJob = controller;
+    const signal = controller.signal;
+    output.textContent = 'Zadanie w toku…';
+    try {
+      await pause(signal);
+      const url = new URL('data:application/json,%7B%22message%22%3A%22Dane%20odebrane%22%7D');
+      const response = await fetch(url, {signal});
+      const data = await response.json();
+      const params = new URLSearchParams([['status','gotowe'], ['typ','skrypt']]);
+      const script = document.createElement('script');
+      script.textContent = 'window.dynamicScriptRan = true;';
+      document.body.appendChild(script);
+      output.textContent = data.message + '. ' + params.get('status') + '.';
+      if (window.dynamicScriptRan) document.title = 'Zadanie: OK';
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        document.title = 'Zadanie: anulowano';
+        output.textContent = 'Zadanie zostało anulowane.';
+      } else {
+        document.title = 'Zadanie: błąd';
+        output.textContent = String(error);
+      }
+    } finally {
+      currentJob = null;
+    }
+  }
+  document.getElementById('run-async').addEventListener('click', start);
+  document.getElementById('cancel-async').addEventListener('click', () => {
+    if (currentJob) currentJob.abort();
+  });
+</script>

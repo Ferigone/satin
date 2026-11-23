@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Date runtime pending</title>
+<h1>Date and local time</h1>
+<pre id="receipt">pending</pre>
+<script>
+const parsed = new Date('2023-07-02T08:11:15.902+05:45');
+const leap = new Date(Date.UTC(2000, 1, 29, 12, 34, 56));
+const rfc = leap.toUTCString();
+const rfcRoundTrip = Date.parse(rfc) === leap.getTime();
+const localRoundTrip = Date.parse(leap.toString()) === leap.getTime();
+leap.setUTCFullYear(2001);
+const changed = leap.toISOString();
+const missing = new Date(NaN);
+const invalid = [missing.toString(), missing.toJSON(), Number.isNaN(Date.parse('-000000-01-01T00:00Z'))];
+missing.setUTCFullYear(9);
+
+const winter = new Date(Date.UTC(2024, 0, 15, 12));
+const summer = new Date(Date.UTC(2024, 6, 15, 12));
+const spring = new Date(2024, 2, 31, 2, 30);
+const autumn = new Date(2024, 9, 27, 2, 30);
+const local = [
+    winter.getTimezoneOffset(), summer.getTimezoneOffset(), winter.getHours(), summer.getHours(),
+    spring.toISOString(), autumn.toISOString(),
+    Date.parse('2024-03-31T02:30') === spring.getTime()
+];
+let coerced = 0;
+const called = Date({valueOf() { coerced++; return 3; }});
+const date = new Date(123);
+date.toString = () => 'custom';
+const copied = new Date(date);
+const number = Date.prototype[Symbol.toPrimitive].call({valueOf() {return 8;}}, 'number');
+
+const output = {
+    iso: [parsed.toISOString(), new Date(-8640000000000000).toISOString(), new Date(8640000000000000).toISOString()],
+    setters: [changed, missing.toISOString(), Date.UTC(99, 12, 0, 24)],
+    strings: [rfc, rfcRoundTrip, localRoundTrip, JSON.stringify(new Date(0))],
+    invalid,
+    brand: [typeof called, coerced, Object.prototype.toString.call(copied), copied.getTime(), date + '', number],
+    local
+};
+const receipt = document.getElementById('receipt');
+receipt.textContent = JSON.stringify(output);
+receipt.setAttribute('data-complete', 'yes');
+document.title = 'Date runtime OK';
+</script>

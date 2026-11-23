@@ -1,0 +1,170 @@
+{
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "files": [
+    {
+      "path": "intersection-observer/observer-attributes.html",
+      "sha256": "a9cc00b377feaa8ab0797c420c6e54614b7038fa50ec5d9c21d1e82c789c0126",
+      "subtests": 9
+    },
+    {
+      "path": "intersection-observer/observer-exceptions.html",
+      "sha256": "c7387deddbd9e2a4c9b057ea799e252ef4b2e1a39e07fa8c5922361495bd1523",
+      "subtests": 9
+    },
+    {
+      "path": "intersection-observer/thresholds-frozen-array.html",
+      "sha256": "a29934b5086601eb4a3bd6054dd565f0303968f73e68b8b6c38a39d531ba5482",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/observer-callback-arguments.html",
+      "sha256": "52a2b06b42a10dc2e579bc6a4a1e0058ba793ed91592936a97ab0e098a9ce13f",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/empty-root-margin.html",
+      "sha256": "635b161dc75224232e4d15a8962846167497123fcd197b80c06cee13f43955ed",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/same-document-no-root.html",
+      "sha256": "4dcd963c52accc46024439741624f22c1d1f4e29848f857ca6c60e48de8aa5ff",
+      "subtests": 4
+    },
+    {
+      "path": "intersection-observer/same-document-root.html",
+      "sha256": "a9f613e93cc497381cd18f406fb5a7bf71dbeafcbccf8ad5a0e6d127c72f98b2",
+      "subtests": 7
+    },
+    {
+      "path": "intersection-observer/same-document-with-document-root.html",
+      "sha256": "7dde56f7d212ef0b9a5de53f386366f5defc6f074eeb9f6da4ad0646c94dbadb",
+      "subtests": 3
+    },
+    {
+      "path": "intersection-observer/same-document-zero-size-target.html",
+      "sha256": "fef46ee481f4b99e09f8cf22eee487cd7d21a9e35c999a49afe208936bbc9afc",
+      "subtests": 4
+    },
+    {
+      "path": "intersection-observer/multiple-thresholds.html",
+      "sha256": "10b2f72f7a4292ef4732d4e5da8769101239a5898d002320d081046dcbfad530",
+      "subtests": 10
+    },
+    {
+      "path": "intersection-observer/isIntersecting-change-events.html",
+      "sha256": "acda0c42e07e8445a66482e6323fd279a1107e89b91ed4530303cec86e93b814",
+      "subtests": 5,
+      "windowIds": [
+        "root"
+      ]
+    },
+    {
+      "path": "intersection-observer/padding-clip.html",
+      "sha256": "e4a424910d88faa5a775cce53ec7ea7ddecaea91aeb04fcef739c64e2cf7eda4",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/root-margin-root-element.html",
+      "sha256": "d209f9a0387b61496753919b2cccca602cfeaa20551f817ea93f5f11fda9ec7f",
+      "subtests": 7
+    },
+    {
+      "path": "intersection-observer/edge-inclusive-intersection.html",
+      "sha256": "7bd6a88ac28198ef17a867e2d0d8b8006dc0c435eff9001964f77610c63f204f",
+      "subtests": 5,
+      "windowIds": [
+        "target"
+      ]
+    },
+    {
+      "path": "intersection-observer/observe-after-unobserve.html",
+      "sha256": "8c3b697373b1799af1d3bb08946144f48fce35b659323b46b8d9dd068ddf8d52",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/disconnect.html",
+      "sha256": "5f9dfbacfd8fd5cfe49ecaa0562a40ec69302469d1055e5455ef88832934adf4",
+      "subtests": 3
+    },
+    {
+      "path": "intersection-observer/target-is-root.html",
+      "sha256": "1d012fa255b99b3b62e3c954c0ad49cf03c1ac68aeee1b35f41f293b2a1d80bd",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/not-in-containing-block-chain.html",
+      "sha256": "e6d408f12fa1963804afed875ef91e9ef9ec9e545a8d12ca9088f8d3ce006e5b",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/zero-area-element-visible.html",
+      "sha256": "108a7baabda734ba0b89e31df0850a60dc86a6dbc5565f139ec0e30bd6de15c4",
+      "subtests": 2
+    },
+    {
+      "path": "intersection-observer/visibility-hidden.html",
+      "sha256": "eb99bc39c6432ca936a43c8b5b3de7b7be4ba6a4bef4fb6c89ac2e1bdb1523e8",
+      "subtests": 3
+    },
+    {
+      "path": "intersection-observer/reinsert-element.html",
+      "sha256": "71773196ef7f8f712f26b9e0ec43cfc7c0a32d485494e745acc796605921b8e0",
+      "subtests": 1
+    },
+    {
+      "path": "intersection-observer/unclipped-root.html",
+      "sha256": "00549be7761f5e5fc0af970820fee47475ecf54ecde1d039fbe5d35ef89f6fb6",
+      "subtests": 3
+    },
+    {
+      "path": "intersection-observer/containing-block.html",
+      "sha256": "d90992a318f736dd8ea1f5b27272565bd9a8a6ca89cb0a6a077753959d17c371",
+      "subtests": 5
+    },
+    {
+      "path": "intersection-observer/fixed-position-scroll.html",
+      "sha256": "6d21887f543381001fbfb444955ed3a05ee0c857a610dbc26decaf07c8331138",
+      "subtests": 3,
+      "windowIds": [
+        "target"
+      ]
+    },
+    {
+      "path": "intersection-observer/scroll-margin-zero.html",
+      "sha256": "51c3c5f5c483a73f9fa40800bf96342b5e73544ca287f3bbfbf0964771b937ec",
+      "subtests": 1,
+      "windowIds": [
+        "target"
+      ]
+    },
+    {
+      "path": "intersection-observer/initial-observation-with-threshold.html",
+      "sha256": "7b4bf76df8b2574a15a44c81b99b261f9dbae1c52ee3203063c8ade7dde15679",
+      "subtests": 3
+    },
+    {
+      "path": "intersection-observer/isIntersecting-threshold.html",
+      "sha256": "cafe4f8e50a44961687edd8b232bce0a883e08bc54cc2e9706a00f12c37892ff",
+      "subtests": 3,
+      "windowIds": [
+        "scroller",
+        "target"
+      ]
+    }
+  ],
+  "support": [
+    {
+      "path": "intersection-observer/resources/intersection-observer-test-utils.js",
+      "sha256": "8454449710342c998b8cc02e426a9fd8f02d1ced15cac233364932a278c73120"
+    },
+    {
+      "path": "resources/testharness.js",
+      "sha256": "7a108d7cfa98ac413ddb38f82fd509fb2037dfcc25ccf466567520cbb6bdf1fa"
+    },
+    {
+      "path": "LICENSE.md",
+      "sha256": "5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570"
+    }
+  ]
+}

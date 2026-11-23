@@ -1,0 +1,175 @@
+{
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "files": [
+    {
+      "file": "position-sticky-bottom.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-bottom.html",
+      "sha256": "8279893ea6886901543facd9ab88c85524787ba8039267cd7cc43b5620f08b91"
+    },
+    {
+      "file": "position-sticky-get-bounding-client-rect.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-get-bounding-client-rect.html",
+      "sha256": "e6b3918266ce5d450ddf071df4acc58da01fad16024cbb5fa146cb80baf14179"
+    },
+    {
+      "file": "position-sticky-inflow-position.html",
+      "subtests": 1,
+      "windowIds": [
+        "sticky",
+        "before",
+        "after"
+      ],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-inflow-position.html",
+      "sha256": "4572875f1a6db75d92329fc8775d187ec329fc600a941868e121cf1f324ac320"
+    },
+    {
+      "file": "position-sticky-left.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-left.html",
+      "sha256": "fab98adf2d3a75c2b35fee57e41071bf13d56643b82c8e066792e3e5edf36e32"
+    },
+    {
+      "file": "position-sticky-left-and-right-overconstrained.html",
+      "subtests": 4,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-left-and-right-overconstrained.html",
+      "sha256": "e764c840b5bdb9222da64ae22efe52e6729ff3d34aa25abdceaba2d3bfeac791"
+    },
+    {
+      "file": "position-sticky-margins.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-margins.html",
+      "sha256": "ca7844f24ea2f601d44365a9d869484e23c9d7a30db52776bfd3980e0376bba7"
+    },
+    {
+      "file": "position-sticky-nested-left.html",
+      "subtests": 5,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-nested-left.html",
+      "sha256": "f4360ad827b8f206a720509799e7c6d56bcf261728447885b462269ea44242e1"
+    },
+    {
+      "file": "position-sticky-nested-top.html",
+      "subtests": 5,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-nested-top.html",
+      "sha256": "8761d4e72c6acdbcc1b470a94ec282fa6f1f9571c14fa98670271d7045a7d09f"
+    },
+    {
+      "file": "position-sticky-offset-overflow.html",
+      "subtests": 1,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-offset-overflow.html",
+      "sha256": "4108a80988e7bf2f1040efadbe242405fb31cc79bb8620f34a6d0ef7d7e89a25"
+    },
+    {
+      "file": "position-sticky-offset-top-left.html",
+      "subtests": 2,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-offset-top-left.html",
+      "sha256": "5a567b73f622018cab9a1714383d2675dd38c95e0389f4932fb479f2a833a93f"
+    },
+    {
+      "file": "position-sticky-overflow-hidden.html",
+      "subtests": 2,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-overflow-hidden.html",
+      "sha256": "dd1c81d3cd803244e0696ea3a26061841d6fcd91c8efc89164c31a5b64f4dcd2"
+    },
+    {
+      "file": "position-sticky-overflow-padding.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-overflow-padding.html",
+      "sha256": "c7404d4602f1c3ba2b79ac334ffefdee730414f070917930d4b8165d3e62c4a3"
+    },
+    {
+      "file": "position-sticky-parsing.html",
+      "subtests": 1,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-parsing.html",
+      "sha256": "90d3f48b98c7fb50bedd0b568a1fe2ea759a5a8a79a6dcaf1f9f363c711e8fb7"
+    },
+    {
+      "file": "position-sticky-right.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-right.html",
+      "sha256": "5f2067e3854b4cce1f404d89cb0beef60097b83d35f05769f1ec283b73a1768a"
+    },
+    {
+      "file": "position-sticky-root-scroller.html",
+      "subtests": 1,
+      "windowIds": [
+        "sticky"
+      ],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-root-scroller.html",
+      "sha256": "29e7c1f5ed41da710c0527f233460f5684f574c15bd907d65e743fc5adf0c4d0"
+    },
+    {
+      "file": "position-sticky-top.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-top.html",
+      "sha256": "e7976cc71d0ed7a2d921a3b9fd64b93918cd7a6dce4706348bda7668f59e144d"
+    },
+    {
+      "file": "position-sticky-top-and-bottom.html",
+      "subtests": 2,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-top-and-bottom.html",
+      "sha256": "7fcc0cb08936ba30912ad65c07d09efb46cef7763451daebaf4768703106d586"
+    },
+    {
+      "file": "position-sticky-top-and-bottom-overconstrained.html",
+      "subtests": 4,
+      "windowIds": [],
+      "styleForwarding": false,
+      "upstream": "css/css-position/sticky/position-sticky-top-and-bottom-overconstrained.html",
+      "sha256": "5c40b2b9dd7132bfee3e67fb064e609538956f94d761c2affd9df7a9aa136ef8"
+    },
+    {
+      "file": "position-sticky-transforms-translate.html",
+      "subtests": 3,
+      "windowIds": [],
+      "styleForwarding": true,
+      "upstream": "css/css-position/sticky/position-sticky-transforms-translate.html",
+      "sha256": "635d0a98119872465ba333106e1b5a5a196c52c357f3a795740211e533c9c218"
+    }
+  ],
+  "support": [
+    {
+      "file": "sticky-util.js",
+      "upstream": "css/css-position/resources/sticky-util.js",
+      "sha256": "d842852dd61df7620c7de030243ba4439ea13be3d22a694bf424b8810f4e1788"
+    },
+    {
+      "file": "testharness.js",
+      "upstream": "resources/testharness.js",
+      "sha256": "7a108d7cfa98ac413ddb38f82fd509fb2037dfcc25ccf466567520cbb6bdf1fa"
+    }
+  ]
+}

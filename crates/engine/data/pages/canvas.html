@@ -1,0 +1,103 @@
+<h1>Zatoka o świcie</h1>
+<p>Narysuj krajobraz w Canvas 2D. Po narysowaniu lub wyczyszczeniu przeglądarka odczyta piksel w punkcie (28, 216).</p>
+<style>
+  #canvas-art{display:block;box-sizing:border-box;width:100%;height:auto;background:#eaf3f2;border:1px solid #b7d4cc}
+  .canvas-actions{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0 0}
+  .canvas-actions button{font-size:16px;padding:10px 18px;border:1px solid #155d53}
+  #draw-canvas{background:#155d53;color:#fff}
+  #clear-canvas{background:#fff;color:#174b43}
+  #canvas-status{background:#eaf3f2;border-left:3px solid #18836f;color:#174b43;padding:10px 14px;margin:14px 0;font-size:15px}
+</style>
+<canvas id="canvas-art" width="720" height="240" aria-label="Zatoka z zieloną wodą, wzgórzami i wschodzącym słońcem">
+  Rysunek zatoki wymaga obsługi Canvas 2D.
+</canvas>
+<div class="canvas-actions">
+  <button id="draw-canvas" type="button">Rysuj</button>
+  <button id="clear-canvas" type="button">Wyczyść</button>
+</div>
+<p id="canvas-status" role="status" data-result="empty">Płótno jest puste.</p>
+<p class="muted"><a href="about:home">Start</a> · <a href="about:version">Możliwości przeglądarki</a></p>
+<script>
+  const canvas = document.getElementById('canvas-art');
+  const canvasStatus = document.getElementById('canvas-status');
+
+  function showError(message) {
+    canvasStatus.setAttribute('data-result', 'error');
+    canvasStatus.textContent = message;
+    document.title = 'Próba płótna nieudana';
+  }
+
+  function drawBay(ctx) {
+    const sky = ctx.createLinearGradient(0, 0, 0, 170);
+    sky.addColorStop(0, '#254e6a');
+    sky.addColorStop(0.56, '#9ebdb7');
+    sky.addColorStop(1, '#f6cb9d');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, 720, 240);
+
+    ctx.fillStyle = '#ffe9ba';
+    ctx.beginPath();
+    ctx.arc(524, 92, 43, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#527f85';
+    ctx.beginPath();
+    ctx.moveTo(0, 133);
+    ctx.bezierCurveTo(73, 99, 108, 56, 172, 96);
+    ctx.bezierCurveTo(221, 128, 266, 112, 311, 124);
+    ctx.bezierCurveTo(414, 152, 489, 113, 550, 128);
+    ctx.bezierCurveTo(632, 145, 679, 120, 720, 110);
+    ctx.lineTo(720, 165);
+    ctx.lineTo(0, 165);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#18836f';
+    ctx.fillRect(0, 154, 720, 86);
+
+    ctx.fillStyle = '#244f5d';
+    ctx.beginPath();
+    ctx.moveTo(0, 126);
+    ctx.bezierCurveTo(93, 135, 137, 156, 252, 158);
+    ctx.bezierCurveTo(151, 183, 72, 160, 0, 186);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = '#e6cf9f';
+    ctx.fillRect(502, 168, 64, 2);
+    ctx.fillRect(474, 180, 78, 2);
+    ctx.fillRect(517, 192, 98, 2);
+    ctx.fillStyle = '#62b6a1';
+    ctx.fillRect(265, 197, 102, 2);
+    ctx.fillRect(384, 217, 144, 2);
+    ctx.fillRect(583, 224, 68, 2);
+  }
+
+  function updateCanvas(draw) {
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        showError('Nie udało się utworzyć kontekstu Canvas 2D.');
+        return;
+      }
+      if (draw) drawBay(ctx);
+      else ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const rgba = ctx.getImageData(28, 216, 1, 1).data;
+      const sample = 'RGBA(' + rgba[0] + ', ' + rgba[1] + ', ' + rgba[2] + ', ' + rgba[3] + ')';
+      const expected = draw ? 'RGBA(24, 131, 111, 255)' : 'RGBA(0, 0, 0, 0)';
+      if (sample !== expected) {
+        showError('Piksel (28, 216) ma wartość ' + sample + '. Oczekiwano ' + expected + '.');
+        return;
+      }
+      canvasStatus.setAttribute('data-result', draw ? 'drawn' : 'cleared');
+      canvasStatus.textContent = (draw ? 'Zatoka narysowana. ' : 'Płótno wyczyszczone. ') + 'Piksel (28, 216) to ' + sample + '.';
+      document.title = draw ? 'Płótno gotowe' : 'Płótno wyczyszczone';
+    } catch (error) {
+      showError('Nie udało się narysować lub odczytać piksela.');
+    }
+  }
+
+  document.getElementById('draw-canvas').addEventListener('click', function () { updateCanvas(true); });
+  document.getElementById('clear-canvas').addEventListener('click', function () { updateCanvas(false); });
+</script>

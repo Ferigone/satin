@@ -1,0 +1,20 @@
+@font-face {
+    font-family: QAWide;
+    src: url(fonts/malformed.woff2) format(woff2), url("fonts/wide.woff2") format("woff2");
+    font-display: swap;
+}
+@font-face {
+    font-family: QAAlias;
+    src: url(fonts/malformed.woff2) format(woff2), url("fonts/wide.woff2") format("woff2");
+    font-display: swap;
+}
+@font-face {
+    font-family: QADenied;
+    src: url(fonts/denied.woff2) format(woff2);
+    font-display: swap;
+}
+@font-face {
+    font-family: QAFallback;
+    src: url(fonts/fallback.ttf) format(truetype);
+    font-display: swap;
+}

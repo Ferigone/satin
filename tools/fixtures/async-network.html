@@ -1,0 +1,184 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Async network pending</title>
+<style>
+body { margin: 0; padding: 30px; color: #172b3d; background: #eef4f7; font: 18px sans-serif; }
+main { padding: 22px; background: white; border: 2px solid #bacad4; }
+h1 { margin: 0 0 16px; color: #153655; }
+p { padding: 8px; background: #edf4fa; }
+pre { overflow: auto; font-size: 12px; }
+</style>
+<main>
+    <h1 id="outcome">Async network pending</h1>
+    <p>Abort before dispatch with an explicit reason.</p>
+    <p>Abort before headers and after reading the first bytes. Cancel both readers of a cloned body.</p>
+    <p>Send repeated form fields after both connections close.</p>
+    <pre id="receipt"></pre>
+</main>
+<script>
+function endpoint(path) {
+    return new URL(path, document.baseURI);
+}
+
+function check(condition, message) {
+    if (!condition) throw new Error(message);
+}
+
+async function gate(part, phase) {
+    var address = endpoint('gate');
+    address.searchParams.set('part', part);
+    address.searchParams.set('phase', phase);
+    var response = await fetch(address);
+    check(response.ok && (await response.text()) === phase, part + ' ' + phase + ' gate');
+}
+
+async function readPrefix(reader) {
+    var prefix = '';
+    while (prefix.length < 22) {
+        var item = await reader.read();
+        check(!item.done && item.value instanceof Uint8Array, 'Expected an unfinished Uint8Array chunk');
+        for (var i = 0; i < item.value.length; i++) prefix += String.fromCharCode(item.value[i]);
+    }
+    check(prefix === 'partial body delivered', 'Partial bytes received before the server closes');
+    return prefix;
+}
+
+async function watchStall(address, signal, onBody) {
+    var responseExposed = false;
+    var prefix = null;
+    try {
+        var response = await fetch(address, {signal: signal});
+        responseExposed = true;
+        check(!response.bodyUsed && response.body instanceof ReadableStream, 'Readable response body');
+        var reader = response.body.getReader();
+        check(response.body.locked && !response.bodyUsed, 'Acquiring a reader locks without disturbance');
+        prefix = await readPrefix(reader);
+        check(response.bodyUsed, 'Reading disturbs the body');
+        onBody();
+        await reader.read();
+    } catch (error) {
+        return {
+            name: error.name,
+            signalAborted: signal.aborted,
+            sameReason: error === signal.reason,
+            responseExposed: responseExposed,
+            prefix: prefix
+        };
+    }
+    throw new Error('Stalled response completed');
+}
+
+async function cancelStall(part) {
+    var controller = new AbortController();
+    var address = endpoint('stall');
+    address.searchParams.set('part', part);
+    var received;
+    var firstChunk = new Promise(resolve => received = resolve);
+    var pending = watchStall(address, controller.signal, received);
+    if (part === 'body') {
+        var premature = await Promise.race([firstChunk, pending]);
+        check(premature === undefined, 'Body failed before the first read');
+    }
+    await gate(part, 'started');
+    controller.abort();
+    var observed = await pending;
+    check(observed.name === 'AbortError' && observed.signalAborted, part + ' abort reason');
+    await gate(part, 'closed');
+    return observed;
+}
+
+async function cancelClones() {
+    var address = endpoint('stall');
+    address.searchParams.set('part', 'reader');
+    var response = await fetch(address);
+    var original = response.body;
+    var clone = response.clone();
+    check(original.locked && response.body !== original && clone.body !== response.body, 'Clone tees the response stream');
+    var left = response.body.getReader();
+    var right = new ReadableStreamDefaultReader(clone.body);
+    var prefixes = await Promise.all([readPrefix(left), readPrefix(right)]);
+    await gate('reader', 'started');
+    var reads = [left.read(), right.read()];
+    var firstCancel = left.cancel('left');
+    var secondCancel = right.cancel('right');
+    await Promise.all([firstCancel, secondCancel, left.closed, right.closed]);
+    var results = await Promise.all(reads);
+    check(results[0].done && results[1].done && response.bodyUsed && clone.bodyUsed, 'Both readers ended after cancellation');
+    left.releaseLock();
+    right.releaseLock();
+    check(!response.body.locked && !clone.body.locked, 'Release unlocks both branches');
+    await gate('reader', 'closed');
+    return prefixes;
+}
+
+async function download() {
+    var response = await fetch(endpoint('download'));
+    var reader = response.body.getReader();
+    var count = 0;
+    var first;
+    var last;
+    for (;;) {
+        var item = await reader.read();
+        if (item.done) break;
+        var bytes = item.value;
+        check(bytes instanceof Uint8Array && bytes.length > 0, 'The download yields binary chunks');
+        if (!count) first = bytes[0];
+        count += bytes.length;
+        last = bytes[bytes.length - 1];
+    }
+    check(count === 5242882 && first === 72 && last === 33, 'Complete bytes beyond the collection limit');
+    return [count, first, last];
+}
+
+async function run() {
+    var reason = {stage: 'before dispatch'};
+    var preaborted = new AbortController();
+    preaborted.abort(reason);
+    var preabortMatched = false;
+    try {
+        await fetch(endpoint('never'), {signal: preaborted.signal});
+    } catch (error) {
+        preabortMatched = error === reason && preaborted.signal.reason === reason;
+    }
+    check(preabortMatched, 'Explicit preabort reason identity');
+
+    // Each gate uses the available Fetch slot while its companion request waits.
+    var headers = await cancelStall('headers');
+    var body = await cancelStall('body');
+    var clones = await cancelClones();
+    var downloaded = await download();
+    var target = endpoint('submit');
+    var query = target.searchParams;
+    query.append('q', 'a b+é&=');
+    query.append('q', 'two');
+    query.set('mode', '~*');
+    var fields = new URLSearchParams();
+    fields.append('search', 'a b');
+    fields.append('search', 'Łódź 🦀');
+    fields.append('literal', '+&=%~*');
+    var response = await fetch(target, {method: 'POST', body: fields});
+    check(response.ok, 'Form submission status');
+    var acknowledgement = await response.json();
+    check(acknowledgement.accepted === true, 'Form submission acknowledgement');
+    var result = {preabortMatched: preabortMatched, headers: headers, body: body, clones: clones, download: downloaded,
+        search: target.search, serialized: fields.toString(), accepted: acknowledgement.accepted};
+    var receipt = await fetch(endpoint('receipt'), {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(result)
+    });
+    check(receipt.status === 204, 'Receipt status');
+    document.getElementById('receipt').textContent = JSON.stringify(result);
+    finish('Async network OK', 'yes');
+}
+
+function finish(title, status) {
+    document.title = title;
+    var heading = document.getElementById('outcome');
+    heading.textContent = title;
+    heading.setAttribute('data-complete', status);
+}
+
+run().catch(function(error) {
+    document.getElementById('receipt').textContent = error.name + ': ' + error.message;
+    finish('Async network FAIL', 'no');
+});
+</script>

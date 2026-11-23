@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/web-platform-tests/wpt",
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "upstream_path": "fetch/data-urls/resources/data-urls.json",
+  "file": "data-urls.json",
+  "git_blob": "f318d1f3e547d3d5b98ec737c231178f796166db",
+  "sha256": "b3be3d6e1d0eb7f1b5b20d7410d30cb76216d41c9fe3d8364446abecff88bba5",
+  "bytes": 4669,
+  "cases": 72,
+  "license": "../../src/svg/fixtures/LICENSE.md"
+}

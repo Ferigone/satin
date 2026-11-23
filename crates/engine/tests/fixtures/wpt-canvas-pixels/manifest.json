@@ -1,0 +1,158 @@
+{
+  "revision": "9e1907a13cbbc338975302097a4bafcbc4d12dc5",
+  "files": [
+    {
+      "file": "2d.imageData.create1.initial.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.create1.initial.html",
+      "sha256": "e6ed621d7574f9ea72d6485c706d0cd46f627c36f97c40c0acaea2451b29a080",
+      "bytes": 1543,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.create2.negative.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.create2.negative.html",
+      "sha256": "93e5c2c957eeef290f82040987f2f6df851bba09f4d6ddb2e58a4e00efb1e78a",
+      "bytes": 1418,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.get.basic.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.get.basic.html",
+      "sha256": "7851b2589bf0d328cbf03d3a110a7a58d8253e1f846f4e726907c302a2bf078c",
+      "bytes": 935,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.get.nonfinite.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.get.nonfinite.html",
+      "sha256": "5c9600b7390c06131791aff495ff96f189f65b57378c7eb98449022435f06dfb",
+      "bytes": 5327,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.get.source.negative.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.get.source.negative.html",
+      "sha256": "c757e0d15d6b8e82e1a688a9bf2cc4a4dcc2fc6a329ed3e0c426dfdcf49ba529",
+      "bytes": 2186,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.get.source.outside.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.get.source.outside.html",
+      "sha256": "53ea7968d0472350ae3911e0dd7fcd901bb6b1c1e7501469eacd777bdebe4473",
+      "bytes": 4453,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.get.unaffected.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.get.unaffected.html",
+      "sha256": "ab7fe9f5b8bcd7f58425c333360527f3f00c61adcb05d3904e37b1dee972108b",
+      "bytes": 1482,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.object.ctor.array.bounds.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.object.ctor.array.bounds.html",
+      "sha256": "5483b145ad3279d73d71790741b4317ed201c06f72e677245583f2aa4ffd761c",
+      "bytes": 1506,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.object.ctor.array.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.object.ctor.array.html",
+      "sha256": "c5fb4a694c9da27919457f01532c3af3a196bcbac24c2f49804772408a0cf0b5",
+      "bytes": 1178,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.object.ctor.pixelFormat.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.object.ctor.pixelFormat.html",
+      "sha256": "81889cd670bc4e35737e35c5fda6778b457e3a0fdb0aeecbfa7cf5b7ae362679",
+      "bytes": 3647,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.object.ctor.size.bounds.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.object.ctor.size.bounds.html",
+      "sha256": "445a45a77915d36fe9fa7aaa16ce3c06599ef279972795c391059d59e2260bc3",
+      "bytes": 1144,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.alpha.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.alpha.html",
+      "sha256": "d22c87f26f967d4f35f0b9ec4f34529e8b3df201a377f91e072dd4964c5f5bd9",
+      "bytes": 1245,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.basic.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.basic.html",
+      "sha256": "0d13add3b0fb58103d249d1191b5668a215d87f2dfc9d1e67e1b941af3c0f0a5",
+      "bytes": 1259,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.basic.rgba.float16.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.basic.rgba.float16.html",
+      "sha256": "85168378aaef64686007a814b1d788d8c46cb187d1c3030a67c7a14563fc9258",
+      "bytes": 1548,
+      "subtests": 1,
+      "expected_failure": "Canvas contexts use 8-bit backing stores"
+    },
+    {
+      "file": "2d.imageData.put.dirty.negative.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.dirty.negative.html",
+      "sha256": "1f6145fb665ae411d90b65d0101a0358e450f460f6c02a6d2cfba20901baeddd",
+      "bytes": 1620,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.dirty.outside.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.dirty.outside.html",
+      "sha256": "ae0dd94b2926cbd44d310bfe285dbf75ed68fc6d9fe2e21749c8da02fb524e50",
+      "bytes": 1779,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.nonfinite.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.nonfinite.html",
+      "sha256": "83ae86375df464919568af3b883867d6cc333f84c9365f15cc5e2cfdec29fa49",
+      "bytes": 10130,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.unaffected.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.unaffected.html",
+      "sha256": "40e7e78747b3d27706f0b78c6385be2eb7972ed01edbd38ba9a75eca0e06ffc1",
+      "bytes": 1408,
+      "subtests": 1
+    },
+    {
+      "file": "2d.imageData.put.wrongtype.html",
+      "upstream": "html/canvas/element/pixel-manipulation/2d.imageData.put.wrongtype.html",
+      "sha256": "6d3a574db0056cfa5218189b70e7100e35d88900e00647e630a63e34697242f6",
+      "bytes": 1291,
+      "subtests": 1
+    },
+    {
+      "file": "canvas-tests.js",
+      "upstream": "html/canvas/resources/canvas-tests.js",
+      "sha256": "5e0b9852d7661acc64bd32390498e0510d56cea75f6395ea402e5c8daeea0988",
+      "bytes": 7591
+    },
+    {
+      "file": "imagedata.html",
+      "upstream": "html/semantics/embedded-content/the-canvas-element/imagedata.html",
+      "sha256": "8b9585b62a4fa11748e49e1c5994d2c7bc7f7191ec61aaaa917167b80a9c7a05",
+      "bytes": 1749,
+      "subtests": 7
+    },
+    {
+      "file": "LICENSE.md",
+      "upstream": "LICENSE.md",
+      "sha256": "5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570",
+      "bytes": 1500
+    }
+  ]
+}

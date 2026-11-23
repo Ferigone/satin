@@ -1,0 +1,2 @@
+# Measured supported token-output mismatches: none.
+# Parse-error diagnostics are not implemented or counted as conformance passes.

@@ -1,0 +1,84 @@
+<!doctype html>
+<meta charset="utf-8">
+<canvas id="source" width="2" height="2"></canvas>
+<canvas id="target" width="10" height="10"></canvas>
+<img id="same" src="/green.png" alt="">
+<img id="cross" src="__CROSS__/green.png" alt="">
+<pre id="receipt"></pre>
+<script>
+function element(id) { return document.getElementById(id); }
+
+function errorName(operation) {
+    try { operation(); }
+    catch (error) { return error.name; }
+    return "none";
+}
+
+async function verify() {
+    const source = element("source"), target = element("target");
+    const ctx = source.getContext("2d"), output = target.getContext("2d");
+    const pixel = (x, y) => output.getImageData(x, y, 1, 1).data.join();
+    ctx.putImageData(new ImageData(new Uint8ClampedArray([
+        255,0,0,255, 0,255,0,255, 0,0,255,255, 255,255,255,255
+    ]), 2, 2), 0, 0);
+    let checkpoint = false;
+    const promise = createImageBitmap(source, 2, 0, -3, 2, {
+        resizeHeight: 4, imageOrientation: "flipY", resizeQuality: "pixelated"
+    });
+    Promise.resolve().then(() => { checkpoint = true; });
+    ctx.clearRect(0, 0, 2, 2);
+    const bitmap = await promise;
+    output.drawImage(bitmap, 0, 0);
+    const snapshot = [
+        checkpoint, bitmap instanceof ImageBitmap, bitmap.width, bitmap.height,
+        pixel(0, 0), pixel(2, 0), pixel(4, 0), pixel(2, 3)
+    ];
+    const clone = structuredClone({one: bitmap, again: bitmap});
+    const copy = await createImageBitmap(clone.one);
+    const moved = structuredClone(bitmap, {transfer: [bitmap]});
+    const detached = [bitmap.width, bitmap.height, errorName(() => output.drawImage(bitmap, 0, 0))];
+    const transfer = [clone.one === clone.again, moved.width, moved.height, copy.width, detached];
+    clone.one.close();
+    copy.close();
+    moved.close();
+
+    const response = await fetch("/green.png");
+    const file = new File([await response.blob()], "green.png", {type: "image/png"});
+    const decoded = await createImageBitmap(file, {resizeWidth: 3});
+    output.drawImage(decoded, 0, 0);
+    const blob = [decoded.width, decoded.height, pixel(2, 2)];
+    decoded.close();
+    const inputErrors = [];
+    for (const make of [
+        () => createImageBitmap(new Blob(["invalid"])),
+        () => createImageBitmap(source, 0, 0, 0, 2),
+        () => createImageBitmap(source, {resizeWidth: 0}),
+        () => createImageBitmap(source, {resizeWidth: -1})
+    ]) {
+        try { await make(); }
+        catch (error) { inputErrors.push(error.name); }
+    }
+
+    const same = await createImageBitmap(element("same"));
+    output.drawImage(same, 0, 0);
+    const samePixel = pixel(0, 0);
+    same.close();
+    const cross = await createImageBitmap(element("cross"));
+    const cloneError = errorName(() => structuredClone(cross));
+    const transferError = errorName(() => structuredClone(cross, {transfer: [cross]}));
+    output.drawImage(cross, 0, 0);
+    const origin = [samePixel, cloneError, transferError, cross.width, errorName(() => pixel(0, 0))];
+    cross.close();
+
+    return {snapshot, transfer, blob, inputErrors, origin};
+}
+
+function finish(value) {
+    const receipt = element("receipt");
+    receipt.textContent = JSON.stringify(value);
+    receipt.setAttribute("data-complete", "yes");
+}
+window.addEventListener("load", () => {
+    verify().then(finish, error => finish({error: error.name + ": " + error.message}));
+});
+</script>

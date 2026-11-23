@@ -1,0 +1,16 @@
+[package]
+name = "rust-browser-javascript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rust_browser_javascript"
+path = "src/lib.rs"
+
+[dependencies]
+num-bigint = "=0.4.6"
+num-traits = "0.2.19"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_Time"] }

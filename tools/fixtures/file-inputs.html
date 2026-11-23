@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Waiting for file selection</title>
+<style>
+  body { font: 18px sans-serif; margin: 32px; color: #16352f; background: #f6fcfa; }
+  input, button { display: block; margin: 14px 0; padding: 8px; }
+</style>
+<form id="form" method="post" enctype="multipart/form-data">
+  <label for="files">Local attachments</label>
+  <input id="files" name="upload" type="file" multiple required accept=".bin,text/plain">
+  <input id="proof" name="proof" type="hidden">
+  <button id="choose" type="button">Choose attachments</button>
+</form>
+<p id="state">Select two files.</p>
+<script>
+const form = document.getElementById('form');
+const input = document.getElementById('files');
+const blank = input.files;
+let selection, echo = false, changes = 0, cancellations = 0, submitted = false;
+const events = [];
+const confirm = (condition, detail) => { if (!condition) throw new Error(detail); };
+document.getElementById('choose').onclick = () => input.showPicker();
+form.action = '/submit' + location.search;
+function checkReady() {
+  if (!echo || cancellations < 2 || submitted) return;
+  confirm(changes === 1, 'one accepted selection');
+  confirm(input.files === selection, 'stable FileList');
+  submitted = true;
+  document.getElementById('proof').value = JSON.stringify({
+    events,
+    files: Array.from(selection).map(file => [file.name, file.type, file.size]),
+    validity: form.checkValidity(),
+    value: input.value.split(String.fromCharCode(92)).join('/'),
+  });
+  form.requestSubmit();
+}
+for (const name of ['input', 'change', 'cancel']) {
+  form.addEventListener(name, function (event) {
+    confirm(event.target === input, 'event target');
+    events.push([event.type, event.isTrusted, event.bubbles, event.composed]);
+  });
+}
+input.addEventListener('change', function () {
+  changes++;
+  selection = input.files;
+  confirm(selection instanceof FileList && selection !== blank && blank.length === 0, 'FileList identity');
+  confirm(selection.length === 2 && selection.item(0) === selection[0], 'indexed Files');
+  const cloned = structuredClone({selection, first: selection[0]});
+  confirm(cloned.selection instanceof FileList && cloned.selection[0] === cloned.first &&
+    cloned.first !== selection[0], 'FileList structured clone');
+  const data = new FormData(form);
+  confirm(data.getAll('upload')[1] === selection[1], 'FormData wraps selected Files');
+  fetch('/echo' + location.search, {method: 'POST', body: data}).then(reply => {
+    confirm(reply.ok, 'multipart Fetch response');
+    echo = true;
+    checkReady();
+  });
+  document.getElementById('state').textContent = 'Two files selected.';
+});
+input.addEventListener('cancel', function () {
+  cancellations++;
+  confirm(input.files === selection, 'dismissed picker preserves selection');
+  queueMicrotask(checkReady);
+});
+</script>

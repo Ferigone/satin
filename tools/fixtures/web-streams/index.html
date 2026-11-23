@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Web streams pending</title>
+<h1>Web streams</h1>
+<ul>
+  <li>Read an open HTTP response with a BYOB reader</li>
+  <li>Pipe a Fetch body through a transform into a writable sink</li>
+  <li>Read the same Blob through iteration, BYOB, and a pipe</li>
+</ul>
+<pre id="receipt"></pre>
+<script>
+function bytes(view) {
+  return Array.from(view).join(',');
+}
+
+async function check() {
+  const response = await fetch('pieces');
+  const reader = response.body.getReader({ mode: 'byob' });
+  const backing = new Uint8Array([90, 91, 0, 0, 0, 95]);
+  const firstRead = reader.read(new Uint8Array(backing.buffer, 2, 3), { min: 3 });
+  const detached = backing.byteLength === 0;
+  const first = await firstRead;
+  const resume = await fetch('resume', { method: 'POST' });
+  const second = await reader.read(new Uint8Array(3), { min: 3 });
+  const eof = await reader.read(new Uint8Array(1));
+  await reader.closed;
+  reader.releaseLock();
+
+  const transform = new TransformStream({
+    transform(chunk, controller) {
+      for (const byte of chunk) controller.enqueue(byte + 1);
+    },
+    flush(controller) { controller.enqueue(99); }
+  });
+  const output = [];
+  const sink = new WritableStream({
+    async write(byte) {
+      await Promise.resolve();
+      output.push(byte);
+    },
+    close() { output.push('closed'); }
+  }, new CountQueuingStrategy({ highWaterMark: 1 }));
+  const relay = await fetch('relay');
+  await relay.body.pipeThrough(transform).pipeTo(sink);
+
+  const blob = new Blob([new Uint8Array([21, 22, 23])]);
+  const blobStream = blob.stream();
+  const iterated = [];
+  for await (const chunk of blobStream) {
+    for (const byte of chunk) iterated.push(byte);
+  }
+  const blobReader = blob.stream().getReader({ mode: 'byob' });
+  const blobRead = await blobReader.read(new Uint8Array(3), { min: 3 });
+  const blobDone = await blobReader.read(new Uint8Array(4));
+  const blobWriterOutput = [];
+  await blob.stream().pipeTo(new WritableStream({
+    write(chunk) {
+      for (const byte of chunk) blobWriterOutput.push(byte);
+    }
+  }));
+
+  return {
+    fetch: [detached, first.done, first.value.byteOffset, bytes(new Uint8Array(first.value.buffer)),
+      resume.status, second.done, bytes(second.value), eof.done, eof.value.byteLength, response.body.locked],
+    pipe: [output.join(','), relay.body.locked, transform.readable.locked, transform.writable.locked, sink.locked],
+    blob: [iterated.join(','), blobStream.locked, blobRead.done, bytes(blobRead.value),
+      blobDone.done, blobDone.value.byteLength, blobWriterOutput.join(',')]
+  };
+}
+
+async function publish(result) {
+  const receipt = document.getElementById('receipt');
+  receipt.textContent = JSON.stringify(result);
+  const uploaded = await fetch('receipt', { method: 'POST', body: receipt.textContent });
+  if (uploaded.status === 204) {
+    document.title = 'Web streams verified';
+    receipt.setAttribute('data-complete', 'yes');
+  }
+}
+check().then(publish, error => publish({ error: error.name + ': ' + error.message }));
+</script>

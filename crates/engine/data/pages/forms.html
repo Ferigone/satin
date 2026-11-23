@@ -1,0 +1,49 @@
+<p class="eyebrow">RUST BROWSER · ALFA.4</p>
+<h1>Wpisz, wybierz, wyślij.</h1>
+<p>Sprawdź pola tekstowe, wybór opcji i wysyłanie formularza. Wynik tej próby
+zostaje na tej stronie.</p>
+<style>
+form{max-width:620px}label.field{display:block;margin:18px 0}
+input,textarea,select,button{font-family:sans-serif;font-size:16px}
+input.text,textarea{display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:10px}
+select{min-width:180px;padding:8px;margin-left:8px}
+button{padding:10px 18px;margin:18px 10px 0 0;background:#16836a;color:white;border:1px solid #16836a}
+button.secondary{background:white;color:#126f5e}
+#result{white-space:pre-wrap;overflow-wrap:break-word;background:#eaf6f0}
+</style>
+<form id="form" action="about:forms" method="get">
+  <label class="field" for="name">Imię
+    <input class="text" id="name" name="name" value="Ada" required maxlength="100">
+  </label>
+  <label class="field" for="password">Hasło próbne
+    <input class="text" id="password" name="password" type="password" placeholder="Pole z maskowaniem znaków">
+  </label>
+  <p><label><input id="subscribe" name="subscribe" type="checkbox" checked> Powiadomienia</label></p>
+  <p><label for="color">Kolor</label>
+    <select id="color" name="color"><option value="green">Zielony</option><option value="blue">Niebieski</option><option value="orange">Pomarańczowy</option></select>
+  </p>
+  <label class="field" for="notes">Notatka
+    <textarea id="notes" name="notes" rows="3">Pierwsza notatka.</textarea>
+  </label>
+  <button id="send" type="submit">Wyślij próbę</button>
+  <button id="reset" type="reset" class="secondary">Przywróć pola</button>
+</form>
+<pre id="result">Oczekiwanie na formularz.</pre>
+<p class="muted">Tab przenosi między polami. Działają zaznaczanie klawiaturą,
+Ctrl+A, kopiowanie i wklejanie. Hasło nie jest dołączane do pokazywanego wyniku.</p>
+<p><a href="about:platform">Próba platformy WWW</a> · <a href="about:version">Możliwości i braki wersji</a></p>
+<script>
+document.getElementById('form').onsubmit=function(event){
+  event.preventDefault();
+  var result={name:document.getElementById('name').value,color:document.getElementById('color').value,
+    subscribe:document.getElementById('subscribe').checked,notes:document.getElementById('notes').value};
+  Promise.all([Promise.resolve(result),Promise.resolve('Formularz obsłużony.')]).then(function(values){
+    document.getElementById('result').textContent=values[1]+'\n'+JSON.stringify(values[0],null,2);
+    document.title='Formularz: OK';
+  });
+};
+document.getElementById('form').onreset=function(){
+  document.getElementById('result').textContent='Przywrócono początkowe wartości.';
+  document.title='Formularze';
+};
+</script>

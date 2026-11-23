@@ -1,0 +1,49 @@
+<h1>Próba nawigacji</h1>
+<p>Otwórz widok, potem wróć do poprzedniego. Pasek adresu i zawartość karty aktualizują się w tym samym dokumencie.</p>
+<style>
+  .route-actions{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}
+  .route-actions button{padding:11px 15px;color:#08483b;background:#e5f6ef;border:1px solid #93c9b9;font-size:16px}
+  .route-panel{background:white;border:1px solid #cbdde2;padding:20px 24px}
+  #route-title{margin-top:0;color:#154f43}
+</style>
+<div class="route-actions">
+  <button type="button" id="route-start" data-route="start">Początek</button>
+  <button type="button" id="route-details" data-route="details">Szczegóły</button>
+  <button type="button" id="route-back">Wstecz</button>
+  <button type="button" id="route-forward">Dalej</button>
+</div>
+<section class="route-panel" aria-live="polite">
+  <h2 id="route-title">Początek</h2>
+  <p id="route-text">Wybierz Szczegóły, aby utworzyć wpis historii.</p>
+</section>
+<p><a href="about:home">Wróć na start</a></p>
+<script>
+  const routes = new Map([
+    ['start', ['Początek', 'Wybierz Szczegóły, aby utworzyć wpis historii.']],
+    ['details', ['Szczegóły', 'Wstecz przywróci poprzedni widok i adres.']]
+  ]);
+  const title = document.getElementById('route-title');
+  const details = document.getElementById('route-text');
+  const watcher = new MutationObserver(() => {
+    document.title = 'Trasa: ' + title.textContent;
+  });
+  watcher.observe(title, {childList:true});
+  function render() {
+    const match = /^#([a-z]+)$/.exec(location.hash);
+    const route = match && routes.get(match[1]) || routes.get('start');
+    title.textContent = route[0];
+    details.textContent = route[1];
+  }
+  function open(event) {
+    const route = event.currentTarget.getAttribute('data-route');
+    if (location.hash !== '#' + route) history.pushState({route}, '', '#' + route);
+    render();
+  }
+  document.getElementById('route-start').addEventListener('click', open);
+  document.getElementById('route-details').addEventListener('click', open);
+  document.getElementById('route-back').addEventListener('click', () => history.back());
+  document.getElementById('route-forward').addEventListener('click', () => history.forward());
+  window.addEventListener('popstate', render);
+  if (!location.hash) history.replaceState({route:'start'}, '', '#start');
+  render();
+</script>

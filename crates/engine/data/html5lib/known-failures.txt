@@ -1,0 +1,7 @@
+# These four cases require executing scripts synchronously during parsing.
+# parse_with_scripting sets the tokenizer/tree-builder flag but does not execute
+# scripts, process document.write, or pause the tree constructor for mutations.
+scripted/adoption01.dat:1:scripting-on
+scripted/ark.dat:1:scripting-on
+scripted/webkit01.dat:1:scripting-on
+scripted/webkit01.dat:2:scripting-on

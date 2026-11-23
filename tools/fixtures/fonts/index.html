@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Font pipeline pending</title>
+<link rel="stylesheet" href="start.css">
+<style>
+body { margin: 0; background: white; color: black; }
+.probe { position: absolute; left: 20px; font-size: 40px; line-height: 40px; }
+#wide { top: 20px; font-family: QAWide, QAFallback, Arial; }
+#alias { top: 75px; font-family: QAAlias, QAFallback, Arial; }
+#denied { top: 130px; font-family: QADenied, QAFallback, Arial; }
+#reference { top: 185px; font-family: QAFallback, Arial; }
+#result { position: absolute; top: 240px; margin: 0; font-size: 12px; }
+</style>
+<div id="wide" class="probe">A</div>
+<div id="alias" class="probe">A</div>
+<div id="denied" class="probe">A</div>
+<div id="reference" class="probe">A</div>
+<pre id="result"></pre>
+<script>
+function width(id) {
+    return document.getElementById(id).getBoundingClientRect().width;
+}
+function measure() {
+    return {wide: width('wide'), alias: width('alias'), denied: width('denied'), reference: width('reference')};
+}
+var first = measure();
+var loaded = false;
+var attempts = 0;
+window.addEventListener('load', function () { loaded = true; });
+fetch('measured');
+function finish(current, ok) {
+    var node = document.getElementById('result');
+    node.textContent = JSON.stringify({first: first, final: current, loaded: loaded, ok: ok});
+    node.setAttribute('data-ready', 'yes');
+    document.title = ok ? 'Font pipeline OK' : 'Font pipeline FAIL';
+}
+function poll() {
+    var current = measure();
+    if (loaded && current.wide === 32 && current.alias === 32 && current.reference === 20) {
+        finish(current, first.wide !== current.wide && first.alias !== current.alias && current.denied === 20);
+    } else if (++attempts >= 100) {
+        finish(current, false);
+    } else {
+        setTimeout(poll, 25);
+    }
+}
+setTimeout(poll, 25);
+</script>

@@ -1,0 +1,127 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Structured clone verification</title>
+<pre id="receipt"></pre>
+<script>
+const results = {};
+const shared = Object.create(null);
+const list = new Array(4);
+list[2] = shared;
+const source = {shared, list, negative: -0, nan: NaN, text: '\ud800'};
+shared.parent = source;
+source[Symbol()] = () => 1;
+Object.defineProperty(source, '__proto__', { value: 9, enumerable: true });
+const graph = structuredClone(source);
+results.graph = [
+  graph !== source, graph.shared === graph.list[2], graph.shared.parent === graph,
+  graph.list.length, 0 in graph.list, 2 in graph.list, 3 in graph.list,
+  Object.getPrototypeOf(graph.shared) === Object.prototype, graph.__proto__,
+  Object.is(graph.negative, -0), Number.isNaN(graph.nan), graph.text.charCodeAt(0),
+];
+
+const record = {}, next = {}, visits = [];
+Object.defineProperty(record, 'first', { enumerable: true, get: () => {
+  visits.push('first');
+  delete record.deleted;
+  Object.defineProperty(record, 'hiddenLater', { enumerable: false });
+  record.added = 8;
+  return next;
+}});
+record.deleted = 4;
+record.hiddenLater = 5;
+Object.defineProperty(next, 'child', { enumerable: true, get: () => {
+  visits.push('child');
+  return 2;
+}});
+record.last = next;
+const walked = structuredClone(record);
+results.getters = [
+  visits.join(), walked.first === walked.last, walked.first.child,
+  'deleted' in walked, 'added' in walked, 'hiddenLater' in walked,
+];
+
+class DerivedMap extends Map {}
+const map = new DerivedMap(), set = new Set(), regexp = /abc/gi;
+map.set(shared, set);
+map.set(map, shared);
+set.add(map);
+regexp.lastIndex = 7;
+const error = new TypeError('message');
+error.cause = shared;
+const builtins = structuredClone({
+  date: new Date(923), invalid: new Date(NaN), regexp, map, set, shared,
+  boxed: new String('\udfff'), error,
+});
+results.intrinsics = [
+  builtins.date.getTime(), Number.isNaN(builtins.invalid.getTime()),
+  builtins.regexp.source, builtins.regexp.flags, builtins.regexp.lastIndex,
+  Object.getPrototypeOf(builtins.map) === Map.prototype,
+  builtins.map.get(builtins.shared) === builtins.set,
+  builtins.map.get(builtins.map) === builtins.shared, builtins.set.has(builtins.map),
+  builtins.boxed.valueOf().charCodeAt(0), builtins.error instanceof TypeError,
+  builtins.error.message, builtins.error.cause === builtins.shared,
+];
+
+const buffer = new ArrayBuffer(5, { maxByteLength: 12 });
+const bytes = new Uint8Array(buffer), tracking = new Uint8Array(buffer, 1);
+bytes.set([1, 2, 3, 4, 5]);
+const fixed = new DataView(buffer, 2, 2);
+const binary = structuredClone({ buffer, tracking, fixed, alias: tracking });
+binary.buffer.resize(8);
+binary.tracking[0] = 11;
+results.binary = [
+  buffer.byteLength, bytes.join(), binary.buffer !== buffer, binary.buffer.maxByteLength,
+  binary.tracking === binary.alias, binary.tracking.buffer === binary.buffer,
+  binary.fixed.buffer === binary.buffer, binary.tracking.byteOffset,
+  binary.tracking.length, binary.fixed.byteOffset, binary.fixed.byteLength, binary.tracking.join(),
+];
+const spare = new ArrayBuffer(1), order = [];
+const options = {};
+Object.defineProperty(options, 'transfer', { get: () => {
+  order.push('options');
+  return (function* () { order.push('iterator'); yield buffer; yield spare; })();
+}});
+const movedInput = { tracking, buffer };
+Object.defineProperty(movedInput, 'during', { enumerable: true, get: () => {
+  order.push('getter');
+  bytes[2] = 17;
+  return 6;
+}});
+const moved = structuredClone(movedInput, options);
+results.transfer = [
+  buffer.detached, spare.detached, moved.tracking.buffer === moved.buffer,
+  moved.buffer.maxByteLength, moved.tracking.join(), moved.during, order.join(),
+];
+
+function errorName(operation) {
+  try { operation(); } catch (issue) { return issue.name; }
+  return 'accepted';
+}
+const first = new ArrayBuffer(3), second = new ArrayBuffer(4), reentrant = {};
+Object.defineProperty(reentrant, 'last', { enumerable: true, get: () => {
+  second.transfer();
+  return 1;
+}});
+results.errors = [
+  errorName(() => structuredClone(() => 1)),
+  errorName(() => structuredClone(Symbol())),
+  errorName(() => structuredClone(document)),
+  errorName(() => structuredClone(window)),
+  errorName(() => structuredClone(Promise.resolve(1))),
+  errorName(() => structuredClone(0, { transfer: [first, first] })),
+  errorName(() => structuredClone({}, { transfer: [new Uint8Array(first)] })),
+  errorName(() => structuredClone(Symbol(), { transfer: [first] })),
+  first.detached,
+  errorName(() => structuredClone(reentrant, { transfer: [first, second] })),
+  first.detached, second.detached,
+];
+results.binding = [
+  structuredClone.length, structuredClone(undefined) === undefined,
+  structuredClone.call(null, 1), errorName(() => structuredClone.call({}, 1)),
+  errorName(() => structuredClone()), errorName(() => structuredClone(1, false)),
+  errorName(() => structuredClone(1, { transfer: [3] })),
+];
+const receipt = document.getElementById('receipt');
+receipt.textContent = JSON.stringify(results);
+receipt.setAttribute('data-complete', 'yes');
+</script>

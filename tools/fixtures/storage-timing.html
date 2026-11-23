@@ -1,0 +1,174 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Storage and timing pending</title>
+<style>
+body{margin:32px;background:#eef5f6;color:#173246;font:18px sans-serif}
+main{background:white;border:1px solid #c5d6dc;padding:24px;max-width:900px}
+h1{margin-top:0}button{background:#126f5f;color:white;border:0;padding:12px 18px}
+pre{font-size:14px;background:#e9f0f3;padding:14px;white-space:pre-wrap}
+</style>
+<main>
+  <h1 id="outcome">Storage and timing pending</h1>
+  <p>Verify storage keys, tab isolation and storage events using an owned profile.</p>
+  <p>The clock checks interval cancellation and timestamps shared by callbacks in a frame.</p>
+  <p>The saved value includes a UTF-16 code unit that must survive restarting the browser.</p>
+  <button type="button" id="open-writer">Open writer tab</button>
+  <pre id="receipt">The fixture is running.</pre>
+</main>
+<script>
+const current = new URL(location.href);
+const mode = current.searchParams.get('mode');
+const role = current.pathname;
+const expectedText = 'Łódź 🦀';
+const title = document.getElementById('outcome');
+const output = document.getElementById('receipt');
+
+function endpoint(route) {
+    const address = new URL(route, current);
+    address.searchParams.set('mode', mode);
+    return address.href;
+}
+function check(condition, reason) {
+    if (!condition) throw new Error(reason);
+}
+function finish(value, receipt) {
+    document.title = value;
+    title.textContent = value;
+    title.setAttribute('data-complete', 'yes');
+    output.textContent = JSON.stringify(receipt);
+}
+function fail(error) {
+    const diagnostic = {role, name:error.name, message:error.message};
+    finish('Storage fixture failed', diagnostic);
+    fetch(endpoint('/diagnostic'), {method:'POST',body:JSON.stringify(diagnostic)}).catch(() => {});
+}
+async function post(route, receipt) {
+    const response = await fetch(endpoint(route), {method:'POST', body:JSON.stringify(receipt)});
+    check(response.status === 204, 'receipt ' + route);
+}
+function clock() {
+    const interval = new Promise(resolve => {
+        const trace = [];
+        var calls = 0;
+        globalThis.stringTimer = 0;
+        setTimeout('globalThis.stringTimer = 17', 0);
+        const ignored = setTimeout(() => trace.push('unwanted timeout'), 0);
+        clearInterval(ignored);
+        const handle = setInterval(function(arg) {
+            calls++;
+            trace.push(arg + calls);
+            queueMicrotask(() => trace.push('micro'));
+            if (calls === 3) {
+                clearTimeout(handle);
+                setTimeout(() => {
+                    resolve([stringTimer, trace.join(',')]);
+                }, 5);
+            }
+        }, 0, 'tick');
+    });
+    const frames = new Promise(resolve => {
+        var firstStamp, secondStamp;
+        const trace = [];
+        requestAnimationFrame(t => {
+            firstStamp = t;
+            trace.push('first');
+            cancelAnimationFrame(ignored);
+            queueMicrotask(() => trace.push('micro'));
+            requestAnimationFrame(t => {
+                trace.push('next');
+                resolve([trace.join(','), firstStamp === secondStamp, t > firstStamp,
+                    performance.now() >= t && performance.timeOrigin > 1500000000000]);
+            });
+        });
+        const ignored = requestAnimationFrame(() => trace.push('unwanted frame'));
+        requestAnimationFrame(t => {
+            secondStamp = t;
+            trace.push('second');
+        });
+    });
+    return Promise.all([interval, frames]);
+}
+function verifyNames() {
+    const s = localStorage;
+    check(s instanceof Storage && s === window.localStorage && s !== sessionStorage, 'wrapper identity');
+    s.visible = 7;
+    Object.defineProperty(s, 'enumerated', {value:'entry'});
+    s.setItem('getItem', 'method');
+    const methodSurface = typeof s.getItem;
+    s.getItem = 'shadow';
+    const method = Storage.prototype.getItem;
+    const collision = [methodSurface, typeof s.getItem, method.call(s, 'getItem'),
+        Object.keys(s).indexOf('getItem') >= 0];
+    delete s.getItem;
+    collision.push(typeof s.getItem, method.call(s, 'getItem'));
+    Storage.prototype.removeItem.call(s, 'getItem');
+    const desc = Object.getOwnPropertyDescriptor(s, 'visible');
+    const keys = Object.keys(s);
+    check(desc.writable && desc.configurable && desc.enumerable && desc.value === '7', 'named descriptor');
+    check(keys.indexOf('enumerated') >= 0 && Reflect.set(s, 'visible', 8) && s.visible === '8', 'named write');
+    delete s.visible;
+    check(!('visible' in s) && s.getItem('visible') === null, 'named delete');
+    s.removeItem('enumerated');
+    return collision;
+}
+async function writer() {
+    const paired = mode !== 'headless';
+    const gate = fetch(endpoint('/gate'));
+    const collision = verifyNames();
+    check(sessionStorage.getItem('tab') === null, 'independent session storage in writer');
+    if (paired) check(localStorage.getItem('shared') === 'visible-to-writer', 'shared local storage in writer');
+    sessionStorage.tab = 'writer-origin';
+    localStorage.saved = expectedText;
+    localStorage.rawUnit = '\ud800';
+    if (paired) {
+        localStorage.broadcast = 'one';
+        localStorage.broadcast = 'one';
+        localStorage.broadcast = 'two';
+        localStorage.removeItem('broadcast');
+    }
+    const timed = await clock();
+    const receipt = {named:true, separateTab:true, timing:timed, collision};
+    await post('/writer-receipt', receipt);
+    const ready = await gate;
+    check(ready.status === 204, 'writer gate');
+    finish('Storage writer OK', receipt);
+    if (!paired) location.href = endpoint('/reload');
+}
+function listen() {
+    localStorage.shared = 'visible-to-writer';
+    sessionStorage.tab = 'listener-origin';
+    const events = [];
+    let ticks = 0;
+    window.onstorage = event => {
+        if (event.key !== 'broadcast') return;
+        try {
+            check(event instanceof StorageEvent && event.isTrusted && event.storageArea === localStorage, 'trusted storage event');
+            check(event.url === endpoint('/writer') && event.target === window, 'source URL and receiving target');
+            check(ticks === events.length, 'one microtask checkpoint per storage event');
+            events.push([event.oldValue, event.newValue]);
+            queueMicrotask(() => { ticks++; });
+            if (events.length === 3) {
+                const receipt = {events, scoped:sessionStorage.tab === 'listener-origin'};
+                post('/listener-receipt', receipt).then(() => finish('Storage listener OK', receipt), fail);
+            }
+        } catch (error) { fail(error); }
+    };
+    document.getElementById('open-writer').addEventListener('click', () => {
+        window.open(endpoint('/writer'), '_blank', 'noopener');
+    });
+    document.title = 'Storage listener ready';
+    title.textContent = document.title;
+}
+async function readBack() {
+    const resumedTab = role === '/reload';
+    const receipt = {saved:localStorage.saved, raw:localStorage.rawUnit.charCodeAt(0),
+        session:sessionStorage.getItem('tab')};
+    check(receipt.saved === expectedText && receipt.raw === 55296, 'stored values');
+    check(receipt.session === (resumedTab ? 'writer-origin' : null), 'session lifetime');
+    await post(resumedTab ? '/reload-receipt' : '/reopen-receipt', receipt);
+    finish(resumedTab ? 'Storage reload OK' : 'Storage reopened OK', receipt);
+}
+if (role === '/listener') listen();
+else if (role === '/writer') writer().catch(fail);
+else readBack().catch(fail);
+</script>
