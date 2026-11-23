@@ -56,7 +56,18 @@ Sanitized receipt: `target/public-media/chrome-M4FBXN/summary.json`.
 
 ## Satin candidate
 
-Not tested yet: no coordinator build was available to this worktree for the recorded runs.
+Release candidate: `0.1.0-alpha.18`, source `4daf9467e47f3aa3b13aa6daa2319e73f3e3f17e`, executable SHA-256 `9acb0041fd927709e526cac6db86a49f845fbdcbe8fe117a0944eef6532a3358`, verified before and after the run. The probe ran the coordinator's exact `satin-a18-integration/target/release/rust-browser.exe` read-only, without the launcher, updater, or installed profile. It used the same Satin headless probe and fresh per-site profiles as alpha.17; both launches exited 0.
+
+| Site | Start UTC | Executed scripts (alpha.17 → .18) | Diagnostics (nesting), alpha.17 → .18 | Player / chat |
+| --- | --- | ---: | ---: | --- |
+| Twitch | `19:17:33.458Z` | 41 → 41 | 64 (49) → 64 (48) | No `<video>`, player marker, active media status, or chat line marker. |
+| YouTube | `19:17:39.728Z` | 47 → 47 | 5 (3) → 5 (3) | No `<video>`, `#movie_player`, or active media status. |
+
+The first Twitch diagnostic was not classified by the sanitizer. The next was `ExecutionLimit: Expression nesting limit exceeded` at inline script #140, as in alpha.17. The first two YouTube diagnostics were the same nesting error as in alpha.17. The single difference in the Twitch nesting count is an observation on the live site, not evidence that the parser limit was fixed.
+
+**Untested on alpha.18:** In-session media time, decoded frames, audio, and play/pause/seek could not be tested because neither public page initialized a player. No Twitch chat was rendered for a read-only check. In the earlier Chrome reference, both players advanced by several seconds with decoded video and audio and responded to pause/resume; YouTube also sought and Twitch rendered chat. Chrome was not rerun for this comparison.
+
+Sanitized receipt: `target/public-media/satin-rffnUh/summary.json`.
 
 ## Earlier captures reviewed
 
