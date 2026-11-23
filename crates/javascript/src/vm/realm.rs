@@ -7,6 +7,7 @@ use crate::{
 };
 use std::rc::Rc;
 
+#[cfg_attr(test, derive(Clone, Copy))]
 pub(crate) struct CoreIntrinsics {
     pub(super) object_prototype: ObjectId,
     pub(super) function_prototype: ObjectId,
@@ -102,5 +103,7 @@ fn allocate_additional_core(vm: &mut crate::Vm) -> Result<EnvId, crate::JsError>
     Ok(allocate_core(&mut vm.heap))
 }
 
+#[cfg(test)]
+mod entry;
 #[cfg(test)]
 mod tests;

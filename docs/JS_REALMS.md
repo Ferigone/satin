@@ -51,6 +51,17 @@ intended behavior without changing the public ES5.1 suite.
   **not** initialize a second realm's complete intrinsics or execute its code:
   the infallible startup installer bypasses allocation checks, so it must
   not be reused for guest-driven creation as it stands.
+- The test-only current-core guard restores its parent's selected aliases on
+  both success and error. It uses ordinary scoped roots for parked parents
+  while GC roots the current environment normally. Reentry shares fuel and
+  reserves native depth; it never starts a new task or changes the collector's
+  active-execution rule. Its restricted view cannot execute JS, call native
+  functions, run jobs, or copy host policy or source-referrer state.
+
+Executable entry still needs a checked *ready* realm with a complete,
+budgeted intrinsic graph and traced callable/continuation ownership. Global
+selection and HTML entry settings are separate; entering a JS realm does
+not grant access to a browser document or start a new checkpoint.
 
 ## Host boundaries
 
