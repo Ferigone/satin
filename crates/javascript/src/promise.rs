@@ -1040,7 +1040,7 @@ impl Vm {
                 data.values[index] = value;
                 data.remaining -= 1;
                 if data.remaining == 0 {
-                    self.finish_aggregate(state)?;
+                    return self.finish_aggregate(state);
                 }
                 Ok(Value::Undefined)
             }
@@ -1133,7 +1133,7 @@ impl Vm {
         self.define_data_property(result.clone(), "errors", list, true, false, true)?;
         Ok(result)
     }
-    fn finish_aggregate(&mut self, state: ObjectId) -> Result<(), JsError> {
+    fn finish_aggregate(&mut self, state: ObjectId) -> Result<Value, JsError> {
         let ObjectKind::PromiseAggregate(data) = &self.heap.object(state)?.kind else {
             unreachable!()
         };
@@ -1149,8 +1149,7 @@ impl Vm {
         } else {
             (capability.resolve, self.try_new_array(&values)?)
         };
-        self.invoke(function, Value::Undefined, &[result])?;
-        Ok(())
+        self.invoke(function, Value::Undefined, &[result])
     }
     fn promise_combine(
         &mut self,
@@ -1527,9 +1526,13 @@ pub(crate) fn install(vm: &mut Vm) {
         |vm, this, _| {
             let capability = vm.capability_for_constructor(this)?;
             let object = vm.new_object();
-            vm.set_property(object.clone(), "promise", capability.promise)?;
-            vm.set_property(object.clone(), "resolve", capability.resolve)?;
-            vm.set_property(object.clone(), "reject", capability.reject)?;
+            for (key, value) in [
+                ("promise", capability.promise),
+                ("resolve", capability.resolve),
+                ("reject", capability.reject),
+            ] {
+                vm.define_data_property(object.clone(), key, value, true, true, true)?;
+            }
             Ok(object)
         },
     );
