@@ -2034,7 +2034,18 @@ impl Vm {
                 }
                 Ok(())
             }
-            Reference::Global(key) => self.set(self.global(), &key, value, strict),
+            Reference::Global(key) => {
+                let global = self.global();
+                // A getter, coercion, or right-hand side may have removed a
+                // binding since the identifier was resolved.
+                if strict && !self.has(&global, &key)? {
+                    return Err(JsError::new(
+                        ErrorKind::ReferenceError,
+                        format!("{key} is not defined"),
+                    ));
+                }
+                self.set(global, &key, value, strict)
+            }
             Reference::Property(object, key) => self.set_key(object, &key, value, strict),
             Reference::Private(object, id) => self.private_set(object, id, value),
             Reference::Unresolvable(key) => {
