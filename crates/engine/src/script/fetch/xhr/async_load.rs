@@ -311,7 +311,11 @@ impl Host {
             if body.is_empty() {
                 return self.finish(vm, id);
             }
-            if !self.append(vm, id, &body)? {
+            let accepted = match Arc::try_unwrap(body) {
+                Ok(bytes) => self.append_owned(vm, id, bytes)?,
+                Err(shared) => self.append(vm, id, &shared)?,
+            };
+            if !accepted {
                 return self.fail(vm, id, "error");
             }
             self.notify_chunk(vm, id)?;
@@ -332,19 +336,48 @@ impl Host {
         };
         match result {
             Poll::Ready(Ok(Some(bytes))) => {
-                if !self.append(vm, id, &bytes)? {
+                if !self.append_owned(vm, id, bytes)? {
                     return self.fail(vm, id, "error");
                 }
                 self.notify_chunk(vm, id)?;
                 // A notification can represent more than one chunk or have
-                // EOF already visible in the pipe. Arrange a separate read
-                // task rather than consuming any of that in this callback.
-                self.schedule(id, Task::Read);
+                // EOF already visible in the pipe. Continue in a separate
+                // task only if work is already ready. We acknowledged the
+                // pipe before reading, so a later arrival can notify us.
+                let ready = self
+                    .fetch
+                    .borrow()
+                    .pending_xhr
+                    .get(&id)
+                    .and_then(|pending| pending.pipe.as_ref())
+                    .is_some_and(FetchBody::has_ready_read);
+                if ready {
+                    self.schedule(id, Task::Read);
+                }
                 Ok(())
             }
             Poll::Ready(Ok(None)) => self.finish(vm, id),
             Poll::Ready(Err(_)) => self.fail(vm, id, "error"),
             Poll::Pending => Ok(()),
+        }
+    }
+
+    fn append_owned(&self, vm: &mut Vm, id: u64, bytes: Vec<u8>) -> Result<bool, JsError> {
+        if bytes.capacity() <= FETCH_BODY_LIMIT
+            && self.fetch.borrow().pending_xhr[&id].received.capacity() == 0
+        {
+            // Keep a uniquely owned first chunk instead of copying it into a
+            // second allocation. Its allocation still counts in Fetch's budget.
+            super::super::budget(vm, &self.fetch, bytes.capacity())?;
+            self.fetch
+                .borrow_mut()
+                .pending_xhr
+                .get_mut(&id)
+                .unwrap()
+                .received = bytes;
+            Ok(true)
+        } else {
+            self.append(vm, id, &bytes)
         }
     }
 

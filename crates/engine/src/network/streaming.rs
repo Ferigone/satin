@@ -62,6 +62,10 @@ impl FetchBody {
         }
     }
 
+    pub(crate) fn has_ready_read(&self) -> bool {
+        !self.chunks.is_empty() || self.outcome().is_some()
+    }
+
     pub fn read(&mut self) -> Poll<Result<Option<Vec<u8>>, FetchError>> {
         if let Some(terminal) = self.outcome() {
             return Poll::Ready(terminal.map(|()| None));

@@ -692,6 +692,147 @@ fn xhr_body_checkpoint_can_abort_queued_eof_and_reopen_without_stale_load() {
 }
 
 #[test]
+fn xhr_header_checkpoint_cancel_drops_buffered_data_before_loading() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime
+        .eval(
+            r#"
+            var xhr = new XMLHttpRequest(), trace = [];
+            xhr.onreadystatechange = function() {
+                trace.push(xhr.readyState);
+                if (xhr.readyState === 2) {
+                    Promise.resolve().then(function() { xhr.abort(); });
+                }
+            };
+            xhr.onabort = function() { trace.push('abort'); };
+            xhr.onload = function() { trace.push('unexpected load'); };
+            xhr.open('GET', '/header-abort');
+            xhr.send();
+            "#,
+        )
+        .unwrap();
+    let job = runtime.take_network_jobs().pop().unwrap();
+    runtime
+        .complete_network(job.id, Ok(buffered_response("/header-abort", b"unused")))
+        .unwrap();
+    runtime.progress_network(job.id).unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert!(job.request.signal.as_ref().unwrap().is_cancelled());
+    assert_eq!(runtime.pending_network(), 0);
+    assert_eq!(
+        runtime
+            .eval("[trace.join(','),xhr.readyState,xhr.responseText].join('|')")
+            .unwrap(),
+        Value::from("1,2,4,abort|0|"),
+    );
+}
+
+#[test]
+fn xhr_null_body_completes_with_headers_but_an_empty_body_stream_closes_later() {
+    for has_body in [false, true] {
+        let mut runtime = realm("https://example.test/page", "");
+        runtime
+            .eval(
+                r#"
+                var xhr = new XMLHttpRequest(), states = [];
+                xhr.onreadystatechange = function() { states.push(xhr.readyState); };
+                xhr.open('GET', '/empty');
+                xhr.send();
+                "#,
+            )
+            .unwrap();
+        let id = runtime.take_network_jobs().pop().unwrap().id;
+        let mut response = buffered_response("/empty", b"");
+        if !has_body {
+            response.body = None;
+            response.status = 204;
+        }
+        runtime.complete_network(id, Ok(response)).unwrap();
+        assert_eq!(
+            runtime.eval("states.join(',')").unwrap(),
+            Value::from(if has_body { "1,2" } else { "1,2,4" }),
+        );
+        runtime.pump_with_network_errors().unwrap();
+        assert_eq!(
+            runtime.eval("states.join(',')").unwrap(),
+            Value::from("1,2,4")
+        );
+        assert_eq!(runtime.pending_network(), 0);
+    }
+}
+
+#[test]
+fn xhr_waits_for_transport_without_scheduling_reads_of_an_idle_pipe() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, wait) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        let mut request = String::new();
+        while !request.ends_with("\r\n\r\n") {
+            assert_ne!(reader.read_line(&mut request).unwrap(), 0);
+        }
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\na")
+            .unwrap();
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        socket.write_all(b"b").unwrap();
+    });
+    let mut runtime = realm(&format!("http://{address}/page"), "");
+    runtime
+        .eval("var xhr=new XMLHttpRequest();xhr.open('GET','/slow-body');xhr.send();")
+        .unwrap();
+    let job = runtime.take_network_jobs().pop().unwrap();
+    let loader = Loader::new().unwrap();
+    let cancel = CancelSignal::new();
+    let (head, transfer) = loader
+        .transport_handle()
+        .block_on(loader.open_web_fetch(&job.request, &cancel, Instant::now() + FETCH_TIMEOUT))
+        .unwrap();
+    let (notify, received) = mpsc::channel();
+    loader
+        .transport_handle()
+        .spawn(transfer.unwrap().run(move || {
+            let notify = notify.clone();
+            async move {
+                let _ = notify.send(());
+            }
+        }));
+    runtime.complete_fetch(job.id, Ok(head)).unwrap();
+    received.recv_timeout(Duration::from_secs(5)).unwrap();
+    runtime.progress_network(job.id).unwrap();
+    assert_eq!(
+        runtime
+            .eval("[xhr.readyState,xhr.responseText].join('|')")
+            .unwrap(),
+        Value::from("3|a")
+    );
+    assert!(runtime.next_deadline().is_none());
+    assert_eq!(runtime.pending_network(), 1);
+    release.send(()).unwrap();
+    for _ in 0..4 {
+        if runtime.pending_network() == 0 {
+            break;
+        }
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.progress_network(job.id).unwrap();
+        runtime.pump_with_network_errors().unwrap();
+    }
+    assert_eq!(runtime.pending_network(), 0);
+    assert_eq!(
+        runtime
+            .eval("[xhr.readyState,xhr.responseText].join('|')")
+            .unwrap(),
+        Value::from("4|ab")
+    );
+    server.join().unwrap();
+}
+
+#[test]
 fn response_xml_preserves_long_qualified_names_and_traces_retained_child_lists() {
     let (address, server) = serve(|_| {
         // Longer than u16::MAX in UTF-8, and that offset falls inside é.
