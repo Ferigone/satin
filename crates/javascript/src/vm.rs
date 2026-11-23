@@ -1896,7 +1896,6 @@ impl Vm {
         self.consume_work(indexed)?;
         let object = self.heap.object(id)?;
         let mut keys = object.keys(enumerable);
-        let is_boxed_string = matches!(object.kind, ObjectKind::Boxed(Value::String(_)));
         if indexed > 0 || !named.is_empty() {
             let mut prefix = Vec::with_capacity(count);
             for i in 0..indexed {
@@ -1905,9 +1904,6 @@ impl Vm {
             prefix.extend(named);
             prefix.extend(keys);
             keys = prefix;
-        }
-        if is_boxed_string && include_length {
-            keys.push("length".into());
         }
         Ok(keys)
     }

@@ -144,6 +144,15 @@ impl Object {
             .collect();
         indices.sort_by_key(|p| p.0);
         let mut out: Vec<_> = indices.into_iter().map(|(_, k)| k).collect();
+        // These non-enumerable own properties exist from construction.
+        if !enumerable_only
+            && matches!(
+                self.kind,
+                ObjectKind::Array { .. } | ObjectKind::Boxed(Value::String(_))
+            )
+        {
+            out.push("length".into());
+        }
         out.extend(
             self.order
                 .iter()
@@ -155,9 +164,6 @@ impl Object {
                 })
                 .cloned(),
         );
-        if !enumerable_only && matches!(self.kind, ObjectKind::Array { .. }) {
-            out.push("length".into());
-        }
         out
     }
 }
