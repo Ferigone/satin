@@ -41,6 +41,7 @@ mod address_bar;
 mod bookmark_menu;
 mod bookmarks;
 mod chrome_menu;
+mod history_ui;
 mod icons;
 mod navigation_error;
 mod settings;
@@ -95,6 +96,7 @@ enum Action {
     Bookmarks,
     ShortcutHelp,
     Menu,
+    TabHistory,
     MenuItem(usize),
     BookmarkItem(usize),
     Minimize,
@@ -117,6 +119,7 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::NewTab, "New tab"),
     (Action::Settings, "Settings"),
     (Action::Bookmarks, "Bookmarks"),
+    (Action::TabHistory, "Tab history"),
     (Action::Version, "About Satin"),
     (Action::ShortcutHelp, "Keyboard shortcuts"),
 ];
@@ -269,6 +272,7 @@ pub fn run(
         tab_hits_current: false,
         chrome_hover: None,
         chrome_menu: None,
+        history_menu: None,
         caption_pressed: None,
         last_title_press: None,
         hover: None,
@@ -350,6 +354,7 @@ struct App {
     tab_hits_current: bool,
     chrome_hover: Option<Action>,
     chrome_menu: Option<Menu>,
+    history_menu: Option<history_ui::HistoryMenu>,
     caption_pressed: Option<Action>,
     last_title_press: Option<(Instant, f32, f32)>,
     hover: Option<String>,
@@ -952,6 +957,7 @@ impl App {
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
             Action::ShortcutHelp => self.navigate(shortcuts::HELP_URL.into(), true),
+            Action::TabHistory => self.open_history_menu(),
             Action::Menu => {
                 self.select_popup = None;
                 self.chrome_menu = self.chrome_menu.is_none().then_some(Menu::Main(0));
@@ -1081,7 +1087,10 @@ impl App {
         self.redraw();
     }
     fn insert(&mut self, text: &str) {
-        if self.settings_panel.is_some() || matches!(self.chrome_menu, Some(Menu::Bookmarks(_))) {
+        if self.settings_panel.is_some()
+            || self.history_menu.is_some()
+            || matches!(self.chrome_menu, Some(Menu::Bookmarks(_)))
+        {
             return;
         }
         if !self.address_focus {
@@ -1133,7 +1142,7 @@ impl App {
             self.settings_key(key);
             return;
         }
-        if self.bookmark_panel_key(&key) {
+        if self.handle_history_key(&key) || self.bookmark_panel_key(&key) {
             return;
         }
         if let Some(Menu::Main(selected)) = self.chrome_menu {
@@ -1537,6 +1546,7 @@ impl App {
         self.draw_toolbar(canvas, width);
         self.draw_footer(canvas, width, height);
         self.draw_chrome_menu(canvas, width);
+        self.draw_history_menu(canvas, width);
     }
 
     fn draw_tabs(&mut self, canvas: &mut Canvas, width: f32) {
@@ -2181,6 +2191,9 @@ impl App {
             self.settings_press();
             return;
         }
+        if self.handle_history_click() {
+            return;
+        }
         if let Some(edge) = self.frame_resize_at_pointer() {
             if let Some(window) = &self.window {
                 let _ = window.drag_resize_window(edge);
@@ -2244,7 +2257,8 @@ impl App {
             return None;
         }
         let tab = &self.tabs[self.active];
-        if self.mouse.1 < TOP
+        if self.history_menu.is_some()
+            || self.mouse.1 < TOP
             || self.window.as_ref().is_some_and(|window| {
                 self.mouse.1 >= window.inner_size().height as f32 / self.scale - tab.footer_height()
             })
@@ -2915,11 +2929,12 @@ impl ApplicationHandler<()> for App {
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Focused(false) => self.dismiss_history_menu(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
                 let changes_panel = match event.logical_key {
                     Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                        self.settings_panel.is_some() || bookmarks_open
+                        self.settings_panel.is_some() || self.history_menu.is_some() || bookmarks_open
                     }
                     Key::Named(NamedKey::Delete) => bookmarks_open,
                     _ => false,
@@ -2941,6 +2956,9 @@ impl ApplicationHandler<()> for App {
                 );
                 if self.settings_panel.is_some() {
                     self.settings_cursor();
+                    return;
+                }
+                if self.update_history_pointer() {
                     return;
                 }
                 let chrome = self.chrome_action_at_pointer();
@@ -2973,6 +2991,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                self.clear_history_hover();
                 self.chrome_hover = None;
                 self.caption_pressed = None;
                 self.hover = None;
@@ -2986,6 +3005,7 @@ impl ApplicationHandler<()> for App {
                 if button == MouseButton::Left {
                     self.left_press(event_loop);
                 } else if button == MouseButton::Right
+                    && self.history_menu.is_none()
                     && WINDOW_FRAME
                     && self.settings_panel.is_none()
                     && self.mouse.1 < TAB_H
@@ -3006,6 +3026,9 @@ impl ApplicationHandler<()> for App {
                 ..
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.history_menu.is_some() {
+                    return;
+                }
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * 54.,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.scale,
@@ -3013,6 +3036,7 @@ impl ApplicationHandler<()> for App {
                 self.scroll(amount / self.tabs[self.active].zoom);
             }
             WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
+                self.dismiss_history_menu();
                 if let Ok(url) = url::Url::from_file_path(path) {
                     self.navigate(url.into(), true);
                 }
@@ -3270,6 +3294,7 @@ fn chrome_icon(
         | Action::Select(_)
         | Action::Bookmarks
         | Action::ShortcutHelp
+        | Action::TabHistory
         | Action::MenuItem(_)
         | Action::BookmarkItem(_) => {}
     }

@@ -117,6 +117,14 @@ impl SessionHistory {
             .is_some_and(|index| index < entries.items.len())
     }
 
+    /// Read an entry for browser chrome without traversing or exposing its state.
+    /// An offset of zero reads the current entry.
+    pub fn entry_url(&self, delta: i32) -> Option<Url> {
+        let entries = self.0.borrow();
+        let index = entries.index.checked_add_signed(delta as isize)?;
+        entries.items.get(index).map(|entry| entry.url.clone())
+    }
+
     pub(crate) fn length(&self) -> usize {
         self.0.borrow().items.len()
     }
