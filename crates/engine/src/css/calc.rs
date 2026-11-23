@@ -251,7 +251,7 @@ impl Parser<'_> {
     }
 }
 
-fn number_end(input: &str) -> Option<usize> {
+pub(super) fn number_end(input: &str) -> Option<usize> {
     let bytes = input.as_bytes();
     let past_sign = |i| i + usize::from(matches!(bytes.get(i), Some(b'+' | b'-')));
     let past_digits = |i| i + bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();

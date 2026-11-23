@@ -1,7 +1,68 @@
 use super::{
-    Declaration, contains_variable, declaration_tokens, number, serialized_tokens,
-    supports_declaration, trim_boundary, whitespace_tokens,
+    Declaration, calc, contains_variable, declaration_tokens, identifier, number,
+    serialized_tokens, supports_declaration, trim_boundary, valid_components, whitespace_tokens,
+    without_comments,
 };
+
+/// Specified-value reflection, independent of computed style and layout.
+#[derive(Clone, Copy)]
+pub(crate) enum ReflectedLonghand {
+    Float,
+    Opacity,
+}
+
+impl ReflectedLonghand {
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        match name {
+            "float" => Some(Self::Float),
+            "opacity" => Some(Self::Opacity),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn serialize(self, source: &str) -> Option<String> {
+        let clean = without_comments(source);
+        if !valid_components(&clean, 0) {
+            return None;
+        }
+        let value = trim_boundary(&clean);
+        if contains_variable(value) {
+            return Some(serialized_tokens(value));
+        }
+        let mut end = 0;
+        if value
+            .as_bytes()
+            .first()
+            .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'\\')
+            && let Some(mut keyword) = identifier(value, &mut end)
+            && end == value.len()
+        {
+            keyword.make_ascii_lowercase();
+            return (matches!(
+                keyword.as_str(),
+                "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+            ) || matches!(self, Self::Float)
+                && matches!(
+                    keyword.as_str(),
+                    "none" | "left" | "right" | "inline-start" | "inline-end"
+                ))
+            .then_some(keyword);
+        }
+        if matches!(self, Self::Float) {
+            return None;
+        }
+        let end = calc::number_end(value)?;
+        let scale = match &value[end..] {
+            "" => 1.,
+            "%" => 100.,
+            _ => return None,
+        };
+        // CSSOM exposes percentages as numbers and leaves range clamping to
+        // computed values. A canonical number has a leading zero when needed.
+        let alpha = (value[..end].parse::<f64>().ok()? / scale) as f32;
+        alpha.is_finite().then(|| (alpha + 0.).to_string())
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Axis {
@@ -149,6 +210,17 @@ fn longhand_value(declaration: &Declaration) -> Option<EdgeValue<'_>> {
 
 /// Read the declared value and important flag, independently of computed style.
 pub(crate) fn specified(declarations: &[Declaration], name: &str) -> (String, bool) {
+    if let Some(property) = ReflectedLonghand::named(name) {
+        return declarations
+            .iter()
+            .filter(|declaration| declaration.name == name)
+            .filter_map(|declaration| {
+                let value = property.serialize(&declaration.value)?;
+                Some((value, declaration.important))
+            })
+            .max_by_key(|(_, important)| *important)
+            .unwrap_or_default();
+    }
     let Some((axis, target)) = Axis::find(name) else {
         return declarations
             .iter()

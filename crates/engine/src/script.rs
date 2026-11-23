@@ -1866,11 +1866,12 @@ fn inline_style_node(vm: &Vm, style: &Value) -> Result<NodeId, JsError> {
 }
 
 fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
-    // Each document shares one set of logical CSS accessors across its inline styles.
+    // Each document shares these CSS accessors across its inline styles.
     let style_prototype = vm.new_object();
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
+        .chain(&[("cssFloat", "float"), ("opacity", "opacity")])
     {
         let get_state = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {
@@ -2034,14 +2035,18 @@ fn update_style(
         None
     } else {
         let mut declarations = css::declarations(&format!("{key}:{value};"));
-        if declarations.len() != 1
-            || declarations[0].name != key
-            || declarations[0].important
-            || !css::supports_declaration(key, value)
-        {
+        if declarations.len() != 1 || declarations[0].name != key || declarations[0].important {
             return Ok(());
         }
         let mut declaration = declarations.pop().unwrap();
+        if let Some(property) = css::inline_style::ReflectedLonghand::named(key) {
+            let Some(value) = property.serialize(value) else {
+                return Ok(());
+            };
+            declaration.value = value;
+        } else if !css::supports_declaration(key, value) {
+            return Ok(());
+        }
         declaration.important = important;
         Some(declaration)
     };
