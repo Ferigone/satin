@@ -201,6 +201,67 @@ fn reviver_context_is_empty_for_mutated_values() {
     );
 }
 #[test]
+fn reviver_propagates_typed_array_write_back_exceptions() {
+    assert_eq!(
+        run(r#"
+            var events = [], marker = {}, caught;
+            try {
+                JSON.parse("[0,0]", function(key, value) {
+                    events.push(key);
+                    if (key === "0" && Array.isArray(this)) {
+                        this[1] = new Uint8Array(1);
+                    } else if (key === "0") {
+                        return { valueOf: function() { events.push("coerce"); throw marker; } };
+                    }
+                    return value;
+                });
+            } catch (e) {
+                caught = e;
+            }
+            caught === marker && events.join(",") === "0,0,coerce"
+            "#),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run(r#"
+            var caught = false;
+            try {
+                JSON.parse("[0,0]", function(key, value) {
+                    if (key === "0" && Array.isArray(this)) {
+                        this[1] = new Uint8Array(1);
+                    } else if (key === "0") {
+                        return 1n;
+                    }
+                    return value;
+                });
+            } catch (e) {
+                caught = e instanceof TypeError;
+            }
+            caught
+            "#),
+        Value::Bool(true)
+    );
+}
+#[test]
+fn reviver_does_not_convert_a_value_for_a_detached_typed_array_index() {
+    assert_eq!(
+        run(r#"
+            var called = false;
+            var result = JSON.parse("[0,0]", function(key, value) {
+                if (key === "0" && Array.isArray(this)) {
+                    this[1] = new Uint8Array(1);
+                } else if (key === "0") {
+                    this.buffer.transfer();
+                    return { valueOf: function() { called = true; throw 1; } };
+                }
+                return value;
+            });
+            !called && result[1].length === 0
+            "#),
+        Value::Bool(true)
+    );
+}
+#[test]
 fn raw_json_is_branded_frozen_and_emitted_after_the_replacer() {
     assert_eq!(
         run(r#"

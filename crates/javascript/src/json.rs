@@ -431,6 +431,16 @@ fn revive_child(
     let replacement = internalize(vm, reviver, holder.clone(), &key, record, records, source)?;
     if replacement.is_undefined() {
         vm.delete(holder, &key, false)?;
+    } else if let Some(id) = holder.as_object()
+        && matches!(vm.heap.object(id)?.kind, ObjectKind::TypedArray(_))
+        && let Some(index) = crate::binary::numeric_index(&key)
+    {
+        // CreateDataProperty supplies all three flags as true. A missing
+        // integer-indexed element rejects silently, but conversion on an
+        // existing element can throw and must abort the reviver walk.
+        if vm.typed_element_exists(id, index)? {
+            vm.typed_index_set(id, index, &replacement)?;
+        }
     } else if let Err(error) = vm.define_property(holder, key, Property::data(replacement))
         && error.uncatchable()
     {
