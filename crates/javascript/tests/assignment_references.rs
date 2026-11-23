@@ -1,0 +1,199 @@
+use rust_browser_javascript::{ErrorKind, Value, Vm};
+
+fn assert_script(source: &str) {
+    let result = Vm::new()
+        .eval(source)
+        .unwrap_or_else(|error| panic!("{error}\n{source}"));
+    assert_eq!(result, Value::Bool(true), "{source}");
+}
+
+#[test]
+fn strict_write_rechecks_a_resolved_global_binding() {
+    for expression in ["x = (delete globalThis.x, 2)", "x += 1", "x++", "--x"] {
+        assert_script(&format!(
+            r#"
+            Object.defineProperty(globalThis, "x", {{
+                configurable: true,
+                get() {{ delete globalThis.x; return 2; }}
+            }});
+            (function () {{
+                "use strict";
+                try {{ {expression}; }} catch (error) {{
+                    return error instanceof ReferenceError && !("x" in globalThis);
+                }}
+                return false;
+            }})();
+            "#,
+        ));
+    }
+}
+
+#[test]
+fn sloppy_global_and_strict_property_writes_can_recreate_a_deleted_property() {
+    assert_script(
+        r#"
+        Object.defineProperty(globalThis, "x", {
+            configurable: true,
+            get() { delete globalThis.x; return 2; }
+        });
+        x += 1;
+        var object = {
+            get x() { delete this.x; return 4; }
+        };
+        (function () { "use strict"; object.x++; })();
+        globalThis.x === 3 && object.x === 5;
+        "#,
+    );
+}
+
+#[test]
+fn simple_assignment_defers_key_coercion_and_nullish_base_errors() {
+    assert_script(
+        r#"
+        const events = [];
+        const key = { toString() { events.push("key coercion"); return "x"; } };
+        const object = {};
+        object[(events.push("key expression"), key)] = (events.push("rhs"), 3);
+        try {
+            null[key] = (events.push("null rhs"), 4);
+        } catch (error) {
+            events.push(error instanceof TypeError);
+        }
+        object.x === 3 && events.join("/") === "key expression/rhs/key coercion/null rhs/true";
+        "#,
+    );
+}
+
+#[test]
+fn compound_update_and_delete_use_the_computed_key_once() {
+    assert_script(
+        r#"
+        const events = [];
+        const symbol = Symbol();
+        const key = { [Symbol.toPrimitive]() { events.push("key"); return symbol; } };
+        const object = { [symbol]: 1 };
+        const sum = object[key] += (events.push("rhs"), 2);
+        const old = object[key]++;
+        const next = ++object[key];
+        const skipped = object[key] ||= (events.push("skipped rhs"), 6);
+        const deleted = delete object[key];
+        sum === 3 && old === 3 && next === 5 && skipped === 5 && deleted &&
+            !(symbol in object) && events.join("/") === "key/rhs/key/key/key/key";
+        "#,
+    );
+}
+
+#[test]
+fn destructuring_gets_the_source_value_before_coercing_the_target_key() {
+    assert_script(
+        r#"
+        const events = [];
+        const target = {};
+        const key = { toString() { events.push("coerce"); return "x"; } };
+        const source = { get x() { events.push("read"); return 3; } };
+        ({ x: target[(events.push("target"), key)] } = source);
+        target.x === 3 && events.join("/") === "target/read/coerce";
+        "#,
+    );
+}
+
+#[test]
+fn suspended_assignment_keeps_the_uncoerced_key_alive() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+            var called = false;
+            var object = {};
+            var iterator = (function* () {
+                object[{ toString() { called = true; return "x"; } }] = yield "ready";
+            })();
+            iterator.next().value === "ready" && !called;
+            "#,
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    vm.collect_garbage();
+    assert_eq!(
+        vm.eval("iterator.next(7).done && called && object.x === 7")
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn anonymous_assignment_names_require_an_ungrouped_identifier_target() {
+    assert_script(
+        r#"
+        let f, C, g, D;
+        (f) = function () {};
+        (C) ??= class {};
+        g = (function () {});
+        D ??= (class {});
+        f.name === "" && C.name === "" && g.name === "g" && D.name === "D";
+        "#,
+    );
+}
+
+#[test]
+fn dot_and_optional_dot_require_identifier_names() {
+    let mut vm = Vm::new();
+    for source in ["object.\"x\"", "object?.\"x\"", "object. 1", "object?. 1"] {
+        assert_eq!(
+            vm.check_syntax(source).unwrap_err().kind,
+            ErrorKind::SyntaxError,
+            "{source}"
+        );
+    }
+    assert_script(
+        r#"
+        const target = { "default": 1, 2: 3 };
+        target.default === 1 && target?.\u0064efault === 1 && target[2] === 3;
+        "#,
+    );
+}
+
+#[test]
+fn strict_primitive_assignment_uses_inherited_setters_with_the_primitive_receiver() {
+    assert_script(
+        r#"
+        const calls = [];
+        const symbol = Symbol();
+        const setter = function (value) {
+            "use strict";
+            calls.push(typeof this, this, value);
+        };
+        Object.defineProperty(Number.prototype, "slot", { set: setter });
+        Object.defineProperty(String.prototype, symbol, { set: setter });
+        Object.defineProperty(String.prototype, "0", { set: setter });
+        (function () {
+            "use strict";
+            (3).slot = 4;
+            "ab"[symbol] = 5;
+            try { "ab"[0] = 6; } catch (error) { calls.push(error instanceof TypeError); }
+            try { true.missing = 8; } catch (error) { calls.push(error instanceof TypeError); }
+        })();
+        false.missing = 9;
+        calls.join("/") === "number/3/4/string/ab/5/true/true" && false.missing === undefined;
+        "#,
+    );
+}
+
+#[test]
+fn delete_respects_non_configurable_own_keys_of_a_primitive_string() {
+    assert_script(
+        r#"
+        const sloppy = (delete "ab"[0]) === false &&
+            (delete "ab".length) === false &&
+            (delete "ab"[3]) === true && (delete "ab"["01"]) === true &&
+            (delete "ab".charAt) === true;
+        const strict = (function () {
+            "use strict";
+            try { delete "\uD800"[0]; } catch (error) { return error instanceof TypeError; }
+            return false;
+        })();
+        sloppy && strict;
+        "#,
+    );
+}

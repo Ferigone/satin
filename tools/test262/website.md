@@ -22,6 +22,22 @@ Each invocation writes `run-*/report.json` and raw evidence under `--output`: ex
 
 Exit `0` means all requested runs reached their reference target (`partial` for the first-result workflow or `complete`); exit `1` means at least one run is `unverified`, including a Satin-only capture; exit `2` means invalid invocation or inability to write a report. A nonzero exit does not turn blank or partial counters into a score.
 
+## Repeatable chapter comparison
+
+Use the smallest published chapter, **`harness` (55 tests)** at suite version `1234`, dated `2016-03-23`. This is a short check of the website's loading, runner, and reporting path, not a representative ES5.1 score. In the page, open **Run**, wait for `Chapter - harness (55 tests)`, and click **Run** on that row. Do not use **Run All** or a **Select** button. Wait for **Testing complete!**, then open **Results**.
+
+The reference probe uses those same controls. Run it twice with fresh profiles (the tool creates them), keeping the browser paths and budget fixed. To reduce contention, run one Chromium executable per invocation:
+
+```powershell
+node tools/test262/website.mjs `
+  --chromium 'C:/Program Files/Google/Chrome/Application/chrome.exe' `
+  --chapter harness --timeout-ms 15000 --output target/test262/website-harness
+```
+
+`--chapter` matches the exact loaded chapter name, implies completion mode, and requires Chromium. The chapter lookup is bounded at 15 seconds after opening Run. The chapter observation budget (default 15 seconds) starts at the row click attempt and includes the site's initial iframe check. Startup, navigation, individual DevTools commands, and Results capture have separate bounds.
+
+Compare only reports with the same `selection.kind`, `selection.name`, `selection.planned`, and suite version/date. Check recorded chapter data response identifiers (`json/harness.json` ETag/Last-Modified, if present) and browser version/digest. A comparable completion requires `websiteRun: "complete"`, the completion marker, ran equal to the selected 55, reconciled counters, and matching Results. An early snapshot or a Pause checkpoint is partial evidence even if its counters reconcile. If the marker and final counters were observed but Results capture timed out, report both facts; that attempt is still `unverified`. A completed chapter is not a completed suite. The Satin CLI cannot verify a chapter completion; do not treat its by-ID evidence as equivalent.
+
 The report interpretation tests require no browser or network:
 
 ```powershell

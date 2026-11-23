@@ -160,7 +160,7 @@ pub struct Vm {
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
     Global(JsString),
-    Property(Value, PropertyKey),
+    Property(Value, Value),
     Private(Value, crate::private::PrivateId),
     Super(Value, Value, Value),
     Import(EnvId, JsString),
@@ -1354,6 +1354,11 @@ impl Vm {
         }
         Ok(o.properties.get(key).cloned())
     }
+    fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
+        matches!(receiver, Value::String(s) if
+            key == &JsString::from("length")
+                || array_index(key).is_some_and(|index| (index as usize) < s.len()))
+    }
     pub(crate) fn set(
         &mut self,
         receiver: Value,
@@ -1634,6 +1639,15 @@ impl Vm {
                 return Err(JsError::type_error(
                     "Cannot delete a property of null or undefined",
                 ));
+            }
+            if Self::primitive_string_has_own_key(&receiver, key) {
+                return if strict {
+                    Err(JsError::type_error(
+                        "Cannot delete non-configurable property",
+                    ))
+                } else {
+                    Ok(false)
+                };
             }
             return Ok(true);
         };
@@ -1938,15 +1952,35 @@ impl Vm {
         }
     }
     fn normalize_reference(&mut self, reference: &mut Reference) -> Result<(), JsError> {
-        if let Reference::Super(base, _, key) = reference
-            && !base.is_nullish()
-        {
+        let (base, key) = match reference {
+            Reference::Property(base, key) | Reference::Super(base, _, key) => (base, key),
+            _ => return Ok(()),
+        };
+        if !base.is_nullish() && !matches!(key, Value::String(_) | Value::Symbol(_)) {
+            // GetValue canonicalizes the reference's key. Preserve it when an
+            // operation will reuse the same reference for PutValue.
             *key = match self.to_property_key(key)? {
                 PropertyKey::String(name) => Value::String(name),
                 PropertyKey::Symbol(symbol) => Value::Symbol(symbol),
             };
         }
         Ok(())
+    }
+    fn property_reference_key(
+        &mut self,
+        base: &Value,
+        key: &Value,
+    ) -> Result<PropertyKey, JsError> {
+        if base.is_nullish() {
+            return Err(JsError::type_error(
+                "Cannot access a property of null or undefined",
+            ));
+        }
+        let key = self.to_property_key(key)?;
+        if let PropertyKey::String(name) = &key {
+            self.consume_work(name.len())?;
+        }
+        Ok(key)
     }
     pub(crate) fn read_reference(&mut self, reference: Reference) -> Result<Value, JsError> {
         match reference {
@@ -1969,7 +2003,10 @@ impl Vm {
                 self.get_from(base, &key, receiver)
             }
             Reference::Global(key) => self.get(self.global(), &key),
-            Reference::Property(object, key) => self.get_property_key(object, key),
+            Reference::Property(object, key) => {
+                let key = self.property_reference_key(&object, &key)?;
+                self.get_property_key(object, key)
+            }
             Reference::Private(object, id) => self.private_get(object, id),
             Reference::Unresolvable(key) => Err(JsError::new(
                 ErrorKind::ReferenceError,
@@ -2018,8 +2055,41 @@ impl Vm {
                 }
                 Ok(())
             }
-            Reference::Global(key) => self.set(self.global(), &key, value, strict),
-            Reference::Property(object, key) => self.set_key(object, &key, value, strict),
+            Reference::Global(key) => {
+                let global = self.global();
+                // A getter, coercion, or right-hand side may have removed a
+                // binding since the identifier was resolved.
+                if strict && !self.has(&global, &key)? {
+                    return Err(JsError::new(
+                        ErrorKind::ReferenceError,
+                        format!("{key} is not defined"),
+                    ));
+                }
+                self.set(global, &key, value, strict)
+            }
+            Reference::Property(object, key) => {
+                let key = self.property_reference_key(&object, &key)?;
+                if object.as_object().is_some() {
+                    return self.set_key(object, &key, value, strict);
+                }
+                // Only string wrappers have own properties for primitive
+                // bases. Otherwise start the lookup at the wrapper prototype
+                // without allocating a wrapper or changing the receiver.
+                let string_own_key = matches!(&key, PropertyKey::String(name)
+                    if Self::primitive_string_has_own_key(&object, name));
+                let succeeded = match self.property_start(&object) {
+                    Some(prototype) if !string_own_key => {
+                        self.set_from(Value::Object(prototype), &key, value, object)?
+                    }
+                    _ => false,
+                };
+                if !succeeded && strict {
+                    return Err(JsError::type_error(
+                        "Cannot assign a property on this primitive",
+                    ));
+                }
+                Ok(())
+            }
             Reference::Private(object, id) => self.private_set(object, id, value),
             Reference::Unresolvable(key) => {
                 if strict {
@@ -2963,15 +3033,9 @@ impl Vm {
             Op::Property => {
                 let key = self.pop_value(stack)?;
                 let object = self.pop_value(stack)?;
-                if object.is_nullish() {
-                    return Err(JsError::type_error(
-                        "Cannot access a property of null or undefined",
-                    ));
-                }
-                let key = self.to_property_key(&key)?;
-                if let PropertyKey::String(key) = &key {
-                    self.consume_work(key.len())?;
-                }
+                // Reference creation evaluates both operands without checking the
+                // base or coercing the key. A simple assignment does those after
+                // evaluating its right-hand side, when PutValue consumes it.
                 stack.push(Item::Reference(Reference::Property(object, key)));
             }
             Op::Get => {
@@ -2996,6 +3060,7 @@ impl Vm {
                 let item = stack.pop().unwrap();
                 let deleted = match item {
                     Item::Reference(Reference::Property(object, key)) => {
+                        let key = self.property_reference_key(&object, &key)?;
                         self.delete_key(object, &key, strict)?
                     }
                     Item::Reference(Reference::Global(key)) => {

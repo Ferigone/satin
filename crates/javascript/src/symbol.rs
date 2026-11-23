@@ -88,7 +88,7 @@ impl Vm {
             }
         }
     }
-    fn property_start(&self, value: &Value) -> Option<ObjectId> {
+    pub(crate) fn property_start(&self, value: &Value) -> Option<ObjectId> {
         match value {
             Value::Object(id) => Some(*id),
             Value::String(_) => Some(self.string_prototype),

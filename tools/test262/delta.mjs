@@ -38,6 +38,16 @@ function indexResults(report, label) {
   return indexed;
 }
 
+function limits(report, label) {
+  if (!Object.hasOwn(report, 'limits')) return null; // legacy schema-1 report
+  const { timeoutMs, maxInstructions } = report.limits ?? {};
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647 ||
+      !Number.isSafeInteger(maxInstructions) || maxInstructions < 1 || maxInstructions > 100_000_000) {
+    throw new Error(`${label}: invalid limits (expected timeoutMs and maxInstructions)`);
+  }
+  return { timeoutMs, maxInstructions };
+}
+
 export function compareReports(baseline, candidate) {
   const baselineScope = scope(baseline, 'baseline');
   const candidateScope = scope(candidate, 'candidate');
@@ -46,6 +56,16 @@ export function compareReports(baseline, candidate) {
     const after = JSON.stringify(candidateScope[field]);
     return before === after ? [] : [`${field}: baseline ${before}, candidate ${after}`];
   });
+  const baselineLimits = limits(baseline, 'baseline');
+  const candidateLimits = limits(candidate, 'candidate');
+  const limitsVerified = baselineLimits !== null && candidateLimits !== null;
+  if (limitsVerified) {
+    for (const field of Object.keys(baselineLimits)) {
+      if (baselineLimits[field] !== candidateLimits[field]) {
+        mismatches.push(`${field}: baseline ${baselineLimits[field]}, candidate ${candidateLimits[field]}`);
+      }
+    }
+  }
   if (mismatches.length) throw new Error(`Test262 scope mismatch:\n${mismatches.join('\n')}`);
 
   const before = indexResults(baseline, 'baseline');
@@ -77,7 +97,9 @@ export function compareReports(baseline, candidate) {
   return {
     schema: 1,
     scope: baselineScope,
+    limits: { baseline: baselineLimits, candidate: candidateLimits, verified: limitsVerified },
     workerSha256: { baseline: baseline.workerSha256 ?? null, candidate: candidate.workerSha256 ?? null },
+    runnerSha256: { baseline: baseline.runnerSha256 ?? null, candidate: candidate.runnerSha256 ?? null },
     counts: { unchanged, lostCoverage, ...Object.fromEntries(Object.entries(changes).map(([key, rows]) => [key, rows.length])) },
     changes,
   };
@@ -97,7 +119,8 @@ async function main(args) {
   if (args.length === 1 && ['--help', '-h'].includes(args[0])) {
     process.stdout.write(`${usage}
 Exit codes: 0 = no regression or coverage loss, 1 = regression or coverage loss,
-            2 = invalid input or scope mismatch.
+             2 = invalid input or scope mismatch.
+Limits are compared when present in both input reports.
 `);
     return 0;
   }

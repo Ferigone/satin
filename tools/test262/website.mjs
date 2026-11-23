@@ -31,6 +31,20 @@ export function countersConsistent(counters) {
     ran <= planned && ran === pass + fail && failedToLoad <= fail;
 }
 
+export function findChapter(labels, name) {
+  const matches = labels.flatMap(label => {
+    const match = /^Chapter - (.+) \((\d+) tests?\)$/.exec(label);
+    const planned = count(match?.[2]);
+    return match?.[1] === name && planned > 0 ? [{ kind: 'chapter', name, label, planned }] : [];
+  });
+  if (matches.length > 1) throw new Error(`Ambiguous chapter: ${name}`);
+  return matches[0] ?? null;
+}
+
+export function completeCounters(counters, planned) {
+  return planned > 0 && countersConsistent(counters) && count(counters.planned) === planned && count(counters.ran) === planned;
+}
+
 // Satin's CLI gives us serialized HTML but not a DOM query API. Only use
 // simple, known elements for these observations; preserve absent vs empty.
 export function satinSnapshot(html) {
@@ -174,6 +188,8 @@ function observePage(ids) {
     suiteVersion: text('.targetTestSuiteVersion'), suiteDate: text('.targetTestSuiteDate'),
     chapterRows: document.querySelectorAll('#chapterSelector tr').length,
     loadedChapters: document.querySelectorAll('#chapterSelector tr:not(.waiting):not(.loading)').length,
+    chapterLabels: Array.from(document.querySelectorAll('#chapterSelector tr:not(.waiting):not(.loading) .chapterName'),
+      cell => cell.textContent.trim()),
     results: {
       ran: text('.totalCases'), pass: text('.passedCases'), fail: text('.failedCases'), failedToLoad: text('#failedToLoadCounter'),
     },
@@ -182,8 +198,10 @@ function observePage(ids) {
 
 // Locate and hit-test; Input.dispatchMouseEvent sends browser pointer input,
 // not a synthetic DOM click or a direct call to the site's controller.
-function clickPoint(selector) {
-  const target = document.querySelector(selector);
+function clickPoint(selector, chapterLabel) {
+  const matches = Array.from(document.querySelectorAll(selector)).filter(node => chapterLabel === undefined ||
+    node.closest('tr')?.querySelector('.chapterName')?.textContent.trim() === chapterLabel);
+  const target = matches.length === 1 ? matches[0] : null;
   if (!target?.getClientRects().length) return null;
   target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   const rect = target.getBoundingClientRect();
@@ -294,26 +312,47 @@ async function chromium(executable, dir, options, entry) {
       if (!seen) throw new Error(`Timed out waiting for ${label}`);
       return seen;
     }
-    async function click(selector) {
-      const point = await waitFor(() => evaluateHere(`(${clickPoint})(${JSON.stringify(selector)})`), Boolean, 5000);
+    async function click(selector, chapterLabel) {
+      const args = chapterLabel === undefined ? [selector] : [selector, chapterLabel];
+      const point = await waitFor(() => evaluateHere(`(${clickPoint})(...${JSON.stringify(args)})`), Boolean, 5000);
       if (!point) throw new Error(`${selector} never became a hit-testable pointer target`);
-      entry.actions.push({ atMs: elapsed(), selector, ...point });
+      entry.actions.push({ atMs: elapsed(), selector, chapterLabel, ...point });
       await cmd('Input.dispatchMouseEvent', { ...point, type: 'mousePressed', button: 'left', clickCount: 1 });
       await cmd('Input.dispatchMouseEvent', { ...point, type: 'mouseReleased', button: 'left', clickCount: 1 });
     }
 
     await capture('load');
     stage = 'site-initialization';
-    await wait('initialized', s => s.homeVisible && s.runTarget === '.content-tests' && count(s.counters.planned) > 0);
+    const initialized = await wait('initialized', s => s.homeVisible && s.runTarget === '.content-tests' && count(s.counters.planned) > 0);
     stage = 'run-tab';
     await click('#run');
     await wait('run-tab', s => s.runSelected && s.runVisible && s.controls.btnRunAll);
-    stage = 'run-all';
-    await click('#btnRunAll');
-    await wait('running', s => s.controls.btnPause);
+    let chapterDeadline;
+    if (options.chapter) {
+      stage = 'chapter-selection';
+      const ready = await wait('chapter-ready', s => findChapter(s.chapterLabels, options.chapter));
+      entry.selection = findChapter(ready.chapterLabels, options.chapter);
+      stage = 'chapter-run';
+      chapterDeadline = performance.now() + options.timeoutMs;
+      await click('#chapterSelector tr img[alt="Run"]', entry.selection.label);
+    } else {
+      entry.selection = { kind: 'all', planned: count(initialized.counters.planned) };
+      stage = 'run-all';
+      await click('#btnRunAll');
+    }
+    const runBudget = fallback => {
+      if (!chapterDeadline) return fallback;
+      const remaining = chapterDeadline - performance.now();
+      if (remaining <= 0) throw new Error('Chapter run exceeded its observation window');
+      return Math.min(fallback, remaining);
+    };
+    await wait('running', s => s.controls.btnPause || (options.chapter && s.progress === 'Testing complete!'), runBudget(15_000));
     stage = 'first-result';
-    const first = await wait('first-result', s => count(s.counters.ran) > 0, 25_000, 15);
+    const first = await wait('first-result', s => count(s.counters.ran) > 0, runBudget(25_000), 15);
     if (!countersConsistent(first.counters)) throw new Error('First observed counters do not reconcile');
+    if (count(first.counters.planned) !== entry.selection.planned) {
+      throw new Error('Running test count does not match the selected scope');
+    }
     let checkpoint;
     if (options.until === 'complete') {
       stage = 'completion';
@@ -330,8 +369,10 @@ async function chromium(executable, dir, options, entry) {
           entry.completionPollTimeouts++;
           return null;
         }
-      }, s => s?.progress === 'Testing complete!', options.timeoutMs, 250);
-      if (!checkpoint) throw new Error('Site did not reach its completion marker within the observation window');
+      }, s => s?.progress === 'Testing complete!', runBudget(options.timeoutMs), 250);
+      if (!checkpoint || (chapterDeadline && performance.now() > chapterDeadline)) {
+        throw new Error('Site did not reach its completion marker within the observation window');
+      }
       await capture('complete', checkpoint);
     } else {
       stage = 'pause';
@@ -340,8 +381,8 @@ async function chromium(executable, dir, options, entry) {
     }
     stage = 'counter-check';
     if (!countersConsistent(checkpoint.counters)) throw new Error('Checkpoint counters do not reconcile');
-    if (options.until === 'complete' && count(checkpoint.counters.ran) !== count(checkpoint.counters.planned)) {
-      throw new Error('Site reported completion without running all planned tests');
+    if (options.until === 'complete' && !completeCounters(checkpoint.counters, entry.selection.planned)) {
+      throw new Error('Site reported completion without running the selected planned tests');
     }
     stage = 'results';
     await click('#results');
@@ -377,8 +418,11 @@ async function chromium(executable, dir, options, entry) {
 }
 
 function parseOptions(argv) {
-  const options = { output: 'target/test262/website', chromium: [], native: false, until: 'first', timeoutMs: 420_000, satinRunMs: 4000 };
-  const keys = { '--satin': 'satin', '--output': 'output', '--until': 'until', '--timeout-ms': 'timeoutMs', '--satin-run-ms': 'satinRunMs' };
+  const options = { output: 'target/test262/website', chromium: [], native: false, satinRunMs: 4000 };
+  const keys = {
+    '--satin': 'satin', '--output': 'output', '--until': 'until', '--chapter': 'chapter',
+    '--timeout-ms': 'timeoutMs', '--satin-run-ms': 'satinRunMs',
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--native') { options.native = true; continue; }
@@ -387,6 +431,11 @@ function parseOptions(argv) {
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${arg}`);
     if (arg === '--chromium') options.chromium.push(value);
     else options[keys[arg]] = arg.endsWith('-ms') ? Number(value) : value;
+  }
+  options.until ??= options.chapter ? 'complete' : 'first';
+  options.timeoutMs ??= options.chapter ? 15_000 : 420_000;
+  if (options.chapter && (options.satin || options.until !== 'complete' || !options.chapter.trim())) {
+    throw new Error('--chapter requires Chromium and completion mode');
   }
   if ((!options.satin && !options.chromium.length) || (options.native && !options.satin) ||
       !['first', 'complete'].includes(options.until) ||
@@ -398,7 +447,7 @@ function parseOptions(argv) {
 
 async function main(argv) {
   if (argv.includes('--help')) {
-    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--until first|complete] [--timeout-ms MS] [--output DIR]');
+    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--until first|complete | --chapter NAME (Chromium only)] [--timeout-ms MS] [--output DIR]');
     return;
   }
   const options = parseOptions(argv);
@@ -432,7 +481,9 @@ async function main(argv) {
     report: path,
     runs: Object.fromEntries(Object.entries(report.runs).map(([name, run]) => [name, {
       websiteRun: run.websiteRun, firstFailedStage: run.firstFailedStage, firstDiagnostic: run.firstDiagnostic,
-      counters: run.snapshots.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots.paused?.counters ?? run.load?.dom?.counters,
+      selection: run.selection,
+      counters: run.snapshots.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots.paused?.counters ??
+        run.snapshots['first-result']?.counters ?? run.load?.dom?.counters,
       error: run.probeError ?? run.error,
     }])),
   }));

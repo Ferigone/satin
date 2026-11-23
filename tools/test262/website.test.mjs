@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { count, countersConsistent, satinFailure, satinSnapshot } from './website.mjs';
+import { completeCounters, count, countersConsistent, findChapter, satinFailure, satinSnapshot } from './website.mjs';
 
 const initial = `<a href="#" class="nav-link" id="run">Run</a>
 <img src="images/runall.png" alt="Run All" id="btnRunAll">
@@ -38,4 +38,21 @@ test('reports the earliest blocked stage even if a later input attempt also fail
   const tab = { dom: { runClass: 'selected nav-link' } };
   assert.equal(satinFailure(initialized, tab, native), 'run-all-control');
   assert.equal(satinFailure(initialized, tab, null), null);
+});
+
+test('selects an exact loaded chapter label and its advertised plan, never a partial or ambiguous label', () => {
+  const label = 'Chapter - harness (55 tests)';
+  const labels = ['Loading test file: json/language.json', 'Chapter - annexB (81 tests)', label];
+  assert.deepEqual(findChapter(labels, 'harness'), { kind: 'chapter', name: 'harness', label, planned: 55 });
+  for (const name of ['Harness', 'harn', 'language']) assert.equal(findChapter(labels, name), null);
+  assert.throws(() => findChapter([label, 'Chapter - harness (56 tests)'], 'harness'), /Ambiguous chapter/);
+});
+
+test('requires all selected tests, not a self-consistent partial or a different completed scope', () => {
+  const partial = { planned: '55', ran: '54', pass: '49', fail: '5', failedToLoad: '0' };
+  assert.ok(countersConsistent(partial));
+  assert.ok(!completeCounters(partial, 55));
+  const complete = { ...partial, ran: '55', pass: '50' };
+  assert.ok(completeCounters(complete, 55));
+  assert.ok(!completeCounters(complete, 16436));
 });

@@ -887,6 +887,105 @@ fn create_array(vm: &mut Vm, args: &[Value], prototype: crate::ObjectId) -> Resu
     }
 }
 
+fn move_indexed_property(
+    vm: &mut Vm,
+    object: &Value,
+    from: usize,
+    to: usize,
+) -> Result<(), JsError> {
+    vm.tick()?;
+    let from = JsString::from(from.to_string());
+    let to = JsString::from(to.to_string());
+    if vm.has(object, &from)? {
+        let value = vm.get(object.clone(), &from)?;
+        vm.set(object.clone(), &to, value, true)?;
+    } else {
+        vm.delete(object.clone(), &to, true)?;
+    }
+    Ok(())
+}
+
+fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, JsError> {
+    const MAX_SAFE_LENGTH: u64 = (1 << 53) - 1;
+    let object = vm.coerce_object(receiver)?;
+    let length_value = vm.get_property(object.clone(), "length")?;
+    let len = integer(vm, length_value)?.clamp(0.0, MAX_SAFE_LENGTH as f64) as u64;
+    let relative_start = integer(vm, arg(args, 0))?;
+    let start = if relative_start < 0.0 {
+        (len as f64 + relative_start).max(0.0) as u64
+    } else {
+        relative_start.min(len as f64) as u64
+    };
+    let removed_count = match args.len() {
+        0 => 0,
+        1 => len - start,
+        _ => integer(vm, arg(args, 1))?.clamp(0.0, (len - start) as f64) as u64,
+    };
+    let items = args.get(2..).unwrap_or_default();
+    let new_len = (len - removed_count).saturating_add(items.len() as u64);
+    if new_len > MAX_SAFE_LENGTH {
+        return Err(JsError::type_error(
+            "Array splice exceeds maximum safe length",
+        ));
+    }
+    // Check the traversal and result bounds before species creation or mutation.
+    let limit = u64::from(vm.limits.max_array_length);
+    if len > limit {
+        return Err(JsError::new(
+            ErrorKind::ExecutionLimit,
+            "Array-like length budget exhausted",
+        ));
+    }
+    if new_len > limit {
+        return Err(JsError::new(
+            ErrorKind::ExecutionLimit,
+            "Array length budget exhausted",
+        ));
+    }
+    let (len, start, removed_count, new_len) = (
+        len as usize,
+        start as usize,
+        removed_count as usize,
+        new_len as usize,
+    );
+
+    let removed = vm.array_species_create(object.clone(), removed_count)?;
+    for i in 0..removed_count {
+        vm.tick()?;
+        let from = JsString::from((start + i).to_string());
+        if vm.has(&object, &from)? {
+            let value = vm.get(object.clone(), &from)?;
+            vm.define_data_property(removed.clone(), &i.to_string(), value, true, true, true)?;
+        }
+    }
+    vm.set_property(removed.clone(), "length", Value::from(removed_count))?;
+
+    let tail = start + removed_count..len;
+    match items.len().cmp(&removed_count) {
+        Ordering::Less => {
+            for from in tail {
+                move_indexed_property(vm, &object, from, from - removed_count + items.len())?;
+            }
+            for i in (new_len..len).rev() {
+                vm.tick()?;
+                vm.delete(object.clone(), &i.to_string().into(), true)?;
+            }
+        }
+        Ordering::Greater => {
+            for from in tail.rev() {
+                move_indexed_property(vm, &object, from, from - removed_count + items.len())?;
+            }
+        }
+        Ordering::Equal => {}
+    }
+    for (i, item) in items.iter().enumerate() {
+        vm.tick()?;
+        vm.set_property(object.clone(), &(start + i).to_string(), item.clone())?;
+    }
+    vm.set_property(object, "length", Value::from(new_len))?;
+    Ok(removed)
+}
+
 fn reserve_sort_items(
     vm: &mut Vm,
     items: &mut Vec<Value>,
@@ -1024,6 +1123,7 @@ fn install_array(vm: &mut Vm) {
     });
     method(vm, array, "of", 0, |vm, _, a| vm.try_new_array(a));
     method(vm, proto.clone(), "sort", 1, sort_array);
+    method(vm, proto.clone(), "splice", 2, splice_array);
     method(vm, proto.clone(), "push", 1, |vm, this, a| {
         let object = vm.coerce_object(this)?;
         let len = length(vm, object.clone())?;

@@ -217,12 +217,6 @@ impl Vm {
             PatternCode::Target(object, key) => {
                 let object = self.expression_value(object, env)?;
                 let key = self.expression_value(key, env)?;
-                if object.is_nullish() {
-                    return Err(JsError::type_error(
-                        "Cannot access a property of null or undefined",
-                    ));
-                }
-                let key = self.to_property_key(&key)?;
                 Ok(Some(Reference::Property(object, key)))
             }
             PatternCode::PrivateTarget(object, name) => {
