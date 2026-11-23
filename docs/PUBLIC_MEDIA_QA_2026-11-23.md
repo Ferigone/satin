@@ -44,6 +44,16 @@ Same Chrome binary. The Playwright follow-up waited for Twitch metadata before t
 
 Sanitized receipt: `target/public-media/chrome-hsAomw/summary.json`.
 
+## Chrome reference, YouTube after consent dismissed
+
+The same binary started a new YouTube run at `18:23:35.119Z`. This probe waited for the optional-cookie control to disappear before checking playback. The player had one real `<video>` at 854×480, autoplay was active, no ad marker was detected, and the consent control was no longer visible. Chrome measured 55 executed HTTP(S)-named script IDs, no page errors, and one audio track with `OpusAudioDecoder`.
+
+- From `18:23:42.834Z` to `18:23:47.831Z`, time advanced `0.457 → 5.453 s`, decoded frames `18 → 168`, and decoded audio bytes `10784 → 81709`.
+- The pause click held the video at `5.533 s` and 170 decoded frames for 1.208 s. The resume click advanced to `7.409 s` and 226 decoded frames. The midpoint scrubber click then changed `currentTime` to `317.283 s` (duration `634.601 s`). Sustained playback after that seek was not sampled.
+- The separate REA shell capture started `18:23:21.425Z`; `ev_f012b24a4d1e15fa5b180eba01503f339efe5a6daa1e9e4540935a30bb233b58` completed all steps and terminated the owned process. Audio was not checked audibly, and live chat did not apply.
+
+Sanitized receipt: `target/public-media/chrome-M4FBXN/summary.json`.
+
 ## Satin candidate
 
 Not tested yet: no coordinator build was available to this worktree for the recorded runs.
