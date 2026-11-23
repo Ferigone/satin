@@ -6,6 +6,7 @@ use rust_browser_engine::{
     Fonts, Layout, LoadedPage, Rect,
     cookies::CookieContext,
     css::Color,
+    dom::Document,
     history::{
         HistoryScroll, HistoryTransition, NavigationMode, ScriptNavigation, SessionHistory,
         fragment_offset,
@@ -49,7 +50,8 @@ mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
 use self::bookmark_menu::Menu;
 use crate::testing::{
-    Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, SmokeAction,
+    Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, CheckpointSample,
+    SmokeAction,
 };
 use navigation_error::Recovery;
 use tab_strip::{NEW_TAB_WIDTH, TabStrip};
@@ -292,7 +294,7 @@ pub fn run(
             .unwrap_or_default(),
         smoke_wait_deadline: None,
         smoke_checkpoint_document: None,
-        smoke_checkpoint_observation: None,
+        smoke_checkpoint_sample: None,
         smoke_checkpoint_last: None,
         smoke_checkpoint_outputs: CheckpointOutputs::default(),
         file_picker_responses,
@@ -335,7 +337,7 @@ struct App {
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
     smoke_wait_deadline: Option<Instant>,
     smoke_checkpoint_document: Option<CheckpointDocument>,
-    smoke_checkpoint_observation: Option<CheckpointObservation>,
+    smoke_checkpoint_sample: Option<CheckpointSample>,
     smoke_checkpoint_last: Option<Checkpoint>,
     smoke_checkpoint_outputs: CheckpointOutputs,
     file_picker_responses: Option<crate::file_picker::Responses>,
@@ -2057,10 +2059,7 @@ impl App {
         }
     }
 
-    fn checkpoint_observation(
-        &self,
-        checkpoint: &Checkpoint,
-    ) -> Result<CheckpointObservation, String> {
+    fn checkpoint_snapshot(&self, checkpoint: &Checkpoint) -> Result<(&Document, &Layout), String> {
         let tab = &self.tabs[self.active];
         let (Some(page), Some(layout)) = (&tab.page, &tab.layout) else {
             return Err(checkpoint.error("no current document layout"));
@@ -2075,7 +2074,15 @@ impl App {
         {
             return Err(checkpoint.error("document or layout is incomplete"));
         }
-        checkpoint.observe(&page.document, layout, self.tab_viewport(self.active))
+        Ok((&page.document, layout))
+    }
+
+    fn checkpoint_observation(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<CheckpointObservation, String> {
+        let (document, layout) = self.checkpoint_snapshot(checkpoint)?;
+        checkpoint.observe(document, layout, self.tab_viewport(self.active))
     }
 
     fn arm_smoke_checkpoint(&mut self) -> Result<(), String> {
@@ -2093,7 +2100,7 @@ impl App {
         }
         checkpoint.require_unmet(self.checkpoint_observation(checkpoint)?.is_match())?;
         self.smoke_checkpoint_document = Some(identity);
-        self.smoke_checkpoint_observation = None;
+        self.smoke_checkpoint_sample = None;
         self.smoke_wait_deadline =
             Some(Instant::now() + Duration::from_millis(checkpoint.timeout_ms));
         Ok(())
@@ -2122,23 +2129,24 @@ impl App {
                 .smoke_wait_deadline
                 .ok_or_else(|| checkpoint.error("checkpoint has no input deadline"))?;
             if Instant::now() >= deadline {
-                return Err(checkpoint.timeout_error(self.smoke_checkpoint_observation));
+                return Err(checkpoint.timeout_error(self.smoke_checkpoint_sample));
             }
             let tab = &self.tabs[self.active];
-            let observation = if tab.loading
+            let sample = if tab.loading
                 || tab.document_session.as_ref().is_some_and(|session| {
                     !session.done() || session.needs_advance(tab.runtime.as_ref())
                 }) {
-                CheckpointObservation::DocumentNotReady
+                CheckpointObservation::DocumentNotReady.into()
             } else {
-                self.checkpoint_observation(checkpoint)?
+                let (document, layout) = self.checkpoint_snapshot(checkpoint)?;
+                checkpoint.sample_after_click(document, layout, self.tab_viewport(self.active))?
             };
-            self.smoke_checkpoint_observation = Some(observation);
-            if !observation.is_match() {
+            self.smoke_checkpoint_sample = Some(sample);
+            if !sample.is_match() {
                 return Ok(Some(deadline));
             }
             if Instant::now() >= deadline {
-                return Err(checkpoint.timeout_error(self.smoke_checkpoint_observation));
+                return Err(checkpoint.timeout_error(self.smoke_checkpoint_sample));
             }
             checkpoint.capture(
                 self.smoke_output

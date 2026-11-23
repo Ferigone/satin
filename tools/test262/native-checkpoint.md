@@ -27,6 +27,19 @@ For local troubleshooting, add `"diagnose_timeout":true` to one checkpoint actio
 
 The label is from the last post-click check, not a final DOM snapshot and not attribution to the click handler. Ambiguity and document replacement still fail separately. An outer process kill may not produce any label. A timeout with any label is still a failure, with no success envelope and the same rollback rules. Do not feed the label into artifact acceptance or use it as evidence of completion.
 
+To distinguish a pane without layout rects from a boxed pane with an unboxed row, optionally add this object **to the checkpoint action** alongside `"diagnose_timeout":true`:
+
+```json
+{"timeout_context":{"pane_class":"content-tests","control_id":"run","selected_class":"selected"}}
+```
+
+These are three literal, case-sensitive values (at most 256 bytes each, no whitespace), not selectors. Only when the last post-click sample is `exact-text-no-layout-box`, stderr also reports:
+
+- `pane_rect=present|none|missing|ambiguous|unavailable`, for the connected element with the exact pane class token.
+- `run_class=match|no-match|missing|ambiguous|unavailable`, for the exact selected class token on the connected element with the given ID.
+
+`missing` means no matching element, `ambiguous` means multiple matches, and `unavailable` means a diagnostic work bound prevented an answer. The scan is capped at 32,768 DOM entries and 32,768 layout entries, with a 64 KiB class-byte budget for the pane scan and another for the control class. Both fields come from the same DOM and layout as the row observation; a later sample supersedes them. A rect is not a viewport hit, and a class match does not identify the handler that ran. No raw values, new artifacts, or changes to checkpoint acceptance.
+
 ## Coordinator validation
 
 Run the focused unit tests once in the authorized build worktree:

@@ -12,6 +12,8 @@ use std::{
 
 const MAX_ACTION_BYTES: usize = 1024 * 1024;
 const MAX_CHECKPOINT_HTML: usize = 4 * 1024 * 1024;
+const MAX_CONTEXT_ENTRIES: usize = 32_768;
+const MAX_CONTEXT_CLASS_BYTES: usize = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -55,6 +57,16 @@ pub struct Checkpoint {
     pub timeout_ms: u64,
     #[serde(default)]
     diagnose_timeout: bool,
+    #[serde(default)]
+    timeout_context: Option<TimeoutContext>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimeoutContext {
+    pane_class: String,
+    control_id: String,
+    selected_class: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +96,123 @@ impl CheckpointObservation {
             Self::NoLayoutBox => "exact-text-no-layout-box",
             Self::NotHittable => "exact-text-not-hittable",
             Self::Match => "exact-text-hit-too-late",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CheckpointSample {
+    observation: CheckpointObservation,
+    context: Option<TimeoutContextSample>,
+}
+
+impl From<CheckpointObservation> for CheckpointSample {
+    fn from(observation: CheckpointObservation) -> Self {
+        Self {
+            observation,
+            context: None,
+        }
+    }
+}
+
+impl CheckpointSample {
+    pub fn is_match(self) -> bool {
+        self.observation.is_match()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimeoutContextSample {
+    pane_rect: &'static str,
+    run_class: &'static str,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextNode {
+    Missing,
+    Unique(NodeId),
+    Ambiguous,
+}
+
+impl ContextNode {
+    fn record(&mut self, node: NodeId) {
+        *self = match *self {
+            Self::Missing => Self::Unique(node),
+            _ => Self::Ambiguous,
+        };
+    }
+
+    fn label(self, inspect: impl FnOnce(NodeId) -> &'static str) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Ambiguous => "ambiguous",
+            Self::Unique(node) => inspect(node),
+        }
+    }
+}
+
+impl TimeoutContext {
+    fn sample(&self, document: &Document, layout: &Layout) -> TimeoutContextSample {
+        // Bound the connected walk (including its pending stack). An unchecked
+        // pane class could hide a match or a duplicate, so it is not absence.
+        if document.nodes.len() > MAX_CONTEXT_ENTRIES {
+            return TimeoutContextSample {
+                pane_rect: "unavailable",
+                run_class: "unavailable",
+            };
+        }
+        let mut pane = ContextNode::Missing;
+        let mut control = ContextNode::Missing;
+        let mut class_bytes = Some(MAX_CONTEXT_CLASS_BYTES);
+        for node in document.connected_nodes() {
+            if pane != ContextNode::Ambiguous
+                && let Some(remaining) = class_bytes
+                && let Some(value) = document.attr(node, "class")
+            {
+                class_bytes = remaining.checked_sub(value.len());
+                if class_bytes.is_some()
+                    && value
+                        .split_ascii_whitespace()
+                        .any(|token| token == self.pane_class.as_str())
+                {
+                    pane.record(node);
+                }
+            }
+            if control != ContextNode::Ambiguous
+                && document.attr(node, "id") == Some(self.control_id.as_str())
+            {
+                control.record(node);
+            }
+        }
+        let pane_rect = if class_bytes.is_none() {
+            "unavailable"
+        } else {
+            pane.label(|node| {
+                if layout.elements.len() > MAX_CONTEXT_ENTRIES {
+                    "unavailable"
+                } else if layout.elements.iter().any(|entry| entry.node == node) {
+                    "present"
+                } else {
+                    "none"
+                }
+            })
+        };
+        let run_class = control.label(|node| {
+            let value = document.attr(node, "class").unwrap_or_default();
+            if value.len() > MAX_CONTEXT_CLASS_BYTES {
+                "unavailable"
+            } else if value
+                .split_ascii_whitespace()
+                .any(|token| token == self.selected_class.as_str())
+            {
+                "match"
+            } else {
+                "no-match"
+            }
+        });
+        TimeoutContextSample {
+            pane_rect,
+            run_class,
         }
     }
 }
@@ -156,6 +285,20 @@ impl Checkpoint {
         {
             return Err("Invalid smoke checkpoint parameters".into());
         }
+        if let Some(context) = &self.timeout_context
+            && (!self.diagnose_timeout
+                || [
+                    &context.pane_class,
+                    &context.control_id,
+                    &context.selected_class,
+                ]
+                .into_iter()
+                .any(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_whitespace)
+                }))
+        {
+            return Err("Invalid smoke checkpoint timeout context".into());
+        }
         Ok(())
     }
 
@@ -163,10 +306,16 @@ impl Checkpoint {
         format!("Smoke checkpoint {:?}: {message}", self.name)
     }
 
-    pub fn timeout_error(&self, last: Option<CheckpointObservation>) -> String {
+    pub fn timeout_error(&self, last: Option<CheckpointSample>) -> String {
         let message = "timed out waiting for a layout hit with exact text";
         if self.diagnose_timeout {
-            let reason = last.map_or("no-post-click-sample", CheckpointObservation::label);
+            let reason = last.map_or("no-post-click-sample", |sample| sample.observation.label());
+            if let Some(context) = last.and_then(|sample| sample.context) {
+                return self.error(&format!(
+                    "{message}; last_observation={reason}; pane_rect={}; run_class={}",
+                    context.pane_rect, context.run_class
+                ));
+            }
             self.error(&format!("{message}; last_observation={reason}"))
         } else {
             self.error(message)
@@ -228,6 +377,23 @@ impl Checkpoint {
             None if found_descendant => CheckpointObservation::TextMismatch,
             None => CheckpointObservation::MissingDescendant,
         })
+    }
+
+    pub fn sample_after_click(
+        &self,
+        document: &Document,
+        layout: &Layout,
+        viewport: Viewport,
+    ) -> Result<CheckpointSample, String> {
+        let observation = self.observe(document, layout, viewport)?;
+        let mut sample = CheckpointSample::from(observation);
+        if observation == CheckpointObservation::NoLayoutBox
+            && self.diagnose_timeout
+            && let Some(context) = &self.timeout_context
+        {
+            sample.context = Some(context.sample(document, layout));
+        }
+        Ok(sample)
     }
 
     fn output_path(&self, frame: &Path) -> PathBuf {
@@ -377,6 +543,7 @@ mod tests {
             text: "2".into(),
             timeout_ms: 100,
             diagnose_timeout: false,
+            timeout_context: None,
         }
     }
 
@@ -447,7 +614,7 @@ mod tests {
     fn checkpoint_timeout_reason_is_opt_in_and_contains_no_page_text() {
         let default = checkpoint();
         assert_eq!(
-            default.timeout_error(Some(CheckpointObservation::Hidden)),
+            default.timeout_error(Some(CheckpointObservation::Hidden.into())),
             r#"Smoke checkpoint "results": timed out waiting for a layout hit with exact text"#
         );
         let SmokeAction::Checkpoint(opted_in) = serde_json::from_str(
@@ -469,12 +636,181 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                opted_in.timeout_error(sample),
+                opted_in.timeout_error(sample.map(Into::into)),
                 format!(
                     r#"Smoke checkpoint "report": timed out waiting for a layout hit with exact text; last_observation={reason}"#
                 )
             );
         }
+    }
+
+    const TIMEOUT_CONTEXT: &str =
+        r#"{"pane_class":"content-tests","control_id":"run","selected_class":"selected"}"#;
+    const UNBOXED_ROW: &str =
+        r#"<div id="report"><span class="ran" style="display:none">2</span></div>"#;
+
+    fn parse_timeout_context(enabled: bool, context: &str) -> Result<Checkpoint, String> {
+        let mut actions = parse_actions(
+            format!(
+                r#"[{{"action":"click","id":"run"}},{{"action":"checkpoint","name":"results","within_id":"report","descendant_class":"ran","text":"2","timeout_ms":100,"diagnose_timeout":{enabled},"timeout_context":{context}}}]"#
+            )
+            .as_bytes(),
+        )?;
+        let Some(SmokeAction::Checkpoint(checkpoint)) = actions.pop_back() else {
+            panic!("expected checkpoint");
+        };
+        Ok(checkpoint)
+    }
+
+    fn sample_fixture(checkpoint: &Checkpoint, html: &str) -> Result<CheckpointSample, String> {
+        let page = LoadedPage::from_html("about:blank", html);
+        let fonts = Fonts::new().unwrap();
+        let viewport = Viewport::default();
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+        checkpoint.sample_after_click(&page.document, &layout, viewport)
+    }
+
+    #[test]
+    fn checkpoint_timeout_context_distinguishes_pane_and_row() {
+        let checkpoint = parse_timeout_context(true, TIMEOUT_CONTEXT).unwrap();
+        for (pane_style, selection, row_style, pane, run) in [
+            ("display:none", "unselected", "", "none", "no-match"),
+            ("", "selected", "display:none", "present", "match"),
+            ("display:none", "selected", "", "none", "match"),
+        ] {
+            let sample = sample_fixture(
+                &checkpoint,
+                &format!(
+                    r#"<a id="run" class="nav-link {selection}">Run</a>
+                    <div class="content-tests" style="{pane_style}"><p>Sibling</p>
+                    <div id="report"><span class="ran" style="{row_style}">2</span></div></div>"#
+                ),
+            )
+            .unwrap();
+            assert!(!sample.is_match());
+            assert_eq!(
+                checkpoint.timeout_error(Some(sample)),
+                format!(
+                    r#"Smoke checkpoint "results": timed out waiting for a layout hit with exact text; last_observation=exact-text-no-layout-box; pane_rect={pane}; run_class={run}"#
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_timeout_context_refuses_to_guess_missing_or_ambiguous_targets() {
+        let checkpoint = parse_timeout_context(true, TIMEOUT_CONTEXT).unwrap();
+        let pane = r#"<div class="content-tests">Pane</div>"#;
+        let run = r#"<a id="run" class="nav-link selected">Run</a>"#;
+        let huge_class = "x".repeat(MAX_CONTEXT_CLASS_BYTES + 1);
+        let oversized_pane = format!(r#"<div class="{huge_class} content-tests">Pane</div>"#);
+        let oversized_run = format!(r#"<a id="run" class="{huge_class} selected">Run</a>"#);
+        for (extra, pane, run) in [
+            (format!("{pane}{pane}{run}"), "ambiguous", "match"),
+            (format!("{pane}{run}{run}"), "present", "ambiguous"),
+            (
+                format!(r#"<div class="content-tests-extra">Other</div>{run}"#),
+                "missing",
+                "match",
+            ),
+            (
+                format!("{pane}<template>{run}</template>"),
+                "present",
+                "missing",
+            ),
+            (
+                format!(r#"{pane}<a id="run" class="Selected selected-more">Run</a>"#),
+                "present",
+                "no-match",
+            ),
+            (
+                format!(r#"{pane}<a id="run">Run</a>"#),
+                "present",
+                "no-match",
+            ),
+            (
+                format!("{pane}{run}{oversized_pane}"),
+                "unavailable",
+                "match",
+            ),
+            (
+                format!("{pane}{pane}{oversized_run}"),
+                "ambiguous",
+                "unavailable",
+            ),
+        ] {
+            let sample = sample_fixture(&checkpoint, &format!("{extra}{UNBOXED_ROW}")).unwrap();
+            assert!(
+                checkpoint
+                    .timeout_error(Some(sample))
+                    .ends_with(&format!("pane_rect={pane}; run_class={run}"))
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_timeout_context_is_opt_in_and_never_reused_on_a_different_sample() {
+        assert!(parse_timeout_context(false, TIMEOUT_CONTEXT).is_err());
+        for context in [
+            TIMEOUT_CONTEXT.replace("content-tests", "content-tests .nested"),
+            TIMEOUT_CONTEXT.replace("selected\"", "\""),
+            TIMEOUT_CONTEXT.replace("content-tests", &"x".repeat(257)),
+            TIMEOUT_CONTEXT.replace("pane_class", "selector"),
+        ] {
+            assert!(parse_timeout_context(true, &context).is_err());
+        }
+        let checkpoint = parse_timeout_context(true, TIMEOUT_CONTEXT).unwrap();
+        let mut sample = sample_fixture(&checkpoint, UNBOXED_ROW).unwrap();
+        assert!(
+            checkpoint
+                .timeout_error(Some(sample))
+                .contains("pane_rect=")
+        );
+        for (html, reason) in [
+            ("", "missing-root"),
+            (r#"<div id="report"></div>"#, "missing-descendant"),
+            (
+                r#"<div id="report"><span class="ran">12</span></div>"#,
+                "text-mismatch",
+            ),
+        ] {
+            sample = sample_fixture(&checkpoint, html).unwrap();
+            assert!(
+                checkpoint
+                    .timeout_error(Some(sample))
+                    .ends_with(&format!("last_observation={reason}"))
+            );
+        }
+        assert!(
+            checkpoint
+                .timeout_error(None)
+                .ends_with("last_observation=no-post-click-sample")
+        );
+        assert!(
+            checkpoint
+                .timeout_error(Some(CheckpointObservation::DocumentNotReady.into()))
+                .ends_with("last_observation=document-not-ready")
+        );
+        let matched = sample_fixture(
+            &checkpoint,
+            r#"<div id="report"><span class="ran">2</span></div>"#,
+        )
+        .unwrap();
+        assert!(matched.is_match());
+        assert!(matched.context.is_none());
+        let ambiguous = format!("{UNBOXED_ROW}{UNBOXED_ROW}");
+        assert!(
+            sample_fixture(&checkpoint, &ambiguous)
+                .unwrap_err()
+                .ends_with("ambiguous root id")
+        );
+        let diagnostic_only = parse_timeout_context(true, "null").unwrap();
+        let sample = sample_fixture(&diagnostic_only, UNBOXED_ROW).unwrap();
+        assert!(
+            diagnostic_only
+                .timeout_error(Some(sample))
+                .ends_with("last_observation=exact-text-no-layout-box")
+        );
     }
 
     #[test]
