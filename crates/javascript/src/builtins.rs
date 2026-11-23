@@ -7,6 +7,8 @@ use crate::{
 };
 use std::{cmp::Ordering, mem::size_of, rc::Rc};
 
+mod array_iteration;
+
 pub(crate) fn install(vm: &mut Vm) {
     for (name, value) in [
         ("undefined", Value::Undefined),
@@ -1121,7 +1123,7 @@ fn install_array(vm: &mut Vm) {
             relative(integer(vm, arg(a, 1))?, len)
         };
         let count = end.saturating_sub(start);
-        let array = vm.array_species_create(object.clone(), count)?;
+        let array = vm.array_species_create(object.clone(), count as u64)?;
         for i in 0..count {
             vm.tick()?;
             let key = JsString::from((start + i).to_string());
@@ -1232,15 +1234,8 @@ fn install_array(vm: &mut Vm) {
             })
         });
     }
-    for name in [
-        "forEach",
-        "map",
-        "filter",
-        "some",
-        "every",
-        "find",
-        "findIndex",
-    ] {
+    array_iteration::install(vm, &proto);
+    for name in ["find", "findIndex"] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {
             let object = vm.coerce_object(this)?;
             let len = length(vm, object.clone())?;
@@ -1248,93 +1243,26 @@ fn install_array(vm: &mut Vm) {
             if !vm.is_callable(&callback) {
                 return Err(JsError::type_error("Array callback is not callable"));
             }
-            let result = if name == "map" {
-                vm.array_species_create(object.clone(), len)?
-            } else if name == "filter" {
-                vm.array_species_create(object.clone(), 0)?
-            } else {
-                Value::Undefined
-            };
-            let mut count = 0;
             for i in 0..len {
                 vm.tick()?;
                 let key = JsString::from(i.to_string());
-                if matches!(name, "find" | "findIndex") || vm.has(&object, &key)? {
-                    let value = vm.get(object.clone(), &key)?;
-                    let mapped = vm.invoke(
-                        callback.clone(),
-                        arg(a, 1),
-                        &[value.clone(), Value::from(i), object.clone()],
-                    )?;
-                    match name {
-                        "map" => vm.define_data_property(
-                            result.clone(),
-                            &i.to_string(),
-                            mapped,
-                            true,
-                            true,
-                            true,
-                        )?,
-                        "filter" if mapped.is_truthy() => {
-                            vm.define_data_property(
-                                result.clone(),
-                                &count.to_string(),
-                                value,
-                                true,
-                                true,
-                                true,
-                            )?;
-                            count += 1;
-                        }
-                        "some" if mapped.is_truthy() => return Ok(Value::Bool(true)),
-                        "every" if !mapped.is_truthy() => return Ok(Value::Bool(false)),
-                        "find" if mapped.is_truthy() => return Ok(value),
-                        "findIndex" if mapped.is_truthy() => return Ok(Value::from(i)),
-                        _ => {}
-                    }
+                let value = vm.get(object.clone(), &key)?;
+                let mapped = vm.invoke(
+                    callback.clone(),
+                    arg(a, 1),
+                    &[value.clone(), Value::from(i), object.clone()],
+                )?;
+                if mapped.is_truthy() {
+                    return Ok(if name == "find" { value } else { Value::from(i) });
                 }
             }
-            Ok(match name {
-                "map" => result,
-                "filter" => result,
-                "some" => Value::Bool(false),
-                "every" => Value::Bool(true),
-                "findIndex" => Value::from(-1),
-                _ => Value::Undefined,
+            Ok(if name == "find" {
+                Value::Undefined
+            } else {
+                Value::from(-1)
             })
         });
     }
-    method(vm, proto.clone(), "reduce", 1, |vm, this, a| {
-        let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
-        let callback = arg(a, 0);
-        if !vm.is_callable(&callback) {
-            return Err(JsError::type_error("Reduce callback is not callable"));
-        }
-        let mut accumulator = if a.len() > 1 {
-            Some(a[1].clone())
-        } else {
-            None
-        };
-        for i in 0..len {
-            vm.tick()?;
-            let key = JsString::from(i.to_string());
-            if vm.has(&object, &key)? {
-                let value = vm.get(object.clone(), &key)?;
-                accumulator = Some(if let Some(accumulator) = accumulator {
-                    vm.invoke(
-                        callback.clone(),
-                        Value::Undefined,
-                        &[accumulator, value, Value::from(i), object.clone()],
-                    )?
-                } else {
-                    value
-                });
-            }
-        }
-        accumulator
-            .ok_or_else(|| JsError::type_error("Reduce of empty array without initial value"))
-    });
     method(vm, proto, "reverse", 0, |vm, this, _| {
         let object = vm.coerce_object(this)?;
         let len = length(vm, object.clone())?;

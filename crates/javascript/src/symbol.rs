@@ -547,14 +547,8 @@ impl Vm {
     pub(crate) fn array_species_create(
         &mut self,
         original: Value,
-        length: usize,
+        length: u64,
     ) -> Result<Value, JsError> {
-        if length > self.limits.max_array_length as usize {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Array species length budget exhausted",
-            ));
-        }
         let mut constructor = Value::Undefined;
         if self.is_array(&original) {
             constructor = self.get_property(original, "constructor")?;
@@ -567,10 +561,10 @@ impl Vm {
         }
         if constructor.is_undefined() {
             let result = self.try_new_array(&[])?;
-            self.set_property(result.clone(), "length", Value::from(length))?;
+            self.set_property(result.clone(), "length", Value::from(length as f64))?;
             Ok(result)
         } else {
-            self.construct(constructor, &[Value::from(length)])
+            self.construct(constructor, &[Value::from(length as f64)])
         }
     }
 }
