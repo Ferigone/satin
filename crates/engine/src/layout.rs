@@ -76,6 +76,11 @@ pub enum DrawCommand {
         rect: Rect,
         color: Color,
     },
+    UniformBorder {
+        rect: Rect,
+        widths: [f32; 4],
+        color: Color,
+    },
     Text {
         x: f32,
         baseline: f32,
@@ -2867,6 +2872,7 @@ impl Builder<'_> {
                 }
                 DrawCommand::PopState => {}
                 DrawCommand::Rect { rect, .. }
+                | DrawCommand::UniformBorder { rect, .. }
                 | DrawCommand::Image { rect, .. }
                 | DrawCommand::Canvas { rect, .. }
                 | DrawCommand::Svg { rect, .. }
@@ -2943,28 +2949,46 @@ impl Builder<'_> {
     }
     fn draw_borders(&mut self, r: Rect, s: &Style, b: [f32; 4]) {
         self.commands.background = true;
-        for (i, rect) in [
-            Rect { height: b[0], ..r },
-            Rect {
-                x: r.x + r.width - b[1],
-                width: b[1],
-                ..r
-            },
-            Rect {
-                y: r.y + r.height - b[2],
-                height: b[2],
-                ..r
-            },
-            Rect { width: b[3], ..r },
-        ]
-        .into_iter()
-        .enumerate()
+        let colors = s.border_colors.map(|color| color.unwrap_or(s.color));
+        let mut active = colors
+            .into_iter()
+            .zip(b)
+            .filter_map(|(color, width)| (width > 0.).then_some(color));
+        if (b[0] > 0. || b[2] > 0.)
+            && (b[1] > 0. || b[3] > 0.)
+            && let Some(color) = active.next()
+            && (1..255).contains(&color.3)
+            && active.all(|side| side == color)
         {
-            if b[i] > 0. {
-                self.commands.push(DrawCommand::Rect {
-                    rect,
-                    color: s.border_colors[i].unwrap_or(s.color),
-                });
+            self.commands.push(DrawCommand::UniformBorder {
+                rect: r,
+                widths: b,
+                color,
+            });
+        } else {
+            for (i, rect) in [
+                Rect { height: b[0], ..r },
+                Rect {
+                    x: r.x + r.width - b[1],
+                    width: b[1],
+                    ..r
+                },
+                Rect {
+                    y: r.y + r.height - b[2],
+                    height: b[2],
+                    ..r
+                },
+                Rect { width: b[3], ..r },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if b[i] > 0. {
+                    self.commands.push(DrawCommand::Rect {
+                        rect,
+                        color: colors[i],
+                    });
+                }
             }
         }
         self.commands.background = false;

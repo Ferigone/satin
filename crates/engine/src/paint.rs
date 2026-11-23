@@ -3,6 +3,7 @@ use crate::{
     fonts::{Fonts, RasterFailure, Run},
     layout::{Affine2D, DrawCommand, Layout, Rect},
 };
+mod box_border;
 mod controls;
 mod transformed;
 use transformed::valid_rect;
@@ -276,6 +277,11 @@ impl Canvas {
                     ..
                 } => self.form_control(*rect, control, style, fonts, 1.),
                 DrawCommand::Rect { rect, color } => self.fill_rect(*rect, *color),
+                DrawCommand::UniformBorder {
+                    rect,
+                    widths,
+                    color,
+                } => self.uniform_border(*rect, *widths, *color),
                 DrawCommand::Text {
                     x,
                     baseline,
