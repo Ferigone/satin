@@ -77,10 +77,7 @@ impl DocumentPolicy {
 
     fn parse(policy: &[u8]) -> Self {
         let mut directives = [const { None }; SOURCE_DIRECTIVES.len()];
-        for directive in policy
-            .split(|&byte| byte == b';')
-            .filter(|part| part.is_ascii())
-        {
+        for directive in policy.split(|&byte| byte == b';') {
             let mut tokens = directive
                 .split(u8::is_ascii_whitespace)
                 .filter(|token| !token.is_empty());
@@ -93,7 +90,7 @@ impl DocumentPolicy {
             else {
                 continue;
             };
-            // The first directive wins, even if its source list is empty.
+            // The first directive wins, even with empty or unrecognized sources.
             directives[index].get_or_insert(tokens);
         }
         let [worker_src, child_src, script_src, default_src] = directives;
@@ -175,12 +172,25 @@ mod tests {
             "script-src wasm-unsafe-eval unsafe-eval 'wasm-unsafe-eval-extra'",
             "script-src 'none'; script-src-elem 'wasm-unsafe-eval'",
             "script-src 'none', script-src 'wasm-unsafe-eval'",
+            "script-src 'none' \u{00e9}; script-src 'wasm-unsafe-eval'",
         ] {
             assert!(
                 !DocumentPolicy::from_meta(content).allows_wasm_compilation(),
                 "{content}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_source_tokens_do_not_discard_a_recognized_header_directive() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "content-security-policy",
+            HeaderValue::from_bytes(b"worker-src 'none' \xff; script-src \xff").unwrap(),
+        );
+        let policy = DocumentPolicy::from_headers(&headers);
+        assert!(!policy.allows_blob());
+        assert!(!policy.allows_wasm_compilation());
     }
 
     #[test]
