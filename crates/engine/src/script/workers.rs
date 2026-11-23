@@ -1,4 +1,5 @@
 //! Classic dedicated workers run in separate JavaScript VMs.
+mod fetch;
 mod mailbox;
 mod realm;
 
@@ -233,6 +234,8 @@ pub(super) struct Workers {
     document: Weak<RefCell<State>>,
     events: event_target::Events,
     messages: MessagePorts,
+    network: Network,
+    meta_connect_policy: Rc<RefCell<ConnectPolicy>>,
     exception: RootId,
 }
 
@@ -279,6 +282,7 @@ fn run_worker(
     name: Vec<u16>,
     address: Url,
     source: Source,
+    network: Option<Network>,
 ) -> Result<(), JsError> {
     if connection.cancelled.load(Ordering::Relaxed) {
         return Ok(());
@@ -288,6 +292,15 @@ fn run_worker(
     vm.set_interrupt_flag(connection.cancelled.clone());
     let parent = connection.clone();
     let ingress = connection.clone();
+    let network = network.map(|network| {
+        let connection_ref = Arc::downgrade(connection);
+        let wake: Wake = Arc::new(move || {
+            if let Some(connection) = connection_ref.upgrade() {
+                connection.to_worker.notify_external();
+            }
+        });
+        (network, WorkerTaskSender::new(connection).cancellation(), wake)
+    });
     let closing = Rc::new(Cell::new(false));
     let close_state = closing.clone();
     let exception = Rc::new(Cell::new(None));
@@ -315,6 +328,7 @@ fn run_worker(
             // checkpoint. Drop all future worker tasks and abort host I/O.
             ingress.close_ingress();
         },
+        network,
     )?;
     let vm = worker.vm_mut();
     let class = vm.get_global("DOMException")?;
@@ -327,12 +341,34 @@ fn run_worker(
         }
         connection.report_error(&error.to_string());
     }
+    let mut prefer_fetch = false;
+    let mut ran_timer = false;
     while !closing.get() && !connection.cancelled.load(Ordering::Relaxed) {
-        let result = match connection.to_worker.receive_until(worker.timer_deadline()) {
-            Received::Message(Envelope(task, _charge)) => match task {
-                WorkerTask::Message(packet) => worker.dispatch_packet(packet),
-                WorkerTask::Host(task) => worker.dispatch_host_task(task),
-            },
+        worker.dispatch_fetch_jobs();
+        // A continually due timer must not indefinitely delay an already
+        // published transport event. Give it one turn after a timer task.
+        let input = if ran_timer && let Some(event) = worker.next_fetch_event() {
+            Received::External(event)
+        } else {
+            connection.to_worker.receive_until_or(
+                worker.timer_deadline(),
+                || worker.next_fetch_event(),
+                prefer_fetch,
+            )
+        };
+        ran_timer = matches!(&input, Received::Deadline);
+        let result = match input {
+            Received::Message(Envelope(task, _charge)) => {
+                prefer_fetch = true;
+                match task {
+                    WorkerTask::Message(packet) => worker.dispatch_packet(packet),
+                    WorkerTask::Host(task) => worker.dispatch_host_task(task),
+                }
+            }
+            Received::External(event) => {
+                prefer_fetch = false;
+                worker.dispatch_fetch_event(event)
+            }
             Received::Deadline => worker.dispatch_timer(Instant::now()),
             Received::Closed => break,
         };
@@ -346,6 +382,10 @@ fn run_worker(
 }
 
 impl Workers {
+    pub(super) fn set_meta_connect_policy(&self, policy: &ConnectPolicy) {
+        *self.meta_connect_policy.borrow_mut() = policy.clone();
+    }
+
     pub(super) fn set_wake(&self, wake: Wake) {
         let slot = self.store.borrow().wake.clone();
         // Parser scripts can start a worker before the embedder supplies its
@@ -381,6 +421,7 @@ impl Workers {
         address: Url,
         name: Vec<u16>,
         source: Result<Source, &'static str>,
+        network: Network,
     ) -> Result<(), JsError> {
         let (id, connection) = {
             let mut state = self.store.borrow_mut();
@@ -414,7 +455,7 @@ impl Workers {
                     .name(format!("satin-worker-{id}"))
                     .spawn(move || {
                         let _permit = permit;
-                        if let Err(error) = run_worker(&worker, name, address, source)
+                        if let Err(error) = run_worker(&worker, name, address, source, Some(network))
                             && !worker.cancelled.load(Ordering::Relaxed)
                         {
                             worker.report_error(&error.to_string());
@@ -487,6 +528,15 @@ impl Workers {
         // Snapshot the creator's effective policy when constructing the
         // worker, not when its thread is scheduled or the Blob is created.
         let policy = document.borrow().document_policy;
+        // Parser-written metadata takes effect even for the next nested
+        // script, before the document scheduler has drained parser results.
+        let parser = document.borrow().parser.upgrade();
+        let network = if let Some(parser) = parser {
+            self.network.inherit_meta(parser.borrow().connect_policy())
+        } else {
+            self.network
+                .inherit_meta(&self.meta_connect_policy.borrow())
+        };
         let source = if address.scheme() != "blob" || !classic {
             Err("This Satin worker requires a classic Blob source")
         } else if !policy.allows_blob() {
@@ -507,7 +557,7 @@ impl Workers {
         };
         vm.mark_platform_object(&object)?;
         event_target::attach(vm, object.clone())?;
-        self.start(vm, object.clone(), address, name, source)?;
+        self.start(vm, object.clone(), address, name, source, network)?;
         Ok(object)
     }
 
@@ -600,6 +650,7 @@ mod worker_lifecycle_tests {
                 vec![],
                 Url::parse("blob:https://example.test/host-task").unwrap(),
                 source,
+                None,
             )
             .map_err(|error| error.to_string());
             worker.finish();
@@ -674,6 +725,7 @@ pub(super) fn install(
     document: &Shared,
     events: event_target::Events,
     messages: MessagePorts,
+    page: &LoadedPage,
 ) -> Result<Workers, JsError> {
     let prototype = vm.new_object_with_prototype(events.target_proto.clone())?;
     let exception = vm.get_global("DOMException")?;
@@ -682,6 +734,8 @@ pub(super) fn install(
         document: Rc::downgrade(document),
         events,
         messages,
+        network: Network::from_page(page),
+        meta_connect_policy: Rc::new(RefCell::new(page.meta_connect_policy.clone())),
         exception: vm.root(exception),
     };
     let constructor = workers.clone();

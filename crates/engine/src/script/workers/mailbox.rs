@@ -56,8 +56,9 @@ struct Entry<T> {
     message: Envelope<T>,
 }
 
-pub(super) enum Received<T> {
+pub(super) enum Received<T, U = ()> {
     Message(Envelope<T>),
+    External(U),
     Deadline,
     Closed,
 }
@@ -99,12 +100,29 @@ impl<T> Mailbox<T> {
             .map(|entry| entry.message)
     }
 
+    #[cfg(test)]
     pub(super) fn receive_until(&self, deadline: Option<Instant>) -> Received<T> {
+        self.receive_until_or(deadline, || None, false)
+    }
+
+    pub(super) fn receive_until_or<U>(
+        &self,
+        deadline: Option<Instant>,
+        mut external: impl FnMut() -> Option<U>,
+        external_first: bool,
+    ) -> Received<T, U> {
         let mut messages = self.messages.lock().expect("worker mailbox");
         loop {
             let Some(queue) = messages.as_mut() else {
                 return Received::Closed;
             };
+            let timer_pending = deadline.is_some_and(|due| Instant::now() >= due);
+            if !timer_pending
+                && external_first
+                && let Some(event) = external()
+            {
+                return Received::External(event);
+            }
             // Keep FIFO within the mailbox but let a due timer run ahead of
             // newly arriving tasks. A busy producer cannot starve timers.
             if queue
@@ -112,6 +130,12 @@ impl<T> Mailbox<T> {
                 .is_some_and(|entry| deadline.is_none_or(|due| entry.queued <= due))
             {
                 return Received::Message(queue.pop_front().expect("ready entry").message);
+            }
+            if !timer_pending
+                && !external_first
+                && let Some(event) = external()
+            {
+                return Received::External(event);
             }
             messages = if let Some(due) = deadline {
                 let remaining = due.saturating_duration_since(Instant::now());
@@ -126,6 +150,13 @@ impl<T> Mailbox<T> {
                 self.ready.wait(messages).expect("worker mailbox")
             };
         }
+    }
+
+    pub(super) fn notify_external(&self) {
+        // Producers publish outside this lock. Taking it once after publishing
+        // prevents a lost wake between the consumer's predicate and wait.
+        let _messages = self.messages.lock().expect("worker mailbox");
+        self.ready.notify_one();
     }
 
     pub(super) fn has_messages(&self) -> bool {

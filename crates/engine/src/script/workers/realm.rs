@@ -1,8 +1,14 @@
 //! JavaScript and its event loop checkpoint for a dedicated worker thread.
 mod timers;
 
+use super::{
+    Wake,
+    fetch::{FetchEvent, Network, WorkerFetch},
+};
+use crate::network::CancelSignal;
 use crate::script::{
-    arg, dom_api, event_target, fatal, getter, message_ports::message_event, scheduler, webidl,
+    abort::AbortHost, arg, dom_api, event_target, fatal, getter, message_ports::message_event,
+    scheduler, webidl,
 };
 use rust_browser_javascript::{ErrorKind, JsError, JsString, StructuredClonePacket, Value, Vm};
 use std::{rc::Rc, time::Instant};
@@ -17,6 +23,7 @@ pub(super) struct WorkerRealm {
     events: event_target::Events,
     message_events: message_event::MessageEvents,
     timers: timers::Timers,
+    fetch: Option<WorkerFetch>,
 }
 
 impl WorkerRealm {
@@ -26,9 +33,11 @@ impl WorkerRealm {
         url: &Url,
         post: impl Fn(&mut Vm, &[Value]) -> Result<(), JsError> + 'static,
         close: impl Fn() + 'static,
+        network: Option<(Network, CancelSignal, Wake)>,
     ) -> Result<Self, JsError> {
         dom_api::install_errors(&mut vm)?;
-        let events = event_target::install_worker(&mut vm)?;
+        let abort = AbortHost::install_worker(&mut vm)?;
+        let events = abort.events().clone();
         let global = vm.global();
         let object = vm.get_global("Object")?;
         let set_prototype = vm.get_property(object.clone(), "setPrototypeOf")?;
@@ -116,12 +125,18 @@ impl WorkerRealm {
         })?;
         scheduler::install_queue_microtask(&mut vm, global.clone())?;
         let timers = timers::Timers::install(&mut vm, global)?;
+        let fetch = network
+            .map(|(network, generation, wake)| {
+                WorkerFetch::install(&mut vm, url, abort, network, generation, wake)
+            })
+            .transpose()?;
 
         Ok(Self {
             vm,
             events,
             message_events,
             timers,
+            fetch,
         })
     }
 
@@ -147,6 +162,23 @@ impl WorkerRealm {
         task: impl FnOnce(&mut Vm) -> Result<(), JsError>,
     ) -> Result<(), JsError> {
         run_task(&mut self.vm, task)
+    }
+
+    pub(super) fn dispatch_fetch_jobs(&mut self) {
+        if let Some(fetch) = &mut self.fetch {
+            fetch.dispatch();
+        }
+    }
+
+    pub(super) fn next_fetch_event(&mut self) -> Option<FetchEvent> {
+        self.fetch.as_mut()?.next_event()
+    }
+
+    pub(super) fn dispatch_fetch_event(&mut self, event: FetchEvent) -> Result<(), JsError> {
+        let Some(fetch) = &self.fetch else {
+            return Ok(());
+        };
+        run_task(&mut self.vm, |vm| fetch.receive(vm, event))
     }
 
     pub(super) fn timer_deadline(&self) -> Option<Instant> {
@@ -307,6 +339,7 @@ mod tests {
                 Ok(())
             },
             move || closed.set(true),
+            None,
         )
         .unwrap()
     }

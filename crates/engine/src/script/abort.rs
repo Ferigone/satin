@@ -405,6 +405,19 @@ impl AbortHost {
 
     pub(super) fn install(vm: &mut Vm, scheduler: Option<super::Shared>) -> Result<Self, JsError> {
         let events = event_target::install(vm, scheduler.clone())?;
+        Self::install_with_events(vm, scheduler, events)
+    }
+
+    pub(super) fn install_worker(vm: &mut Vm) -> Result<Self, JsError> {
+        let events = event_target::install_worker(vm)?;
+        Self::install_with_events(vm, None, events)
+    }
+
+    fn install_with_events(
+        vm: &mut Vm,
+        scheduler: Option<super::Shared>,
+        events: event_target::Events,
+    ) -> Result<Self, JsError> {
         let exception_constructor = vm.get_global("DOMException")?;
         // Capture the intrinsics before page code can replace their globals.
         vm.root(exception_constructor.clone());

@@ -830,7 +830,7 @@ impl ScriptRuntime {
         let cloning =
             structured_clone::CloneHost::new(&mut vm, blobs, image_data, image_bitmap, file_lists)?;
         let messages = message_ports::install(&mut vm, events.clone(), cloning.clone())?;
-        let workers = workers::install(&mut vm, &state, events, messages.clone())?;
+        let workers = workers::install(&mut vm, &state, events, messages.clone(), page)?;
         cloning.install(&mut vm, window, messages.clone())?;
         scheduler::install_performance(&mut vm, &state)?;
         history_api::install(&mut vm, &state, document, &layout)?;
