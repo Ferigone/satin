@@ -1014,6 +1014,13 @@ fn font_sources(source: &str) -> Option<Vec<FontSource>> {
     (!result.is_empty()).then_some(result)
 }
 fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
+    fn codepoint(digits: &str) -> Option<u32> {
+        if !(1..=6).contains(&digits.len()) || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        {
+            return None;
+        }
+        u32::from_str_radix(digits, 16).ok()
+    }
     let mut result = vec![];
     for part in split_top(source, b',') {
         if result.len() >= 256 {
@@ -1036,21 +1043,16 @@ fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
                 u32::from_str_radix(&value.replace('?', "f"), 16).ok()?,
             )
         } else if let Some((a, b)) = value.split_once('-') {
-            (
-                u32::from_str_radix(a, 16).ok()?,
-                u32::from_str_radix(b, 16).ok()?,
-            )
+            (codepoint(a)?, codepoint(b)?)
         } else {
-            let n = u32::from_str_radix(value, 16).ok()?;
+            let n = codepoint(value)?;
             (n, n)
         };
-        if start > end || start > 0x10ffff {
+        // An out-of-bounds endpoint invalidates the descriptor; do not clip it.
+        if start > end || end > 0x10ffff {
             return None;
         }
-        result.push(UnicodeRange {
-            start,
-            end: end.min(0x10ffff),
-        });
+        result.push(UnicodeRange { start, end });
     }
     (!result.is_empty()).then_some(result)
 }

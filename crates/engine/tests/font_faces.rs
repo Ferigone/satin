@@ -289,6 +289,45 @@ fn font_weight_descriptor_normalizes_descending_variable_ranges() {
 }
 
 #[test]
+fn invalid_unicode_range_preserves_the_previous_descriptor_and_glyph_fallback() {
+    let fonts = Fonts::new().unwrap();
+    let request = rust_browser_engine::fonts::FontRequest {
+        families: Arc::from([
+            FontFamily::Named("Audit".into()),
+            FontFamily::Named("AuditFallback".into()),
+        ]),
+        weight: 400,
+        style: FontStyle::Normal,
+    };
+    for (value, uses_wide) in [
+        ("U+40-110000", false),
+        ("U+??????", false),
+        ("U+0000041", false),
+        ("U+41-0000042", false),
+        ("U++41", false),
+        ("U+41, U+00-110000", false),
+        ("U+42-41", false),
+        ("U+0041-10FFFF", true),
+        ("u+4?", true),
+        ("U+??", true),
+        ("U+40, U+41", true),
+    ] {
+        let set = font_set(
+            &format!(
+                "@font-face{{font-family:Audit;src:url(wide);unicode-range:U+42;unicode-range:{value}}}
+                 @font-face{{font-family:AuditFallback;src:url(fallback)}}"
+            ),
+            &[WIDE, FALLBACK],
+        );
+        let run = fonts.shape_text("A", 40., &request, &set);
+        let picked = run.face_for(&run.glyphs[0]).face().id();
+        let expected = &set.entries()[if uses_wide { 0 } else { 1 }];
+        assert_eq!(picked, expected.face.id(), "unicode-range: {value}");
+        assert_close(run.advance, if uses_wide { 32. } else { 20. });
+    }
+}
+
+#[test]
 fn decoder_rejects_truncation_and_declared_expansion_before_codec_work() {
     for bytes in [WOFF, WOFF2] {
         assert!(FontFace::decode(&bytes[..bytes.len() - 3]).is_err());
