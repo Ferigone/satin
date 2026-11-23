@@ -1,4 +1,6 @@
 //! The matcher uses an explicit backtrack stack and reversible captures.
+mod prefix;
+
 use super::{
     Flags, case, limit,
     pattern::{Assertion, BackReference, Expr, Member, Pattern, Shorthand, decode_pair},
@@ -13,6 +15,7 @@ pub(crate) struct Program {
     code: Vec<Op>,
     captures: usize,
     repeats: usize,
+    first_ascii: u128,
     bytes: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
@@ -60,6 +63,7 @@ struct Compiler<'a> {
 }
 
 pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Program {
+    let first_ascii = prefix::first_ascii(&pattern.body, flags);
     let mut compiler = Compiler {
         code: Vec::new(),
         repeats: 0,
@@ -73,6 +77,7 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         code: compiler.code,
         captures: pattern.captures,
         repeats: compiler.repeats,
+        first_ascii,
         names: pattern.names,
         bytes: 0,
     };
@@ -265,12 +270,16 @@ impl Program {
         &self,
         vm: &mut Vm,
         input: &[u16],
-        mut start: usize,
+        start: usize,
         sticky: bool,
     ) -> Result<Option<Match>, JsError> {
         if start > input.len() {
             return Ok(None);
         }
+        let first_ascii = if sticky { u128::MAX } else { self.first_ascii };
+        let Some(mut start) = prefix::seek(vm, input, start, first_ascii)? else {
+            return Ok(None);
+        };
         let bytes = self.captures * size_of::<Capture>() + self.repeats * size_of::<Repeat>();
         vm.ensure_allocation(bytes + self.captures * size_of::<Option<Span>>())?;
         let mut state = Matcher {
@@ -317,7 +326,11 @@ impl Program {
             if sticky || start == input.len() {
                 return Ok(None);
             }
-            start = advance(input, start, self.flags.unicode());
+            let next = advance(input, start, self.flags.unicode());
+            let Some(next) = prefix::seek(vm, input, next, first_ascii)? else {
+                return Ok(None);
+            };
+            start = next;
         }
     }
 }
