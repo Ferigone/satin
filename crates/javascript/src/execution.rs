@@ -3,7 +3,7 @@ mod controls;
 mod delegation;
 
 use crate::{
-    ErrorKind, JsError, ObjectId, PropertyKey, Value, Vm,
+    ErrorKind, JsError, ObjectId, Value, Vm,
     bytecode::{Chunk, Code, Op},
     heap::EnvId,
     patterns::Invocation,
@@ -199,10 +199,7 @@ fn visit_operand(item: &Item, visit: &mut impl FnMut(&Value)) {
             }
             Reference::Property(receiver, key) => {
                 visit(receiver);
-                match key {
-                    PropertyKey::String(name) => visit(&Value::String(name.clone())),
-                    PropertyKey::Symbol(symbol) => visit(&Value::Symbol(symbol.clone())),
-                }
+                visit(key);
             }
             Reference::Private(receiver, _) => visit(receiver),
             Reference::Super(base, receiver, key) => {

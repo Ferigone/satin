@@ -159,7 +159,7 @@ pub struct Vm {
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
     Global(JsString),
-    Property(Value, PropertyKey),
+    Property(Value, Value),
     Private(Value, crate::private::PrivateId),
     Super(Value, Value, Value),
     Import(EnvId, JsString),
@@ -1954,15 +1954,31 @@ impl Vm {
         }
     }
     fn normalize_reference(&mut self, reference: &mut Reference) -> Result<(), JsError> {
-        if let Reference::Super(base, _, key) = reference
-            && !base.is_nullish()
-        {
+        let (base, key) = match reference {
+            Reference::Property(base, key) | Reference::Super(base, _, key) => (base, key),
+            _ => return Ok(()),
+        };
+        if !base.is_nullish() && !matches!(key, Value::String(_) | Value::Symbol(_)) {
+            // GetValue canonicalizes the reference's key. Preserve it when an
+            // operation will reuse the same reference for PutValue.
             *key = match self.to_property_key(key)? {
                 PropertyKey::String(name) => Value::String(name),
                 PropertyKey::Symbol(symbol) => Value::Symbol(symbol),
             };
         }
         Ok(())
+    }
+    fn property_reference_key(&mut self, base: &Value, key: &Value) -> Result<PropertyKey, JsError> {
+        if base.is_nullish() {
+            return Err(JsError::type_error(
+                "Cannot access a property of null or undefined",
+            ));
+        }
+        let key = self.to_property_key(key)?;
+        if let PropertyKey::String(name) = &key {
+            self.consume_work(name.len())?;
+        }
+        Ok(key)
     }
     pub(crate) fn read_reference(&mut self, reference: Reference) -> Result<Value, JsError> {
         match reference {
@@ -1985,7 +2001,10 @@ impl Vm {
                 self.get_from(base, &key, receiver)
             }
             Reference::Global(key) => self.get(self.global(), &key),
-            Reference::Property(object, key) => self.get_property_key(object, key),
+            Reference::Property(object, key) => {
+                let key = self.property_reference_key(&object, &key)?;
+                self.get_property_key(object, key)
+            }
             Reference::Private(object, id) => self.private_get(object, id),
             Reference::Unresolvable(key) => Err(JsError::new(
                 ErrorKind::ReferenceError,
@@ -2046,7 +2065,10 @@ impl Vm {
                 }
                 self.set(global, &key, value, strict)
             }
-            Reference::Property(object, key) => self.set_key(object, &key, value, strict),
+            Reference::Property(object, key) => {
+                let key = self.property_reference_key(&object, &key)?;
+                self.set_key(object, &key, value, strict)
+            }
             Reference::Private(object, id) => self.private_set(object, id, value),
             Reference::Unresolvable(key) => {
                 if strict {
@@ -2990,15 +3012,9 @@ impl Vm {
             Op::Property => {
                 let key = self.pop_value(stack)?;
                 let object = self.pop_value(stack)?;
-                if object.is_nullish() {
-                    return Err(JsError::type_error(
-                        "Cannot access a property of null or undefined",
-                    ));
-                }
-                let key = self.to_property_key(&key)?;
-                if let PropertyKey::String(key) = &key {
-                    self.consume_work(key.len())?;
-                }
+                // Reference creation evaluates both operands without checking the
+                // base or coercing the key. A simple assignment does those after
+                // evaluating its right-hand side, when PutValue consumes it.
                 stack.push(Item::Reference(Reference::Property(object, key)));
             }
             Op::Get => {
@@ -3023,6 +3039,7 @@ impl Vm {
                 let item = stack.pop().unwrap();
                 let deleted = match item {
                     Item::Reference(Reference::Property(object, key)) => {
+                        let key = self.property_reference_key(&object, &key)?;
                         self.delete_key(object, &key, strict)?
                     }
                     Item::Reference(Reference::Global(key)) => {
