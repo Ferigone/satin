@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
-import { reportNativeHarnessArtifacts as report, verifyNativeHarnessArtifacts as verify } from './native-checkpoint-verify.mjs';
+import { fileURLToPath } from 'node:url';
+import {
+  assessNativeHarnessCapture as assess, reportNativeHarnessArtifacts as report, verifyNativeHarnessArtifacts as verify,
+} from './native-checkpoint-verify.mjs';
 import { site } from './website.mjs';
 
 const runId = '34-123456789';
@@ -147,4 +154,119 @@ test('keeps partial and timed-out observations separate from completions', () =>
   assert.equal(report(input).status, 'timeout');
   assert.equal(report(input).observed.run.ran.value, 54);
   assert.equal(Object.hasOwn(report(input), 'counters'), false);
+});
+
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+const reviewedFiles = {
+  actions: 'actions.json', selectionPng: 'selection.png', png: 'frame.png',
+  run: 'frame.png.run.json', results: 'frame.png.results.json',
+};
+
+function reviewedSample() {
+  const input = sample();
+  Object.assign(input.manifest.files, { actions: 'actions.json', selectionFrame: 'selection.png' });
+  input.actions = [
+    { action: 'title', value: title },
+    { action: 'click', id: 'run' },
+    { action: 'click_at', x: 0.5, y: 0.5 },
+    { action: 'checkpoint', name: 'run', within_id: 'progressbar', descendant_class: 'text', text: 'Testing complete!', timeout_ms: 15_000 },
+    { action: 'click', id: 'results' },
+    { action: 'checkpoint', name: 'results', within_id: 'contentContainer', descendant_class: 'totalCases', text: '55', timeout_ms: 15_000 },
+  ];
+  input.selectionPng = png;
+  input.digests = Object.fromEntries(Object.keys(reviewedFiles).map(key => [key,
+    sha256(Buffer.isBuffer(input[key]) ? input[key] : JSON.stringify(input[key]))]));
+  input.manifest.visualReview = {
+    reviewer: 'Offline fixture reviewer', runId, sha256: { ...input.digests },
+    selection: { label: 'Chapter - harness (55 tests)', control: 'Run', x: 0.5, y: 0.5, scale: 1 },
+    results: { current: true, counters: { ran: 55, pass: 53, fail: 2, failedToLoad: 1 } },
+  };
+  return input;
+}
+
+test('coordinator intake requires both prescribed actions and artifact-bound positive visual review', () => {
+  const input = reviewedSample();
+  assert.equal(assess(input).websiteRun, 'complete');
+  assert.equal(assess(input).snapshots.complete.counters.ran, 55);
+  assert.equal(Object.hasOwn(assess(input).snapshots, 'first-result'), false);
+  for (const [mutate, stage] of [
+    [capture => { capture.actions[2] = { action: 'click', id: 'btnRunAll' }; }, 'chapter-selection'],
+    [capture => { delete capture.manifest.visualReview; }, 'visual-review'],
+    [capture => { capture.manifest.visualReview.runId = '17-99'; }, 'visual-review'],
+    [capture => { capture.digests.png = '0'.repeat(64); }, 'visual-review'],
+    [capture => { capture.manifest.visualReview.selection.x = 0.4; }, 'visual-review'],
+    [capture => { capture.manifest.visualReview.selection.control = 'Select'; }, 'visual-review'],
+    [capture => { capture.manifest.visualReview.results.current = false; }, 'visual-review'],
+    [capture => { capture.manifest.visualReview.results.counters.fail = 0; }, 'visual-review'],
+  ]) {
+    const capture = reviewedSample();
+    mutate(capture);
+    const result = assess(capture);
+    assert.equal(result.websiteRun, 'unverified');
+    assert.equal(result.firstFailedStage, stage);
+    assert.equal(result.snapshots, undefined);
+  }
+});
+
+test('an apparent visual approval cannot promote a partial, timeout, or same-URL reload', () => {
+  for (const [mutate, stage] of [
+    [capture => { capture.run.html = capture.run.html.replace('id="totalCounter">55', 'id="totalCounter">54'); }, 'chapter-completion'],
+    [capture => { capture.process.timedOut = true; }, 'native-timeout'],
+    [capture => { capture.results.documentNavigation++; }, 'native-artifacts'],
+  ]) {
+    const capture = reviewedSample();
+    mutate(capture);
+    const result = assess(capture);
+    assert.equal(result.websiteRun, 'unverified');
+    assert.equal(result.firstFailedStage, stage);
+    assert.equal(result.snapshots, undefined);
+  }
+});
+
+test('website CLI imports a manifest without spawning a browser or scoring missing visual review', async t => {
+  const scratch = fileURLToPath(new URL('../../target/test262/', import.meta.url));
+  await mkdir(scratch, { recursive: true });
+  const dir = await mkdtemp(join(scratch, 'native-intake-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const input = reviewedSample();
+  const manifestPath = join(dir, 'manifest.json');
+  await Promise.all([
+    ...Object.entries(reviewedFiles).map(([key, name]) => writeFile(join(dir, name),
+      Buffer.isBuffer(input[key]) ? input[key] : JSON.stringify(input[key]))),
+    writeFile(join(dir, input.manifest.files.stdout), JSON.stringify(input.summary)),
+    writeFile(join(dir, input.manifest.files.process), JSON.stringify(input.process)),
+  ]);
+  const invoke = async () => {
+    await writeFile(manifestPath, JSON.stringify(input.manifest));
+    const tool = fileURLToPath(new URL('./website.mjs', import.meta.url));
+    const child = spawnSync(process.execPath, [tool, '--native-chapter-manifest', manifestPath, '--output', join(dir, 'reports')],
+      { encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.error, undefined);
+    const message = JSON.parse(child.stdout);
+    const receipt = JSON.parse(await readFile(message.report, 'utf8'));
+    return { code: child.status, run: receipt.runs['satin-native'] };
+  };
+  const verified = await invoke();
+  assert.equal(verified.code, 0);
+  assert.equal(verified.run.websiteRun, 'complete');
+  delete input.manifest.visualReview;
+  const unreviewed = await invoke();
+  assert.equal(unreviewed.code, 1);
+  assert.equal(unreviewed.run.firstFailedStage, 'visual-review');
+  assert.equal(unreviewed.run.websiteRun, 'unverified');
+  assert.equal(unreviewed.run.snapshots, undefined);
+
+  await rm(join(dir, reviewedFiles.results));
+  await writeFile(join(dir, input.manifest.files.process), JSON.stringify({ code: null, timedOut: true }));
+  const timedOut = await invoke();
+  assert.equal(timedOut.code, 1);
+  assert.equal(timedOut.run.firstFailedStage, 'native-timeout');
+  assert.equal(timedOut.run.nativeEvidence.observed.results.ran.state, 'missing-snapshot');
+  assert.equal(timedOut.run.snapshots, undefined);
+
+  const tool = fileURLToPath(new URL('./website.mjs', import.meta.url));
+  const mixed = spawnSync(process.execPath, [tool, '--native-chapter-manifest', manifestPath, '--satin', 'must-not-launch.exe'],
+    { encoding: 'utf8', timeout: 5000 });
+  assert.equal(mixed.status, 2);
+  assert.match(mixed.stderr, /cannot be combined with browser capture options/);
 });

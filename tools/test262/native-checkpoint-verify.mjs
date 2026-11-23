@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -30,12 +31,13 @@ export function validateNativeHarnessManifest(manifest) {
     'Manifest must identify the 55-case harness chapter');
   requireEvidence(typeof suite?.version === 'string' && suite.version.trim() &&
     typeof suite.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(suite.date), 'Missing manifest suite identity');
-  const required = ['process', 'stdout', 'frame'];
+  const required = ['process', 'stdout', 'frame', ...['actions', 'selectionFrame'].filter(key => Object.hasOwn(files ?? {}, key))];
   requireEvidence(required.every(key => typeof files?.[key] === 'string' &&
     /^[a-z\d][a-z\d_.-]*$/i.test(files[key]) && basename(files[key]) === files[key]),
   'Manifest files must be simple filenames beside the manifest');
-  requireEvidence(new Set(required.map(key => files[key].toLowerCase())).size === required.length &&
-    /\.png$/i.test(files.frame), 'Manifest files must be distinct, with a PNG frame');
+  const names = [...required.map(key => files[key]), `${files.frame}.run.json`, `${files.frame}.results.json`];
+  requireEvidence(new Set(names.map(name => name.toLowerCase())).size === names.length && /\.png$/i.test(files.frame) &&
+    (!files.selectionFrame || /\.png$/i.test(files.selectionFrame)), 'Manifest files must be distinct, with PNG frames');
   return manifest;
 }
 
@@ -190,6 +192,73 @@ export function reportNativeHarnessArtifacts(input) {
   }
 }
 
+function verifyChapterActions(actions) {
+  requireEvidence(Array.isArray(actions), 'Missing chapter action record');
+  const steps = actions[0]?.action === 'title' && actions[0].value === title ? actions.slice(1) : actions;
+  const [nav, row, run, resultsNav, results] = steps;
+  const checkpoint = (action, name, root, className, text) => action?.action === 'checkpoint' &&
+    action.name === name && action.within_id === root && action.descendant_class === className &&
+    action.text === text && Number.isSafeInteger(action.timeout_ms) && action.timeout_ms > 0 && action.timeout_ms <= 15_000;
+  requireEvidence(steps.length === 5 && nav?.action === 'click' && nav.id === 'run' &&
+    row?.action === 'click_at' && [row.x, row.y].every(value => Number.isFinite(value) && value >= 0) &&
+    checkpoint(run, 'run', 'progressbar', 'text', 'Testing complete!') &&
+    resultsNav?.action === 'click' && resultsNav.id === 'results' &&
+    checkpoint(results, 'results', 'contentContainer', 'totalCases', '55'), 'Unexpected chapter or Results action sequence');
+  return row;
+}
+
+function verifyChapterVisualReview(input, counters, row) {
+  const review = input.manifest.visualReview;
+  requireEvidence(typeof review?.reviewer === 'string' && review.reviewer.trim() &&
+    review.runId === input.summary.checkpoints.runId, 'Missing visual review for this attempt');
+  for (const key of ['actions', 'selectionPng', 'png', 'run', 'results']) {
+    requireEvidence(/^[a-f0-9]{64}$/.test(review.sha256?.[key] ?? '') &&
+      review.sha256[key] === input.digests?.[key], `Visual review does not match ${key} artifact`);
+  }
+  const selection = review.selection;
+  requireEvidence(validPng(input.selectionPng) &&
+    input.selectionPng.readUInt32BE(16) === input.png.readUInt32BE(16) &&
+    input.selectionPng.readUInt32BE(20) === input.png.readUInt32BE(20) &&
+    selection?.label === 'Chapter - harness (55 tests)' && selection.control === 'Run' &&
+    selection.x === row.x && selection.y === row.y && Number.isFinite(selection.scale) && selection.scale > 0 &&
+    row.x * selection.scale < input.png.readUInt32BE(16) && row.y * selection.scale < input.png.readUInt32BE(20),
+  'Visual review did not confirm the chapter Run hit');
+  requireEvidence(review.results?.current === true && resultKeys.every(key => review.results.counters?.[key] === counters[key]),
+    'Visual review did not confirm current matching Results');
+}
+
+// This intake never starts Satin. It promotes an already-captured workflow
+// only with both machine-checked evidence and the coordinator's visual review.
+export function assessNativeHarnessCapture(input) {
+  const nativeEvidence = reportNativeHarnessArtifacts(input);
+  const entry = {
+    websiteRun: 'unverified', selection: nativeEvidence.selection, nativeEvidence,
+    artifactStates: input.artifacts, firstFailedStage: null,
+  };
+  if (nativeEvidence.status !== 'artifacts-consistent') {
+    entry.firstFailedStage = nativeEvidence.status === 'timeout' ? 'native-timeout' :
+      nativeEvidence.status === 'partial' ? 'chapter-completion' : 'native-artifacts';
+    entry.error = nativeEvidence.error;
+    return entry;
+  }
+  let row;
+  try {
+    row = verifyChapterActions(input.actions);
+  } catch (error) {
+    return { ...entry, firstFailedStage: 'chapter-selection', error: error.message };
+  }
+  try {
+    verifyChapterVisualReview(input, nativeEvidence.counters, row);
+  } catch (error) {
+    return { ...entry, firstFailedStage: 'visual-review', error: error.message };
+  }
+  return {
+    ...entry, websiteRun: 'complete',
+    visualReview: { reviewer: input.manifest.visualReview.reviewer, runId: input.manifest.visualReview.runId },
+    snapshots: { complete: { counters: nativeEvidence.counters } },
+  };
+}
+
 const parseJson = bytes => JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
 
 export async function readNativeHarnessArtifacts(manifestPath) {
@@ -198,13 +267,16 @@ export async function readNativeHarnessArtifacts(manifestPath) {
   const entries = {
     process: files.process, summary: files.stdout, png: files.frame,
     run: `${files.frame}.run.json`, results: `${files.frame}.results.json`,
+    ...(files.actions ? { actions: files.actions } : {}),
+    ...(files.selectionFrame ? { selectionPng: files.selectionFrame } : {}),
   };
   const dir = dirname(resolve(manifestPath));
-  const capture = { manifest, artifacts: {} };
+  const capture = { manifest, artifacts: {}, digests: {} };
   await Promise.all(Object.entries(entries).map(async ([key, file]) => {
     try {
       const bytes = await readFile(resolve(dir, file));
-      capture[key] = key === 'png' ? bytes : parseJson(bytes);
+      capture[key] = key === 'png' || key === 'selectionPng' ? bytes : parseJson(bytes);
+      capture.digests[key] = createHash('sha256').update(bytes).digest('hex');
       capture.artifacts[key] = capture[key] == null ? 'invalid' : 'present';
     } catch (error) {
       if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;

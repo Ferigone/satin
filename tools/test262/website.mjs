@@ -431,6 +431,7 @@ function parseOptions(argv) {
   const keys = {
     '--satin': 'satin', '--output': 'output', '--until': 'until', '--chapter': 'chapter',
     '--timeout-ms': 'timeoutMs', '--satin-run-ms': 'satinRunMs',
+    '--native-chapter-manifest': 'nativeChapterManifest',
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -440,6 +441,13 @@ function parseOptions(argv) {
     if (!value || value.startsWith('--')) throw new Error(`Missing value for ${arg}`);
     if (arg === '--chromium') options.chromium.push(value);
     else options[keys[arg]] = arg.endsWith('-ms') ? Number(value) : value;
+  }
+  if (options.nativeChapterManifest) {
+    if (options.satin || options.native || options.chromium.length || options.until !== undefined ||
+        options.chapter !== undefined || options.timeoutMs !== undefined || argv.includes('--satin-run-ms')) {
+      throw new Error('--native-chapter-manifest is read-only and cannot be combined with browser capture options');
+    }
+    return options;
   }
   options.until ??= options.chapter ? 'complete' : 'first';
   options.timeoutMs ??= options.chapter ? 15_000 : 420_000;
@@ -457,12 +465,22 @@ function parseOptions(argv) {
 async function main(argv) {
   if (argv.includes('--help')) {
     console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--until first|complete | --chapter NAME (Chromium only)] [--timeout-ms MS] [--output DIR]');
+    console.log('node tools/test262/website.mjs --native-chapter-manifest MANIFEST_JSON [--output DIR] (read-only coordinator intake)');
     return;
   }
   const options = parseOptions(argv);
   await mkdir(resolve(options.output), { recursive: true });
   const output = await mkdtemp(resolve(options.output, 'run-'));
   const report = { schema: 1, scope: 'legacy-live-website', url: site, date: new Date().toISOString(), options, runs: {} };
+  if (options.nativeChapterManifest) {
+    const manifest = resolve(options.nativeChapterManifest);
+    try {
+      const { assessNativeHarnessCapture, readNativeHarnessArtifacts } = await import('./native-checkpoint-verify.mjs');
+      report.runs['satin-native'] = { manifest, ...assessNativeHarnessCapture(await readNativeHarnessArtifacts(manifest)) };
+    } catch (error) {
+      report.runs['satin-native'] = { manifest, websiteRun: 'unverified', firstFailedStage: 'native-manifest', probeError: String(error) };
+    }
+  }
   const jobs = [
     ...(options.satin ? [['satin', options.satin, satin]] : []),
     ...options.chromium.map((executable, i) => [`chromium-${i + 1}`, executable, chromium]),
@@ -491,8 +509,8 @@ async function main(argv) {
     runs: Object.fromEntries(Object.entries(report.runs).map(([name, run]) => [name, {
       websiteRun: run.websiteRun, firstFailedStage: run.firstFailedStage, firstDiagnostic: run.firstDiagnostic,
       selection: run.selection,
-      counters: run.snapshots.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots.paused?.counters ??
-        run.snapshots['first-result']?.counters ?? run.load?.dom?.counters,
+      counters: run.snapshots?.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots?.paused?.counters ??
+        run.snapshots?.['first-result']?.counters ?? run.load?.dom?.counters,
       error: run.probeError ?? run.error,
     }])),
   }));
