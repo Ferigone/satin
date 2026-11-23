@@ -97,6 +97,42 @@ fn css_bad_string_recovery_does_not_treat_escaped_newlines_as_bad() {
 }
 
 #[test]
+fn css_block_recovery_preserves_declarations_and_the_next_rule() {
+    for (value, width) in [
+        ("fn(})", 41.),
+        ("[}]", 47.),
+        ("fn(a;b, [{}])", 31.),
+        (r"fn(\})", 37.),
+        (r#"fn("}")"#, 39.),
+    ] {
+        let sheet = format!(
+            "#first {{ width:29px; color:green; color:{value}; width:{width}px; }} \
+             #later {{ width:53px; }}"
+        );
+        let (doc, computed) = styles("<div id=first></div><div id=later></div>", &sheet);
+        let first = &computed[by_id(&doc, "first").0];
+        assert_eq!(first.width, Length::Px(width), "{value}");
+        assert_eq!(first.color, Color::rgb(0, 128, 0), "{value}");
+        assert_eq!(computed[by_id(&doc, "later").0].width, Length::Px(53.));
+    }
+}
+
+#[test]
+fn css_block_recovery_does_not_open_blocks_in_unquoted_urls() {
+    // Only test rule discovery; declaration-value parsing is a separate step.
+    for value in [
+        r"URL(asset[\).svg)",
+        "url(asset{.svg)",
+        r#"url("asset[.svg")"#,
+    ] {
+        let sheet = format!("#first {{ --asset:{value} }} #later {{ width:53px; }}");
+        let rules = css::parse(&sheet, 800.);
+        assert_eq!(rules.len(), 2, "{value}");
+        assert_eq!(rules[1].selector, "#later", "{value}");
+    }
+}
+
+#[test]
 fn longhand_cascade_is_independent_of_shorthand_priority() {
     let (d, s) = styles(
         "<div id='a' class='c' style='padding-left:7px; color: blue'></div>",

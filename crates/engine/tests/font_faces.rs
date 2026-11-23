@@ -90,6 +90,32 @@ fn font_face_rule_parses_cascade_lists_and_unicode_ranges() {
 }
 
 #[test]
+fn css_block_recovery_keeps_later_font_descriptors_and_rules() {
+    let rules = css::font_faces(
+        r#"
+        @font-face {
+            font-family: First;
+            unknown: fn(});
+            src: url(first.woff2);
+        }
+        @font-face {
+            font-family: Second;
+            unknown: [}];
+            src: URL([part\).woff2)
+        }
+        @font-face { font-family: Later; src: url(later.woff2); }
+    "#,
+        800.,
+    );
+    let families: Vec<_> = rules.iter().map(|r| r.family.as_ref()).collect();
+    assert_eq!(families, ["First", "Second", "Later"]);
+    assert!(matches!(
+        &rules[1].sources[0],
+        FontSource::Url { url, .. } if url.as_ref() == "[part).woff2"
+    ));
+}
+
+#[test]
 fn family_weight_and_style_are_real_inherited_css_values() {
     let page = LoadedPage::from_html(
         "https://fonts.test/",

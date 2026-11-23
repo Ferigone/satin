@@ -675,6 +675,66 @@ fn matching_close(source: &str, open: usize, left: u8, right: u8) -> Option<usiz
     None
 }
 
+// An unquoted url() is a token, not a function containing simple blocks.
+fn unquoted_stylesheet_url_end(source: &[u8], open: usize) -> Option<usize> {
+    let start = open.checked_sub(3)?;
+    if !source[start..open].eq_ignore_ascii_case(b"url")
+        || start.checked_sub(1).is_some_and(|prev| {
+            let b = source[prev];
+            b.is_ascii_alphanumeric() || b >= 128 || matches!(b, b'-' | b'_' | b'\\' | b'#' | b'@')
+        })
+    {
+        return None;
+    }
+    let body = &source[open + 1..];
+    let first = body
+        .iter()
+        .copied()
+        .find(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+    if matches!(first, Some(b'\'' | b'"')) {
+        return None;
+    }
+    let mut i = open + 1;
+    while let Some(&b) = source.get(i) {
+        match b {
+            b')' => return Some(i + 1),
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    Some(source.len())
+}
+
+fn stylesheet_block_end(source: &str, open: usize) -> Option<usize> {
+    let mut offset = open + 1;
+    let mut bytes = structural_bytes(source.get(offset..)?);
+    let mut closers = Vec::new();
+    while let Some((i, token)) = bytes.next() {
+        let CssByte::Unquoted(b) = token else {
+            continue;
+        };
+        match b {
+            b'(' => {
+                if let Some(end) = unquoted_stylesheet_url_end(source.as_bytes(), offset + i) {
+                    offset = end;
+                    bytes = structural_bytes(&source[offset..]);
+                } else {
+                    closers.push(b')');
+                }
+            }
+            b'[' => closers.push(b']'),
+            b'{' => closers.push(b'}'),
+            b'}' if closers.is_empty() => return Some(offset + i),
+            // Other closing tokens within a component cannot close it.
+            b')' | b']' | b'}' if closers.last() == Some(&b) => {
+                closers.pop();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn parse(source: &str, viewport: f32) -> Vec<Rule> {
     let clean = without_comments(source);
     let mut out = vec![];
@@ -704,7 +764,7 @@ pub fn font_faces(source: &str, viewport: f32) -> Vec<FontFaceRule> {
             }
             let open = offset + stop;
             let header = trim_boundary(&source[offset..open]);
-            let Some(end) = matching_close(source, open, b'{', b'}') else {
+            let Some(end) = stylesheet_block_end(source, open) else {
                 break;
             };
             let body = &source[open + 1..end];
@@ -1111,7 +1171,7 @@ fn parse_rules(
         }
         let open = offset + stop;
         let header = trim_boundary(&source[offset..open]);
-        let end = matching_close(source, open, b'{', b'}').unwrap_or(source.len());
+        let end = stylesheet_block_end(source, open).unwrap_or(source.len());
         let body = &source[open + 1..end];
         if header
             .get(..6)
