@@ -1,0 +1,16 @@
+[
+  {"action":"key","value":"l","control":true},
+  {"action":"text","value":"about:version"},
+  {"action":"key","value":"Enter"},
+  {"action":"title","value":"About Satin"},
+  {"action":"key","value":"t","control":true},
+  {"action":"title","value":"New Tab"},
+  {"action":"key","value":"Tab","control":true},
+  {"action":"title","value":"About Satin"},
+  {"action":"key","value":"w","control":true},
+  {"action":"title","value":"New Tab"},
+  {"action":"key","value":"f","alt":true},
+  {"action":"key","value":"ArrowUp"},
+  {"action":"key","value":"Enter"},
+  {"action":"title","value":"Keyboard shortcuts"}
+]

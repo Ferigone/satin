@@ -1,6 +1,7 @@
 use crate::jobs::{Job, Message, Payload, Task, Workers};
 use crate::media::Bridge;
 use crate::profile::{Profile, Session};
+use crate::shortcuts::{self, Command};
 use rust_browser_engine::{
     Fonts, Layout, LoadedPage, Rect,
     cookies::CookieContext,
@@ -92,6 +93,7 @@ enum Action {
     Settings,
     Version,
     Bookmarks,
+    ShortcutHelp,
     Menu,
     MenuItem(usize),
     BookmarkItem(usize),
@@ -116,6 +118,7 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::Settings, "Settings"),
     (Action::Bookmarks, "Bookmarks"),
     (Action::Version, "About Satin"),
+    (Action::ShortcutHelp, "Keyboard shortcuts"),
 ];
 
 struct Tab {
@@ -788,7 +791,13 @@ impl App {
             self.address_focus = false;
             self.status.clear();
         }
-        if url.starts_with("about:") {
+        if let Some(page) = shortcuts::help_page(&parsed) {
+            // Browser-owned help is static: do not create a script realm for it.
+            tab.title = page.title();
+            tab.page = Some(Arc::new(page));
+            tab.layout = None;
+            tab.loading = false;
+        } else if url.starts_with("about:") {
             self.start_page(index, OpenedPage::internal(&parsed, self.profile.cookies()));
             self.advance_page(index);
         } else {
@@ -942,6 +951,7 @@ impl App {
             Action::Settings => self.open_settings(),
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
+            Action::ShortcutHelp => self.navigate(shortcuts::HELP_URL.into(), true),
             Action::Menu => {
                 self.select_popup = None;
                 self.chrome_menu = self.chrome_menu.is_none().then_some(Menu::Main(0));
@@ -1087,6 +1097,37 @@ impl App {
             self.redraw();
         }
     }
+    fn run_shortcut(&mut self, command: Command, event_loop: &ActiveEventLoop) {
+        match command {
+            Command::Address => self.action(Action::Address, event_loop),
+            Command::NewTab => self.action(Action::NewTab, event_loop),
+            Command::CloseTab => self.action(Action::Close(self.active), event_loop),
+            Command::NextTab => self.activate((self.active + 1) % self.tabs.len()),
+            Command::PreviousTab => {
+                self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
+            }
+            // The keyboard reloads even if a load is in progress. The chrome
+            // button's Action::Reload can instead stop the current load.
+            Command::Reload => self.navigate(self.tabs[self.active].url.clone(), false),
+            Command::Back => self.action(Action::Back, event_loop),
+            Command::Forward => self.action(Action::Forward, event_loop),
+            Command::Menu => self.action(Action::Menu, event_loop),
+            Command::BookmarkPage => self.save_current_bookmark(),
+            Command::ZoomIn | Command::ZoomOut | Command::ResetZoom => {
+                let tab = &mut self.tabs[self.active];
+                tab.zoom = match command {
+                    Command::ZoomIn => tab.zoom * 1.1,
+                    Command::ZoomOut => tab.zoom / 1.1,
+                    _ => 1.,
+                }
+                .clamp(0.5, 3.);
+                tab.layout = None;
+                self.ensure_layout();
+                self.redraw();
+            }
+        }
+    }
+
     fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
         if self.settings_panel.is_some() {
             self.settings_key(key);
@@ -1131,30 +1172,14 @@ impl App {
                 return;
             }
         }
+        if let Some(command) = shortcuts::command(&key, self.modifiers) {
+            self.run_shortcut(command, event_loop);
+            return;
+        }
         let ctrl = self.modifiers.control_key() && !self.modifiers.alt_key();
         if ctrl {
             if let Key::Character(c) = &key {
                 match c.to_lowercase().as_str() {
-                    "l" => {
-                        self.action(Action::Address, event_loop);
-                        return;
-                    }
-                    "t" => {
-                        self.action(Action::NewTab, event_loop);
-                        return;
-                    }
-                    "w" => {
-                        self.action(Action::Close(self.active), event_loop);
-                        return;
-                    }
-                    "r" => {
-                        self.navigate(self.tabs[self.active].url.clone(), false);
-                        return;
-                    }
-                    "d" if !self.modifiers.shift_key() && !self.modifiers.super_key() => {
-                        self.save_current_bookmark();
-                        return;
-                    }
                     "a" if self.address_focus => {
                         self.address.select_all();
                         self.redraw();
@@ -1215,53 +1240,15 @@ impl App {
                         }
                         return;
                     }
-                    "+" | "=" | "-" | "0" => {
-                        let t = &mut self.tabs[self.active];
-                        t.zoom = match c.as_str() {
-                            "-" => t.zoom / 1.1,
-                            "0" => 1.,
-                            _ => t.zoom * 1.1,
-                        }
-                        .clamp(0.5, 3.);
-                        t.layout = None;
-                        self.ensure_layout();
-                        self.redraw();
-                        return;
-                    }
                     _ => {}
                 }
             }
-            if key == Key::Named(NamedKey::Tab) {
-                let direction = if self.modifiers.shift_key() {
-                    self.tabs.len() - 1
-                } else {
-                    1
-                };
-                self.activate((self.active + direction) % self.tabs.len());
-                return;
-            }
         }
-        if self.modifiers.alt_key() {
-            if let Key::Character(c) = &key
-                && c.eq_ignore_ascii_case("f")
-            {
-                self.action(Action::Menu, event_loop);
-                return;
+        if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
+            if let Some(window) = &self.window {
+                window.show_window_menu(LogicalPosition::new(0., TAB_H));
             }
-            if WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
-                if let Some(window) = &self.window {
-                    window.show_window_menu(LogicalPosition::new(0., TAB_H));
-                }
-                return;
-            }
-            if key == Key::Named(NamedKey::ArrowLeft) {
-                self.action(Action::Back, event_loop);
-                return;
-            }
-            if key == Key::Named(NamedKey::ArrowRight) {
-                self.action(Action::Forward, event_loop);
-                return;
-            }
+            return;
         }
         if !self.address_focus {
             if key == Key::Named(NamedKey::Tab)
@@ -1295,7 +1282,6 @@ impl App {
             }
         }
         match key {
-            Key::Named(NamedKey::F5) => self.navigate(self.tabs[self.active].url.clone(), false),
             Key::Named(NamedKey::Escape) => {
                 if self.address_focus {
                     self.address_focus = false;
@@ -1997,7 +1983,7 @@ impl App {
             9. * u,
             CHROME_PANEL,
         );
-        for (index, (_, label)) in MENU_ITEMS.iter().enumerate() {
+        for (index, (item, label)) in MENU_ITEMS.iter().enumerate() {
             let item_y = y + 6. + index as f32 * 35.;
             let action = Action::MenuItem(index);
             let bounds = Rect {
@@ -2022,6 +2008,20 @@ impl App {
                 false,
                 &mut self.fonts,
             );
+            if *item == Action::NewTab {
+                let hint = shortcuts::label(Command::NewTab);
+                let size = 13. * u;
+                let advance = self.fonts.shape(hint, size, false, false, false).advance;
+                canvas.label(
+                    hint,
+                    (x + 183.) * u - advance,
+                    (item_y + 23.) * u,
+                    size,
+                    CHROME_MUTED,
+                    false,
+                    &mut self.fonts,
+                );
+            }
             self.hits.push((bounds, action));
         }
     }
@@ -3269,6 +3269,7 @@ fn chrome_icon(
         Action::Settings
         | Action::Select(_)
         | Action::Bookmarks
+        | Action::ShortcutHelp
         | Action::MenuItem(_)
         | Action::BookmarkItem(_) => {}
     }
