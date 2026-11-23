@@ -1,7 +1,7 @@
 # Shared VM realms for blank iframes and Test262
 
-**Realm creation is not exposed.** The heap identity guard and the private
-global environment split do not create realms or expose `contentWindow`.
+**Realm creation is not exposed.** The private bootstrap core has no
+executable realm entry, Test262 hook or `contentWindow`.
 The [browser probe](../tools/fixtures/iframe-script-realms.md) checks the
 intended behavior without changing the public ES5.1 suite.
 
@@ -39,8 +39,18 @@ intended behavior without changing the public ES5.1 suite.
   Avoid permanent roots for each frame's intrinsics and DOM wrappers.
   Ordinary native functions now trace their defining global environment,
   including when only an exported callback keeps the owner alive. This is a
-  lifetime edge, not realm switching; a traced intrinsic table and ownership
+  lifetime edge, not realm switching; the full intrinsic table and ownership
   for other callable kinds are still needed.
+- Cold bootstrap allocates the global, its environment and seven core
+  prototype objects in the owning heap. The environment traces the prototype
+  record; a rooted native function retains that record through its owner
+  environment, and a dead cycle is collectible. Looking up a core checks
+  heap identity, generation and environment kind. Tests can allocate a second
+  core after charging the shared cell, byte and work budgets. No host values,
+  hooks, policies, or agent symbol state are copied or changed. This does
+  **not** initialize a second realm's complete intrinsics or execute its code:
+  the infallible startup installer bypasses allocation checks, so it must
+  not be reused for guest-driven creation as it stands.
 
 ## Host boundaries
 

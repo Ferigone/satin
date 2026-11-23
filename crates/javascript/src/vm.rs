@@ -20,6 +20,8 @@ use std::{
 
 use crate::dynamic_import::{DynamicImportHook, SourceReferrer};
 
+pub(crate) mod realm;
+
 #[cfg(test)]
 mod global_environment_tests;
 #[cfg(test)]
@@ -241,43 +243,19 @@ impl Vm {
         // Keep the host stack safe even when an embedder requests a larger limit.
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
         let mut heap = Heap::default();
-        let object_prototype = heap.allocate(Cell::Object(Object::new(ObjectKind::Ordinary, None)));
-        let global_object = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Ordinary,
-            Some(object_prototype),
-        )));
-        let global_env = heap.allocate_env(Environment::new_global(global_object, global_object));
-        let function_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Native {
-                callback: Rc::new(|_, _, _| Ok(Value::Undefined)),
-                construct: None,
-                realm_environment: global_env,
+        let global_env = realm::allocate_primary_core(&mut heap);
+        let (
+            global_object,
+            &realm::CoreIntrinsics {
+                object_prototype,
+                function_prototype,
+                array_prototype,
+                string_prototype,
+                number_prototype,
+                boolean_prototype,
+                error_prototype,
             },
-            Some(object_prototype),
-        )));
-        let array_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Array {
-                length: 0,
-                length_writable: true,
-            },
-            Some(object_prototype),
-        )));
-        let string_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Boxed(Value::from("")),
-            Some(object_prototype),
-        )));
-        let number_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Boxed(Value::Number(0.0)),
-            Some(object_prototype),
-        )));
-        let boolean_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Boxed(Value::Bool(false)),
-            Some(object_prototype),
-        )));
-        let error_prototype = heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Ordinary,
-            Some(object_prototype),
-        )));
+        ) = heap.realm_core(global_env).expect("fresh realm core");
         let mut vm = Self {
             heap,
             global_object,

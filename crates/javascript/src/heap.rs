@@ -1,4 +1,7 @@
-use crate::{ErrorKind, JsError, JsString, ObjectId, SymbolId, Value, Vm, bytecode::Code};
+use crate::{
+    ErrorKind, JsError, JsString, ObjectId, SymbolId, Value, Vm, bytecode::Code,
+    vm::realm::CoreIntrinsics,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
@@ -207,6 +210,8 @@ pub(crate) enum EnvKind {
 pub(crate) struct Environment {
     pub parent: Option<EnvId>,
     pub kind: EnvKind,
+    // Only bootstrapped global environments own intrinsic roots.
+    core_intrinsics: Option<Box<CoreIntrinsics>>,
     pub bindings: BTreeMap<JsString, Binding>,
     pub this: Option<Value>,
     pub this_initialized: bool,
@@ -231,6 +236,7 @@ impl Environment {
         Self {
             parent,
             kind,
+            core_intrinsics: None,
             bindings: BTreeMap::new(),
             this,
             this_initialized: true,
@@ -342,6 +348,8 @@ impl Default for Heap {
     }
 }
 impl Heap {
+    pub(crate) const EMPTY_CELL_BYTES: usize = 256;
+
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
         self.estimated_bytes = self.estimated_bytes.saturating_add(cell_bytes(&cell));
         if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_)))
@@ -443,6 +451,26 @@ impl Heap {
     }
     pub fn allocate_env(&mut self, env: Environment) -> EnvId {
         EnvId(self.allocate(Cell::Environment(env)))
+    }
+    pub(crate) fn attach_core_intrinsics(&mut self, env: EnvId, intrinsics: CoreIntrinsics) {
+        let environment = self.environment_mut(env);
+        assert!(matches!(environment.kind, EnvKind::Global { .. }));
+        assert!(environment.core_intrinsics.is_none());
+        environment.core_intrinsics = Some(Box::new(intrinsics));
+        self.estimated_bytes = self
+            .estimated_bytes
+            .saturating_add(std::mem::size_of::<CoreIntrinsics>());
+    }
+    pub(crate) fn realm_core(&self, env: EnvId) -> Option<(ObjectId, &CoreIntrinsics)> {
+        // A realm handle is not a root. Validate heap identity, generation and
+        // cell kind before accepting it; do not use the internal env accessor.
+        let Cell::Environment(environment) = self.cell(env.0)? else {
+            return None;
+        };
+        let EnvKind::Global { binding_object } = environment.kind else {
+            return None;
+        };
+        Some((binding_object, environment.core_intrinsics.as_deref()?))
     }
     pub(crate) fn trace_roots(&self) -> TraceEdges {
         TraceEdges {
@@ -547,6 +575,9 @@ impl Heap {
                 if let EnvKind::Global { binding_object } = env.kind {
                     pending.push(binding_object);
                 }
+                if let Some(intrinsics) = &env.core_intrinsics {
+                    pending.extend(intrinsics.objects());
+                }
                 if let Some(p) = env.parent {
                     pending.push(p.0);
                 }
@@ -648,7 +679,7 @@ impl Heap {
     }
 }
 fn cell_bytes(cell: &Cell) -> usize {
-    256usize.saturating_add(match cell {
+    Heap::EMPTY_CELL_BYTES.saturating_add(match cell {
         Cell::Object(object) => object
             .properties
             .keys()
@@ -702,6 +733,10 @@ fn cell_bytes(cell: &Cell) -> usize {
                     .keys()
                     .map(crate::private::name_bytes)
                     .sum::<usize>()
+                + env
+                    .core_intrinsics
+                    .as_ref()
+                    .map_or(0, |_| std::mem::size_of::<CoreIntrinsics>())
         }
     })
 }
