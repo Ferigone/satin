@@ -69,7 +69,7 @@ impl Routing {
         self.scroll.take()
     }
 
-    fn submit(&mut self, command: ScriptNavigation) -> Result<(), JsError> {
+    pub(super) fn submit(&mut self, command: ScriptNavigation) -> Result<(), JsError> {
         if self.commands.len() >= PENDING_LIMIT {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,

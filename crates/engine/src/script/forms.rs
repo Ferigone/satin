@@ -4,7 +4,7 @@ mod file_inputs;
 use super::file_list::FileListHost;
 use super::form_data::{self, Encoding, EntryList, FormDataHost};
 use super::*;
-use crate::dom::Namespace;
+use crate::{dom::Namespace, history::NavigationMode};
 use file_inputs::FileInputs;
 pub use file_inputs::{
     FilePickerRequest, MAX_PICKER_BYTES, MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, SelectedFile,
@@ -99,6 +99,12 @@ pub(super) struct FormHost {
 
 fn html(doc: &Document, id: NodeId, tag: &str) -> bool {
     doc.namespace(id) == Namespace::Html && doc.tag(id) == tag
+}
+fn is_hyperlink(doc: &Document, id: NodeId) -> bool {
+    html(doc, id, "a") && attr(doc, id, "href")
+}
+fn focus_candidate(doc: &Document, id: NodeId) -> bool {
+    is_hyperlink(doc, id) || (is_labelable(doc, id) && !disabled(doc, id))
 }
 fn is_control(doc: &Document, id: NodeId) -> bool {
     doc.namespace(id) == Namespace::Html
@@ -854,29 +860,15 @@ impl FormHost {
             doc.connected_nodes()
                 .enumerate()
                 .filter_map(|(order, id)| {
-                    if !is_labelable(doc, id) || disabled(doc, id) {
+                    if !focus_candidate(doc, id) {
                         return None;
                     }
                     let tab = doc
                         .attr(id, "tabindex")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(0);
-                    if tab < 0 {
+                    if tab < 0 || hidden(doc, id) {
                         return None;
-                    }
-                    let mut current = Some(id);
-                    while let Some(node) = current {
-                        if attr(doc, node, "hidden")
-                            || doc.attr(node, "style").is_some_and(|style| {
-                                css::declarations(style).iter().any(|d| {
-                                    d.name == "display"
-                                        && d.value.trim().eq_ignore_ascii_case("none")
-                                })
-                            })
-                        {
-                            return None;
-                        }
-                        current = doc.nodes[node.0].parent;
                     }
                     Some((if tab > 0 { tab } else { i32::MAX }, order, id))
                 })
@@ -1948,19 +1940,19 @@ impl FormHost {
         if let Some(id) = target {
             let work = {
                 let dom = self.dom.borrow();
-                value_read_work(&dom.document, &self.data.borrow(), id)
+                let doc = &dom.document;
+                if is_labelable(doc, id) {
+                    value_read_work(doc, &self.data.borrow(), id)
+                } else {
+                    0
+                }
             };
             vm.charge_work(work)?;
         }
         let target = target.filter(|&id| {
             let dom = self.dom.borrow();
             let doc = &dom.document;
-            is_control(doc, id)
-                && matches!(doc.tag(id), "input" | "textarea" | "select" | "button")
-                && !(html(doc, id, "input") && input_type(doc, id) == "hidden")
-                && !disabled(doc, id)
-                && connected(doc, id)
-                && !hidden(doc, id)
+            focus_candidate(doc, id) && connected(doc, id) && !hidden(doc, id)
         });
         let old = self.data.borrow().focused;
         if old == target {
@@ -1993,17 +1985,23 @@ impl FormHost {
             return Ok(true);
         }
         if let Some(id) = target {
-            let value = current_value(&self.dom.borrow().document, &self.data.borrow(), id);
+            let value = {
+                let dom = self.dom.borrow();
+                let doc = &dom.document;
+                is_labelable(doc, id).then(|| current_value(doc, &self.data.borrow(), id))
+            };
             {
                 let mut data = self.data.borrow_mut();
                 data.focused = Some(id);
-                data.focus_value = Some(value.clone());
-                let c = data.controls.entry(id).or_default();
-                if c.value.is_none() {
-                    c.start = value.len();
-                    c.end = value.len();
-                    c.anchor = value.len();
+                if let Some(value) = &value {
+                    let c = data.controls.entry(id).or_default();
+                    if c.value.is_none() {
+                        c.start = value.len();
+                        c.end = value.len();
+                        c.anchor = value.len();
+                    }
                 }
+                data.focus_value = value;
             }
             dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &[])?;
             dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &[])?;
@@ -2201,6 +2199,32 @@ impl FormHost {
         }
         if key == FormKey::Tab {
             return self.focus_next(vm, shift);
+        }
+        if key == FormKey::Enter
+            && !shift
+            && !control
+            && is_hyperlink(&self.dom.borrow().document, id)
+        {
+            // Click listeners can cancel the default, change href, or remove the link.
+            if self.activate(vm, id)? {
+                let url = {
+                    let dom = self.dom.borrow();
+                    let doc = &dom.document;
+                    doc.attr(id, "href")
+                        .filter(|_| connected(doc, id))
+                        .and_then(|href| document_base(&dom).join(href).ok())
+                };
+                if let Some(url) = url {
+                    self.dom
+                        .borrow_mut()
+                        .routing
+                        .submit(ScriptNavigation::Navigate {
+                            url,
+                            mode: NavigationMode::Push,
+                        })?;
+                }
+            }
+            return Ok(true);
         }
         let ty = kind(&self.dom.borrow().document, id);
         if key == FormKey::Space

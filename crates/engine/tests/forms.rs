@@ -1,6 +1,7 @@
 use rust_browser_engine::{
     LoadedPage,
     dom::NodeId,
+    history::{NavigationMode, ScriptNavigation},
     script::{FormKey, ScriptRuntime},
 };
 use rust_browser_javascript::Value;
@@ -447,4 +448,51 @@ fn tab_keydown_can_cancel_native_focus_traversal_and_shift_reverses_it() {
     assert!(runtime.form_keydown(FormKey::Tab, true, false).unwrap());
     assert_eq!(runtime.focused_control(), Some(id(&page, "a")));
     js(&mut runtime, "keys", "Tabreverse");
+}
+
+#[test]
+fn focused_html_link_enter_honors_cancellation_and_uses_the_live_href() {
+    let (page, mut runtime) = realm(
+        "<!doctype html><base href='/base/'><button id=before>Before</button>\
+        <a href=skip tabindex=-1>Skip</a><a id=link href=original>Link</a>\
+        <button id=after>After</button>",
+    );
+    runtime
+        .eval(
+            "var link=document.getElementById('link');var clicks=0;\
+            link.onkeydown=function(e){if(e.key==='Enter')e.preventDefault();};\
+            link.onclick=function(e){\
+                if(++clicks===1)e.preventDefault();\
+                else link.setAttribute('href','replacement#target');\
+            };",
+        )
+        .unwrap();
+    for (shift, target) in [
+        (false, "before"),
+        (false, "link"),
+        (false, "after"),
+        (true, "link"),
+    ] {
+        assert!(runtime.form_keydown(FormKey::Tab, shift, false).unwrap());
+        assert_eq!(runtime.focused_control(), Some(id(&page, target)));
+    }
+    js(&mut runtime, "document.activeElement===link", true);
+    assert!(!runtime.form_keydown(FormKey::Space, false, false).unwrap());
+    assert!(runtime.form_keydown(FormKey::Enter, false, false).unwrap());
+    assert!(runtime.take_navigation_request().is_none());
+    js(&mut runtime, "clicks", 0.0);
+
+    runtime.eval("link.onkeydown=null;").unwrap();
+    assert!(runtime.form_keydown(FormKey::Enter, false, false).unwrap());
+    assert!(runtime.take_navigation_request().is_none());
+    js(&mut runtime, "clicks", 1.0);
+
+    assert!(runtime.form_keydown(FormKey::Enter, false, false).unwrap());
+    assert!(matches!(
+        runtime.take_navigation_request(),
+        Some(ScriptNavigation::Navigate { url, mode: NavigationMode::Push })
+            if url.as_str() == "https://forms.test/base/replacement#target"
+    ));
+    assert!(runtime.take_navigation_request().is_none());
+    js(&mut runtime, "clicks", 2.0);
 }
