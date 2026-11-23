@@ -262,6 +262,31 @@ fn reviver_does_not_convert_a_value_for_a_detached_typed_array_index() {
     );
 }
 #[test]
+fn reviver_write_back_respects_typed_array_resize_during_conversion() {
+    assert_eq!(
+        run(r#"
+            var buffer = new ArrayBuffer(2, { maxByteLength: 4 });
+            var view = new Uint8Array(buffer), conversions = [];
+            var result = JSON.parse("[0,0]", function(key, value) {
+                if (this === view) {
+                    return { valueOf: function() {
+                        conversions.push(key);
+                        if (key === "1") buffer.resize(1);
+                        return 257;
+                    } };
+                }
+                if (key === "0") this[1] = view;
+                return value;
+            });
+            var shrank = view.length === 1;
+            buffer.resize(2);
+            result[1] === view && shrank && conversions.join(",") === "0,1" &&
+                view[0] === 1 && view[1] === 0
+            "#),
+        Value::Bool(true)
+    );
+}
+#[test]
 fn raw_json_is_branded_frozen_and_emitted_after_the_replacer() {
     assert_eq!(
         run(r#"
