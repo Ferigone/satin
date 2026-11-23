@@ -1,4 +1,4 @@
-use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
+use rust_browser_javascript::{ErrorKind, JsString, Value, Vm, VmLimits};
 
 fn assert_js(source: &str) {
     assert_eq!(
@@ -178,5 +178,30 @@ fn codecs_respect_output_length_and_native_work_budgets() {
             vm.eval(&format!("{func}(s)")).unwrap_err().kind,
             ErrorKind::ExecutionLimit
         );
+    }
+}
+
+#[test]
+fn uri_codecs_charge_the_scanned_prefix_before_a_malformed_input_error() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 2000,
+        ..VmLimits::default()
+    });
+    let ascii = vec![b'x' as u16; 4096];
+    for (codec, invalid) in [
+        ("encodeURI", &[0xd800][..]),
+        (
+            "decodeURIComponent",
+            &[b'%' as u16, b'z' as u16, b'z' as u16],
+        ),
+    ] {
+        for (units, expected) in [
+            ([invalid, &ascii].concat(), ErrorKind::UriError),
+            ([&ascii, invalid].concat(), ErrorKind::ExecutionLimit),
+        ] {
+            vm.set_global("s", Value::String(JsString::from_utf16(units)))
+                .unwrap();
+            assert_eq!(vm.eval(&format!("{codec}(s)")).unwrap_err().kind, expected);
+        }
     }
 }
