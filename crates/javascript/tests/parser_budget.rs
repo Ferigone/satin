@@ -144,6 +144,88 @@ fn simple_assignment_chains_keep_reference_order_and_the_right_hand_value() {
 }
 
 #[test]
+fn bundled_nested_data_uses_ast_depth_not_one_native_frame_per_literal() {
+    small_stack(|| {
+        // A bundler can emit a nested data tree in a factory passed to a chunk
+        // registry. The resulting AST is bounded even though there are more
+        // than 24 consecutive array and object literals.
+        let source = format!(
+            "var registry=[];registry.push([1,{{7:function(){{return {}42{};}}}}]);\
+             let node=registry[0][1][7]();\
+             for(let i=0;i<15;i++)node=node[0].child;node;",
+            "[{child:".repeat(15),
+            "}]".repeat(15),
+        );
+        let mut vm = Vm::new();
+        vm.check_syntax(&source).unwrap();
+        assert_eq!(vm.eval(&source).unwrap(), Value::Number(42.0));
+
+        // The same cover grammar can become a parameter pattern; exercise
+        // conversion, compilation and destruction close to the AST limit.
+        let pattern = format!("{}value{}", "[{child:".repeat(30), "}]".repeat(30));
+        let source = format!("const retained = ({pattern}) => value; retained;");
+        vm.check_syntax(&source).unwrap();
+        vm.eval(&source).unwrap();
+    });
+}
+
+#[test]
+fn nested_literal_values_resume_the_normal_expression_grammar() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.eval(
+                r#"
+                const key = 'own';
+                const prior = { inherited: 7 };
+                let first, second;
+                const values = [
+                    [1,,3,][2] * 2,
+                    {x:2}.x === 2 ? 11 : 0,
+                    ...[15,16],
+                    {...{a:17}, [key]:[18,], __proto__: {__proto__: prior}, get n(){return 19}},
+                    {first} = {first: 20},
+                    [second] = [21],
+                ];
+                const bind = ({a:[inner=22]}={a:[]}) => inner;
+                values[0] === 6 && values[1] === 11 && values[2] === 15 &&
+                    values[3] === 16 && values[4].a === 17 && values[4].own[0] === 18 &&
+                    values[4].n === 19 && values[4].inherited === 7 &&
+                    first === 20 && second === 21 && bind() === 22;
+                "#,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        for invalid in ["[...[1],] = []", "[{p:1 q:2}]", "({a:[{x:1}]} => 1)"] {
+            assert_eq!(
+                vm.check_syntax(invalid).unwrap_err().kind,
+                ErrorKind::SyntaxError,
+                "{invalid}"
+            );
+        }
+    });
+}
+
+#[test]
+fn nested_literal_frames_and_mixed_grammar_remain_bounded() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        let direct = format!("{}0{}", "[{child:".repeat(40), "}]".repeat(40));
+        let mixed = format!("{}0{}", "[{child:f(".repeat(40), ")}]".repeat(40));
+        for (source, message) in [
+            (direct, "AST nesting limit exceeded"),
+            (mixed, "Expression nesting limit exceeded"),
+        ] {
+            let error = vm.check_syntax(&source).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+            assert_eq!(error.message, message);
+        }
+        assert_eq!(vm.eval("[{x:[5]}][0].x[0]").unwrap(), Value::Number(5.0));
+    });
+}
+
+#[test]
 fn recursive_grammar_and_dynamic_function_share_the_budget() {
     small_stack(|| {
         let mut vm = Vm::new();
