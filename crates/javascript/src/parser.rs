@@ -1582,27 +1582,52 @@ impl Parser {
         }
         let e = if self.eat("new") {
             if self.eat(".") {
-                self.expect("target")?;
-                if !self.new_target {
-                    return Err(self.error("new.target outside a function"));
+                let target = self.parse_new_target()?;
+                return self.postfix(target, true);
+            }
+            self.new_constructor()?
+        } else {
+            self.primary()?
+        };
+        self.finish_unary(e)
+    }
+    fn parse_new_target(&mut self) -> Result<Expr, JsError> {
+        self.expect("target")?;
+        if !self.new_target {
+            return Err(self.error("new.target outside a function"));
+        }
+        Ok(Expr::NewTarget)
+    }
+    fn new_constructor(&mut self) -> Result<Expr, JsError> {
+        // The first `new` is already consumed. Scan the rest without adding
+        // parser frames, then complete each constructor from the inside out.
+        let mut pending = 1;
+        let mut e = loop {
+            if !self.eat("new") {
+                let primary = self.primary()?;
+                if matches!(primary, Expr::DynamicImport(_)) {
+                    return Err(self.error("A dynamic import call cannot follow new"));
                 }
-                return self.postfix(Expr::NewTarget, true);
+                break primary;
             }
-            let primary = self.primary()?;
-            if matches!(primary, Expr::DynamicImport(_)) {
-                return Err(self.error("A dynamic import call cannot follow new"));
+            if self.eat(".") {
+                break self.parse_new_target()?;
             }
-            let constructor = self.postfix(primary, false)?;
+            pending += 1;
+            if pending >= MAX_AST_DEPTH {
+                return Err(self.error("AST nesting limit exceeded"));
+            }
+        };
+        for _ in 0..pending {
+            let constructor = self.postfix(e, false)?;
             let args = if self.eat("(") {
                 self.arguments()?
             } else {
                 Vec::new()
             };
-            self.checked_expression(Expr::New(Box::new(constructor), args))?
-        } else {
-            self.primary()?
-        };
-        self.finish_unary(e)
+            e = self.checked_expression(Expr::New(Box::new(constructor), args))?;
+        }
+        Ok(e)
     }
     fn finish_unary(&mut self, primary: Expr) -> Result<Expr, JsError> {
         let e = self.postfix(primary, true)?;
