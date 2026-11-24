@@ -719,6 +719,18 @@ impl BoxMetrics {
     fn extra_x(self) -> f32 {
         self.padding[1] + self.padding[3] + self.border[1] + self.border[3]
     }
+    fn clamp_content_height(self, mut content: f32, style: &Style, basis: Option<f32>) -> f32 {
+        if let Some(max) = style.max_height.resolve_with_basis(basis, style.font_size) {
+            content = content.min(to_content(max, self.extra_y(), style.box_sizing));
+        }
+        if let Some(min) = style
+            .min_height
+            .resolve(basis.unwrap_or(0.), style.font_size)
+        {
+            content = content.max(to_content(min, self.extra_y(), style.box_sizing));
+        }
+        content.max(0.)
+    }
     fn extra_y(self) -> f32 {
         self.padding[0] + self.padding[2] + self.border[0] + self.border[2]
     }
@@ -2931,10 +2943,8 @@ impl Builder<'_> {
             href
         };
         let replaced_image = self.is_replaced_image(id);
-        if (replaced_image || self.is_replaced_control(id))
-            && c.width.is_none()
-            && s.width == Length::Auto
-        {
+        let replaced_control = self.is_replaced_control(id);
+        if (replaced_image || replaced_control) && c.width.is_none() && s.width == Length::Auto {
             let m = BoxMetrics::new(s, available, c);
             c.width = self.replaced_auto_border_width(id, available, c, m);
         }
@@ -2977,20 +2987,8 @@ impl Builder<'_> {
         if s.display == Display::ListItem && s.marker != css::MarkerType::None {
             self.list_marker(id, cx, cy, s);
         }
-        let natural = if self.is_replaced_control(id) {
-            let (_, height) = self.control_intrinsic(id);
-            let height = explicit.unwrap_or(height);
-            self.control_command(
-                id,
-                Rect {
-                    x: cx,
-                    y: cy,
-                    width: m.width,
-                    height,
-                },
-                s,
-            );
-            height
+        let natural = if replaced_control {
+            self.control_intrinsic(id).1
         } else if replaced_image {
             let (nw, nh) = self.image_size(id);
             let h = explicit.unwrap_or_else(|| {
@@ -3074,22 +3072,25 @@ impl Builder<'_> {
             }
             (line.y - cy).max(0.)
         };
-        let mut content = explicit.unwrap_or(natural);
-        if c.height.is_none() {
-            if let Some(max) = s
-                .max_height
-                .resolve_with_basis(c.containing_height, s.font_size)
-            {
-                content = content.min(to_content(max, m.extra_y(), s.box_sizing));
-            }
-            if let Some(min) = s
-                .min_height
-                .resolve(c.containing_height.unwrap_or(0.), s.font_size)
-            {
-                content = content.max(to_content(min, m.extra_y(), s.box_sizing));
-            }
+        let content = explicit.unwrap_or(natural);
+        let content = if c.height.is_none() {
+            m.clamp_content_height(content, s, c.containing_height)
+        } else {
+            content.max(0.)
+        };
+        if replaced_control {
+            self.control_command(
+                id,
+                Rect {
+                    x: cx,
+                    y: cy,
+                    width: m.width,
+                    height: content,
+                },
+                s,
+            );
         }
-        let height = content.max(0.) + m.extra_y();
+        let height = content + m.extra_y();
         let rect = Rect {
             x: ox,
             y: oy,
@@ -3577,9 +3578,11 @@ impl Builder<'_> {
                         );
                         let content_height = s
                             .height
-                            .resolve(line.width, s.font_size)
-                            .unwrap_or(height)
-                            .max(0.);
+                            .resolve_with_basis(line.containing_height, s.font_size)
+                            .map(|h| to_content(h, metrics.extra_y(), s.box_sizing))
+                            .unwrap_or(height);
+                        let content_height =
+                            metrics.clamp_content_height(content_height, s, line.containing_height);
                         let outer = Rect {
                             x: line.x,
                             y: line.y,

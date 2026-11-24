@@ -453,3 +453,59 @@ fn single_line_text_centers_vertically_and_textarea_stays_top_aligned() {
     assert_eq!(ink_rows("input", 64), (top + 20, bottom + 20));
     assert_eq!(ink_rows("textarea", 64), ink_rows("textarea", 24));
 }
+
+#[test]
+fn controls_paint_the_final_min_or_max_constrained_content_box() {
+    let mut fonts = fonts();
+    for (rule, reference) in [
+        ("min-height:52px", "height:52px"),
+        ("height:90px;max-height:36px", "height:36px"),
+        ("min-height:52px;max-height:36px", "height:52px"),
+    ] {
+        for (tag, sizing, deep) in [
+            ("input", "content-box", false),
+            ("input", "border-box", false),
+            ("input", "border-box", true),
+            ("textarea", "border-box", false),
+        ] {
+            let render = |height: &str, fonts: &mut Fonts| {
+                let box_style = format!(
+                    "display:block;width:112px;box-sizing:{sizing};{height};padding:3px 5px 7px;border:2px solid black"
+                );
+                let field = if tag == "input" {
+                    format!("<input id=field value=test style='{box_style}'>")
+                } else {
+                    format!("<textarea id=field rows=1 style='{box_style}'>test</textarea>")
+                };
+                let source = if deep {
+                    format!("{}{}{}", "<div>".repeat(80), field, "</div>".repeat(80))
+                } else {
+                    field
+                };
+                let page = page(&source);
+                let layout = Layout::build(&page, fonts, 400.);
+                let field = id(&page, "field");
+                let outer = layout.rect_for(field).unwrap();
+                let content = layout
+                    .commands
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        DrawCommand::Control { node, rect, .. } if *node == field => Some(rect),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    content.height,
+                    outer.height - 14.,
+                    "{height} {sizing} in {tag}"
+                );
+                image(&layout, fonts)
+            };
+            assert_pixels(
+                &render(rule, &mut fonts),
+                &render(reference, &mut fonts),
+                &format!("{rule} ({tag}, {sizing}, deep={deep})"),
+            );
+        }
+    }
+}
