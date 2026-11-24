@@ -399,11 +399,30 @@ pub enum GridAutoFlow {
     Column,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    #[default]
+    Visible,
+    Hidden,
+    Collapse,
+}
+
+impl Visibility {
+    pub fn as_css(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+            Self::Collapse => "collapse",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Style {
     pub display: Display,
     pub marker: MarkerType,
     pub opacity: f32,
+    pub visibility: Visibility,
     pub float: Float,
     pub clear: Clear,
     pub position: Position,
@@ -490,6 +509,7 @@ impl Default for Style {
             display: Display::Inline,
             marker: MarkerType::Disc,
             opacity: 1.,
+            visibility: Visibility::Visible,
             float: Float::None,
             clear: Clear::None,
             position: Position::Static,
@@ -2377,6 +2397,7 @@ enum Property {
     Display,
     ListStyleType,
     Opacity,
+    Visibility,
     Float,
     Clear,
     Background,
@@ -2474,6 +2495,7 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::Display,
     Property::ListStyleType,
     Property::Opacity,
+    Property::Visibility,
     Property::Float,
     Property::Clear,
     Property::Background,
@@ -2639,6 +2661,7 @@ enum Value {
     FontStyle(FontStyle),
     Families(Arc<[FontFamily]>),
     Display(Display),
+    Visibility(Visibility),
     Marker(MarkerType),
     Float(Float),
     Clear(Clear),
@@ -2974,22 +2997,29 @@ impl Stylesheet {
             }
             style.custom = Arc::new(compute_custom(raw, inherited));
         }
-        if is_svg && let Some(raw) = doc.attr(id, "color") {
-            let value = if contains_variable(raw) {
-                resolve_variables(raw, &style.custom, 0)
-                    .and_then(|v| parse_value(Property::Color, &v))
-            } else {
-                parse_value(Property::Color, raw)
-            };
-            if let Some(value) = value {
-                apply_value(
-                    &mut style,
-                    parent,
-                    Property::Color,
-                    &value,
-                    root_font,
-                    self.viewport,
-                );
+        if is_svg {
+            for (name, property) in [
+                ("color", Property::Color),
+                ("visibility", Property::Visibility),
+            ] {
+                let Some(raw) = doc.attr(id, name) else {
+                    continue;
+                };
+                let value = if contains_variable(raw) {
+                    resolve_variables(raw, &style.custom, 0).and_then(|v| parse_value(property, &v))
+                } else {
+                    parse_value(property, raw)
+                };
+                if let Some(value) = value {
+                    apply_value(
+                        &mut style,
+                        parent,
+                        property,
+                        &value,
+                        root_font,
+                        self.viewport,
+                    );
+                }
             }
         }
         if let Some(winner) = winners[Property::Direction as usize] {
@@ -3223,6 +3253,7 @@ fn inherited(property: Property) -> bool {
             | Property::LineHeight
             | Property::BreakWords
             | Property::ListStyleType
+            | Property::Visibility
     )
 }
 fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
@@ -3413,6 +3444,7 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
         Display => s.display = from.display,
         ListStyleType => s.marker = from.marker,
         Opacity => s.opacity = from.opacity,
+        Visibility => s.visibility = from.visibility,
         Float => s.float = from.float,
         Clear => s.clear = from.clear,
         Position => s.position = from.position,
@@ -3553,6 +3585,7 @@ fn apply_value(
         (Display, Value::Display(v)) => s.display = *v,
         (ListStyleType, Value::Marker(v)) => s.marker = *v,
         (Opacity, Value::Number(v)) => s.opacity = *v,
+        (Visibility, Value::Visibility(v)) => s.visibility = *v,
         (Float, Value::Float(v)) => s.float = *v,
         (Clear, Value::Clear(v)) => s.clear = *v,
         (Position, Value::Position(v)) => s.position = *v,
@@ -3714,6 +3747,7 @@ fn targets(name: &str) -> Vec<Property> {
         "display" => vec![Display],
         "list-style" | "list-style-type" => vec![ListStyleType],
         "opacity" => vec![Opacity],
+        "visibility" => vec![Visibility],
         "float" => vec![Float],
         "clear" => vec![Clear],
         "font-size" => vec![FontSize],
@@ -4385,6 +4419,12 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
     let v = lower.as_str();
     match p {
         ListStyleType => MarkerType::parse(v).map(Value::Marker),
+        Visibility => Some(Value::Visibility(match v {
+            "visible" => self::Visibility::Visible,
+            "hidden" => self::Visibility::Hidden,
+            "collapse" => self::Visibility::Collapse,
+            _ => return None,
+        })),
         Opacity => inline_style::opacity_number(v).map(|n| Value::Number(n.clamp(0., 1.))),
         Direction => Some(Value::Bool(match v {
             "ltr" => false,

@@ -140,6 +140,7 @@ pub(super) struct HitRegion {
 }
 #[derive(Clone, Debug)]
 struct SvgHit {
+    root_visible: bool,
     rect: Rect,
     scene: Arc<crate::svg::SvgScene>,
     matrix: Affine2D,
@@ -170,7 +171,10 @@ impl HitRegion {
                 return Some(node);
             }
         }
-        Some(self.node)
+        self.svg
+            .as_ref()
+            .is_none_or(|svg| svg.root_visible)
+            .then_some(self.node)
     }
 }
 #[derive(Clone, Debug)]
@@ -1269,6 +1273,20 @@ impl Builder<'_> {
         let mut originals: Vec<_> = self.commands.items.into_iter().map(Some).collect();
         for (rank, index) in paint_order.into_iter().enumerate() {
             let meta = self.commands.meta[index];
+            let visible = self.styles[meta.node.0].visibility == crate::css::Visibility::Visible;
+            // An inline SVG emits a single scene for its whole subtree, which
+            // can contain visible descendants of a hidden SVG root.
+            if !visible
+                && !matches!(
+                    &originals[index],
+                    Some(DrawCommand::Svg {
+                        interactive: true,
+                        ..
+                    })
+                )
+            {
+                continue;
+            }
             let v = visual[meta.node.0];
             let matrix = if meta.background { v.matrix } else { v.content };
             let clip = if meta.background {
@@ -1343,6 +1361,7 @@ impl Builder<'_> {
                 svg_hits.insert(
                     *node,
                     SvgHit {
+                        root_visible: visible,
                         rect: *rect,
                         scene: scene.clone(),
                         matrix,
@@ -1372,10 +1391,12 @@ impl Builder<'_> {
         for _ in open {
             commands.push(DrawCommand::PopState);
         }
-        hit_elements.retain(|hit| last_emitted.is_some_and(|last| hit.rank <= last));
-        for hit in &mut hit_elements {
+        hit_elements.retain_mut(|hit| {
             hit.svg = svg_hits.get(&hit.node).cloned();
-        }
+            last_emitted.is_some_and(|last| hit.rank <= last)
+                && (self.styles[hit.node.0].visibility == crate::css::Visibility::Visible
+                    || hit.svg.is_some())
+        });
         let mut elements = self.elements.clone();
         for e in &mut elements {
             e.rect = visual[e.node.0].matrix.rect(e.rect);

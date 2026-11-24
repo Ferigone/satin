@@ -425,3 +425,35 @@ fn recursive_grammar_and_dynamic_function_share_the_budget() {
         );
     });
 }
+
+
+#[test]
+fn nested_identifier_expression_statements_use_their_expression_budget() {
+    small_stack(|| {
+        let script = r#"
+            let count = 0;
+            const collect = () => {
+                const load = (headers) => (0, (() => {
+                    return new Promise(((resolve) => {
+                        const send = () => {
+                            count += 1, (() => {
+                                const result = ((values) => {
+                                    const receiver = {open(){}, set(key, value){count += value;}};
+                                    return receiver.open(), Object.keys(values).forEach((key => {
+                                        receiver.set(key, values[key]);
+                                    })), receiver;
+                                })(headers);
+                                resolve(result);
+                            })();
+                        };
+                        send();
+                    }));
+                })());
+                return load;
+            };
+            collect()({a: 3});
+            count;
+        "#;
+        assert_eq!(Vm::new().eval(script).unwrap(), Value::Number(4.0));
+    });
+}

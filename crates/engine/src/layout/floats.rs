@@ -203,7 +203,9 @@ impl Builder<'_> {
         let x = loop {
             let slot = self.float_interval_at(line, y);
             let inline_advance = if y == line.y { line.used } else { 0. };
-            if outer_width + inline_advance > slot.right - slot.left {
+            // The slot subtracts absolute f32 coordinates. Allow their rounding
+            // error when adjoining subpixel floats exactly fill a row.
+            if outer_width + inline_advance > slot.width() + 0.0001 {
                 if inline_advance > 0. {
                     self.flush(line, false);
                     y = y.max(line.y);
