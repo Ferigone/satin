@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Structural selectors count siblings of the same expanded type</title>
+<style>
+  #list > a { display: block; width: 60px; height: 20px; color: black; margin-left: 0; padding-left: 0 }
+  #list > a:first-of-type { margin-left: 8px }
+  #list > a:nth-last-of-type(1) { padding-left: 9px }
+  #list > a:only-of-type { background-color: green }
+  #list > a:first-child { width: 120px }
+  #list > a:last-child { height: 40px }
+  #list > a:only-child { color: green }
+</style>
+<div id="list"><!-- not an element -->
+  <a id="target">target</a>
+</div>
+<output id="result" data-types="not-run" data-live="not-run"></output>
+<script>
+  var list = document.getElementById('list');
+  var target = document.getElementById('target');
+  var result = document.getElementById('result');
+  var foreign = document.createElementNS('http://www.w3.org/2000/svg', 'a');
+  var types = [];
+  var live = [];
+  function snapshot() {
+    var style = getComputedStyle(target);
+    types.push([style.marginLeft, style.paddingLeft, style.backgroundColor].join(';'));
+    live.push([style.width, style.height, style.color].join(';'));
+  }
+  snapshot();
+  list.insertBefore(foreign, target);
+  snapshot();
+  list.appendChild(foreign);
+  snapshot();
+  list.removeChild(foreign);
+  snapshot();
+  result.setAttribute('data-types', types.join('|'));
+  result.setAttribute('data-live', live.join('|'));
+</script>

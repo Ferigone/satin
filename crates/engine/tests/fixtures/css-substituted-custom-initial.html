@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Reduced CSS Variables test: substituted initial in a custom property</title>
+<div style="color: purple; --paint: red; --source: var(--missing, initial); --saved: var(--source, blue)">
+  <span id="direct" style="--paint: var(--missing, initial); color: var(--paint, green)"></span>
+  <span id="nested" style="--paint: var(--missing, var(--missing, /* comment */ initial)); color: var(--paint, green)"></span>
+  <span id="inherited-invalid" style="color: var(--source, green)"></span>
+  <span id="inherited-resolved" style="--source: red; color: var(--saved, green)"></span>
+  <span id="ordinary" style="color: red; color: var(--missing, initial)"></span>
+  <span id="quoted" style='--paint: var(--missing, "initial"); color: var(--paint, green)'></span>
+  <span id="multiple-tokens" style="--paint: var(--missing, initial green); color: var(--paint, green)"></span>
+</div>
+<pre id="receipt"></pre>
+<script>
+var ids = ['direct', 'nested', 'inherited-invalid', 'inherited-resolved', 'ordinary', 'quoted', 'multiple-tokens'];
+var result = {};
+for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    result[id] = getComputedStyle(document.getElementById(id)).color;
+}
+document.getElementById('receipt').textContent = JSON.stringify(result);
+</script>

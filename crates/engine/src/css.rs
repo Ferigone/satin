@@ -7,7 +7,7 @@ pub(crate) mod inline_style;
 pub(crate) use grid::GRID_TRACK_LIMIT;
 pub use grid::{GridAreas, GridLine, GridTemplate};
 
-use crate::dom::{Document, NodeId};
+use crate::dom::{Document, Namespace, NodeId};
 use crate::fonts::{
     FontDisplay, FontFaceRule, FontFamily, FontFormat, FontSource, FontStyle, GenericFamily,
     UnicodeRange,
@@ -178,6 +178,66 @@ pub enum Display {
     Grid,
     InlineGrid,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Float {
+    #[default]
+    None,
+    Left,
+    Right,
+    InlineStart,
+    InlineEnd,
+}
+impl Float {
+    pub(crate) fn as_css(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::InlineStart => "inline-start",
+            Self::InlineEnd => "inline-end",
+        }
+    }
+    pub(crate) fn is_right(self, rtl: bool) -> bool {
+        match self {
+            Self::None | Self::Left => false,
+            Self::Right => true,
+            Self::InlineStart => rtl,
+            Self::InlineEnd => !rtl,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Clear {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+    InlineStart,
+    InlineEnd,
+}
+impl Clear {
+    pub(crate) fn as_css(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Both => "both",
+            Self::InlineStart => "inline-start",
+            Self::InlineEnd => "inline-end",
+        }
+    }
+    pub(crate) fn sides(self, rtl: bool) -> [bool; 2] {
+        match self {
+            Self::None => [false, false],
+            Self::Both => [true, true],
+            Self::Left => [true, false],
+            Self::Right => [false, true],
+            Self::InlineStart => [!rtl, rtl],
+            Self::InlineEnd => [rtl, !rtl],
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoxSizing {
     ContentBox,
@@ -286,6 +346,8 @@ pub enum GridAutoFlow {
 #[derive(Clone, Debug)]
 pub struct Style {
     pub display: Display,
+    pub float: Float,
+    pub clear: Clear,
     pub position: Position,
     pub inset: [Length; 4],
     pub z_index: Option<i32>,
@@ -360,6 +422,8 @@ impl Default for Style {
         static DEFAULT_FAMILIES: OnceLock<Arc<[FontFamily]>> = OnceLock::new();
         Self {
             display: Display::Inline,
+            float: Float::None,
+            clear: Clear::None,
             position: Position::Static,
             inset: [Length::Auto; 4],
             z_index: None,
@@ -507,6 +571,36 @@ pub struct Rule {
     pub specificity: u32,
 }
 
+// A raw newline ends a bad-string token; the caller resumes at that newline.
+// Treat CRLF and FF as CSS newlines without changing the stored source text.
+fn quoted_end(bytes: &[u8], open: usize) -> Result<usize, usize> {
+    let quote = bytes[open];
+    let mut i = open + 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            b if b == quote => return Ok(i + 1),
+            b'\n' | b'\r' | b'\x0c' => return Err(i),
+            b'\\' => {
+                i += 1;
+                let start = i;
+                while i - start < 6 && bytes.get(i).is_some_and(u8::is_ascii_hexdigit) {
+                    i += 1;
+                }
+                // A newline can be escaped directly or consumed as the
+                // optional whitespace at the end of a hexadecimal escape.
+                i += match bytes.get(i) {
+                    Some(b'\r') if bytes.get(i + 1) == Some(&b'\n') => 2,
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => 1,
+                    Some(_) if i == start => 1,
+                    _ => 0,
+                };
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(i)
+}
+
 // Comments separate CSS tokens without creating a whitespace token. The private
 // NUL boundary preserves that difference until a grammar consumes the tokens.
 // Raw NUL input is normalized to U+FFFD, so it cannot impersonate a boundary.
@@ -515,7 +609,6 @@ fn without_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let bytes = source.as_bytes();
     let mut i = 0;
-    let mut quote = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'\\' {
@@ -528,17 +621,14 @@ fn without_comments(source: &str) -> String {
                 out.push(if c == '\0' { '\u{fffd}' } else { c });
                 i += c.len_utf8();
             }
-        } else if quote != 0 {
-            let c = source[i..].chars().next().unwrap();
-            out.push(if c == '\0' { '\u{fffd}' } else { c });
-            i += c.len_utf8();
-            if b == quote {
-                quote = 0;
-            }
         } else if matches!(b, b'\'' | b'"') {
-            quote = b;
-            out.push(b as char);
-            i += 1;
+            let end = quoted_end(bytes, i).unwrap_or_else(|newline| newline);
+            out.extend(
+                source[i..end]
+                    .chars()
+                    .map(|c| if c == '\0' { '\u{fffd}' } else { c }),
+            );
+            i = end;
         } else if bytes[i..].starts_with(b"/*") {
             i = source[i + 2..]
                 .find("*/")
@@ -561,33 +651,47 @@ fn serialized_tokens(source: &str) -> String {
     source.replace('\0', "/**/")
 }
 
-/// Indices of a separator at the top level of a CSS component value list.
-fn separators(source: &str, separator: u8) -> Vec<usize> {
+enum CssByte {
+    Unquoted(u8),
+    BadString,
+}
+
+fn structural_bytes(source: &str) -> impl Iterator<Item = (usize, CssByte)> + '_ {
     let bytes = source.as_bytes();
-    let (mut quote, mut escaped, mut round, mut square, mut curly) = (0, false, 0u32, 0u32, 0u32);
-    let mut result = vec![];
-    for (i, &b) in bytes.iter().enumerate() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while let Some(&b) = bytes.get(i) {
+            let start = i;
+            match b {
+                b'\\' => i += 2,
+                b'\'' | b'"' => match quoted_end(bytes, start) {
+                    Ok(end) => i = end,
+                    Err(newline) => {
+                        i = newline;
+                        return Some((start, CssByte::BadString));
+                    }
+                },
+                _ => {
+                    i += 1;
+                    return Some((start, CssByte::Unquoted(b)));
+                }
             }
-            continue;
         }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
-        if round == 0 && square == 0 && curly == 0 && b == separator {
-            result.push(i);
-        }
+        None
+    })
+}
+
+/// Top-level separators and bad strings (including within simple blocks).
+fn component_boundaries(
+    source: &str,
+    separator: u8,
+) -> impl Iterator<Item = (usize, CssByte)> + '_ {
+    let (mut round, mut square, mut curly) = (0u32, 0u32, 0u32);
+    structural_bytes(source).filter(move |(_, token)| {
+        let CssByte::Unquoted(b) = *token else {
+            return true;
+        };
+        let is_separator = round == 0 && square == 0 && curly == 0 && b == separator;
         match b {
             b'(' => round += 1,
             b')' => round = round.saturating_sub(1),
@@ -597,8 +701,15 @@ fn separators(source: &str, separator: u8) -> Vec<usize> {
             b'}' => curly = curly.saturating_sub(1),
             _ => {}
         }
-    }
-    result
+        is_separator
+    })
+}
+
+/// Indices of a separator at the top level of a CSS component value list.
+fn separators(source: &str, separator: u8) -> Vec<usize> {
+    component_boundaries(source, separator)
+        .filter_map(|(i, token)| matches!(token, CssByte::Unquoted(_)).then_some(i))
+        .collect()
 }
 fn split_top(source: &str, separator: u8) -> Vec<&str> {
     let mut result = vec![];
@@ -611,33 +722,78 @@ fn split_top(source: &str, separator: u8) -> Vec<&str> {
     result
 }
 fn matching_close(source: &str, open: usize, left: u8, right: u8) -> Option<usize> {
-    let (mut quote, mut escaped, mut depth) = (0, false, 0u32);
-    for (i, &b) in source.as_bytes().iter().enumerate().skip(open) {
-        if escaped {
-            escaped = false;
+    let mut depth = 0u32;
+    for (i, token) in structural_bytes(source.get(open..)?) {
+        let CssByte::Unquoted(b) = token else {
             continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
-            }
-            continue;
-        }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
+        };
         if b == left {
             depth += 1;
         } else if b == right {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
-                return Some(i);
+                return Some(open + i);
             }
+        }
+    }
+    None
+}
+
+// An unquoted url() is a token, not a function containing simple blocks.
+fn unquoted_stylesheet_url_end(source: &[u8], open: usize) -> Option<usize> {
+    let start = open.checked_sub(3)?;
+    if !source[start..open].eq_ignore_ascii_case(b"url")
+        || start.checked_sub(1).is_some_and(|prev| {
+            let b = source[prev];
+            b.is_ascii_alphanumeric() || b >= 128 || matches!(b, b'-' | b'_' | b'\\' | b'#' | b'@')
+        })
+    {
+        return None;
+    }
+    let body = &source[open + 1..];
+    let first = body
+        .iter()
+        .copied()
+        .find(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'));
+    if matches!(first, Some(b'\'' | b'"')) {
+        return None;
+    }
+    let mut i = open + 1;
+    while let Some(&b) = source.get(i) {
+        match b {
+            b')' => return Some(i + 1),
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    Some(source.len())
+}
+
+fn stylesheet_block_end(source: &str, open: usize) -> Option<usize> {
+    let mut offset = open + 1;
+    let mut bytes = structural_bytes(source.get(offset..)?);
+    let mut closers = Vec::new();
+    while let Some((i, token)) = bytes.next() {
+        let CssByte::Unquoted(b) = token else {
+            continue;
+        };
+        match b {
+            b'(' => {
+                if let Some(end) = unquoted_stylesheet_url_end(source.as_bytes(), offset + i) {
+                    offset = end;
+                    bytes = structural_bytes(&source[offset..]);
+                } else {
+                    closers.push(b')');
+                }
+            }
+            b'[' => closers.push(b']'),
+            b'{' => closers.push(b'}'),
+            b'}' if closers.is_empty() => return Some(offset + i),
+            // Other closing tokens within a component cannot close it.
+            b')' | b']' | b'}' if closers.last() == Some(&b) => {
+                closers.pop();
+            }
+            _ => {}
         }
     }
     None
@@ -672,7 +828,7 @@ pub fn font_faces(source: &str, viewport: f32) -> Vec<FontFaceRule> {
             }
             let open = offset + stop;
             let header = trim_boundary(&source[offset..open]);
-            let Some(end) = matching_close(source, open, b'{', b'}') else {
+            let Some(end) = stylesheet_block_end(source, open) else {
                 break;
             };
             let body = &source[open + 1..end];
@@ -833,9 +989,9 @@ fn font_face_rule(body: &str) -> Option<FontFaceRule> {
                 if (1..=2).contains(&parts.len())
                     && let Some(a) = absolute_weight(parts[0])
                     && let Some(b) = absolute_weight(parts.get(1).copied().unwrap_or(parts[0]))
-                    && a <= b
                 {
-                    weight = [a, b];
+                    // CSS Fonts normalizes descending descriptor ranges before matching.
+                    weight = [a.min(b), a.max(b)];
                 }
             }
             "unicode-range" => {
@@ -1014,6 +1170,13 @@ fn font_sources(source: &str) -> Option<Vec<FontSource>> {
     (!result.is_empty()).then_some(result)
 }
 fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
+    fn codepoint(digits: &str) -> Option<u32> {
+        if !(1..=6).contains(&digits.len()) || !digits.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        {
+            return None;
+        }
+        u32::from_str_radix(digits, 16).ok()
+    }
     let mut result = vec![];
     for part in split_top(source, b',') {
         if result.len() >= 256 {
@@ -1036,21 +1199,16 @@ fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
                 u32::from_str_radix(&value.replace('?', "f"), 16).ok()?,
             )
         } else if let Some((a, b)) = value.split_once('-') {
-            (
-                u32::from_str_radix(a, 16).ok()?,
-                u32::from_str_radix(b, 16).ok()?,
-            )
+            (codepoint(a)?, codepoint(b)?)
         } else {
-            let n = u32::from_str_radix(value, 16).ok()?;
+            let n = codepoint(value)?;
             (n, n)
         };
-        if start > end || start > 0x10ffff {
+        // An out-of-bounds endpoint invalidates the descriptor; do not clip it.
+        if start > end || end > 0x10ffff {
             return None;
         }
-        result.push(UnicodeRange {
-            start,
-            end: end.min(0x10ffff),
-        });
+        result.push(UnicodeRange { start, end });
     }
     (!result.is_empty()).then_some(result)
 }
@@ -1077,7 +1235,7 @@ fn parse_rules(
         }
         let open = offset + stop;
         let header = trim_boundary(&source[offset..open]);
-        let end = matching_close(source, open, b'{', b'}').unwrap_or(source.len());
+        let end = stylesheet_block_end(source, open).unwrap_or(source.len());
         let body = &source[open + 1..end];
         if header
             .get(..6)
@@ -1179,26 +1337,11 @@ fn media_allows(source: &str, width: f32) -> bool {
     })
 }
 fn first_top_delimiter(source: &str, delimiters: &[u8]) -> Option<(usize, u8)> {
-    let (mut quote, mut escaped, mut round, mut square) = (0, false, 0u32, 0u32);
-    for (i, &b) in source.as_bytes().iter().enumerate() {
-        if escaped {
-            escaped = false;
+    let (mut round, mut square) = (0u32, 0u32);
+    for (i, token) in structural_bytes(source) {
+        let CssByte::Unquoted(b) = token else {
             continue;
-        }
-        if b == b'\\' {
-            escaped = true;
-            continue;
-        }
-        if quote != 0 {
-            if b == quote {
-                quote = 0;
-            }
-            continue;
-        }
-        if matches!(b, b'\'' | b'"') {
-            quote = b;
-            continue;
-        }
+        };
         if round == 0 && square == 0 && delimiters.contains(&b) {
             return Some((i, b));
         }
@@ -1217,9 +1360,21 @@ pub fn declarations(source: &str) -> Vec<Declaration> {
     clean_declarations(&clean)
 }
 fn clean_declarations(source: &str) -> Vec<Declaration> {
-    split_top(source, b';')
-        .into_iter()
-        .filter_map(|s| {
+    let mut start = 0;
+    let mut bad_string = false;
+    component_boundaries(source, b';')
+        .chain(std::iter::once((source.len(), CssByte::Unquoted(b';'))))
+        .filter_map(|(end, token)| {
+            if matches!(token, CssByte::BadString) {
+                // Discard the declaration at its boundary, not the rest of the list.
+                bad_string = true;
+                return None;
+            }
+            let s = source[start..end].trim();
+            start = end + 1;
+            if std::mem::take(&mut bad_string) {
+                return None;
+            }
             let colon = separators(s, b':').into_iter().next()?;
             let raw_name = trim_boundary(&s[..colon]);
             if raw_name.is_empty()
@@ -1554,10 +1709,9 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                                 .filter_map(|s| compile_selector(s, depth + 1))
                                 .collect()
                         };
-                        if args.is_empty() {
-                            return None;
-                        }
-                        if name != "where" {
+                        // An empty forgiving list is valid but matches nothing.
+                        // :not() has already failed if any member could not parse.
+                        if !args.is_empty() && name != "where" {
                             specificity.add(args.iter().map(|s| s.specificity).max()?);
                         }
                         if name == "not" {
@@ -1766,35 +1920,76 @@ fn unescape_string(source: &str) -> Option<String> {
     Some(result)
 }
 fn nth_expression(source: &str) -> Option<(i32, i32)> {
-    if source.as_bytes().windows(3).any(|part| {
-        part[1] == 0
-            && (part[0].is_ascii_alphanumeric() || part[0] == b'-')
-            && (part[2].is_ascii_alphanumeric() || part[2] == b'-')
-    }) {
+    // CSS Syntax §6.2 distinguishes an integer dimension (2n), an ident
+    // (n-3), and a sign followed by an unsigned integer (n + 3). Preserve
+    // token boundaries: whitespace/comments cannot make `2 n` a dimension
+    // or supply the missing sign in `n 3`.
+    let source = trim_boundary(source);
+    let sign_len = usize::from(source.starts_with(['+', '-']));
+    let number_end = sign_len
+        + source.as_bytes()[sign_len..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    let (mut a, explicit_plus, ident_source) = if number_end > sign_len {
+        let number = source[..number_end].parse().ok()?;
+        let rest = &source[number_end..];
+        if trim_boundary(rest).is_empty() {
+            return Some((0, number));
+        }
+        if rest.starts_with('\0') {
+            return None;
+        }
+        (number, false, rest)
+    } else if let Some(rest) = source.strip_prefix('+') {
+        // A '+' delimiter can precede n, but not with a whitespace token.
+        (1, true, rest.trim_start_matches('\0'))
+    } else {
+        (1, false, source)
+    };
+    let mut offset = 0;
+    let ident = identifier(ident_source, &mut offset)?.to_ascii_lowercase();
+    let rest = trim_boundary(&ident_source[offset..]);
+    let ident_only = number_end == sign_len && !explicit_plus;
+    if ident_only && rest.is_empty() {
+        match ident.as_str() {
+            "odd" => return Some((2, 1)),
+            "even" => return Some((2, 0)),
+            _ => {}
+        }
+    }
+    let n = if ident_only && let Some(n) = ident.strip_prefix('-') {
+        a = -1;
+        n
+    } else {
+        &ident
+    };
+    let suffix = n.strip_prefix('n')?;
+    let b = if let Some(digits) = suffix.strip_prefix('-') {
+        if digits.is_empty() {
+            nth_offset(rest, true)?
+        } else if rest.is_empty() {
+            nth_offset(digits, true)?
+        } else {
+            return None;
+        }
+    } else if !suffix.is_empty() {
+        return None;
+    } else if rest.is_empty() {
+        0
+    } else {
+        let negative = rest.starts_with('-');
+        nth_offset(trim_boundary(rest.strip_prefix(['+', '-'])?), negative)?
+    };
+    Some((a, b))
+}
+
+fn nth_offset(digits: &str, negative: bool) -> Option<i32> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let s: String = source
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace() && *c != '\0')
-        .flat_map(char::to_lowercase)
-        .collect();
-    if s == "odd" {
-        return Some((2, 1));
-    }
-    if s == "even" {
-        return Some((2, 0));
-    }
-    if let Some((a, b)) = s.split_once('n') {
-        let a = match a {
-            "" | "+" => 1,
-            "-" => -1,
-            _ => a.parse().ok()?,
-        };
-        let b = if b.is_empty() { 0 } else { b.parse().ok()? };
-        Some((a, b))
-    } else {
-        Some((0, s.parse().ok()?))
-    }
+    let magnitude: i64 = digits.parse().ok()?;
+    i32::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
 pub fn matches_selector(doc: &Document, id: NodeId, source: &str) -> bool {
     let clean = without_comments(source);
@@ -1930,10 +2125,10 @@ impl Compound {
                     return false;
                 };
                 let siblings = &doc.nodes[parent.0].children;
+                let same_type = of_type.then(|| (tag, doc.namespace(id)));
                 let mut position = 0i64;
                 let mut check = |&node: &NodeId| {
-                    let candidate = doc.tag(node);
-                    if !candidate.is_empty() && (!of_type || candidate == tag) {
+                    if nth_sibling_matches(doc, node, same_type) {
                         position += 1;
                     }
                     node == id
@@ -1960,10 +2155,11 @@ impl Compound {
                 }
             }
             Test::OnlyChild(of_type) => doc.nodes[id.0].parent.is_some_and(|p| {
+                let same_type = of_type.then(|| (tag, doc.namespace(id)));
                 doc.nodes[p.0]
                     .children
                     .iter()
-                    .filter(|&&n| !doc.tag(n).is_empty() && (!of_type || doc.tag(n) == tag))
+                    .filter(|&&n| nth_sibling_matches(doc, n, same_type))
                     .count()
                     == 1
             }),
@@ -1979,6 +2175,20 @@ impl Compound {
         })
     }
 }
+
+fn nth_sibling_matches(
+    doc: &Document,
+    sibling: NodeId,
+    same_type: Option<(&str, Namespace)>,
+) -> bool {
+    let tag = doc.tag(sibling);
+    // An expanded element type is its local name and its namespace, not
+    // just the local name (Selectors §14.4).
+    !tag.is_empty()
+        && same_type
+            .is_none_or(|(local, namespace)| tag == local && doc.namespace(sibling) == namespace)
+}
+
 fn attribute_matches(actual: &str, value: &str, op: AttrOp, insensitive: bool) -> bool {
     let eq = |a: &str, b: &str| {
         if insensitive {
@@ -2026,6 +2236,8 @@ enum Property {
     FontSize,
     Color,
     Display,
+    Float,
+    Clear,
     Background,
     Bold,
     Italic,
@@ -2109,6 +2321,8 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::FontSize,
     Property::Color,
     Property::Display,
+    Property::Float,
+    Property::Clear,
     Property::Background,
     Property::Bold,
     Property::Italic,
@@ -2247,6 +2461,8 @@ enum Value {
     FontStyle(FontStyle),
     Families(Arc<[FontFamily]>),
     Display(Display),
+    Float(Float),
+    Clear(Clear),
     Position(Position),
     Overflow(Overflow),
     ZIndex(Option<i32>),
@@ -2555,10 +2771,13 @@ impl Stylesheet {
             let mut raw = (*parent.custom).clone();
             for (name, (decl, _)) in custom {
                 match decl.value.trim() {
-                    "initial" => {
+                    value if value.eq_ignore_ascii_case("initial") => {
                         raw.remove(name);
                     }
-                    "inherit" | "unset" => {
+                    value
+                        if value.eq_ignore_ascii_case("inherit")
+                            || value.eq_ignore_ascii_case("unset") =>
+                    {
                         if let Some(v) = parent.custom.get(name) {
                             raw.insert(name.into(), v.clone());
                         } else {
@@ -2655,6 +2874,9 @@ impl Stylesheet {
             style.svg_overrides = Arc::new(values);
         }
         if style.position.out_of_flow() {
+            style.float = Float::None;
+        }
+        if style.position.out_of_flow() || style.float != Float::None {
             style.display = match style.display {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
@@ -2949,6 +3171,8 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
         FontSize => s.font_size = from.font_size,
         Color => s.color = from.color,
         Display => s.display = from.display,
+        Float => s.float = from.float,
+        Clear => s.clear = from.clear,
         Position => s.position = from.position,
         Top | Right | Bottom | Left => {
             s.inset[p as usize - Top as usize] = from.inset[source as usize - Top as usize]
@@ -3067,6 +3291,8 @@ fn apply_value(
         (Color, Value::Color(color)) => s.color = color.unwrap_or(parent.color),
         (Background, Value::Color(color)) => s.background = Some(color.unwrap_or(s.color)),
         (Display, Value::Display(v)) => s.display = *v,
+        (Float, Value::Float(v)) => s.float = *v,
+        (Clear, Value::Clear(v)) => s.clear = *v,
         (Position, Value::Position(v)) => s.position = *v,
         (Top | Right | Bottom | Left, Value::Length(v)) => {
             s.inset[p as usize - Top as usize] = l(v)
@@ -3205,6 +3431,8 @@ fn targets(name: &str) -> Vec<Property> {
         "color" => vec![Color],
         "background" | "background-color" => vec![Background],
         "display" => vec![Display],
+        "float" => vec![Float],
+        "clear" => vec![Clear],
         "font-size" => vec![FontSize],
         "font-weight" => vec![Bold],
         "font-style" => vec![Italic],
@@ -3847,6 +4075,23 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 None
             }
         }
+        Float => Some(Value::Float(match v {
+            "none" => crate::css::Float::None,
+            "left" => crate::css::Float::Left,
+            "right" => crate::css::Float::Right,
+            "inline-start" => crate::css::Float::InlineStart,
+            "inline-end" => crate::css::Float::InlineEnd,
+            _ => return None,
+        })),
+        Clear => Some(Value::Clear(match v {
+            "none" => crate::css::Clear::None,
+            "left" => crate::css::Clear::Left,
+            "right" => crate::css::Clear::Right,
+            "both" => crate::css::Clear::Both,
+            "inline-start" => crate::css::Clear::InlineStart,
+            "inline-end" => crate::css::Clear::InlineEnd,
+            _ => return None,
+        })),
         Display => Some(Value::Display(match v {
             "none" => crate::css::Display::None,
             "block" | "list-item" | "table" => crate::css::Display::Block,
@@ -4234,6 +4479,37 @@ pub fn length(value: &str) -> Option<Length> {
     let n = number(v)?;
     if n == 0. { Some(Length::Px(0.)) } else { None }
 }
+
+fn functional_color_components(inner: &str, rgb: bool) -> Option<([&str; 3], Option<&str>)> {
+    if inner.contains(',') {
+        // Legacy syntax uses commas exclusively, including before alpha.
+        if inner.contains('/') {
+            return None;
+        }
+        let mut values = inner.split(',').map(str::trim_ascii);
+        let channels = [values.next()?, values.next()?, values.next()?];
+        let alpha = values.next();
+        if values.next().is_some() {
+            return None;
+        }
+        if rgb {
+            let percent = channels[0].ends_with('%');
+            if channels[1..].iter().any(|s| s.ends_with('%') != percent) {
+                return None;
+            }
+        }
+        Some((channels, alpha))
+    } else {
+        // Modern syntax uses a slash before the optional alpha component.
+        let (channels, alpha) = inner.split_once('/').map_or((inner, None), |(head, tail)| {
+            (head, Some(tail.trim_ascii()))
+        });
+        let mut values = channels.split_ascii_whitespace();
+        let channels = [values.next()?, values.next()?, values.next()?];
+        values.next().is_none().then_some((channels, alpha))
+    }
+}
+
 pub fn color(value: &str) -> Option<Color> {
     let v = value.trim().to_ascii_lowercase();
     if let Some(hex) = v.strip_prefix('#') {
@@ -4248,6 +4524,10 @@ pub fn color(value: &str) -> Option<Color> {
                 ))
             }
             6 | 8 => {
+                // The radix parser accepts a leading '+', which is not a hex digit.
+                if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return None;
+                }
                 let n = u32::from_str_radix(hex, 16).ok()?;
                 Some(if hex.len() == 6 {
                     Color((n >> 16) as u8, (n >> 8) as u8, n as u8, 255)
@@ -4272,15 +4552,10 @@ pub fn color(value: &str) -> Option<Color> {
         || v.starts_with("hsla(")
     {
         let inner = v.split_once('(')?.1.strip_suffix(')')?;
-        let values: Vec<_> = inner
-            .split([',', '/', ' ', '\t', '\n', '\r'])
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !(3..=4).contains(&values.len()) {
-            return None;
-        }
-        let a = values.get(3).map_or(Some(255), |s| alpha(s))?;
-        if v.starts_with("hsl") {
+        let rgb = v.starts_with("rgb");
+        let (values, opacity) = functional_color_components(inner, rgb)?;
+        let a = opacity.map_or(Some(255), alpha)?;
+        if !rgb {
             let hue = values[0];
             let h = if let Some(n) = hue.strip_suffix("turn") {
                 number(n)? * 360.
@@ -4361,8 +4636,9 @@ fn contains_variable(source: &str) -> bool {
     variable_offset(source, 0).is_some()
 }
 fn variable_offset(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
     let (mut quote, mut escaped) = (0, false);
-    for (i, &b) in source.as_bytes().iter().enumerate().skip(start) {
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
         if escaped {
             escaped = false;
             continue;
@@ -4381,7 +4657,16 @@ fn variable_offset(source: &str, start: usize) -> Option<usize> {
             quote = b;
             continue;
         }
-        if source.as_bytes()[i..].starts_with(b"var(") {
+        // Function names are ASCII case-insensitive, but a suffix of a
+        // longer identifier (or a dimension, hash or at-keyword) is not var().
+        if bytes
+            .get(i..i + 4)
+            .is_some_and(|name| name.eq_ignore_ascii_case(b"var("))
+            && (i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[i - 1], b'-' | b'_' | b'#' | b'@')
+                    || bytes[i - 1] >= 128))
+        {
             return Some(i);
         }
     }
@@ -4513,16 +4798,21 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
         stack.push(name.into());
         let resolved = substitute_variables(value, stack.len(), &mut |n| {
             resolve_name(n, raw, cache, invalid, stack).map(|value| value.to_string())
-        })
-        .map(Arc::<str>::from);
+        });
         stack.pop();
         if invalid.contains(name) {
             return None;
         }
-        if let Some(v) = &resolved {
-            cache.insert(name.into(), v.clone());
+        let resolved = resolved?;
+        // Substitution to the sole keyword `initial` yields the guaranteed-invalid
+        // value for an unregistered custom property, not a token to pass to callers.
+        if trim_boundary(&without_comments(&resolved)).eq_ignore_ascii_case("initial") {
+            invalid.insert(name.into());
+            return None;
         }
-        resolved
+        let resolved = Arc::<str>::from(resolved);
+        cache.insert(name.into(), resolved.clone());
+        Some(resolved)
     }
     let mut cache = HashMap::new();
     let mut invalid = HashSet::new();

@@ -368,9 +368,14 @@ fn layout_overflow(style: &Style, node: NodeId, viewport_source: Option<NodeId>)
     }
 }
 
+enum PositionAxis {
+    Inline,
+    Block,
+}
+
 fn axis_position(
-    start: Option<f32>,
-    end: Option<f32>,
+    axis: PositionAxis,
+    [start, end]: [Option<f32>; 2],
     extent: f32,
     size: f32,
     margins: [f32; 2],
@@ -384,7 +389,15 @@ fn axis_position(
         start
             + margins[0]
             + if end.is_some() && auto[0] {
-                if auto[1] { (free / 2.).max(0.) } else { free }
+                if auto[1] {
+                    // Only the inline axis assigns negative space to the end margin.
+                    match axis {
+                        PositionAxis::Inline => free.max(0.) / 2.,
+                        PositionAxis::Block => free / 2.,
+                    }
+                } else {
+                    free
+                }
             } else {
                 0.
             }
@@ -551,8 +564,8 @@ impl Builder<'_> {
                 });
             let x = cb.x
                 + axis_position(
-                    inset[3],
-                    inset[1],
+                    PositionAxis::Inline,
+                    [inset[3], inset[1]],
                     cb.width,
                     local.width,
                     [m.margin[3], m.margin[1]],
@@ -561,8 +574,8 @@ impl Builder<'_> {
                 );
             let y = cb.y
                 + axis_position(
-                    inset[0],
-                    inset[2],
+                    PositionAxis::Block,
+                    [inset[0], inset[2]],
                     cb.height,
                     local.height,
                     [m.margin[0], m.margin[2]],

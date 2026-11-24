@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Uniform translucent rectangular border corners</title>
+<style>
+  body { margin: 0; padding: 8px; background: white }
+  .border {
+    width: 32px;
+    height: 24px;
+    border: solid rgba(255, 0, 0, 0.5);
+    border-width: 8px 10px 6px 12px;
+    background: #ffff00;
+  }
+  .clip { width: 36px; height: 40px; overflow: hidden; margin-top: 8px }
+  .clip > .border { margin-left: -4px }
+  .wide {
+    width: 1000000px;
+    height: 1000000px;
+    margin-top: 8px;
+    border: 4px solid rgba(255, 0, 0, 0.5);
+  }
+</style>
+<div class="border"></div>
+<div class="clip"><div class="border"></div></div>
+<div class="wide"></div>

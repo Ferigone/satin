@@ -90,6 +90,32 @@ fn font_face_rule_parses_cascade_lists_and_unicode_ranges() {
 }
 
 #[test]
+fn css_block_recovery_keeps_later_font_descriptors_and_rules() {
+    let rules = css::font_faces(
+        r#"
+        @font-face {
+            font-family: First;
+            unknown: fn(});
+            src: url(first.woff2);
+        }
+        @font-face {
+            font-family: Second;
+            unknown: [}];
+            src: URL([part\).woff2)
+        }
+        @font-face { font-family: Later; src: url(later.woff2); }
+    "#,
+        800.,
+    );
+    let families: Vec<_> = rules.iter().map(|r| r.family.as_ref()).collect();
+    assert_eq!(families, ["First", "Second", "Later"]);
+    assert!(matches!(
+        &rules[1].sources[0],
+        FontSource::Url { url, .. } if url.as_ref() == "[part).woff2"
+    ));
+}
+
+#[test]
 fn family_weight_and_style_are_real_inherited_css_values() {
     let page = LoadedPage::from_html(
         "https://fonts.test/",
@@ -261,6 +287,70 @@ fn variable_weight_uses_same_coordinates_for_advance_and_outline() {
     canvas.text(0., 60., &bold, Color::BLACK, &mut fonts);
     assert_eq!(canvas.pixels[20 * 80 + 24], 0xffffff);
     assert_eq!(canvas.pixels[50 * 80 + 24], 0);
+}
+
+#[test]
+fn font_weight_descriptor_normalizes_descending_variable_ranges() {
+    let fonts = Fonts::new().unwrap();
+    let request = rust_browser_engine::fonts::FontRequest {
+        families: Arc::from([FontFamily::Named("Audit".into())]),
+        weight: 550,
+        style: FontStyle::Normal,
+    };
+    for descriptor in [
+        "400 700",
+        "700 400",
+        "bold normal",
+        "400 700; font-weight: 700 0",
+    ] {
+        let set = font_set(
+            &format!("@font-face{{font-family:Audit;src:url(face);font-weight:{descriptor}}}"),
+            &[VARIABLE],
+        );
+        assert_eq!(set.entries()[0].rule.weight, [400, 700], "{descriptor}");
+        let run = fonts.shape_text("A", 40., &request, &set);
+        assert_close(run.advance, 24.);
+        assert_eq!(run.faces()[0].variation_weight(), Some(550), "{descriptor}");
+    }
+}
+
+#[test]
+fn invalid_unicode_range_preserves_the_previous_descriptor_and_glyph_fallback() {
+    let fonts = Fonts::new().unwrap();
+    let request = rust_browser_engine::fonts::FontRequest {
+        families: Arc::from([
+            FontFamily::Named("Audit".into()),
+            FontFamily::Named("AuditFallback".into()),
+        ]),
+        weight: 400,
+        style: FontStyle::Normal,
+    };
+    for (value, uses_wide) in [
+        ("U+40-110000", false),
+        ("U+??????", false),
+        ("U+0000041", false),
+        ("U+41-0000042", false),
+        ("U++41", false),
+        ("U+41, U+00-110000", false),
+        ("U+42-41", false),
+        ("U+0041-10FFFF", true),
+        ("u+4?", true),
+        ("U+??", true),
+        ("U+40, U+41", true),
+    ] {
+        let set = font_set(
+            &format!(
+                "@font-face{{font-family:Audit;src:url(wide);unicode-range:U+42;unicode-range:{value}}}
+                 @font-face{{font-family:AuditFallback;src:url(fallback)}}"
+            ),
+            &[WIDE, FALLBACK],
+        );
+        let run = fonts.shape_text("A", 40., &request, &set);
+        let picked = run.face_for(&run.glyphs[0]).face().id();
+        let expected = &set.entries()[if uses_wide { 0 } else { 1 }];
+        assert_eq!(picked, expected.face.id(), "unicode-range: {value}");
+        assert_close(run.advance, if uses_wide { 32. } else { 20. });
+    }
 }
 
 #[test]

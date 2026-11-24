@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Reduced CSS Variables test: CSS-wide keywords on custom properties</title>
+<div style="color: purple; --theme: red; --basis: red; --computed: var(--basis)">
+  <span id="initial" style="--theme: INITIAL; color: var(--theme, green)"></span>
+  <span id="inherit" style="--theme: InHeRiT; color: var(--theme, green)"></span>
+  <span id="unset" style="--basis: blue; --computed: UnSeT; color: var(--computed, green)"></span>
+  <span id="absent" style="--absent: INHERIT; color: var(--absent, green)"></span>
+  <span id="quoted" style='--theme: "INITIAL"; color: var(--theme, green)'></span>
+  <span id="multiple-tokens" style="--theme: INITIAL extra; color: var(--theme, green)"></span>
+</div>
+<pre id="receipt"></pre>
+<script>
+var ids = ['initial', 'inherit', 'unset', 'absent', 'quoted', 'multiple-tokens'];
+var result = {};
+for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    result[id] = getComputedStyle(document.getElementById(id)).color;
+}
+document.getElementById('receipt').textContent = JSON.stringify(result);
+</script>

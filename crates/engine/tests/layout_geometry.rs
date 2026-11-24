@@ -85,6 +85,60 @@ fn row_flex_distributes_growth_and_respects_constraints() {
     close(b.height, 20.);
 }
 #[test]
+fn flex_resolves_partial_factors_and_freezes_only_net_violations() {
+    let (p, l) = layout_document(include_str!("fixtures/css_flex_free_space.html"), 800.);
+    // Edge 158.0.4370.33, headless at scale 1; no text metrics involved.
+    for (name, expected) in [
+        ("ordinary-a", [0., 0., 72., 10.]),
+        ("ordinary-b", [72., 0., 48., 10.]),
+        ("partial-shrink-a", [0., 10., 96., 10.]),
+        ("partial-shrink-b", [96., 10., 64., 10.]),
+        ("partial-grow-a", [0., 20., 120., 10.]),
+        ("partial-grow-b", [120., 20., 150., 10.]),
+        ("initial-freeze-a", [0., 30., 140., 10.]),
+        ("initial-freeze-b", [140., 30., 80., 10.]),
+        ("mixed-min", [0., 40., 175., 10.]),
+        ("mixed-max", [175., 40., 100., 10.]),
+        ("mixed-free", [275., 40., 175., 10.]),
+    ] {
+        let r = rect(&p, &l, name);
+        let actual = [r.x, r.y, r.width, r.height];
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 0.05),
+            "{name}: expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+#[test]
+fn flex_shrink_weights_use_inner_basis_before_definite_minimums() {
+    let (p, l) = layout_document(
+        include_str!("fixtures/css_flex_inner_shrink_basis.html"),
+        800.,
+    );
+    // Edge 158.0.4370.33. Each row starts with 150 and 100 px outer bases.
+    for (name, expected) in [
+        ("plain-a", [0., 0., 120., 10.]),
+        ("plain-b", [120., 0., 80., 10.]),
+        ("inset-a", [0., 10., 125., 10.]),
+        ("inset-b", [125., 10., 75., 10.]),
+        ("border-box-a", [0., 20., 122., 10.]),
+        ("min-b", [122., 20., 78., 10.]),
+    ] {
+        let r = rect(&p, &l, name);
+        let actual = [r.x, r.y, r.width, r.height];
+        assert!(
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 0.05),
+            "{name}: expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+#[test]
 fn row_flex_shrinks_wraps_orders_and_aligns() {
     let (p, l) = layout(
         "<div style='display:flex;width:300px;gap:10px;align-items:center'><div id='a' style='width:200px;min-width:0;height:40px;order:2'></div><div id='b' style='width:200px;min-width:0;height:20px'></div></div><div id='wrap' style='display:flex;flex-wrap:wrap;width:250px;gap:10px'><div id='c' style='width:120px;height:30px;flex-shrink:0'></div><div style='width:120px;height:20px'></div><div id='d' style='width:120px;height:10px'></div></div>",

@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS nested closing brace recovery (local reduction)</title>
+<style>
+  #control { width: 29px; color: fn(a;b, {}); width: 31px; }
+  #escaped { width: 29px; color: fn(\}); width: 37px; }
+  #after-control { width: 39px; }
+</style>
+<style>
+  #function { width: 29px; color: fn(}); width: 41px; }
+  #after-function { width: 43px; }
+</style>
+<style>
+  #bracket { width: 29px; color: [}]; width: 47px; }
+  #after-bracket { width: 53px; }
+</style>
+<div id="control"></div>
+<div id="escaped"></div>
+<div id="after-control"></div>
+<div id="function"></div>
+<div id="after-function"></div>
+<div id="bracket"></div>
+<div id="after-bracket"></div>
+<pre id="result"></pre>
+<script>
+  function width(id) {
+    return document.getElementById(id).getBoundingClientRect().width;
+  }
+  var result = JSON.stringify({
+    control: width("control"),
+    escaped: width("escaped"),
+    afterControl: width("after-control"),
+    fn: width("function"),
+    afterFn: width("after-function"),
+    bracket: width("bracket"),
+    afterBracket: width("after-bracket")
+  });
+  document.getElementById("result").textContent = result;
+</script>

@@ -1,0 +1,3 @@
+# These local reductions have recorded, byte-exact browser evidence.
+css-nth-*.html -text
+css-functional-selector-lists.html -text

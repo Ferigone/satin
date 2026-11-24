@@ -9,6 +9,7 @@ use crate::{
 };
 use std::{collections::HashMap, sync::Arc};
 mod controls;
+mod floats;
 mod grid_template;
 mod intersections;
 mod positioning;
@@ -74,6 +75,11 @@ pub enum DrawCommand {
     },
     Rect {
         rect: Rect,
+        color: Color,
+    },
+    UniformBorder {
+        rect: Rect,
+        widths: [f32; 4],
         color: Color,
     },
     Text {
@@ -333,6 +339,14 @@ impl Layout {
             anchors: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             grid_text: HashMap::new(),
+            floats: floats::FloatContext::default(),
+            float_work_remaining: page
+                .document
+                .nodes
+                .len()
+                .saturating_mul(64)
+                .saturating_add(512)
+                .min(1_000_000),
             recursion: 0,
             work_remaining: page
                 .document
@@ -603,6 +617,8 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     intrinsic: Vec<Option<(f32, f32)>>,
     grid_text: HashMap<NodeId, GridText>,
+    floats: floats::FloatContext,
+    float_work_remaining: usize,
     recursion: usize,
     work_remaining: usize,
     limited: bool,
@@ -610,7 +626,8 @@ struct Builder<'a> {
 const MAX_LAYOUT_RECURSION: usize = 48;
 struct FlexItem {
     node: NodeId,
-    basis: f32,
+    basis: f32, // Border-box base used for free-space accounting.
+    inner_basis: f32,
     min: f32,
     max: f32,
     grow: f32,
@@ -620,54 +637,84 @@ struct FlexItem {
     fragment: Option<Fragment>,
 }
 fn distribute_flex(items: &[FlexItem], available: f32) -> Vec<f32> {
-    let mut sizes: Vec<_> = items.iter().map(|i| i.basis).collect();
-    let mut frozen = vec![false; items.len()];
-    let initial = available - sizes.iter().sum::<f32>();
-    let growing = initial >= 0.;
-    // Freezing items at min/max constraints redistributes their unused share to
-    // the remaining items. The pass bound protects pathological author input.
-    for _ in 0..64 {
-        let remaining = available
+    // The outer hypothetical sizes choose the used flex factor. Fixed items
+    // and bases on the wrong side of that size start frozen at it.
+    let mut sizes: Vec<_> = items.iter().map(|i| i.basis.clamp(i.min, i.max)).collect();
+    let growing = sizes.iter().sum::<f32>() < available;
+    let factor = |item: &FlexItem| if growing { item.grow } else { item.shrink };
+    let weight = |item: &FlexItem| {
+        if growing {
+            factor(item)
+        } else {
+            factor(item) * item.inner_basis
+        }
+    };
+    let mut frozen: Vec<_> = items
+        .iter()
+        .zip(&sizes)
+        .map(|(item, &hypothetical)| {
+            factor(item) == 0.
+                || if growing {
+                    item.basis > hypothetical
+                } else {
+                    item.basis < hypothetical
+                }
+        })
+        .collect();
+    let free_space = |sizes: &[f32], frozen: &[bool]| {
+        available
             - items
                 .iter()
                 .enumerate()
                 .map(|(i, item)| if frozen[i] { sizes[i] } else { item.basis })
-                .sum::<f32>();
-        let weight: f32 = items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !frozen[*i])
-            .map(|(_, i)| if growing { i.grow } else { i.shrink * i.basis })
-            .sum();
-        let denominator = if growing {
-            weight.max(1.)
-        } else {
-            weight.max(f32::EPSILON)
-        };
-        let mut changed = false;
+                .sum::<f32>()
+    };
+    let initial = free_space(&sizes, &frozen);
+    let mut violations = vec![0.; items.len()];
+    // The pass bound protects pathological author input.
+    for _ in 0..64 {
+        let (mut factor_sum, mut weight_sum) = (0., 0.);
+        for (i, item) in items.iter().enumerate() {
+            if !frozen[i] {
+                factor_sum += factor(item);
+                weight_sum += weight(item);
+            }
+        }
+        let mut remaining = free_space(&sizes, &frozen);
+        if factor_sum < 1. {
+            let partial = initial * factor_sum;
+            if partial.abs() < remaining.abs() {
+                remaining = partial;
+            }
+        }
+        if !growing {
+            remaining = -remaining.abs();
+        }
+        let mut total_violation = 0.;
         for (i, item) in items.iter().enumerate() {
             if frozen[i] {
                 continue;
             }
-            let factor = if growing {
-                item.grow
-            } else {
-                item.shrink * item.basis
-            };
             let target = item.basis
-                + if weight > 0. {
-                    remaining * factor / denominator
+                + if weight_sum > 0. {
+                    remaining * (weight(item) / weight_sum)
                 } else {
                     0.
                 };
             sizes[i] = target.clamp(item.min, item.max);
-            if (sizes[i] - target).abs() > 0.001 {
-                frozen[i] = true;
-                changed = true;
-            }
+            violations[i] = sizes[i] - target;
+            total_violation += violations[i];
         }
-        if !changed {
+        if total_violation == 0. {
             break;
+        }
+        // Only freeze the constraints on the side of the net violation.
+        // Opposite clamps may cease to be needed after redistribution.
+        for (is_frozen, &violation) in frozen.iter_mut().zip(&violations) {
+            if (total_violation > 0. && violation > 0.) || (total_violation < 0. && violation < 0.)
+            {
+                *is_frozen = true;
+            }
         }
     }
     sizes
@@ -758,9 +805,11 @@ fn grid_placement(
         }
         positions.push((node, axes));
     }
+    // An axis can have no tracks. Implicit tracks are added for item
+    // placement, not merely because an auto-track sizing function exists.
     let mut counts = [
-        (ends[0] - origins[0]).max(1) as usize,
-        (ends[1] - origins[1]).max(1) as usize,
+        (ends[0] - origins[0]) as usize,
+        (ends[1] - origins[1]) as usize,
     ];
     if counts.iter().any(|count| *count > GRID_TRACK_LIMIT) {
         return None;
@@ -1376,24 +1425,45 @@ fn grid_track_sizes(
             .filter(|track| matches!(track.max, GridBreadth::Flex(_)))
             .map(|track| track.base / track.flex.max(1.))
             .fold(0f32, f32::max);
+        // The hypothetical fr size can only decrease when a track freezes.
+        // Visit potential freezes in descending base/factor order so each
+        // spanning item takes one bounded scan, not repeated restarts.
+        let mut freeze_order: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| matches!(track.max, GridBreadth::Flex(_)) && track.base > 0.)
+            .map(|(index, track)| (index, track.base / track.flex))
+            .collect();
+        freeze_order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         for item in &items {
-            let slice = &states[item.start..(item.start + item.span).min(states.len())];
-            let flex = slice
+            let span = item.start..item.start + item.span;
+            let slice = &states[span.clone()];
+            let mut flex: f32 = slice
                 .iter()
                 .filter(|track| matches!(track.max, GridBreadth::Flex(_)))
                 .map(|track| track.flex)
-                .sum::<f32>();
-            if flex > 0. {
-                let fixed = slice
-                    .iter()
-                    .filter(|track| !matches!(track.max, GridBreadth::Flex(_)))
-                    .map(|track| track.limit)
-                    .sum::<f32>();
-                fraction = fraction.max(
-                    (item.maximum - fixed - gap * item.span.saturating_sub(1) as f32)
-                        / flex.max(1.),
-                );
+                .sum();
+            if flex <= 0. {
+                continue;
             }
+            let fixed = slice
+                .iter()
+                .filter(|track| !matches!(track.max, GridBreadth::Flex(_)))
+                .map(|track| track.limit)
+                .sum::<f32>();
+            let mut leftover = item.maximum - fixed - gap * item.span.saturating_sub(1) as f32;
+            let mut hypothetical = leftover.max(0.) / flex.max(1.);
+            for &(index, required) in &freeze_order {
+                if hypothetical >= required {
+                    break;
+                }
+                if span.contains(&index) {
+                    leftover -= states[index].base;
+                    flex -= states[index].flex;
+                    hypothetical = leftover.max(0.) / flex.max(1.);
+                }
+            }
+            fraction = fraction.max(hypothetical);
         }
         for track in &mut states {
             track.base = if matches!(track.max, GridBreadth::Flex(_)) {
@@ -2045,8 +2115,14 @@ impl Builder<'_> {
             } else {
                 s.margin.map(|v| v == Length::Auto)
             };
+            let extra = if text {
+                0.
+            } else if row {
+                m.extra_x()
+            } else {
+                m.extra_y()
+            };
             let (basis, min, max, fragment) = if row {
-                let extra = if text { 0. } else { m.extra_x() };
                 let to_border = |v: f32| {
                     if !text && s.box_sizing == BoxSizing::BorderBox {
                         v.max(extra)
@@ -2119,7 +2195,6 @@ impl Builder<'_> {
                     },
                 );
                 let natural = (f.height - margin[0] - margin[2]).max(0.);
-                let extra = if text { 0. } else { m.extra_y() };
                 let to_border = |v: f32| {
                     if !text && s.box_sizing == BoxSizing::BorderBox {
                         v.max(extra)
@@ -2172,6 +2247,7 @@ impl Builder<'_> {
             items.push(FlexItem {
                 node,
                 basis,
+                inner_basis: basis - extra,
                 min,
                 max,
                 grow: if text { 0. } else { s.flex_grow },
@@ -2482,12 +2558,23 @@ impl Builder<'_> {
         } else {
             href
         };
+        // Flex/grid items are laid out by their own formatter, not this
+        // normal-flow child path.
+        if s.float != css::Float::None && doc.nodes[id.0].parent != Some(doc.root) {
+            self.place_float(id, line, href);
+            return;
+        }
         if matches!(s.display, Display::Block | Display::Flex | Display::Grid) {
             self.flush(line, false);
             let top = s.margin[0].resolve(line.width, s.font_size).unwrap_or(0.);
-            if let Some(previous) = line.previous_margin {
-                line.y -= previous + top - collapse_margins(previous, top);
-            }
+            let hypothetical = line.y
+                - line.previous_margin.map_or(0., |previous| {
+                    previous + top - collapse_margins(previous, top)
+                });
+            line.y = match self.floats.clearance(s.clear.sides(line.parent.rtl)) {
+                Some(bottom) if hypothetical + top < bottom => bottom - top,
+                _ => hypothetical,
+            };
             line.y += self.block(
                 id,
                 line.x,
@@ -2587,6 +2674,36 @@ impl Builder<'_> {
         self.recursion -= 1;
         height
     }
+    fn replaced_auto_border_width(
+        &mut self,
+        id: NodeId,
+        available: f32,
+        c: Constraints,
+        m: BoxMetrics,
+    ) -> Option<f32> {
+        let s = &self.styles[id.0];
+        let width = if self.is_replaced_image(id) {
+            let (nw, nh) = self.image_size(id);
+            s.height
+                .resolve_with_basis(c.containing_height, s.font_size)
+                .filter(|_| !self.is_canvas(id) || nh > 0.)
+                .map(|h| to_content(h, m.extra_y(), s.box_sizing) * nw / nh.max(1.))
+                .unwrap_or(nw)
+        } else if self.is_replaced_control(id) {
+            self.control_intrinsic(id).0
+        } else {
+            return None;
+        };
+        let extra = m.extra_x();
+        let mut width = width.max(0.);
+        if let Some(max) = s.max_width.resolve(available, s.font_size) {
+            width = width.min(to_content(max, extra, s.box_sizing));
+        }
+        if let Some(min) = s.min_width.resolve(available, s.font_size) {
+            width = width.max(to_content(min, extra, s.box_sizing));
+        }
+        Some(width + extra)
+    }
     fn block_inner(
         &mut self,
         id: NodeId,
@@ -2613,36 +2730,7 @@ impl Builder<'_> {
             && s.width == Length::Auto
         {
             let m = BoxMetrics::new(s, available, c);
-            let (nw, nh) = if replaced_image {
-                self.image_size(id)
-            } else {
-                self.control_intrinsic(id)
-            };
-            let content = if replaced_image {
-                s.height
-                    .resolve_with_basis(c.containing_height, s.font_size)
-                    .filter(|_| !self.is_canvas(id) || nh > 0.)
-                    .map(|h| to_content(h, m.extra_y(), s.box_sizing) * nw / nh.max(1.))
-                    .unwrap_or(nw)
-            } else {
-                nw
-            };
-            let mut w = content + m.extra_x();
-            if let Some(max) = s.max_width.resolve(available, s.font_size) {
-                w = w.min(if s.box_sizing == BoxSizing::BorderBox {
-                    max
-                } else {
-                    max + m.extra_x()
-                });
-            }
-            if let Some(min) = s.min_width.resolve(available, s.font_size) {
-                w = w.max(if s.box_sizing == BoxSizing::BorderBox {
-                    min
-                } else {
-                    min + m.extra_x()
-                });
-            }
-            c.width = Some(w);
+            c.width = self.replaced_auto_border_width(id, available, c, m);
         }
         let m = BoxMetrics::new(s, available, c);
         let ox = x + m.left;
@@ -2755,6 +2843,12 @@ impl Builder<'_> {
             };
             self.grid(id, cx, cy, m.width, [block, inline], href.clone())
         } else {
+            let independent = c.flex_item
+                || s.position.out_of_flow()
+                || s.float != css::Float::None
+                || s.overflow.iter().any(|o| o.scrollable())
+                || self.page.document.nodes[id.0].parent == Some(self.page.document.root);
+            let outer = independent.then(|| std::mem::take(&mut self.floats));
             let mut line = Line::new(cx, cy, m.width, s, explicit);
             if matches!(tag, "input" | "button" | "select" | "textarea")
                 && let Some(label) = self
@@ -2769,6 +2863,12 @@ impl Builder<'_> {
                 self.child(child, &mut line, href.clone());
             }
             self.flush(&mut line, false);
+            if let Some(outer) = outer {
+                if let Some(bottom) = self.floats.clearance([true, true]) {
+                    line.y = line.y.max(bottom);
+                }
+                self.floats = outer;
+            }
             (line.y - cy).max(0.)
         };
         let mut content = explicit.unwrap_or(natural);
@@ -2812,6 +2912,7 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
             commands: std::mem::take(&mut self.commands),
             positioned: std::mem::take(&mut self.positioned),
@@ -2839,6 +2940,7 @@ impl Builder<'_> {
         } else {
             self.block(id, 0., 0., available, href, c)
         };
+        self.floats = outer_floats;
         let width = if text {
             c.width.unwrap_or(available)
         } else {
@@ -2867,6 +2969,7 @@ impl Builder<'_> {
                 }
                 DrawCommand::PopState => {}
                 DrawCommand::Rect { rect, .. }
+                | DrawCommand::UniformBorder { rect, .. }
                 | DrawCommand::Image { rect, .. }
                 | DrawCommand::Canvas { rect, .. }
                 | DrawCommand::Svg { rect, .. }
@@ -2904,9 +3007,13 @@ impl Builder<'_> {
         } else {
             0.
         };
-        if s.wrap && line.used + space + f.width > line.width && !line.items.is_empty() {
+        if s.wrap
+            && !line.items.is_empty()
+            && line.used + space + f.width > self.float_interval(line).width()
+        {
             self.flush(line, false);
         }
+        self.fit_empty_line(line, f.width);
         self.pending_space(s, line, None, node);
         line.previous_margin = None;
         line.used += f.width;
@@ -2943,28 +3050,46 @@ impl Builder<'_> {
     }
     fn draw_borders(&mut self, r: Rect, s: &Style, b: [f32; 4]) {
         self.commands.background = true;
-        for (i, rect) in [
-            Rect { height: b[0], ..r },
-            Rect {
-                x: r.x + r.width - b[1],
-                width: b[1],
-                ..r
-            },
-            Rect {
-                y: r.y + r.height - b[2],
-                height: b[2],
-                ..r
-            },
-            Rect { width: b[3], ..r },
-        ]
-        .into_iter()
-        .enumerate()
+        let colors = s.border_colors.map(|color| color.unwrap_or(s.color));
+        let mut active = colors
+            .into_iter()
+            .zip(b)
+            .filter_map(|(color, width)| (width > 0.).then_some(color));
+        if (b[0] > 0. || b[2] > 0.)
+            && (b[1] > 0. || b[3] > 0.)
+            && let Some(color) = active.next()
+            && (1..255).contains(&color.3)
+            && active.all(|side| side == color)
         {
-            if b[i] > 0. {
-                self.commands.push(DrawCommand::Rect {
-                    rect,
-                    color: s.border_colors[i].unwrap_or(s.color),
-                });
+            self.commands.push(DrawCommand::UniformBorder {
+                rect: r,
+                widths: b,
+                color,
+            });
+        } else {
+            for (i, rect) in [
+                Rect { height: b[0], ..r },
+                Rect {
+                    x: r.x + r.width - b[1],
+                    width: b[1],
+                    ..r
+                },
+                Rect {
+                    y: r.y + r.height - b[2],
+                    height: b[2],
+                    ..r
+                },
+                Rect { width: b[3], ..r },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if b[i] > 0. {
+                    self.commands.push(DrawCommand::Rect {
+                        rect,
+                        color: colors[i],
+                    });
+                }
             }
         }
         self.commands.background = false;
@@ -3407,12 +3532,13 @@ impl Builder<'_> {
             if !line.items.is_empty() {
                 self.flush(line, false);
             }
+            let width = self.float_interval(line).width();
             let runs = self.fonts.break_word_text(
                 word,
                 s.font_size,
                 &s.font_request(),
                 &self.page.fonts,
-                line.width,
+                width,
             );
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
@@ -3432,16 +3558,21 @@ impl Builder<'_> {
         } else {
             0.
         };
-        if wrap && line.used + space + run.advance > line.width && !line.items.is_empty() {
+        if wrap
+            && !line.items.is_empty()
+            && line.used + space + run.advance > self.float_interval(line).width()
+        {
             self.flush(line, false);
         }
-        if wrap && s.break_words && run.advance > line.width && word.chars().nth(1).is_some() {
+        self.fit_empty_line(line, run.advance);
+        let width = self.float_interval(line).width();
+        if wrap && s.break_words && run.advance > width && word.chars().nth(1).is_some() {
             let runs = self.fonts.break_word_text(
                 word,
                 s.font_size,
                 &s.font_request(),
                 &self.page.fonts,
-                line.width,
+                width,
             );
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
@@ -3495,8 +3626,9 @@ impl Builder<'_> {
         }
         let height = (ascent + descent).max(0.);
         let baseline = line.y + ascent;
-        let extra = (line.width - line.used).max(0.);
-        let mut x = line.x
+        let slot = self.float_interval(line);
+        let extra = (slot.width() - line.used).max(0.);
+        let mut x = slot.left
             + match line.parent.align.as_str() {
                 "center" => extra / 2.,
                 "right" => extra,
