@@ -203,6 +203,7 @@ impl Vm {
                 && matches!(object.kind, ObjectKind::TypedArray(_))
                 && let Some(index) = crate::binary::numeric_index(name)
             {
+                if self.typed_buffer_immutable(id)? { return Ok(false); }
                 if receiver.as_object() == Some(id) {
                     self.typed_index_set(id, index, &value)?;
                     return Ok(true);
@@ -253,7 +254,7 @@ impl Vm {
             && matches!(self.heap.object(id)?.kind, ObjectKind::TypedArray(_))
             && let Some(index) = crate::binary::numeric_index(name)
         {
-            if !self.typed_element_exists(id, index)? {
+            if self.typed_buffer_immutable(id)? || !self.typed_element_exists(id, index)? {
                 return Ok(false);
             }
             self.typed_index_set(id, index, &value)?;
@@ -356,6 +357,7 @@ impl Vm {
         });
         let constructor_code = explicit.clone().unwrap_or_else(|| {
             Rc::new(Code {
+                source: code.source.clone(),
                 name: None,
                 params: Vec::new(),
                 param_names: Vec::new(),

@@ -22,6 +22,7 @@ pub(crate) enum NumericIndex {
 pub(crate) struct TypedDescriptor {
     value: Option<Value>,
     allowed: bool,
+    immutable_allowed: bool,
 }
 
 impl TypedDescriptor {
@@ -64,6 +65,10 @@ impl TypedDescriptor {
         }
         Ok(Self {
             value,
+            immutable_allowed: !accessor
+                && enumerable.as_ref().is_none_or(Value::is_truthy)
+                && !configurable.as_ref().is_some_and(Value::is_truthy)
+                && !writable.as_ref().is_some_and(Value::is_truthy),
             allowed: !accessor
                 && [enumerable, configurable, writable]
                     .into_iter()
@@ -176,6 +181,10 @@ impl Vm {
         self.read_typed_element(self.array_data(id)?, index)
     }
 
+    pub(crate) fn typed_buffer_immutable(&self, id: ObjectId) -> Result<bool, JsError> {
+        self.buffer_is_immutable(self.array_data(id)?.view.buffer)
+    }
+
     pub(crate) fn typed_index_set(
         &mut self,
         id: ObjectId,
@@ -197,6 +206,22 @@ impl Vm {
         index: NumericIndex,
         property: &Property,
     ) -> Result<(), JsError> {
+        if self.typed_buffer_immutable(id)? {
+            if let PropertyKind::Data {
+                value,
+                writable: false,
+            } = &property.kind
+                && !property.configurable
+                && property.enumerable
+                && self.typed_element_exists(id, index)?
+                && crate::vm::same_value(value, &self.typed_index_get(id, index)?)
+            {
+                return Ok(());
+            }
+            return Err(JsError::type_error(
+                "Invalid immutable TypedArray property definition",
+            ));
+        }
         if !self.typed_element_exists(id, index)? || !property.configurable || !property.enumerable
         {
             return Err(JsError::type_error(
@@ -221,6 +246,16 @@ impl Vm {
         index: NumericIndex,
         descriptor: TypedDescriptor,
     ) -> Result<bool, JsError> {
+        if self.typed_buffer_immutable(id)? {
+            if !descriptor.immutable_allowed || !self.typed_element_exists(id, index)? {
+                return Ok(false);
+            }
+            let current = self.typed_index_get(id, index)?;
+            return Ok(descriptor
+                .value
+                .as_ref()
+                .is_none_or(|v| crate::vm::same_value(v, &current)));
+        }
         if !descriptor.allowed || !self.typed_element_exists(id, index)? {
             return Ok(false);
         }

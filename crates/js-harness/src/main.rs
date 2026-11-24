@@ -140,6 +140,14 @@ fn install_test262_host(
     vm.define_data_property(host.clone(), "detachArrayBuffer", detach, true, true, true)?;
     vm.define_data_property(host.clone(), "global", vm.global(), true, true, true)?;
     vm.define_data_property(host.clone(), "createRealm", create, true, true, true)?;
+    let html_dda = vm.new_html_dda(|_, _, args| {
+        Ok(if args.is_empty() || args[0].as_string().is_some_and(|s| s.is_empty()) {
+            Value::Null
+        } else {
+            Value::Undefined
+        })
+    });
+    vm.define_data_property(host.clone(), "IsHTMLDDA", html_dda, true, true, true)?;
     missing_host::install(vm, &host)?;
     let print = vm.new_native_function("print", move |vm, _, args| {
         // INTERPRETING.md specifies print's first argument. Keep protocol
@@ -693,6 +701,16 @@ mod tests {
         assert_eq!(result["error"]["kind"], "TypeError");
     }
 
+    #[test]
+    fn failed_module_resolution_rejects_the_import_promise() {
+        let result = execute(serde_json::from_value(json!({
+            "id": "test/main.js#module",
+            "source": "for (const name of ['', 'bare', './missing.js']) { let error; try { await import(name) } catch(e) { error = e } if (!(error instanceof TypeError)) throw 'expected TypeError'; }",
+            "module_goal": true,
+            "dynamic_files": [],
+        })).unwrap());
+        assert_eq!(result["outcome"], "ok", "{result}");
+    }
     #[test]
     fn dynamic_fixture_jobs_can_finish_top_level_await_and_share_module_identity() {
         let result = execute(serde_json::from_value(json!({

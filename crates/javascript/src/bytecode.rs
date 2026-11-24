@@ -59,6 +59,7 @@ pub(crate) fn pattern_names(pattern: &PatternCode) -> Vec<JsString> {
 pub(crate) struct ScopePlan {
     pub lexical: Vec<(JsString, bool)>,
     pub vars: Vec<JsString>,
+    pub annex_vars: Vec<JsString>,
     pub functions: Vec<(JsString, Rc<Code>, bool)>,
 }
 #[derive(Clone, Debug, Default)]
@@ -76,6 +77,7 @@ impl Chunk {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Code {
+    pub source: Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub params: Vec<ParameterCode>,
     pub param_names: Vec<JsString>,
@@ -107,6 +109,7 @@ pub(crate) enum Op {
     Name(JsString),
     This,
     NewTarget,
+    CopyAnnexFunction(JsString),
     ImportMeta,
     DynamicImport(crate::parser::ImportPhase),
     Await,
@@ -278,7 +281,7 @@ pub(crate) fn compile_eval(
     context: parser::EvalContext,
     compilation_bytes: usize,
 ) -> Result<Rc<Chunk>, JsError> {
-    let body = parser::parse_script(source, context, compilation_bytes)?;
+    let body = parser::parse_script(source, context, compilation_bytes, inherited_strict)?;
     let strict = inherited_strict || parser::has_strict_directive(&body);
     block(&body, true, strict)
 }
@@ -308,12 +311,18 @@ pub(crate) fn compile_dynamic_function(
     };
     let mut function = body_function.clone();
     function.params = parameter_function.params.clone();
+    function.source = crate::lexer::SourceSpan::generated(&format!("{head} anonymous({parameters}\n) {{\n{body}\n}}"));
+    if !function.strict {
+        let excluded = function.params.iter().flat_map(|p| bound_names(&p.pattern)).chain([JsString::from("arguments")]);
+        parser::annex::mark(&mut function.body, excluded);
+    }
     compile_function(&function, false)
 }
 /// Conservative retained bytecode size; shared chunks/functions are counted once.
 pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc<Chunk>>) -> usize {
     let mut functions = roots;
     let mut seen_functions = BTreeSet::new();
+    let mut seen_sources = BTreeSet::new();
     let mut seen_chunks = BTreeSet::new();
     let mut bytes = 0usize;
     loop {
@@ -321,6 +330,8 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
             if !seen_functions.insert(Rc::as_ptr(&code) as usize) {
                 continue;
             }
+            let (address, size) = code.source.storage();
+            if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
             bytes = bytes.saturating_add(
                 256 + code
                     .param_names
@@ -352,7 +363,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 + chunk
                     .scope
                     .vars
-                    .iter()
+                    .iter().chain(&chunk.scope.annex_vars)
                     .map(|k| 64 + k.len() * 2)
                     .sum::<usize>(),
         );
@@ -360,6 +371,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
         for op in &chunk.ops {
             match op {
                 Op::Push(Value::String(s))
+                | Op::CopyAnnexFunction(s)
                 | Op::Name(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
@@ -382,6 +394,8 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 Op::TemplateAppend(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
                 Op::Function(code) => functions.push(code.clone()),
                 Op::Class(class, name) => {
+                    let (address, size) = class.source.storage();
+                    if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
                     if let ClassName::Binding(name) = name {
                         bytes = bytes.saturating_add(name.len() * 2 + 64);
                     }
@@ -645,6 +659,7 @@ fn block_scope(
         ..Chunk::default()
     };
     let mut lexical = BTreeSet::new();
+    let mut ordinary_block_functions = BTreeSet::new();
     let mut vars = BTreeSet::new();
     collect_vars(stmts, &mut vars);
     for stmt in stmts {
@@ -690,13 +705,15 @@ fn block_scope(
             Stmt::Function(f) => {
                 let name = f.name.clone().unwrap();
                 let variable_function = function_scope && !module_scope;
-                if !variable_function && !lexical.insert(name.clone()) {
-                    return Err(syntax(format!("Duplicate lexical binding '{name}'")));
-                }
                 if variable_function {
                     vars.insert(name.clone());
-                } else {
+                } else if lexical.insert(name.clone()) {
+                    if !strict && f.kind == FunctionKind::Ordinary {
+                        ordinary_block_functions.insert(name.clone());
+                    }
                     chunk.scope.lexical.push((name.clone(), true));
+                } else if f.kind != FunctionKind::Ordinary || !ordinary_block_functions.contains(&name) {
+                    return Err(syntax(format!("Duplicate lexical binding '{name}'")));
                 }
                 chunk
                     .scope
@@ -714,6 +731,11 @@ fn block_scope(
         }
     }
     if function_scope {
+        if !strict {
+            let mut names = BTreeSet::new();
+            collect_declarations(stmts, &mut names, true);
+            chunk.scope.annex_vars = names.into_iter().collect();
+        }
         chunk.scope.vars = vars.into_iter().collect();
     }
     for stmt in stmts {
@@ -772,6 +794,7 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
         }
     }
     Ok(Rc::new(Code {
+        source: f.source.clone(),
         name: f.name.clone(),
         params: f
             .params
@@ -800,45 +823,49 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
     }))
 }
 fn collect_vars(stmts: &[Stmt], out: &mut BTreeSet<JsString>) {
+    collect_declarations(stmts, out, false);
+}
+fn collect_declarations(stmts: &[Stmt], out: &mut BTreeSet<JsString>, annex: bool) {
     for stmt in stmts {
         match stmt {
-            Stmt::Variable(VarKind::Var, d) => {
+            Stmt::Function(f) if annex && f.annex_binding => { out.extend(f.name.iter().cloned()); }
+            Stmt::Variable(VarKind::Var, d) if !annex => {
                 out.extend(d.iter().flat_map(|(pattern, _)| bound_names(pattern)));
             }
-            Stmt::Block(body) => collect_vars(body, out),
+            Stmt::Block(body) => collect_declarations(body, out, annex),
             Stmt::If(_, yes, no) => {
-                collect_vars(std::slice::from_ref(&**yes), out);
+                collect_declarations(std::slice::from_ref(&**yes), out, annex);
                 if let Some(no) = no {
-                    collect_vars(std::slice::from_ref(&**no), out);
+                    collect_declarations(std::slice::from_ref(&**no), out, annex);
                 }
             }
             Stmt::With(_, b) | Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
-                collect_vars(std::slice::from_ref(&**b), out)
+                collect_declarations(std::slice::from_ref(&**b), out, annex)
             }
             Stmt::For(init, _, _, body) => {
                 if let Some(i) = init {
-                    collect_vars(std::slice::from_ref(&**i), out);
+                    collect_declarations(std::slice::from_ref(&**i), out, annex);
                 }
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
             }
             Stmt::ForIn(k, n, _, body) | Stmt::ForOf(k, n, _, body, _) => {
-                if *k == Some(VarKind::Var) {
+                if !annex && *k == Some(VarKind::Var) {
                     out.extend(bound_names(n));
                 }
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
             }
             Stmt::Try(body, catch, finally) => {
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
                 if let Some((_, c)) = catch {
-                    collect_vars(std::slice::from_ref(&**c), out);
+                    collect_declarations(std::slice::from_ref(&**c), out, annex);
                 }
                 if let Some(f) = finally {
-                    collect_vars(std::slice::from_ref(&**f), out);
+                    collect_declarations(std::slice::from_ref(&**f), out, annex);
                 }
             }
             Stmt::Switch(_, cases) => {
                 for (_, body) in cases {
-                    collect_vars(body, out)
+                    collect_declarations(body, out, annex)
                 }
             }
             _ => {}
@@ -913,7 +940,11 @@ fn compile_statement(
     label: Option<LabelId>,
 ) -> Result<(), JsError> {
     match s {
+        Stmt::Function(f) if f.annex_binding && !strict => {
+            out.push(Op::CopyAnnexFunction(f.name.clone().unwrap()));
+        }
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
+        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(&Expr::Literal(Value::String(value.clone())), strict)?)),
         Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
         Stmt::Class(name, class) => {
             let chunk = Chunk {

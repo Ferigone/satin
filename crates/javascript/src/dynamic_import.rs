@@ -12,6 +12,7 @@ pub struct DynamicImportRequest {
     pub referrer: Option<JsString>,
     pub referrer_module: Option<ModuleId>,
     pub specifier: JsString,
+    pub phase: crate::ImportPhase,
     pub capability: PromiseCapability,
 }
 
@@ -32,6 +33,16 @@ impl Vm {
         F: Fn(&mut Vm, DynamicImportRequest) -> Result<(), JsError> + 'static,
     {
         self.realm.dynamic_import_hook = Some(Rc::new(hook));
+    }
+
+    /// Complete a dynamic import once the host has loaded a JavaScript module.
+    /// Source-text modules have no source-phase representation.
+    pub fn settle_source_text_import(&mut self, module: ModuleId, phase: crate::ImportPhase, capability: PromiseCapability) -> Result<(), JsError> {
+        match phase {
+            crate::ImportPhase::Evaluation => self.settle_import_after_evaluation(module, capability),
+            crate::ImportPhase::Source => Err(JsError::new(crate::ErrorKind::SyntaxError, "JavaScript modules have no source-phase representation")),
+            crate::ImportPhase::Defer => Err(JsError::new(crate::ErrorKind::UnsupportedFeature, "Deferred module namespaces are not implemented")),
+        }
     }
 
     /// Evaluate an already linked module and settle the import capability from
@@ -128,12 +139,6 @@ impl Vm {
             let specifier = self.to_string(&value)?;
             self.account_value(Value::String(specifier.clone()))?;
             self.check_import_options(options)?;
-            if phase != crate::parser::ImportPhase::Evaluation {
-                return Err(JsError::new(
-                    crate::ErrorKind::UnsupportedFeature,
-                    "The module loader does not implement deferred or source-phase evaluation",
-                ));
-            }
             let (referrer, referrer_module) = match self.realm.active_referrer.as_ref() {
                 Some(SourceReferrer::Script(identifier)) => (Some(identifier.clone()), None),
                 Some(SourceReferrer::Module(module)) => {
@@ -152,6 +157,7 @@ impl Vm {
                     referrer,
                     referrer_module,
                     specifier,
+                    phase,
                     capability: capability.clone(),
                 },
             )

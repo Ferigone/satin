@@ -85,7 +85,7 @@ impl DynamicHost {
             return Ok(false);
         };
         let result = self.load(vm, &queued.request).and_then(|module| {
-            vm.settle_import_after_evaluation(module, queued.request.capability.clone())
+            vm.settle_source_text_import(module, queued.request.phase, queued.request.capability.clone())
         });
         if let Err(error) = result {
             return reject(vm, queued, error).map(|()| true);
@@ -103,6 +103,7 @@ impl DynamicHost {
             &request.specifier,
         )?;
         let module = self.module(vm, name)?;
+        if request.phase == rust_browser_javascript::ImportPhase::Source { return Ok(module); }
         vm.link_module(module, |vm, importer, specifier| {
             let referrer = vm.module_identifier(importer)?.to_string_lossy();
             self.module(vm, fixture_path(&referrer, specifier)?)
@@ -121,10 +122,11 @@ impl DynamicHost {
             ));
         }
         let source = self.sources.get(&name).ok_or_else(|| {
-            JsError::new(
-                ErrorKind::UnsupportedFeature,
-                "Dynamic import is outside the supplied pinned fixture bundle",
-            )
+            if name.rsplit('/').next().is_some_and(|name| name.contains("_FIXTURE")) {
+                JsError::new(ErrorKind::UnsupportedFeature, "Module fixture is outside the supplied bundle")
+            } else {
+                JsError::type_error(format!("Cannot load module {name}"))
+            }
         })?;
         let module = vm.parse_module(source, &name)?;
         vm.root_module(module)?;
@@ -153,10 +155,14 @@ fn fixture_path(referrer: &str, specifier: &JsString) -> Result<String, JsError>
         ));
     }
     let specifier = String::from_utf16(specifier.as_utf16()).map_err(|_| unsupported())?;
-    if !(specifier.starts_with("./") || specifier.starts_with("../"))
-        || specifier.contains(['\\', '\0'])
-    {
-        return Err(unsupported());
+    if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+        if specifier.contains(':') || specifier.starts_with('/') {
+            return Err(unsupported());
+        }
+        return Err(JsError::type_error("Unresolvable bare module specifier"));
+    }
+    if specifier.contains(['\\', '\0']) {
+        return Err(JsError::type_error("Invalid module specifier"));
     }
     let referrer = fixture_identifier(referrer);
     let (directory, _) = referrer.rsplit_once('/').ok_or_else(unsupported)?;

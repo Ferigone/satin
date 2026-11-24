@@ -2548,6 +2548,7 @@ dependencies = [
  "libc",
  "miniz_oxide 0.8.9",
  "num-bigint",
+ "num-rational",
  "num-traits",
  "regex-automata",
  "unicode-segmentation",

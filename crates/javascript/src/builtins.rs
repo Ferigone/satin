@@ -11,6 +11,7 @@ mod array_iteration;
 mod array_methods;
 mod disposable;
 pub(crate) mod math;
+mod number_format;
 mod web_legacy;
 
 pub(crate) fn install(vm: &mut Vm) {
@@ -162,9 +163,9 @@ fn install_object(vm: &mut Vm) {
                 ObjectKind::Boxed(Value::String(_)) => "String",
                 ObjectKind::Boxed(Value::Number(_)) => "Number",
                 ObjectKind::Boxed(Value::Bool(_)) => "Boolean",
-                ObjectKind::RegExp(_) => "RegExp",
+                ObjectKind::RegExp(..) => "RegExp",
                 ObjectKind::Date(_) => "Date",
-                ObjectKind::Error(_) => "Error",
+                ObjectKind::Error(..) => "Error",
                 _ => "Object",
             },
         };
@@ -388,6 +389,28 @@ fn install_object(vm: &mut Vm) {
         }
         Ok(result)
     });
+    method(vm, object.clone(), "groupBy", 2, |vm, _, args| {
+        crate::collections::group_by(vm, arg(args, 0), arg(args, 1), None)
+    });
+    method(vm, object.clone(), "fromEntries", 1, |vm, _, args| {
+        let mut iterator = vm.get_iterator(arg(args, 0))?;
+        let result = vm.new_object();
+        while let Some(entry) = vm.iterator_step(&mut iterator)? {
+            let added = (|| {
+                if entry.as_object().is_none() {
+                    return Err(JsError::type_error("Iterator entry must be an object"));
+                }
+                let key = vm.get_property(entry.clone(), "0")?;
+                let value = vm.get_property(entry, "1")?;
+                let key = vm.to_property_key(&key)?;
+                vm.define_data_property_key(result.clone(), key, value, true, true, true)
+            })();
+            if let Err(error) = added {
+                return vm.iterator_close(&mut iterator, Err(error));
+            }
+        }
+        Ok(result)
+    });
     method(vm, object.clone(), "assign", 2, |vm, _, a| {
         let target = vm.coerce_object(arg(a, 0))?;
         for source in a.iter().skip(1) {
@@ -439,7 +462,7 @@ fn install_object(vm: &mut Vm) {
             let Some(id) = value.as_object() else {
                 return Ok(Value::Bool(true));
             };
-            if vm.heap.object(id)?.extensible {
+            if vm.object_extensible(id)? {
                 return Ok(Value::Bool(false));
             }
             for key in vm.own_property_keys(value)? {
@@ -800,14 +823,24 @@ fn install_function(vm: &mut Vm) {
                 "Function.toString receiver is not callable",
             ));
         }
-        let name = vm.get_property(this, "name")?;
-        let name = vm.to_string(&name)?;
-        vm.ensure_string_allocation(name.len().saturating_add(64))?;
-        vm.consume_work(name.len().saturating_mul(4))?;
-        Ok(Value::from(format!(
-            "function {}() {{ [independent bytecode] }}",
-            name.to_string_lossy()
-        )))
+        let id = this.as_object().unwrap();
+        let name = match &vm.heap.object(id)?.kind {
+            ObjectKind::Function { code, .. } => {
+                let source = code.source.clone();
+                let chars = source.chars();
+                vm.consume_work(chars.len())?;
+                let length = chars.iter().map(|c| c.len_utf16()).sum();
+                vm.ensure_string_allocation(length)?;
+                let mut units = Vec::with_capacity(length);
+                for &ch in chars { units.extend_from_slice(ch.encode_utf16(&mut [0; 2])); }
+                return vm.finish_string(units);
+            }
+            ObjectKind::Native { initial_name, .. } => initial_name.clone(),
+            _ => JsString::default(),
+        };
+        vm.ensure_string_allocation(name.len().saturating_add(32))?;
+        vm.consume_work(name.len().saturating_add(32))?;
+        Ok(Value::from(format!("function {}() {{ [native code] }}", name.to_string_lossy())))
     });
 }
 fn install_async_function(vm: &mut Vm) {
@@ -2204,21 +2237,7 @@ fn install_number(vm: &mut Vm) {
         out.reverse();
         Ok(Value::from(String::from_utf8(out).unwrap()))
     });
-    method(vm, proto, "toFixed", 1, |vm, this, a| {
-        let n = number_this(vm, this)?;
-        let digits = integer(vm, arg(a, 0))?;
-        if !(0.0..=100.0).contains(&digits) {
-            return Err(JsError::new(
-                ErrorKind::RangeError,
-                "Invalid fraction digits",
-            ));
-        }
-        if !n.is_finite() || n.abs() >= 1e21 {
-            Ok(Value::from(crate::vm::number_string(n)))
-        } else {
-            Ok(Value::from(format!("{:.*}", digits as usize, n)))
-        }
-    });
+    number_format::install(vm, proto);
     let boolean_proto = Value::Object(vm.realm.boolean_prototype);
     let boolean = constructor(vm, "Boolean", 1, boolean_proto.clone(), |_, _, a| {
         Ok(Value::Bool(arg(a, 0).is_truthy()))
@@ -2250,7 +2269,7 @@ fn install_number(vm: &mut Vm) {
     let parse_int = method(vm, global.clone(), "parseInt", 2, |vm, _, a| {
         let text = vm.to_string(&arg(a, 0))?;
         let text = text.to_string_lossy();
-        let text = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let text = text.trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
         let (negative, mut text) = if let Some(s) = text.strip_prefix('-') {
             (true, s)
         } else {
@@ -2289,7 +2308,7 @@ fn install_number(vm: &mut Vm) {
     let parse_float = method(vm, global, "parseFloat", 1, |vm, _, a| {
         let text = vm.to_string(&arg(a, 0))?;
         let text = text.to_string_lossy();
-        let text = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let text = text.trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
         let sign = if text.starts_with(['+', '-']) { 1 } else { 0 };
         if text[sign..].starts_with("Infinity") {
             return Ok(Value::Number(if text.starts_with('-') {
@@ -2508,6 +2527,31 @@ fn install_errors(vm: &mut Vm) {
         true,
     )
     .unwrap();
+    let get_stack = vm.native("get stack", 0, false, Rc::new(|vm, this, _| {
+        let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
+        if let ObjectKind::Error(_, trace) = &vm.heap.object(id)?.kind {
+            return Ok(Value::String(trace.clone()));
+        }
+        Ok(Value::Undefined)
+    }));
+    let set_stack = vm.native("set stack", 1, false, Rc::new(|vm, this, args| {
+        let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
+        let value = arg(args, 0);
+        if id == vm.realm.error_prototype || !matches!(value, Value::String(_)) {
+            return Err(JsError::type_error("Cannot assign this error stack"));
+        }
+        let key = PropertyKey::from("stack");
+        if vm.own_descriptor_key(id, &key)?.is_some() {
+            vm.set_key(this, &key, value, true)?;
+        } else {
+            vm.define_data_property_key(this, key, value, true, true, true)?;
+        }
+        Ok(Value::Undefined)
+    }));
+    vm.define_property(error_proto.clone(), "stack".into(), Property {
+        kind: PropertyKind::Accessor { get: Some(get_stack), set: Some(set_stack) },
+        configurable: true, enumerable: false,
+    }).unwrap();
     method(vm, error_proto.clone(), "toString", 0, |vm, this, _| {
         if this.as_object().is_none() {
             return Err(JsError::type_error("Error.toString requires an object"));
@@ -2572,7 +2616,14 @@ fn install_errors(vm: &mut Vm) {
         let constructor = constructor(vm, kind.name(), 1, proto, move |vm, _, args| {
             create_error(vm, kind, args, vm.realm.error_prototypes[&kind])
         });
-        if kind != ErrorKind::Error {
+        if kind == ErrorKind::Error {
+            method(vm, constructor.clone(), "isError", 1, |vm, _, args| {
+                let is_error = if let Some(id) = arg(args, 0).as_object() {
+                    matches!(vm.heap.object(id)?.kind, ObjectKind::Error(..))
+                } else { false };
+                Ok(is_error.into())
+            });
+        } else {
             let error = vm.get_global("Error").unwrap();
             vm.set_prototype(constructor.as_object().unwrap(), error.as_object())
                 .unwrap();
@@ -2590,7 +2641,7 @@ pub(crate) fn create_error(
     args: &[Value],
     prototype: crate::ObjectId,
 ) -> Result<Value, JsError> {
-    let error = vm.allocate_constructed(ObjectKind::Error(kind), prototype)?;
+    let error = vm.allocate_error(kind, prototype)?;
     let message = arg(args, 0);
     if !message.is_undefined() {
         let message = vm.to_string(&message)?;

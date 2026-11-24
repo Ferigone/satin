@@ -39,6 +39,7 @@ mod wasm;
 pub use bigint::JsBigInt;
 pub use binary::{ArrayBufferView, ArrayBufferViewKind};
 pub use dynamic_import::DynamicImportRequest;
+pub use parser::ImportPhase;
 pub use host_properties::{HostIndexedProperties, HostNamedProperties};
 pub use iterator::IteratorRecord;
 pub use modules::{ModuleId, ModuleRequest, ModuleStatus};

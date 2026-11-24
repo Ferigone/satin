@@ -188,6 +188,9 @@ fn parse(
     args: &[Value],
     base64: bool,
 ) -> Result<Value, JsError> {
+    if let Some(array) = target {
+        vm.require_writable_buffer(array.view.buffer)?;
+    }
     let Value::String(string) = arg(args, 0) else {
         return Err(JsError::type_error("Encoded input must be a string"));
     };

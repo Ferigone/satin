@@ -23,19 +23,22 @@ impl Vm {
     }
 }
 
-fn group_by(
+pub(crate) fn group_by(
     vm: &mut Vm,
     iterable: Value,
     callback: Value,
-    prototype: ObjectId,
+    map_prototype: Option<ObjectId>,
 ) -> Result<Value, JsError> {
     if iterable.is_nullish() || !vm.is_callable(&callback) {
         return Err(JsError::type_error(
-            "Map.groupBy requires items and a callable callback",
+            "groupBy requires items and a callable callback",
         ));
     }
     let mut iterator = vm.get_iterator(iterable)?;
-    let result = vm.new_collection(Kind::Map, prototype)?;
+    let result = match map_prototype {
+        Some(prototype) => vm.new_collection(Kind::Map, prototype)?,
+        None => vm.new_object_with_prototype(Value::Null)?,
+    };
     let id = result.as_object().unwrap();
     let mut index = 0usize;
     while let Some(item) = vm.iterator_step(&mut iterator)? {
@@ -52,7 +55,19 @@ fn group_by(
             Value::Undefined,
             &[item.clone(), index.into()],
         );
-        let added = key.and_then(|key| vm.append_to_group(id, key, item));
+        let added = key.and_then(|key| {
+            if map_prototype.is_some() {
+                return vm.append_to_group(id, key, item);
+            }
+            let key = vm.to_property_key(&key)?;
+            let group = vm.get_property_key(result.clone(), key.clone())?;
+            if group.is_undefined() {
+                let group = vm.try_new_array(&[item])?;
+                vm.define_data_property_key(result.clone(), key, group, true, true, true)
+            } else {
+                vm.append_array_literal(group, Some(item))
+            }
+        });
         if let Err(error) = added {
             return vm.iterator_close(&mut iterator, Err(error));
         }
@@ -63,7 +78,7 @@ fn group_by(
 
 pub(super) fn install(vm: &mut Vm, constructor: Value, prototype: Value, intrinsic: ObjectId) {
     method(vm, constructor, "groupBy", 2, move |vm, _, args| {
-        group_by(vm, arg(args, 0), arg(args, 1), intrinsic)
+        group_by(vm, arg(args, 0), arg(args, 1), Some(intrinsic))
     });
     method(vm, prototype.clone(), "get", 1, |vm, this, args| {
         let id = receiver(vm, &this, Kind::Map)?;

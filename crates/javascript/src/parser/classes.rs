@@ -65,6 +65,7 @@ impl Parser {
 
     pub(super) fn method_function(
         &mut self,
+        start: usize,
         name: Option<JsString>,
         derived_constructor: bool,
         kind: FunctionKind,
@@ -105,7 +106,7 @@ impl Parser {
                     vec![param]
                 }
             };
-            let mut f = self.function_body(name, params, false, kind)?;
+            let mut f = self.function_body(start, name, params, false, kind)?;
             f.method = true;
             Ok(f)
         })();
@@ -122,18 +123,20 @@ impl Parser {
         ) = old;
         result
     }
-    pub(super) fn class(&mut self, declaration: bool) -> Result<Class, JsError> {
+    pub(super) fn class(&mut self, start: usize, declaration: bool) -> Result<Class, JsError> {
         if self.depth >= MAX_PARSER_DEPTH {
             return Err(self.error("Class nesting limit exceeded"));
         }
         self.depth += 1;
-        let result = self.class_inner(declaration);
+        let legacy_before = self.legacy_literals;
+        let result = self.class_inner(start, declaration);
         self.depth -= 1;
         let class = result?;
+        if self.legacy_literals != legacy_before { return Err(self.error("Legacy literal in class definition")); }
         self.check_ast(Ast::Class(&class))?;
         Ok(class)
     }
-    fn class_inner(&mut self, declaration: bool) -> Result<Class, JsError> {
+    fn class_inner(&mut self, start: usize, declaration: bool) -> Result<Class, JsError> {
         let name = if !self.at("{") && !self.at("extends") {
             Some(self.name()?)
         } else if declaration {
@@ -208,6 +211,7 @@ impl Parser {
                     continue;
                 }
             }
+            let method_start = self.current().start;
             let is_async = self.async_method_ahead();
             if is_async {
                 self.advance(1);
@@ -256,6 +260,7 @@ impl Parser {
                     return Err(self.error("Static method cannot be named prototype"));
                 }
                 let function = self.method_function(
+                    method_start,
                     None,
                     is_constructor && heritage.is_some(),
                     function_kind,
@@ -330,6 +335,7 @@ impl Parser {
             }
         }
         Ok(Class {
+            source: self.lexer.span(start, self.last_end),
             name,
             heritage,
             elements,

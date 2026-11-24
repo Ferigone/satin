@@ -206,6 +206,7 @@ impl fmt::Display for JsString {
 /// Keep externally held object values rooted in that heap.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ObjectId {
+    pub(crate) is_html_dda: bool,
     pub(crate) heap_id: u64,
     pub(crate) index: u32,
     pub(crate) generation: u32,
@@ -331,7 +332,8 @@ impl Value {
             Self::Number(n) => *n != 0.0 && !n.is_nan(),
             Self::BigInt(value) => !value.is_zero(),
             Self::String(s) => !s.is_empty(),
-            Self::Object(_) | Self::Symbol(_) => true,
+            Self::Object(id) => !id.is_html_dda,
+            Self::Symbol(_) => true,
         }
     }
 }

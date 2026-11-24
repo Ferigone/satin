@@ -70,15 +70,38 @@ fn regex_literal_syntax_is_checked_even_in_dead_code() {
         assert!(error.line.is_some(), "{source}: {error}");
     }
     vm.check_syntax(r"/\p{Alphabetic}/u").unwrap();
-    for source in [r"/[a&&b]/v"] {
+    vm.check_syntax(r"/[a&&b]/v").unwrap();
+    for source in [
+        r"/[ab&&c]/v",
+        r"/[a&&]/v",
+        r"/[^\q{|x}]/v",
+        r"/[a--b&&c]/v",
+        r"/[a--]/v",
+    ] {
         assert_eq!(
             vm.check_syntax(source).unwrap_err().kind,
-            ErrorKind::UnsupportedFeature
+            ErrorKind::SyntaxError,
+            "{source}"
         );
     }
     assert_eq!(
         vm.eval("new RegExp('a','gg')").unwrap_err().kind,
         ErrorKind::SyntaxError
+    );
+}
+
+#[test]
+fn unicode_sets_use_longest_strings_and_backtrack_in_both_directions() {
+    expect(
+        r#"
+        const match = /[\q{a|ab|abc}]/v.exec("abc");
+        [match[0], /^[\q{a|ab}]b$/v.test("ab"),
+         /(?<=[\q{xy|y}])z/v.test("xyz"),
+         /^[\p{RGI_Emoji}&&\q{🇵🇱|no}]$/v.test("🇵🇱"),
+         /^[\P{Lowercase_Letter}]$/iv.test("A"),
+         /^[\q{|abc}]x$/v.test("x")].join("|")
+    "#,
+        "abc|true|true|true|false|true".into(),
     );
 }
 
@@ -427,6 +450,35 @@ fn large_regexp_does_not_bypass_custom_exec_utf16_or_capture_replacements() {
         .unwrap(),
         "true:1".into()
     );
+}
+
+#[test]
+fn legacy_regexp_statics_observe_bulk_matches_and_subclass_invalidation() {
+    let mut vm = Vm::with_limits(VmLimits {
+        buffer_units_per_instruction: 256,
+        ..VmLimits::default()
+    });
+    let text = format!("{}axbcy", ".".repeat(4096));
+    vm.set_global("text", text.as_str().into()).unwrap();
+    let result = vm
+        .eval(
+            r#"
+        /(a)x/.test(text);
+        let first = RegExp.lastMatch + RegExp.$1;
+        text.replace(/(a|b)(x|c)/g, "!");
+        RegExp.input = { toString() { return "new"; } };
+        let parts = [first, RegExp.$_, RegExp.lastMatch, RegExp.$1, RegExp.lastParen,
+                     RegExp.leftContext.slice(-2), RegExp.rightContext];
+        class Derived extends RegExp {}
+        new Derived("z").test("z");
+        try { RegExp.$1; } catch(e) { parts.push(e instanceof TypeError); }
+        RegExp.input = "restored";
+        parts.push(RegExp.$_);
+        parts.join("|")
+    "#,
+        )
+        .unwrap();
+    assert_eq!(result, "axa|new|bc|b|c|ax|y|true|restored".into());
 }
 
 #[test]

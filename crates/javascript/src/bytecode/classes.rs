@@ -2,6 +2,7 @@ use super::*;
 use crate::parser::{Class, ClassElement, ClassKey, MethodKind};
 #[derive(Clone, Debug)]
 pub(crate) struct ClassCode {
+    pub source: Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub heritage: Option<Rc<Chunk>>,
     pub elements: Vec<ClassElementCode>,
@@ -44,7 +45,11 @@ pub(super) fn compile(class: &Class) -> Result<Rc<ClassCode>, JsError> {
                 constructor,
             } => ClassElementCode::Method {
                 key: compile_key(key)?,
-                code: compile_function(function, true)?,
+                code: {
+                    let mut compiled = compile_function(function, true)?;
+                    if *constructor { Rc::get_mut(&mut compiled).unwrap().source = class.source.clone(); }
+                    compiled
+                },
                 kind: *kind,
                 is_static: *is_static,
                 constructor: *constructor,
@@ -65,6 +70,7 @@ pub(super) fn compile(class: &Class) -> Result<Rc<ClassCode>, JsError> {
         });
     }
     Ok(Rc::new(ClassCode {
+        source: class.source.clone(),
         name: class.name.clone(),
         heritage: class
             .heritage

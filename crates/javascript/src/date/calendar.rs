@@ -12,7 +12,7 @@ pub(super) const MONTHS: [&str; 12] = [
 pub(super) const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy)]
-pub(super) struct CivilTime {
+pub(crate) struct CivilTime {
     pub year: i64,
     pub month: u32,
     pub day: u32,
@@ -102,7 +102,7 @@ pub(super) fn make_full_year(year: f64) -> f64 {
     }
 }
 
-pub(super) fn make_date(fields: [f64; 7]) -> f64 {
+pub(crate) fn make_date(fields: [f64; 7]) -> f64 {
     let [year, month, day, hour, minute, second, millisecond] = fields;
     if !fields.into_iter().all(f64::is_finite) {
         return f64::NAN;

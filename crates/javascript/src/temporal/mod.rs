@@ -1,6 +1,8 @@
 //! Temporal's calendar and time calculations run as self-hosted standard-library
 //! code in Satin. Each realm owns its constructors, brands and cached zone data.
 mod calendar;
+mod arithmetic;
+mod duration;
 pub(crate) mod slots;
 mod timezone;
 
@@ -204,6 +206,14 @@ fn build(vm: &mut Vm, id: ObjectId) -> Result<Value, JsError> {
         inputs.push(vm.new_native_function("", timezone::resolve));
         inputs.push(vm.new_native_function("", timezone::open));
         inputs.extend(slots::intrinsics(vm));
+        inputs.push(vm.new_native_function("", arithmetic::epoch_days));
+        inputs.push(vm.new_native_function("", arithmetic::iso_date));
+        inputs.push(vm.new_native_function("", arithmetic::ratio));
+        inputs.push(vm.new_native_function("", calendar::add));
+        inputs.push(vm.new_native_function("", calendar::difference));
+        inputs.push(vm.new_native_function("", duration::from_args));
+        inputs.push(vm.new_native_function("", duration::from_bag));
+        inputs.push(vm.new_native_function("", duration::from_fields));
         let result = vm.call(factory, Value::Undefined, &inputs)?;
         Ok((
             vm.get_property(result.clone(), "0")?,

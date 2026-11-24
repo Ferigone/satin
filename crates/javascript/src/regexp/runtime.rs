@@ -36,6 +36,7 @@ pub(crate) fn install(vm: &mut Vm) {
         "get [Symbol.species]",
         |_, this, _| Ok(this),
     );
+    super::legacy::install(vm, &regexp);
     method(vm, regexp, "escape", 1, |vm, _, args| {
         escape(vm, arg(args, 0))
     });
@@ -107,9 +108,12 @@ pub(crate) fn install(vm: &mut Vm) {
             && let Some(program) = plain_exec_program(vm, &this)
             && !program.flags.has(Flags::GLOBAL | Flags::STICKY)
             && let Some(search) = super::bulk::Search::new(vm, &program)?
-            && let Some(matched) = search.is_match(vm, input.as_utf16())?
+            && let Some(matched) = search.first_match(vm, input.as_utf16())?
         {
-            return Ok(Value::Bool(matched));
+            if let Some(span) = matched {
+                super::legacy::record_bulk(vm, &this, &input, &program, span)?;
+            }
+            return Ok(Value::Bool(matched.is_some()));
         }
         Ok(Value::Bool(exec(vm, this, input)? != Value::Null))
     });
@@ -127,7 +131,11 @@ pub(crate) fn install(vm: &mut Vm) {
         out.complete(vm)
     });
     method(vm, prototype, "compile", 2, |vm, this, args| {
-        require_program(vm, &this)?;
+        let origin = super::legacy::origin(vm, &this)
+            .filter(|o| o.enabled && o.realm == vm.realm.module_realm)
+            .ok_or_else(|| {
+                JsError::type_error("RegExp.compile requires a local non-subclassed RegExp")
+            })?;
         let pattern = arg(args, 0);
         let flags = arg(args, 1);
         let program = if let Some(program) = native_program(vm, &pattern) {
@@ -141,7 +149,7 @@ pub(crate) fn install(vm: &mut Vm) {
             compile_args(vm, pattern, flags)?
         };
         vm.reserve_allocation(program.retained_bytes())?;
-        vm.heap.object_mut(this.as_object().unwrap())?.kind = ObjectKind::RegExp(program);
+        vm.heap.object_mut(this.as_object().unwrap())?.kind = ObjectKind::RegExp(program, origin);
         vm.set_property(this.clone(), "lastIndex", Value::Number(0.0))?;
         Ok(this)
     });
@@ -182,7 +190,7 @@ pub(super) fn require_object(receiver: &Value) -> Result<(), JsError> {
 }
 
 fn native_program(vm: &Vm, receiver: &Value) -> Option<Rc<Program>> {
-    if let ObjectKind::RegExp(program) = &vm.heap.object(receiver.as_object()?).ok()?.kind {
+    if let ObjectKind::RegExp(program, _) = &vm.heap.object(receiver.as_object()?).ok()?.kind {
         Some(program.clone())
     } else {
         None
@@ -277,6 +285,7 @@ fn create_from_args(
     } else {
         pattern
     };
+    let enabled = new_target.as_ref().is_none_or(|t| t == &intrinsic);
     let prototype = vm.prototype_from_constructor(
         new_target.unwrap_or(intrinsic),
         vm.realm.regexp_prototype.unwrap(),
@@ -285,7 +294,7 @@ fn create_from_args(
         Some(program) if flags.is_undefined() => program,
         _ => compile_args(vm, source, flags)?,
     };
-    allocate(vm, program, prototype)
+    allocate(vm, program, prototype, enabled)
 }
 
 fn compile_args(vm: &mut Vm, source: Value, flags: Value) -> Result<Rc<Program>, JsError> {
@@ -310,7 +319,7 @@ fn compile_args(vm: &mut Vm, source: Value, flags: Value) -> Result<Rc<Program>,
 }
 
 pub(crate) fn literal(vm: &mut Vm, program: Rc<Program>) -> Result<Value, JsError> {
-    allocate(vm, program, vm.realm.regexp_prototype.unwrap())
+    allocate(vm, program, vm.realm.regexp_prototype.unwrap(), true)
 }
 
 pub(super) fn create(vm: &mut Vm, pattern: Value, flags: Value) -> Result<Value, JsError> {
@@ -322,9 +331,14 @@ fn allocate(
     vm: &mut Vm,
     program: Rc<Program>,
     prototype: crate::ObjectId,
+    enabled: bool,
 ) -> Result<Value, JsError> {
     vm.ensure_allocation(program.retained_bytes() + 1024)?;
-    let object = vm.allocate_constructed(ObjectKind::RegExp(program), prototype)?;
+    let origin = super::legacy::Origin {
+        realm: vm.realm.module_realm,
+        enabled,
+    };
+    let object = vm.allocate_constructed(ObjectKind::RegExp(program, origin), prototype)?;
     vm.define_data_property(
         object.clone(),
         "lastIndex",
@@ -377,7 +391,9 @@ fn builtin_exec(vm: &mut Vm, regexp: Value, input: JsString) -> Result<Value, Js
         set_last_index(vm, &regexp, matched.as_ref().map_or(0, |m| m.whole.1))?;
     }
     if let Some(matched) = matched {
-        match_value(vm, input, &program, matched)
+        let result = match_value(vm, input.clone(), &program, &matched)?;
+        super::legacy::record(vm, &regexp, &input, &matched)?;
+        Ok(result)
     } else {
         Ok(Value::Null)
     }
@@ -387,7 +403,7 @@ fn match_value(
     vm: &mut Vm,
     input: JsString,
     program: &Program,
-    m: program::Match,
+    m: &program::Match,
 ) -> Result<Value, JsError> {
     let count = 1 + m.captures.len();
     vm.ensure_allocation(count * size_of::<Value>() * 2)?;
@@ -406,7 +422,7 @@ fn match_value(
         });
     }
     let result = vm.try_new_array(&values)?;
-    let groups = groups_object(vm, program, &m, &values)?;
+    let groups = groups_object(vm, program, m, &values)?;
     let data = |vm: &mut Vm, key, value| {
         vm.define_data_property(result.clone(), key, value, true, true, true)
     };
@@ -424,7 +440,7 @@ fn match_value(
             });
         }
         let indices = vm.try_new_array(&values)?;
-        let groups = groups_object(vm, program, &m, &values)?;
+        let groups = groups_object(vm, program, m, &values)?;
         vm.define_data_property(indices.clone(), "groups", groups, true, true, true)?;
         data(vm, "indices", indices)?;
     }

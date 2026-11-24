@@ -1,6 +1,6 @@
 //! ECMAScript Date, with an internal UTC millisecond value and host-local
 //! timezone rules at the civil-time boundary.
-mod calendar;
+pub(crate) mod calendar;
 mod local;
 mod parse;
 

@@ -209,6 +209,9 @@ fn install_atomics(vm: &mut Vm) {
     ] {
         method(vm, object.clone(), name, len, move |vm, _, args| {
             let a = atomic_view(vm, &arg(args, 0), false)?;
+            if !matches!(op, Operation::Load) {
+                vm.require_writable_buffer(a.view.buffer)?;
+            }
             let i = position(vm, a, &arg(args, 1))?;
             let mut operand = 0u64;
             let mut replacement = 0u64;

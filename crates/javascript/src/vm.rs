@@ -157,7 +157,8 @@ pub struct Vm {
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
-    inspected_calls: Option<Vec<Option<JsString>>>,
+    active_calls: Vec<Option<JsString>>,
+    inspection_enabled: bool,
     pub(crate) execution_depth: usize,
     string_storage: BTreeMap<usize, usize>,
     string_bytes: usize,
@@ -274,7 +275,8 @@ impl Vm {
             task_deadline: None,
             active: 0,
             call_depth: 0,
-            inspected_calls: None,
+            active_calls: Vec::new(),
+            inspection_enabled: false,
             execution_depth: 0,
             string_storage: BTreeMap::new(),
             string_bytes: 0,
@@ -742,6 +744,17 @@ impl Vm {
     {
         self.native(name, 0, false, Rc::new(callback))
     }
+    /// Creates a callable host exotic with the Annex B [[IsHTMLDDA]] slot.
+    /// Mark the handle before it is exposed to script or retained by the host.
+    pub fn new_html_dda<F>(&mut self, callback: F) -> Value
+    where
+        F: Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError> + 'static,
+    {
+        let mut id = self.new_native_function("", callback).as_object().unwrap();
+        id.is_html_dda = true;
+        Value::Object(id)
+    }
+
     /// A native call/construct pair. Construction passes `true`, an undefined
     /// receiver, and requires an object result; subclass/newTarget is not exposed.
     pub fn new_native_constructor<F>(&mut self, name: &str, callback: F) -> Value
@@ -805,8 +818,10 @@ impl Vm {
         } else {
             None
         };
+        let initial_name: JsString = name.into();
         let mut object = Object::new(
             ObjectKind::Native {
+                initial_name: initial_name.clone(),
                 callback,
                 construct,
                 realm_environment: self.realm.global_env,
@@ -828,7 +843,7 @@ impl Vm {
             "name".into(),
             Property {
                 kind: PropertyKind::Data {
-                    value: Value::from(name),
+                    value: Value::String(initial_name),
                     writable: false,
                 },
                 enumerable: false,
@@ -971,7 +986,8 @@ impl Vm {
                 .values()
                 .filter_map(|(_, value)| value.as_object()),
         );
-        let collected = self.heap.collect(roots);
+        let (collected, cleanup) = self.heap.collect(roots);
+        self.schedule_registry_cleanup(cleanup);
         self.inactive_realms
             .retain(|realm, _| self.heap.realm_core(*realm).is_some());
         self.bigint_storage.reclaim();
@@ -1055,6 +1071,7 @@ impl Vm {
                             }
                         }
                         ObjectKind::Boxed(v) => value(v, &mut strings),
+                        ObjectKind::Error(_, trace) => strings.push(trace.clone()),
                         ObjectKind::Promise(data) => data.strings(&mut strings),
                         ObjectKind::PromiseFunction(function, _) => function.strings(&mut strings),
                         ObjectKind::Iterator(data) => data.strings(&mut strings),
@@ -1063,6 +1080,7 @@ impl Vm {
                         ) => strings.push(input.clone()),
                         ObjectKind::Collection(data) => data.strings(&mut strings),
                         ObjectKind::WeakCollection(data) => data.strings(&mut strings),
+                        ObjectKind::FinalizationRegistry(registry) => registry.strings(&mut strings),
                         ObjectKind::PromiseAggregate(data) => data.strings(&mut strings),
                         ObjectKind::Generator(state) => state.visit(|v| value(v, &mut strings)),
                         ObjectKind::AsyncGenerator(state) => {
@@ -1075,6 +1093,7 @@ impl Vm {
                             data.strings(&mut strings);
                             chunks.push(data.code.body.clone());
                         }
+                        ObjectKind::Native {initial_name, ..} => strings.push(initial_name.clone()),
                         ObjectKind::ModuleNamespace(data) => {
                             for (key, target) in &data.exports {
                                 strings.push(key.clone());
@@ -1379,7 +1398,8 @@ impl Vm {
             if !self.typed_element_exists(id, index)? {
                 return Ok(None);
             }
-            return Ok(Some(Property::data(self.typed_index_get(id, index)?)));
+            let mutable = !self.typed_buffer_immutable(id)?;
+            return Ok(Some(Property {kind:PropertyKind::Data { value:self.typed_index_get(id, index)?, writable:mutable }, configurable:mutable, enumerable:true}));
         }
         if key == &JsString::from("length") {
             match &o.kind {
@@ -1471,6 +1491,9 @@ impl Vm {
             if matches!(self.heap.object(owner)?.kind, ObjectKind::TypedArray(_))
                 && let Some(index) = crate::binary::numeric_index(key)
             {
+                if self.typed_buffer_immutable(owner)? {
+                    return if strict { Err(JsError::type_error("ArrayBuffer is immutable")) } else { Ok(()) };
+                }
                 if owner == id {
                     return self.typed_index_set(id, index, &value);
                 }
@@ -2275,6 +2298,66 @@ impl Vm {
             }
         }
     }
+    fn annex_variable_environment(&mut self, mut env: EnvId, name: &JsString) -> Result<Option<EnvId>, JsError> {
+        loop {
+            self.tick()?;
+            let record = self.heap.environment(env);
+            if record.bindings.get(name).is_some_and(|binding| binding.lexical) {
+                return Ok(None);
+            }
+            match record.kind {
+                EnvKind::Global { binding_object } => {
+                    if self.own_descriptor(binding_object, name)?.is_none() && !self.object_extensible(binding_object)? {
+                        return Ok(None);
+                    }
+                    return Ok(Some(env));
+                }
+                EnvKind::Function => return Ok(Some(env)),
+                EnvKind::Module => return Ok(None),
+                _ => env = record.parent.unwrap(),
+            }
+        }
+    }
+
+    fn prepare_annex_function(&mut self, env: EnvId, name: &JsString) -> Result<(), JsError> {
+        let Some(target) = self.annex_variable_environment(env, name)? else { return Ok(()) };
+        if let EnvKind::Global { binding_object } = self.heap.environment(target).kind {
+            if self.own_descriptor(binding_object, name)?.is_none() {
+                let deletable = self.heap.environment(env).kind == EnvKind::SloppyEval;
+                self.define_data_property_key(Value::Object(binding_object), name.clone().into(), Value::Undefined, true, true, deletable)?;
+            }
+        } else if !self.heap.environment(target).bindings.contains_key(name) {
+            self.reserve_binding(name)?;
+            self.heap.environment_mut(target).bindings.insert(name.clone(), Binding {
+                value: Value::Undefined, mutable: true, initialized: true, lexical: false, strict_immutable: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn copy_annex_function(&mut self, env: EnvId, name: &JsString) -> Result<(), JsError> {
+        // A with object can shadow the name. The declaration copies the value
+        // directly between its lexical and variable environment records.
+        let mut boundary = env;
+        loop {
+            self.tick()?;
+            let record = self.heap.environment(boundary);
+            if matches!(record.kind, EnvKind::SloppyEval | EnvKind::Global { .. } | EnvKind::Function | EnvKind::Module) {
+                break;
+            }
+            boundary = record.parent.unwrap();
+        }
+        if let Some(target) = self.annex_variable_environment(boundary, name)? {
+            let reference = match self.heap.environment(target).kind {
+                EnvKind::Global { binding_object } => Reference::Global(binding_object, name.clone()),
+                _ => Reference::Binding(target, name.clone()),
+            };
+            let value = self.read_reference(Reference::Binding(env, name.clone()))?;
+            self.write_reference(reference, value, false)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare(&mut self, scope: &ScopePlan, env: EnvId) -> Result<(), JsError> {
         let declarations = self.declaration_environment(env);
         for (name, _) in &scope.lexical {
@@ -2307,7 +2390,7 @@ impl Vm {
                 let e = self.heap.environment(target);
                 if !matches!(
                     e.kind,
-                    EnvKind::Block | EnvKind::Inspector | EnvKind::With { .. }
+                    EnvKind::Block | EnvKind::SloppyEval | EnvKind::Inspector | EnvKind::With { .. }
                 ) {
                     break;
                 }
@@ -2363,6 +2446,9 @@ impl Vm {
                         strict_immutable: true,
                     });
             }
+        }
+        for name in &scope.annex_vars {
+            self.prepare_annex_function(declarations, name)?;
         }
         for (name, mutable) in &scope.lexical {
             self.reserve_binding(name)?;
@@ -2617,9 +2703,7 @@ impl Vm {
             callback(self, this, args)
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
-            if let Some(stack) = &mut self.inspected_calls {
-                stack.push(code.name.clone());
-            }
+            self.active_calls.push(code.name.clone());
             let mut result = self.with_referrer(referrer, |vm| {
                 let invocation = Invocation {
                     function,
@@ -2646,14 +2730,12 @@ impl Vm {
                         )),
                     })
             });
-            if self.inspected_calls.is_some() {
-                if let Err(error) = &mut result
-                    && error.inspected_calls.is_none()
-                {
-                    error.inspected_calls = self.inspect_call_stack();
-                }
-                self.inspected_calls.as_mut().unwrap().pop();
+            if let Err(error) = &mut result
+                && error.inspected_calls.is_none()
+            {
+                error.inspected_calls = self.inspect_call_stack();
             }
+            self.active_calls.pop();
             result
         };
         self.call_depth -= 1;
@@ -2948,7 +3030,7 @@ impl Vm {
         let kind = if chunk.strict {
             EnvKind::Function
         } else {
-            EnvKind::Block
+            EnvKind::SloppyEval
         };
         let scope = self
             .heap
@@ -3566,7 +3648,7 @@ impl Vm {
         let diagnostic = match &value {
             Value::Object(id) => {
                 let object = self.heap.object(*id)?;
-                if let ObjectKind::Error(error_kind) = object.kind {
+                if let ObjectKind::Error(error_kind, _) = object.kind {
                     kind = error_kind;
                 }
                 object
@@ -3637,6 +3719,7 @@ impl Vm {
     ) -> Result<Completion, JsError> {
         let mut result = None;
         match op {
+            Op::CopyAnnexFunction(name) => self.copy_annex_function(env, name)?,
             Op::Evaluate(expression) => result = Some(self.expression_value(expression, env)?),
             Op::Initialize(kind, key, expression) => {
                 let value = if let Some(e) = expression {
@@ -3901,10 +3984,7 @@ impl Vm {
             .get(&error.kind)
             .copied()
             .unwrap_or(self.realm.error_prototype);
-        let value = Value::Object(self.heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Error(error.kind),
-            Some(prototype),
-        ))));
+        let value = self.allocate_error(error.kind, prototype)?;
         self.define_data_property(
             value.clone(),
             "message",
@@ -3924,6 +4004,7 @@ impl Vm {
             Value::BigInt(_) => "bigint",
             Value::String(_) => "string",
             Value::Symbol(_) => "symbol",
+            Value::Object(id) if id.is_html_dda => "undefined",
             Value::Object(_) => {
                 if self.is_callable(value) {
                     "function"
@@ -4089,7 +4170,9 @@ impl Vm {
             }
             return Ok(a == b);
         }
-        if a.is_nullish() && b.is_nullish() {
+        if (a.is_nullish() && (b.is_nullish() || b.as_object().is_some_and(|id| id.is_html_dda)))
+            || (b.is_nullish() && a.as_object().is_some_and(|id| id.is_html_dda))
+        {
             return Ok(true);
         }
         match (&a, &b) {
@@ -4187,7 +4270,7 @@ pub(crate) fn number_string(n: f64) -> String {
 }
 fn parse_number(s: &JsString) -> f64 {
     let s = s.to_string_lossy();
-    let s = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let s = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     if s.is_empty() {
         return 0.0;
     }
@@ -4219,7 +4302,7 @@ fn parse_number(s: &JsString) -> f64 {
             return n;
         }
     }
-    if matches!(s, "inf" | "+inf" | "-inf") {
+    if s.bytes().any(|b| matches!(b, b'i' | b'I')) {
         f64::NAN
     } else {
         s.parse().unwrap_or(f64::NAN)

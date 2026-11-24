@@ -17,18 +17,19 @@ fn string(value: &JsString, limit: usize) -> String {
 
 impl Vm {
     /// Enables bounded snapshots of currently entered interpreted function calls.
-    /// Standalone VMs that do not install inspection skip all tracking.
     pub fn enable_inspection(&mut self) {
-        self.inspected_calls.get_or_insert_with(Vec::new);
+        self.inspection_enabled = true;
     }
 
     pub fn inspect_call_stack(&self) -> Option<std::rc::Rc<Vec<String>>> {
-        let calls = self.inspected_calls.as_ref()?;
-        if calls.is_empty() {
+        if !self.inspection_enabled || self.active_calls.is_empty() {
             return None;
         }
-        let names = calls
-            .iter()
+        Some(std::rc::Rc::new(self.stack_names().collect()))
+    }
+
+    fn stack_names(&self) -> impl Iterator<Item = String> + '_ {
+        self.active_calls.iter()
             .rev()
             .take(10)
             .map(|name| {
@@ -36,8 +37,16 @@ impl Vm {
                     .filter(|s| !s.is_empty())
                     .map_or_else(|| "(anonymous)".to_owned(), |s| string(s, 80))
             })
-            .collect();
-        Some(std::rc::Rc::new(names))
+    }
+
+    pub(crate) fn allocate_error(&mut self, kind: crate::ErrorKind, prototype: crate::ObjectId) -> Result<Value, JsError> {
+        let mut trace = kind.name().to_owned();
+        for name in self.stack_names() {
+            trace.push_str("\n    at ");
+            trace.push_str(&name);
+        }
+        let trace = self.account_value(Value::from(trace))?;
+        self.allocate_constructed(ObjectKind::Error(kind, trace.as_string().unwrap().clone()), prototype)
     }
 
     /// Evaluate a developer command with a read-only, command-local DOM selection.
@@ -117,9 +126,9 @@ impl Vm {
                     | ObjectKind::Native { .. }
                     | ObjectKind::Bound { .. } => "Function".into(),
                     ObjectKind::Promise(_) => "Promise".into(),
-                    ObjectKind::RegExp(_) => "RegExp".into(),
+                    ObjectKind::RegExp(..) => "RegExp".into(),
                     ObjectKind::Date(_) => "Date".into(),
-                    ObjectKind::Error(kind) => kind.name().into(),
+                    ObjectKind::Error(kind, _) => kind.name().into(),
                     ObjectKind::ArrayBuffer(_) => "ArrayBuffer".into(),
                     ObjectKind::TypedArray(_) => "TypedArray".into(),
                     _ => "Object".into(),

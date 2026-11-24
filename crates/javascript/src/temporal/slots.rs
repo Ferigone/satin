@@ -38,7 +38,7 @@ struct Instance {
     owner: Rc<()>,
 }
 
-pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 2] {
+pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
     let owner = Rc::new(());
     let caller = owner.clone();
     let read = vm.new_native_function("", move |vm, _, args| {
@@ -75,7 +75,69 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 2] {
         )?;
         Ok(obj.clone())
     });
-    [read, write]
+    // A getter retains its two private algorithms in GC-visible host slots.
+    let make_field_getter = vm.new_native_function("", |vm, _, args| {
+        let kind = args.first().and_then(Kind::parse)
+            .ok_or_else(|| JsError::type_error("Invalid Temporal accessor"))?;
+        let field = args[1].as_string().unwrap().to_string_lossy();
+        let read_slots = args[2].clone();
+        let calculate = args[3].clone();
+        let get_slots = read_slots.clone();
+        let compute = calculate.clone();
+        let getter = vm.new_native_function(&format!("get {field}"), move |vm, receiver, _| {
+            if !vm.host_data::<Instance>(&receiver).is_some_and(|data| data.kind == kind) {
+                return Err(JsError::type_error("Invalid Temporal receiver"));
+            }
+            let slots = vm.host_slot(&receiver, 0).expect("branded Temporal slots");
+            if field == "calendarId" {
+                return match vm.get_property(slots, "calendar")? {
+                    Value::Undefined => Ok("iso8601".into()),
+                    Value::Number(_) => Ok("gregory".into()),
+                    cal => vm.get_property(cal, "id"),
+                };
+            }
+            let civil = if kind == Kind::ZonedDateTime {
+                // Zoned dates need local civil fields for all field accessors.
+                // The zone and epoch are immutable, including across realms.
+                if let Some(fields) = vm.host_slot(&receiver, 2) {
+                    fields
+                } else {
+                    let fields = vm.call(get_slots.clone(), Value::Undefined, std::slice::from_ref(&receiver))?;
+                    vm.set_host_slot(receiver.clone(), 2, fields.clone())?;
+                    fields
+                }
+            } else {
+                slots
+            };
+            if kind == Kind::Duration || matches!(field.as_str(), "hour" | "minute" |
+                "second" | "millisecond" | "microsecond" | "nanosecond") {
+                return vm.get_property(civil, &field);
+            }
+            if matches!(field.as_str(), "year" | "month" | "day" | "monthCode" | "era" | "eraYear") {
+                let calendar = vm.get_property(civil.clone(), "calendar")?;
+                if !matches!(calendar, Value::Object(_)) {
+                    return match field.as_str() {
+                        "monthCode" => {
+                            let month = vm.get_property(civil, "month")?.as_number().unwrap();
+                            Ok(format!("M{:02}", month as u8).into())
+                        }
+                        "era" | "eraYear" if calendar.is_undefined() => Ok(Value::Undefined),
+                        "era" | "eraYear" => {
+                            let year = vm.get_property(civil, "year")?.as_number().unwrap();
+                            if field == "era" { Ok(if year < 1.0 { "bce" } else { "ce" }.into()) }
+                            else { Ok(Value::Number(if year < 1.0 { 1.0 - year } else { year })) }
+                        }
+                        _ => vm.get_property(civil, &field),
+                    };
+                }
+            }
+            vm.call(compute.clone(), Value::Undefined, &[civil])
+        });
+        vm.set_host_slot(getter.clone(), 0, read_slots)?;
+        vm.set_host_slot(getter.clone(), 1, calculate)?;
+        Ok(getter)
+    });
+    [read, write, make_field_getter]
 }
 
 pub(crate) fn intl_fields(

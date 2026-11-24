@@ -1,3 +1,4 @@
+pub(crate) mod annex;
 mod classes;
 mod literals;
 pub(crate) mod modules;
@@ -16,7 +17,7 @@ const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum ImportPhase {
+pub enum ImportPhase {
     Evaluation,
     Defer,
     Source,
@@ -58,6 +59,7 @@ impl FunctionKind {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
+    pub source: std::rc::Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
@@ -65,10 +67,12 @@ pub(crate) struct Function {
     pub kind: FunctionKind,
     pub strict: bool,
     pub self_binding: bool,
+    pub annex_binding: bool,
     pub method: bool,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Class {
+    pub source: std::rc::Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub heritage: Option<Box<Expr>>,
     pub elements: Vec<ClassElement>,
@@ -205,6 +209,7 @@ pub(crate) type LabelId = std::num::NonZeroU32;
 #[derive(Clone, Debug)]
 pub(crate) enum Stmt {
     Empty,
+    EscapedStringStatement(JsString),
     Expression(Expr),
     Block(Vec<Stmt>),
     Variable(VarKind, Vec<(Pattern, Option<Expr>)>),
@@ -242,17 +247,20 @@ pub(crate) struct EvalContext {
 pub(crate) fn parse(source: &str) -> Result<Vec<Stmt>, JsError> {
     // Function constructor callers reserve the combined wrapped sources before
     // parsing their separate parameter and body goals.
-    parse_script(source, EvalContext::default(), usize::MAX)
+    parse_script(source, EvalContext::default(), usize::MAX, false)
 }
 pub(crate) fn parse_script(
     source: &str,
     context: EvalContext,
     compilation_bytes: usize,
+    inherited_strict: bool,
 ) -> Result<Vec<Stmt>, JsError> {
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
-        lexer: Lexer::new(source, compilation_bytes),
+        lexer: Lexer::new(source, compilation_bytes, true),
         function_depth: 0,
+        legacy_literals: 0,
+        last_end: 0,
         loop_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
@@ -277,11 +285,16 @@ pub(crate) fn parse_script(
     while !p.is_eof() {
         body.push(p.statement()?);
     }
+    if p.legacy_literals != 0 && (inherited_strict || has_strict_directive(&body)) {
+        return Err(p.error("Legacy literal in strict code"));
+    }
+    annex::mark(&mut body, []);
     Ok(body)
 }
 pub(crate) fn has_strict_directive(body: &[Stmt]) -> bool {
     for stmt in body {
         match stmt {
+            Stmt::EscapedStringStatement(_) => continue,
             Stmt::Expression(Expr::Literal(Value::String(s))) => {
                 if s == &JsString::from("use strict") {
                     return true;
@@ -323,6 +336,8 @@ struct Parser {
     tokens: VecDeque<Token>,
     lexer: Lexer,
     function_depth: usize,
+    legacy_literals: usize,
+    last_end: usize,
     loop_depth: usize,
     switch_depth: usize,
     labels: Vec<ActiveLabel>,
@@ -364,7 +379,8 @@ impl Parser {
     }
 
     fn advance(&mut self, count: usize) {
-        drop(self.tokens.drain(..count));
+        if count != 0 { self.last_end = self.tokens[count - 1].end; }
+        self.legacy_literals += self.tokens.drain(..count).filter(|t| t.legacy_literal).count();
         self.fill();
     }
 
@@ -498,6 +514,7 @@ impl Parser {
         Ok(statement)
     }
     fn statement_inner(&mut self) -> Result<Stmt, JsError> {
+        let start = self.current().start;
         if self.label_ahead() {
             return self.labelled_statement();
         }
@@ -524,15 +541,15 @@ impl Parser {
             return Ok(Stmt::Variable(VarKind::Const, d));
         }
         if self.eat("class") {
-            let class = self.class(true)?;
+            let class = self.class(start, true)?;
             return Ok(Stmt::Class(class.name.clone().unwrap(), class));
         }
         if self.async_function_ahead() {
             self.advance(2);
-            return self.function(true, true).map(Stmt::Function);
+            return self.function(start, true, true).map(Stmt::Function);
         }
         if self.eat("function") {
-            return self.function(false, true).map(Stmt::Function);
+            return self.function(start, false, true).map(Stmt::Function);
         }
         if self.eat("if") {
             self.expect("(")?;
@@ -692,8 +709,12 @@ impl Parser {
                 return Err(self.error(format!("'{unsupported}' is not implemented")));
             }
         }
+        let escaped = self.current().escaped_string;
         let e = self.expression(1)?;
         self.semi()?;
+        if escaped && let Expr::Literal(Value::String(value)) = e {
+            return Ok(Stmt::EscapedStringStatement(value));
+        }
         Ok(Stmt::Expression(e))
     }
 
@@ -965,7 +986,7 @@ impl Parser {
             (false, false) => FunctionKind::Ordinary,
         }
     }
-    fn function(&mut self, is_async: bool, require_name: bool) -> Result<Function, JsError> {
+    fn function(&mut self, start: usize, is_async: bool, require_name: bool) -> Result<Function, JsError> {
         let kind = self.function_kind(is_async);
         let old_counts = (self.await_count, self.yield_count);
         let name = if !self.at("(") {
@@ -1002,7 +1023,7 @@ impl Parser {
         let result = (|| {
             self.expect("(")?;
             let params = self.parameters()?;
-            let mut f = self.function_body(name, params, false, kind)?;
+            let mut f = self.function_body(start, name, params, false, kind)?;
             f.self_binding = !require_name && f.name.is_some();
             Ok(f)
         })();
@@ -1020,11 +1041,13 @@ impl Parser {
     }
     fn function_body(
         &mut self,
+        start: usize,
         name: Option<JsString>,
         params: Vec<Parameter>,
         arrow: bool,
         kind: FunctionKind,
     ) -> Result<Function, JsError> {
+        let legacy_before = self.legacy_literals;
         let old_loop = self.loop_depth;
         let old_switch = self.switch_depth;
         let old_labels = std::mem::take(&mut self.labels);
@@ -1060,8 +1083,15 @@ impl Parser {
         self.await_count = old_await_count;
         self.yield_context = old_yield_context;
         self.yield_count = old_yield_count;
-        let body = result?;
+        let mut body = result?;
         let strict = has_strict_directive(&body);
+        if strict && self.legacy_literals != legacy_before {
+            return Err(self.error("Legacy literal in strict function"));
+        }
+        if !strict {
+            let excluded = params.iter().flat_map(|p| bound_names(&p.pattern)).chain([JsString::from("arguments")]);
+            annex::mark(&mut body, excluded);
+        }
         if strict && !params.iter().all(simple_parameter) {
             return Err(self.error("Use strict directive with a non-simple parameter list"));
         }
@@ -1076,6 +1106,7 @@ impl Parser {
             }
         }
         Ok(Function {
+            source: self.lexer.span(start, self.last_end),
             name,
             params,
             body,
@@ -1083,6 +1114,7 @@ impl Parser {
             kind,
             strict,
             self_binding: false,
+            annex_binding: false,
             method: false,
         })
     }
@@ -1122,6 +1154,7 @@ impl Parser {
 
     fn arrow_from_cover(
         &mut self,
+        start: usize,
         parts: Vec<Expr>,
         trailing: bool,
         is_async: bool,
@@ -1166,7 +1199,7 @@ impl Parser {
         } else {
             FunctionKind::Ordinary
         };
-        let function = self.function_body(None, params, true, kind)?;
+        let function = self.function_body(start, None, params, true, kind)?;
         let arrow = self.checked_expression(Expr::Function(function))?;
         // An arrow is an AssignmentExpression, so a bare arrow can start
         // a comma expression but cannot take a binary or postfix operator.
@@ -1340,6 +1373,7 @@ impl Parser {
         min: u8,
         stop_before_simple_assignment: bool,
     ) -> Result<Expr, JsError> {
+        let start = self.current().start;
         let async_prefix =
             min <= 2 && self.at("async") && self.lookahead(1).is_some_and(|next| !next.newline);
         let async_word_arrow = async_prefix && self.identifier_arrow_at(1);
@@ -1350,6 +1384,7 @@ impl Parser {
             let name = self.name()?;
             self.expect("=>")?;
             return self.arrow_from_cover(
+                start,
                 vec![Expr::Identifier(name)],
                 false,
                 async_word_arrow,
@@ -1386,7 +1421,7 @@ impl Parser {
                     return Err(self.error("await is not allowed in arrow parameters"));
                 }
                 self.advance(1);
-                return self.arrow_from_cover(parts, trailing, async_parens, min == 1);
+                return self.arrow_from_cover(start, parts, trailing, async_parens, min == 1);
             }
             let primary = if async_parens {
                 Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
@@ -1795,6 +1830,7 @@ impl Parser {
         result
     }
     fn primary_inner(&mut self) -> Result<Expr, JsError> {
+        let start = self.current().start;
         if self.at("yield") && self.yield_context != KeywordContext::None {
             return Err(self.error(
                 "yield is only allowed here as an assignment expression in a generator body",
@@ -1811,6 +1847,7 @@ impl Parser {
                 error.column = Some(slash.column);
                 error
             })?;
+            self.last_end = self.lexer.position();
             self.tokens.clear();
             self.fill();
             return Ok(Expr::RegExp(program));
@@ -1820,7 +1857,7 @@ impl Parser {
             return Err(self.error("Unexpected '...' in an expression"));
         }
         if self.eat("class") {
-            return self.class(false).map(Expr::Class);
+            return self.class(start, false).map(Expr::Class);
         }
         if self.eat("super") {
             if !self.super_property && !self.super_call {
@@ -1878,11 +1915,11 @@ impl Parser {
         }
         if self.async_function_ahead() {
             self.advance(2);
-            let function = self.function(true, false)?;
+            let function = self.function(start, true, false)?;
             return self.checked_expression(Expr::Function(function));
         }
         if self.eat("function") {
-            let function = self.function(false, false)?;
+            let function = self.function(start, false, false)?;
             return self.checked_expression(Expr::Function(function));
         }
         if self.eat("this") {
@@ -2064,7 +2101,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 }
             },
             Ast::Statement(statement) => match statement {
-                Stmt::Empty | Stmt::Break(_) | Stmt::Continue(_) => {}
+                Stmt::Empty | Stmt::EscapedStringStatement(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
                 Stmt::Label(_, _, item) => pending.push((Ast::Statement(item), child_depth)),
                 Stmt::Class(_, class) => push_class_ast(class, child_depth, &mut pending),
                 Stmt::DefaultExport(value) => pending.push((Ast::Expression(value), child_depth)),

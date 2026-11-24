@@ -57,6 +57,7 @@ pub(crate) enum ObjectKind {
         referrer: Option<crate::dynamic_import::SourceReferrer>,
     },
     Native {
+        initial_name: JsString,
         callback: NativeCallback,
         construct: Option<NativeConstruct>,
         // A native callback has no lexical environment to trace automatically.
@@ -73,9 +74,9 @@ pub(crate) enum ObjectKind {
     SharedArrayBuffer(ObjectId),
     TypedArray(crate::binary::TypedArray),
     DataView(crate::binary::View),
-    RegExp(Rc<crate::regexp::Program>),
+    RegExp(Rc<crate::regexp::Program>, crate::regexp::Origin),
     RegExpStringIterator(crate::regexp::StringIterator),
-    Error(ErrorKind),
+    Error(ErrorKind, JsString),
     Promise(crate::promise::PromiseData),
     PromiseFunction(crate::promise::PromiseFunction, EnvId),
     Iterator(crate::iterator::IteratorData),
@@ -86,6 +87,8 @@ pub(crate) enum ObjectKind {
     Collection(Box<crate::collections::CollectionData>),
     CollectionIterator(crate::collections::CollectionIterator),
     WeakCollection(Box<crate::collections::weak::WeakData>),
+    WeakRef(Option<Value>),
+    FinalizationRegistry(Box<crate::collections::weak_ref::Registry>),
     PromiseAggregate(crate::promise::AggregateData),
     Generator(crate::generator::GeneratorState),
     AsyncGenerator(crate::generator::AsyncGenerator),
@@ -215,6 +218,7 @@ pub(crate) enum EnvKind {
     With { binding_object: ObjectId },
     Function,
     Block,
+    SloppyEval,
     // A Console command resolves helper names here and declares script bindings in its parent.
     Inspector,
     Module,
@@ -370,7 +374,7 @@ impl Heap {
 
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
         self.estimated_bytes = self.estimated_bytes.saturating_add(cell_bytes(&cell));
-        if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_)))
+        if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
         {
             self.weak_collections += 1;
         }
@@ -380,6 +384,7 @@ impl Heap {
             slot.cell = Some(cell);
             slot.marked = false;
             ObjectId {
+                is_html_dda: false,
                 heap_id: self.id,
                 index,
                 generation: slot.generation,
@@ -392,6 +397,7 @@ impl Heap {
                 cell: Some(cell),
             });
             ObjectId {
+                is_html_dda: false,
                 heap_id: self.id,
                 index,
                 generation: 1,
@@ -522,9 +528,10 @@ impl Heap {
         }
     }
 
-    pub(crate) fn collect(&mut self, mut pending: TraceEdges) -> usize {
+    pub(crate) fn collect(&mut self, mut pending: TraceEdges) -> (usize, Vec<ObjectId>) {
         let mut symbols = BTreeSet::new();
         let mut weak_owners = Vec::new();
+        let mut cleanup = Vec::new();
         // A conditional edge is either followed immediately or registered
         // once under its unmarked key. Later marks wake the waiting values.
         let mut waiting = BTreeMap::<TraceTarget, Vec<TraceTarget>>::new();
@@ -552,6 +559,9 @@ impl Heap {
                             }
                         }
                     }
+                    if let Cell::Object(object) = cell && matches!(object.kind, ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)) {
+                        weak_owners.push(id);
+                    }
                 }
                 TraceTarget::Symbol(symbol) => {
                     if !symbols.insert(symbol) {
@@ -570,13 +580,21 @@ impl Heap {
         // resets any mark bit or frees a slot generation.
         for owner in weak_owners {
             let object = self.object_mut(owner).unwrap();
-            let ObjectKind::WeakCollection(mut data) =
-                std::mem::replace(&mut object.kind, ObjectKind::Ordinary)
-            else {
-                unreachable!("marked weak collection");
-            };
-            data.retain_keys(|key| self.target_marked(key, &symbols));
-            self.object_mut(owner).unwrap().kind = ObjectKind::WeakCollection(data);
+            let mut kind = std::mem::replace(&mut object.kind, ObjectKind::Ordinary);
+            let marked = |key| self.target_marked(key, &symbols);
+            match &mut kind {
+                ObjectKind::WeakCollection(data) => data.retain_keys(marked),
+                ObjectKind::WeakRef(target) => {
+                    if target.as_ref().and_then(TraceTarget::of_value).is_some_and(|key| !marked(key)) {
+                        *target = None;
+                    }
+                }
+                ObjectKind::FinalizationRegistry(registry) => {
+                    if registry.sweep(marked) { cleanup.push(owner); }
+                }
+                _ => unreachable!("marked weak owner"),
+            }
+            self.object_mut(owner).unwrap().kind = kind;
         }
         let before = self.live;
         for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -584,7 +602,7 @@ impl Heap {
                 if slot.marked {
                     slot.marked = false;
                 } else {
-                    if matches!(&slot.cell, Some(Cell::Object(object)) if matches!(object.kind, ObjectKind::WeakCollection(_)))
+                    if matches!(&slot.cell, Some(Cell::Object(object)) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
                     {
                         self.weak_collections -= 1;
                     }
@@ -601,7 +619,7 @@ impl Heap {
             .filter_map(|s| s.cell.as_ref())
             .map(cell_bytes)
             .sum();
-        before - self.live
+        (before - self.live, cleanup)
     }
 
     fn trace_cell(cell: &Cell, pending: &mut TraceEdges) {
@@ -688,6 +706,7 @@ impl Heap {
                     ObjectKind::Collection(data) => data.trace(pending),
                     ObjectKind::CollectionIterator(data) => pending.extend(data.target),
                     ObjectKind::PromiseAggregate(data) => data.trace(pending),
+                    ObjectKind::FinalizationRegistry(registry) => registry.trace(pending),
                     ObjectKind::Generator(state) => state.trace(pending),
                     ObjectKind::AsyncGenerator(state) => state.trace(pending),
                     ObjectKind::AsyncFromSyncIterator(state) => state.trace(pending),
@@ -731,7 +750,7 @@ fn cell_bytes(cell: &Cell) -> usize {
             .saturating_add(object.order.capacity() * std::mem::size_of::<JsString>())
             .saturating_add(match &object.kind {
                 ObjectKind::ArrayBuffer(buffer) => buffer.retained_bytes(),
-                ObjectKind::RegExp(program) => program.retained_bytes(),
+                ObjectKind::RegExp(program, _) => program.retained_bytes(),
                 ObjectKind::Module(data) => data.extra_bytes(),
                 ObjectKind::WasmModule(module) => module.retained_bytes(),
                 ObjectKind::ModuleNamespace(data) => data.exports.len() * 256,
@@ -742,8 +761,10 @@ fn cell_bytes(cell: &Cell) -> usize {
                     data.reactions.capacity() * std::mem::size_of::<crate::promise::ReactionPair>()
                         + data.extra_bytes()
                 }
+                ObjectKind::FinalizationRegistry(registry) => registry.bytes(),
                 ObjectKind::PromiseAggregate(data) => {
                     data.values.capacity() * std::mem::size_of::<Value>()
+                        + data.keys.capacity() * std::mem::size_of::<crate::PropertyKey>()
                 }
                 ObjectKind::Generator(state) => state.extra_bytes(),
                 ObjectKind::Iterator(state) => state.extra_bytes(),

@@ -46,8 +46,10 @@ impl ExportEntry {
 pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, JsError> {
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
-        lexer: Lexer::new(source, compilation_bytes),
+        lexer: Lexer::new(source, compilation_bytes, false),
         function_depth: 0,
+        legacy_literals: 0,
+        last_end: 0,
         loop_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
@@ -89,6 +91,7 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
             module.body.push(p.statement()?);
         }
     }
+    if p.legacy_literals != 0 { return Err(p.error("Legacy literal in module code")); }
     let mut exports = std::collections::BTreeSet::new();
     for export in &module.exports {
         if let Some(name) = export.exported()
@@ -257,12 +260,13 @@ impl Parser {
             return self.semi();
         }
         if self.eat("default") {
+            let start = self.current().start;
             let is_async = self.async_function_ahead();
             if is_async {
                 self.advance(1);
             }
             let local = if self.eat("function") {
-                let mut function = self.function(is_async, false)?;
+                let mut function = self.function(start, is_async, false)?;
                 function.self_binding = false;
                 if let Some(name) = &function.name {
                     let name = name.clone();
@@ -274,7 +278,7 @@ impl Parser {
                     "*default*".into()
                 }
             } else if self.eat("class") {
-                let class = self.class(false)?;
+                let class = self.class(start, false)?;
                 if let Some(name) = &class.name {
                     let name = name.clone();
                     module.body.push(Stmt::Class(name.clone(), class));

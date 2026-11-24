@@ -60,7 +60,7 @@ test('an encountered host gap stays non-passing, including during upstream setup
 });
 
 test('preflight labels only the explicit unsupported Test262 host requirements', () => {
-  assert.match(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), /\$262\.IsHTMLDDA/);
+  assert.equal(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), null);
   assert.match(unsupportedReason({ flags: ['CanBlockIsFalse'] }, 'sloppy'), /CanBlockIsFalse/);
   assert.match(unsupportedReason({ flags: ['CanBlockIsTrue'] }, 'sloppy'), /CanBlockIsTrue/);
   assert.equal(unsupportedReason({

@@ -1,60 +1,53 @@
-//! Strict Unicode property and property-value lookup for ECMAScript RegExp.
-use icu_properties::{
-    CodePointMapData, CodePointSetData, CodePointSetDataBorrowed, PropertyParser,
-    props::{GeneralCategory, GeneralCategoryGroup, Script},
-    script::ScriptWithExtensions,
-};
+//! Exact ECMAScript property aliases and Unicode 17.0 code-point sets.
+//! Script extensions have a separate index from Script.
+mod data {
+    include!("data/property-index.rs");
+}
+
+const RANGES: &[u8] = include_bytes!("data/property-ranges.bin");
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Property {
-    Any,
-    Ascii,
-    Assigned,
-    Binary(CodePointSetDataBorrowed<'static>),
-    Category(GeneralCategoryGroup),
-    Script(Script),
-    Extensions(Script),
+pub(super) struct Property {
+    ranges: &'static [[u8; 6]],
 }
 
 impl Property {
     pub(super) fn parse(name: &str) -> Option<Self> {
-        let category = |v| {
-            PropertyParser::<GeneralCategoryGroup>::new()
-                .get_strict(v)
-                .map(Self::Category)
+        let (index, value) = match name.split_once('=') {
+            Some(("gc" | "General_Category", value)) => (data::CATEGORIES, value),
+            Some(("sc" | "Script", value)) => (data::SCRIPTS, value),
+            Some(("scx" | "Script_Extensions", value)) => (data::SCRIPT_EXTENSIONS, value),
+            Some(_) => return None,
+            None => {
+                return Self::lookup(data::CATEGORIES, name)
+                    .or_else(|| Self::lookup(data::BINARY, name));
+            }
         };
-        let script = |v| PropertyParser::<Script>::new().get_strict(v);
-        if let Some((key, value)) = name.split_once('=') {
-            return match key {
-                "gc" | "General_Category" => category(value),
-                "sc" | "Script" => script(value).map(Self::Script),
-                "scx" | "Script_Extensions" => script(value).map(Self::Extensions),
-                _ => None,
-            };
-        }
-        match name {
-            "Any" => Some(Self::Any),
-            "ASCII" => Some(Self::Ascii),
-            "Assigned" => Some(Self::Assigned),
-            _ => category(name)
-                .or_else(|| CodePointSetData::new_for_ecma262(name.as_bytes()).map(Self::Binary)),
-        }
+        Self::lookup(index, value)
+    }
+
+    fn lookup(index: &[(&str, usize, usize)], name: &str) -> Option<Self> {
+        let entry = index
+            .binary_search_by(|(value, _, _)| value.cmp(&name))
+            .ok()?;
+        let (_, offset, count) = index[entry];
+        let (ranges, _) = RANGES[offset..offset + count * 6].as_chunks::<6>();
+        Some(Self { ranges })
     }
 
     pub(super) fn contains(self, point: u32) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Ascii => point < 128,
-            Self::Assigned => {
-                CodePointMapData::<GeneralCategory>::new().get32(point)
-                    != GeneralCategory::Unassigned
-            }
-            Self::Binary(set) => set.contains32(point),
-            Self::Category(group) => {
-                group.contains(CodePointMapData::<GeneralCategory>::new().get32(point))
-            }
-            Self::Script(script) => CodePointMapData::<Script>::new().get32(point) == script,
-            Self::Extensions(script) => ScriptWithExtensions::new().has_script32(point, script),
-        }
+        self.ranges
+            .binary_search_by(|&[a, b, c, d, e, f]| {
+                let start = u32::from_be_bytes([0, a, b, c]);
+                let end = u32::from_be_bytes([0, d, e, f]);
+                if point < start {
+                    std::cmp::Ordering::Greater
+                } else if point > end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .is_ok()
     }
 }

@@ -863,3 +863,33 @@ fn with_environment_tracks_live_properties_unscopables_and_suspended_frames() {
         ErrorKind::SyntaxError
     );
 }
+
+#[test]
+fn block_functions_copy_the_current_lexical_value_to_the_variable_scope() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        function probe(param) {
+            let before = f;
+            { function f() {}; f = 3; }
+            { function param() {}; }
+            try { throw null } catch (f) { { function f(){return 4} } }
+            return before === undefined && f() === 4 && param === 7;
+        }
+        probe(7)
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn callable_source_preserves_comments_and_ignores_overridden_names() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        const fn = ( x /* in */ ) => /pattern/u;
+        Object.defineProperty(fn, "name", { get(){ throw "name getter called"; } });
+        const C = class /* keep */ { static method /* keep */ () {} };
+        fn.toString() === "( x /* in */ ) => /pattern/u" &&
+            C.toString() === "class /* keep */ { static method /* keep */ () {} }" &&
+            C.method.toString() === "method /* keep */ () {}"
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}

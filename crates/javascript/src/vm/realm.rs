@@ -154,6 +154,7 @@ fn allocate_core(heap: &mut Heap) -> EnvId {
     let function_prototype = allocate_object(
         heap,
         ObjectKind::Native {
+            initial_name: Default::default(),
             callback: Rc::new(|_, _, _| Ok(Value::Undefined)),
             construct: None,
             realm_environment: env,

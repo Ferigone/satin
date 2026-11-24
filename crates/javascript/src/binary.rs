@@ -38,6 +38,7 @@ pub(crate) struct Buffer {
     bytes: Option<Vec<u8>>,
     maximum: Option<usize>,
     wasm: bool,
+    immutable: bool,
 }
 
 impl Buffer {
@@ -156,7 +157,17 @@ impl Vm {
         }
     }
 
+    pub(crate) fn buffer_is_immutable(&self, id: ObjectId) -> Result<bool, JsError> {
+        Ok(self.buffer_data(id)?.immutable)
+    }
+    fn require_writable_buffer(&self, id: ObjectId) -> Result<(), JsError> {
+        if self.buffer_is_immutable(id)? {
+            return Err(JsError::type_error("ArrayBuffer is immutable"));
+        }
+        Ok(())
+    }
     fn buffer_data_mut(&mut self, id: ObjectId) -> Result<&mut Buffer, JsError> {
+        self.require_writable_buffer(id)?;
         let id = self.backing_id(id)?;
         match &mut self.heap.object_mut(id)?.kind {
             ObjectKind::ArrayBuffer(data) => Ok(data),
@@ -191,6 +202,7 @@ impl Vm {
                 bytes: Some(bytes),
                 maximum,
                 wasm: false,
+                immutable: false,
             }),
             prototype,
         )
@@ -280,6 +292,7 @@ impl Vm {
             bytes: Some(bytes),
             maximum: None,
             wasm: true,
+            immutable: false,
         };
         Ok(replacement)
     }
@@ -519,6 +532,7 @@ impl Vm {
         target: ObjectId,
         offset: usize,
     ) -> Result<(), JsError> {
+        self.require_writable_buffer(target)?;
         let source = self.backing_id(source)?;
         let target = self.backing_id(target)?;
         self.binary_work(range.len())?;

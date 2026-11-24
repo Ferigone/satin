@@ -283,8 +283,12 @@ impl Search {
         Ok(None)
     }
 
-    pub(super) fn is_match(mut self, vm: &mut Vm, text: &[u16]) -> Result<Option<bool>, JsError> {
-        let found = self.find(vm, text, 0)?.is_some();
+    pub(super) fn first_match(
+        mut self,
+        vm: &mut Vm,
+        text: &[u16],
+    ) -> Result<Option<Option<super::program::Span>>, JsError> {
+        let found = self.find(vm, text, 0)?;
         vm.charge_buffer_work(self.work)?;
         Ok((!self.non_ascii).then_some(found))
     }
@@ -295,11 +299,11 @@ impl Search {
         input: &JsString,
         replacement: &JsString,
         global: bool,
-    ) -> Result<Option<Value>, JsError> {
+    ) -> Result<Option<(Value, Option<super::program::Span>)>, JsError> {
         let units = input.as_utf16();
         let mut from = 0;
         let mut copied = 0;
-        let mut matched = false;
+        let mut matched = None;
         let mut output = Vec::new();
         while from <= units.len() {
             let Some((start, end)) = self.find(vm, units, from)? else {
@@ -313,7 +317,7 @@ impl Search {
             Self::reserve_output(vm, &mut output, length)?;
             output.extend_from_slice(&units[copied..start]);
             output.extend_from_slice(replacement.as_utf16());
-            matched = true;
+            matched = Some((start, end));
             copied = end;
             if !global {
                 break;
@@ -324,14 +328,15 @@ impl Search {
         if self.non_ascii {
             return Ok(None);
         }
-        if !matched {
-            return Ok(Some(Value::String(input.clone())));
+        if matched.is_none() {
+            return Ok(Some((Value::String(input.clone()), None)));
         }
         let length = output.len().saturating_add(units.len() - copied);
         vm.charge_buffer_work(units.len() - copied)?;
         Self::reserve_output(vm, &mut output, length)?;
         output.extend_from_slice(&units[copied..]);
-        vm.finish_buffer_string(output).map(Some)
+        vm.finish_buffer_string(output)
+            .map(|value| Some((value, matched)))
     }
 
     fn reserve_output(vm: &Vm, output: &mut Vec<u16>, length: usize) -> Result<(), JsError> {
