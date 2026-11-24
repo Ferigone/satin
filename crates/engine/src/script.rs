@@ -33,6 +33,7 @@ mod navigation;
 mod navigator;
 mod scheduler;
 mod storage;
+mod style_sheets;
 mod streams;
 mod structured_clone;
 mod text_encoding;
@@ -857,6 +858,7 @@ impl ScriptRuntime {
         )?;
         let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
         tree_walker::install(&mut vm, &state, &document, &dom_errors)?;
+        style_sheets::install(&mut vm, &dom_errors)?;
         class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =

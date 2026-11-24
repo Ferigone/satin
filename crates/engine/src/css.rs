@@ -1,6 +1,8 @@
 //! A bounded, independently implemented CSS subset. Selectors and declarations
 //! are compiled once per layout; matching does not tokenize or allocate strings.
 mod calc;
+mod cssom_rules;
+pub(crate) use cssom_rules::constructed_rules;
 pub(crate) mod canvas_font;
 mod grid;
 mod inspection;
