@@ -8,7 +8,7 @@ use crate::{
     heap::EnvId,
     patterns::Invocation,
     promise::{PromiseCapability, ReactionPair},
-    vm::{Completion, Item, Reference, permits_bytecode_depth},
+    vm::{Completion, Item, Reference},
 };
 use controls::Resume;
 use std::{mem::size_of, rc::Rc};
@@ -370,7 +370,7 @@ impl Vm {
     ) -> RunResult {
         let mut completed: Option<Flow> = None;
         // Owned frames share one driver stack frame and its opcode dispatch.
-        if !frames.is_empty() && !permits_bytecode_depth(base_depth + 2) {
+        if !frames.is_empty() && !self.permits_bytecode_depth(base_depth + 2) {
             return RunResult::Completed(Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Nested bytecode depth budget exhausted",

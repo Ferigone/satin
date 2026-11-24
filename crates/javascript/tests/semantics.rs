@@ -731,3 +731,40 @@ fn nested_execution_uses_available_windows_stack_and_recovers_at_limits() {
             .unwrap();
     }
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn embedder_bytecode_depth_keeps_its_own_limit_and_native_stack_guard() {
+    let nested = "function effect(n) { if(n) { if(true) { try { return effect(n-1); } finally {} } } return 42; }";
+    for stack_bytes in [1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(stack_bytes)
+            .spawn(move || {
+                let mut standard = Vm::new();
+                let mut browser = Vm::with_limits(VmLimits {
+                    max_bytecode_depth: 96,
+                    ..VmLimits::default()
+                });
+                for vm in [&mut standard, &mut browser] {
+                    vm.eval(nested).unwrap();
+                }
+                if stack_bytes == 8 * 1024 * 1024 {
+                    let first_limit = (1..40)
+                        .find(|n| standard.eval(&format!("effect({n})")).is_err())
+                        .expect("nested blocks must exhaust the standalone depth allowance");
+                    assert_eq!(
+                        browser.eval(&format!("effect({first_limit})")).unwrap(),
+                        Value::from(42)
+                    );
+                }
+                for vm in [&mut standard, &mut browser] {
+                    let error = vm.eval("effect(1000)").unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+                    assert_eq!(vm.eval("effect(2)").unwrap(), Value::from(42));
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

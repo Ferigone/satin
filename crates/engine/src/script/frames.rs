@@ -506,9 +506,9 @@ impl FrameWindow {
                         .borrow_mut()
                         .begin_script(script.node)
                         .map_err(parser_error)?;
-                    let (result, local_exhaustion) =
+                    let (result, recoverable_child_limit) =
                         vm.eval_embedded_script(&source, "about:blank");
-                    let result = self.report_error(vm, result, local_exhaustion);
+                    let result = self.report_error(vm, result, recoverable_child_limit);
                     self.parser
                         .borrow_mut()
                         .resume_script(script.node)
@@ -547,10 +547,10 @@ impl FrameWindow {
         &self,
         vm: &mut Vm,
         result: Result<Value, JsError>,
-        local_exhaustion: bool,
+        recoverable_child_limit: bool,
     ) -> Result<(), JsError> {
         let Err(error) = result else { return Ok(()) };
-        if fatal(&error) && !local_exhaustion {
+        if fatal(&error) && !recoverable_child_limit {
             return Err(error);
         }
         if !self.reporting_error.replace(true) {
@@ -698,6 +698,27 @@ mod tests {
             error.kind,
             ErrorKind::ExecutionLimit | ErrorKind::HeapLimit
         ));
+    }
+
+    #[test]
+    fn child_operation_limits_report_the_original_error_and_resume_its_caller() {
+        let page = LoadedPage::from_html("https://example.test/", "<iframe></iframe>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let value = runtime.eval(r#"
+            var child = document.querySelector('iframe').contentWindow, errors = [];
+            child.document.open();
+            child.onerror = function (message) { errors.push(message); return true; };
+            child.document.write('<script>new RegExp("(?:".repeat(200) + "hello" + ")".repeat(200));</script>');
+            child.document.write('<script>"x".repeat(67108865);</script>');
+            child.document.write('<script>this.finished = true;</script>');
+            errors.join("|") + "|" + child.finished;
+        "#).unwrap();
+        assert_eq!(
+            value,
+            Value::from(
+                "Uncaught ExecutionLimit: Regular expression nesting limit exceeded|Uncaught ExecutionLimit: String code-unit budget exhausted|true"
+            )
+        );
     }
 
     #[test]
