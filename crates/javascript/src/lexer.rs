@@ -246,9 +246,10 @@ impl Lexer {
             let ch = if next == '\\' {
                 escaped = true;
                 self.bump();
-                if self.bump() != Some('u') {
+                if self.peek(0) != Some('u') {
                     return Err(self.error("Expected a Unicode escape in an identifier"));
                 }
+                self.bump();
                 let point = if self.peek(0) == Some('{') {
                     self.bump();
                     let mut point = self.hex(1)?;
@@ -394,10 +395,15 @@ impl Lexer {
     fn hex(&mut self, n: usize) -> Result<u32, JsError> {
         let mut value = 0;
         for _ in 0..n {
-            let c = self.bump().ok_or_else(|| self.error("Incomplete escape"))?;
-            value = value * 16
-                + c.to_digit(16)
-                    .ok_or_else(|| self.error("Invalid hexadecimal escape"))?;
+            let c = self
+                .peek(0)
+                .ok_or_else(|| self.error("Incomplete escape"))?;
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| self.error("Invalid hexadecimal escape"))?;
+            // Leave the cursor at the offending character on failure, including CRLF.
+            self.bump();
+            value = value * 16 + digit;
         }
         Ok(value)
     }
