@@ -1,0 +1,126 @@
+{
+  "test262Revision": "48221d7c1f7745dc13e420a2e850a248c0b2afb4",
+  "runnerSha256": "d6764ff6f5050c00d35d1dc8d7d736d4d0a2c74cba225eed1e486ce8a29e4c5b",
+  "workerSha256": "bb437c2b21f368c79c4fb1ba96e5ef2bc4eb8d22b48b4261b6c3ce1bc8a253da",
+  "limits": {
+    "timeoutMs": 3000,
+    "maxInstructions": 1000000
+  },
+  "reportCount": 54,
+  "fullSuite": true,
+  "outcomesSha256": "708efc32649bd79111d666c37b348af3fac3e2ce7a508320b477df0a9d6fb86d",
+  "overall": {
+    "testedFiles": 53792,
+    "passedFiles": 36958,
+    "totalVariants": 103345,
+    "statuses": {
+      "pass": 71003,
+      "fail": 23719,
+      "unsupported": 4112,
+      "resource_limit": 4510,
+      "async_incomplete": 0,
+      "harness_error": 0,
+      "timeout": 0,
+      "crash": 0,
+      "invalid_metadata": 1
+    }
+  },
+  "byFolder": {
+    "annexB": {
+      "testedFiles": 1086,
+      "passedFiles": 513,
+      "totalVariants": 1377,
+      "statuses": {
+        "pass": 640,
+        "fail": 645,
+        "unsupported": 86,
+        "resource_limit": 6,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 0
+      }
+    },
+    "built-ins": {
+      "testedFiles": 23877,
+      "passedFiles": 13364,
+      "totalVariants": 47448,
+      "statuses": {
+        "pass": 26544,
+        "fail": 14998,
+        "unsupported": 2135,
+        "resource_limit": 3770,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 1
+      }
+    },
+    "harness": {
+      "testedFiles": 117,
+      "passedFiles": 85,
+      "totalVariants": 234,
+      "statuses": {
+        "pass": 170,
+        "fail": 0,
+        "unsupported": 4,
+        "resource_limit": 60,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 0
+      }
+    },
+    "intl402": {
+      "testedFiles": 3393,
+      "passedFiles": 19,
+      "totalVariants": 6786,
+      "statuses": {
+        "pass": 38,
+        "fail": 6704,
+        "unsupported": 20,
+        "resource_limit": 24,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 0
+      }
+    },
+    "language": {
+      "testedFiles": 23832,
+      "passedFiles": 22132,
+      "totalVariants": 44709,
+      "statuses": {
+        "pass": 42015,
+        "fail": 601,
+        "unsupported": 1641,
+        "resource_limit": 452,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 0
+      }
+    },
+    "staging": {
+      "testedFiles": 1487,
+      "passedFiles": 845,
+      "totalVariants": 2791,
+      "statuses": {
+        "pass": 1596,
+        "fail": 771,
+        "unsupported": 226,
+        "resource_limit": 198,
+        "async_incomplete": 0,
+        "harness_error": 0,
+        "timeout": 0,
+        "crash": 0,
+        "invalid_metadata": 0
+      }
+    }
+  }
+}

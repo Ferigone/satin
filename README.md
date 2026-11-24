@@ -6,7 +6,7 @@
 <p align="center">
   <a href="https://github.com/Ferigone/satin/releases"><strong>Download for Windows</strong></a> ·
   <a href="#build-from-source">Build from source</a> ·
-  <a href="docs/ROADMAP.md">Roadmap</a>
+  <a href="#compatibility-roadmap">Compatibility roadmap</a>
 </p>
 
 <p align="center"><img src="assets/satin-preview.png" alt="Satin on Windows with its address bar, tabs, and start page" width="900"></p>
@@ -27,6 +27,59 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Console displays page logs and reported JavaScript errors. Network shows observed
 HTTP(S) request metadata, not a complete capture of all browser traffic.
+
+## Compatibility roadmap
+
+<!-- compatibility:begin -->
+Satin’s JavaScript engine passed **71,003 of 103,345 Test262 checks (68.70%)** on Linux x86_64. **36,958 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `d4b9962`](https://github.com/Ferigone/satin/commit/d4b996243356f70941a0f9858d980884f5898a96) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
+
+![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
+
+Colours show the pass rate within each named suite. The CSS results cover sticky positioning and logical properties with variables. A full CSS Web Platform Tests (WPT) run is still open.
+
+<details>
+<summary>Exact counts, test scope and reproduction</summary>
+
+| Suite | Passed / total | Pass rate | Scope and evidence |
+| --- | ---: | ---: | --- |
+| Core language | 42,015 / 44,709 | 93.97% | Test262 · `language` |
+| Built-in objects | 26,544 / 47,448 | 55.94% | Test262 · `built-ins` |
+| Intl (ECMA-402) | 38 / 6,786 | 0.56% | Test262 · `intl402` |
+| Annex B | 640 / 1,377 | 46.48% | Test262 · `annexB` |
+| Test harness | 170 / 234 | 72.65% | Test262 · `harness` |
+| Staging | 1,596 / 2,791 | 57.18% | Test262 · `staging` |
+| Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
+| Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
+| All CSS modules | — | Unmeasured | [A full run of the WPT CSS suite is still open](docs/ROADMAP.md) |
+| HTML tokenizer | 7,028 / 7,036 | 99.89% | [html5lib initial-state variants](crates/engine/data/html5lib/README.md) |
+| HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
+| Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
+
+The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 23,719 `fail`, 4,112 `unsupported`, 4,510 `resource_limit`, 1 `invalid_metadata`. A file whose metadata the runner cannot read contributes one result. The separate legacy website probe passed its 55-case harness chapter. [Legacy browser probe](tools/test262/website.md)
+
+The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising the tests. Each variant had a 3-second timeout and a 1,000,000-instruction budget. [Per-file and per-variant outcomes (TSV.GZ)](docs/compatibility/test262-outcomes.tsv.gz) · [Machine-readable totals](docs/compatibility/test262.json) · [Reproduce the measurement](tools/test262/README.md#reports-and-limits)
+
+</details>
+<!-- compatibility:end -->
+
+### CSS beyond the test counts
+
+| Area | What works in Satin | What remains |
+| --- | --- | --- |
+| Cascade & selectors | Specificity, inheritance, `!important` and custom properties. | Extend the range of upstream selector and cascade cases. [CSS implementation](docs/CSS_LAYOUT.md) |
+| Box model & Flexbox | Wrapping, gaps, ordering and auto margins. A box and Flexbox reference checks 44 coordinates across 11 rectangles. | Broader Flexbox sizing and alignment, including text-dependent layouts. [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
+| Grid | Named lines and areas, `auto-fill` and `auto-fit`. A geometry comparison covers 580 coordinates across 38 fixtures. | Subgrid, nested intrinsic sizing and resolved track values in CSSOM. [Grid](docs/GRID.md) · [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
+| Flow & writing modes | Floats and clearance in horizontal flow. Logical edges follow each element's text direction. | Vertical writing modes and bidirectional text layout. [Float layout](docs/css-float-layout.md) · [Logical properties](docs/CSS_LAYOUT.md#logical-box-properties) |
+
+### Toward a daily-use browser
+
+| Milestone | Working today or last measured | Next checkpoint |
+| --- | --- | --- |
+| Web pages render correctly | The HTML parser has a pinned corpus. CSS has geometry comparisons and selected WPT cases. | Close the remaining html5lib cases, expand CSS WPT by module, and verify subgrid and vertical text. [Engine roadmap](docs/ROADMAP.md#1-browser-foundation) |
+| Interactive apps run end to end | Forms, Fetch, DOM events and JavaScript modules run in Satin. | Improve standard-library and Intl results and implement the Test262 host for creating separate realms. Exercise persistent app data with IndexedDB. [JavaScript](docs/JAVASCRIPT.md) · [Realms](docs/JS_REALMS.md) |
+| Offline apps and accelerated graphics | Classic Blob workers can exchange buffers and run small WebAssembly programs. Canvas 2D has pixel-readback tests. | Add service workers and test offline navigation. Extend graphics coverage to WebGL and GPU-backed rendering. [Platform roadmap](docs/ROADMAP.md#3-web-platform) |
+| Public media sites play reliably | Local H.264/AAC samples play and seek on Windows. In the recorded alpha.18 run, neither YouTube nor Twitch created a player. | Reach the player on each public site, verify play/pause, then record sustained progress in both playback time and decoded frames. [Media checks](docs/VERIFICATION.md#website-compatibility) · [Site measurements](docs/PUBLIC_MEDIA_QA_2026-11-23.md#satin-candidate) |
+| Windows release is ready for daily use | The installer and updater preserve a profile. Windows QA measures startup and idle memory. | Isolate content processes, verify recovery, and track memory and responsiveness across long browsing sessions. [Release goals](docs/ROADMAP.md#4-performance-and-a-practical-release) · [Windows QA](docs/WINDOWS_RELEASE_QA.md) |
 
 ## Install on Windows
 

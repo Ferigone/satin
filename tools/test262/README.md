@@ -46,9 +46,36 @@ The report records the pinned revision, worker and runner SHA-256, selection, re
 
 Repeat `--path` to select paths relative to the Test262 `test` directory. Use `--limit` and `--offset` to select a subset. The default `--timeout-ms` is 3,000 and the default `--instructions` is 1,000,000. `_FIXTURE` files are excluded from directory selections and cannot be requested as standalone tests.
 
+To measure the entire pinned suite, use `--path .` with the default offset and no limit. With the release worker and checkout prepared as above, run
+
+```powershell
+node tools/test262/runner.mjs --test262 PATH_TO_TEST262 --worker target/release/rb-js.exe --path . --output target/test262/full.json
+node tools/test262/summarize.mjs target/test262/full.json
+```
+
+On Linux, use `target/release/rb-js` for the worker. The 2026-11-24 snapshot used Linux x86_64 with six workers, each running disjoint ranges of up to 1,000 files at the default budgets. VM stack limits vary by platform.
+
+The summary counts files and variant outcomes overall and by top-level test folder. A file passes when every reported variant passes. An invalid-metadata row counts as a non-passing file and row. For sharded runs, pass all report filenames to the same command. It reads JSON or gzip-compressed JSON, checks that the revision, worker, runner and budgets match, and rejects duplicate variants. Totals cover only the supplied reports.
+
 The runner sends at most one request at a time. JSONL requests are capped at 16 MiB. The worker bounds the execution budget to 1–100,000,000 instructions, charges native work and string copies, and limits each checkpoint to 10,000 jobs. The VM queue defaults to 4,096 jobs. Reaction and unhandled-rejection limits also apply. The log holds up to 64 entries, each with up to 2,048 UTF-16 units of preview.
 
 The VM defaults to 64 MiB of estimated allocations and 100,000 heap cells, with additional source, text, and nesting limits. The allocation budget estimates VM memory. Reaching a resource limit yields `resource_limit`. The outer deadline stops only the worker process created by the runner and records `timeout` or `crash` as appropriate. [JavaScript engine documentation](../../docs/JAVASCRIPT.md)
+
+### Refresh the README compatibility snapshot
+
+After a full run, update the date, Satin commit and build environment in [the snapshot](../../docs/compatibility/snapshot.json). Review its CSS and web measurements against their linked fixtures. From the repository root in PowerShell 7, run the commands below. For shards, pass all shard paths in place of the single input file.
+
+```powershell
+$summary = node tools/test262/summarize.mjs --outcomes target/test262/outcomes.tsv.gz target/test262/full.json
+if ($LASTEXITCODE -ne 0) { throw 'Invalid Test262 reports' }
+$json = $summary -join "`n"
+if (!(($json | ConvertFrom-Json).fullSuite)) { throw 'The reports cover only part of Test262' }
+Set-Content docs/compatibility/test262.json -Value ($json + "`n") -Encoding utf8NoBOM -NoNewline
+Copy-Item target/test262/outcomes.tsv.gz docs/compatibility/test262-outcomes.tsv.gz -Force
+node tools/render-compatibility.mjs
+```
+
+`fullSuite` requires every input to select `--path .`, agree on the available file count, and together cover that many distinct files. The gzip contains one headerless TSV row per variant, ordered by path then variant. Its columns are path, variant (empty for invalid metadata), and status. The summary records the SHA-256 of the uncompressed UTF-8 bytes with LF line endings. Review the snapshot date, Satin source revision and build environment when publishing new results.
 
 ## Compare two reports
 
