@@ -110,7 +110,7 @@ Colours show the pass rate within each named suite. The CSS results cover sticky
 | --- | ---: | ---: | --- |
 ${table}
 
-The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were ${statuses}. A file whose metadata the runner cannot read contributes one result. The separate legacy website probe passed its 55-case harness chapter. [Legacy browser probe](tools/test262/website.md)
+The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were ${statuses}. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s \`language\`, \`built-ins\`, \`annexB\` or \`harness\` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
 
 The Test262 run used ${snapshot.build}. Each variant had a ${js.limits.timeoutMs / 1000}-second timeout and a ${number(js.limits.maxInstructions)}-instruction budget. [Per-file and per-variant outcomes (TSV.GZ)](docs/compatibility/test262-outcomes.tsv.gz) · [Machine-readable totals](docs/compatibility/test262.json) · [Reproduce the measurement](tools/test262/README.md#reports-and-limits)
 

@@ -6,25 +6,25 @@
   <text x="20" y="33" font-size="20" fill="#f6f3ed" font-weight="650" text-anchor="start">JavaScript</text>
 <text x="768" y="33" font-size="13" fill="#b7b5b1" font-weight="450" text-anchor="end">Test262  /  all six directories</text>
 <g transform="translate(20 45)">
-    <title>Core language · 93.97% · 42,015 / 44,709</title>
+    <title>Core language · 94.86% · 42,413 / 44,709</title>
     <rect width="244" height="84" rx="7" fill="#263e37"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Core language</text>
-    <text x="13" y="57" font-size="30" fill="#a1dac5" font-weight="650" text-anchor="start">93.97%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">42,015 / 44,709</text>
+    <text x="13" y="57" font-size="30" fill="#a1dac5" font-weight="650" text-anchor="start">94.86%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">42,413 / 44,709</text>
   </g>
 <g transform="translate(272 45)">
-    <title>Built-in objects · 55.94% · 26,544 / 47,448</title>
+    <title>Built-in objects · 62.83% · 29,810 / 47,448</title>
     <rect width="244" height="84" rx="7" fill="#4d4224"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Built-in objects</text>
-    <text x="13" y="57" font-size="30" fill="#f6d887" font-weight="650" text-anchor="start">55.94%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">26,544 / 47,448</text>
+    <text x="13" y="57" font-size="30" fill="#f6d887" font-weight="650" text-anchor="start">62.83%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">29,810 / 47,448</text>
   </g>
 <g transform="translate(524 45)">
-    <title>Intl (ECMA-402) · 0.56% · 38 / 6,786</title>
+    <title>Intl (ECMA-402) · 0.59% · 40 / 6,786</title>
     <rect width="244" height="84" rx="7" fill="#502c2c"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Intl (ECMA-402)</text>
-    <text x="13" y="57" font-size="30" fill="#ffad9e" font-weight="650" text-anchor="start">0.56%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">38 / 6,786</text>
+    <text x="13" y="57" font-size="30" fill="#ffad9e" font-weight="650" text-anchor="start">0.59%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">40 / 6,786</text>
   </g>
 <g transform="translate(20 137)">
     <title>Annex B · 46.48% · 640 / 1,377</title>
@@ -34,18 +34,18 @@
     <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">640 / 1,377</text>
   </g>
 <g transform="translate(272 137)">
-    <title>Test harness · 72.65% · 170 / 234</title>
-    <rect width="244" height="84" rx="7" fill="#4d4224"/>
+    <title>Test harness · 97.44% · 228 / 234</title>
+    <rect width="244" height="84" rx="7" fill="#263e37"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Test harness</text>
-    <text x="13" y="57" font-size="30" fill="#f6d887" font-weight="650" text-anchor="start">72.65%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">170 / 234</text>
+    <text x="13" y="57" font-size="30" fill="#a1dac5" font-weight="650" text-anchor="start">97.44%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">228 / 234</text>
   </g>
 <g transform="translate(524 137)">
-    <title>Staging · 57.18% · 1,596 / 2,791</title>
+    <title>Staging · 60.48% · 1,688 / 2,791</title>
     <rect width="244" height="84" rx="7" fill="#4d4224"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Staging</text>
-    <text x="13" y="57" font-size="30" fill="#f6d887" font-weight="650" text-anchor="start">57.18%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">1,596 / 2,791</text>
+    <text x="13" y="57" font-size="30" fill="#f6d887" font-weight="650" text-anchor="start">60.48%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">1,688 / 2,791</text>
   </g>
   <text x="20" y="254" font-size="20" fill="#f6f3ed" font-weight="650" text-anchor="start">CSS</text>
 <text x="768" y="254" font-size="13" fill="#b7b5b1" font-weight="450" text-anchor="end">Web Platform Tests</text>
