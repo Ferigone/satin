@@ -490,7 +490,8 @@ export function parseOptions(argv) {
     if (!options.chapter.trim() || options.chapter.includes('/')) throw new Error('Expected a chapter name or json/NAME.json');
   }
   options.until ??= options.chapter ? 'complete' : 'first';
-  options.timeoutMs ??= 420_000;
+  const longRun = options.until === 'complete' && !['harness', 'annexB'].includes(options.chapter);
+  options.timeoutMs ??= longRun ? 21_600_000 : 420_000;
   if (options.satin && (options.chapter || argv.includes('--until'))) options.native = true;
   if ((!options.satin && !options.chromium.length) || (options.native && !options.satin) ||
       !['first', 'complete'].includes(options.until) ||

@@ -148,7 +148,7 @@ fn mark_dirty(state: &mut State) {
 }
 
 /// Bound each web realm independently. A response, its UTF-16 string and its
-/// parsed data can coexist; ordinary interpreted JS has the standalone task budget.
+/// parsed data can coexist. The scheduler supplies the separate timer task bounds.
 fn web_vm() -> Vm {
     Vm::with_limits(VmLimits {
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,

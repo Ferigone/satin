@@ -12,6 +12,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
+    time::Instant,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -148,6 +149,7 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
+    task_deadline: Option<Instant>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
@@ -263,6 +265,7 @@ impl Vm {
             remaining: limits.max_instructions,
             limits,
             interrupt: None,
+            task_deadline: None,
             active: 0,
             call_depth: 0,
             inspected_calls: None,
@@ -357,7 +360,8 @@ impl Vm {
         if self.active == 0 {
             return (self.eval_with_identifier(source, identifier), false);
         }
-        let reserved = self.remaining / 4;
+        let child_budget = (self.remaining - self.remaining / 4).min(self.limits.max_instructions);
+        let reserved = self.remaining - child_budget;
         let parent_cells = self.limits.max_heap_objects;
         let parent_bytes = self.limits.max_heap_bytes;
         let reserved_cells = parent_cells.saturating_sub(self.heap.live) / 4;
@@ -423,13 +427,32 @@ impl Vm {
     where
         F: FnOnce(&mut Vm) -> Result<T, JsError>,
     {
-        if self.active == 0 {
+        self.with_task_limits(self.limits.max_instructions, None, callback)
+    }
+
+    /// A host may give an outer scheduled callback more work with a wall-clock
+    /// deadline. Nested tasks and their microtasks always share the outer limits.
+    pub fn with_task_limits<T, F>(
+        &mut self,
+        instructions: u64,
+        deadline: Option<Instant>,
+        callback: F,
+    ) -> Result<T, JsError>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, JsError>,
+    {
+        let outer = self.active == 0;
+        if outer {
             self.check_interrupt()?;
-            self.remaining = self.limits.max_instructions;
+            self.remaining = instructions;
+            self.task_deadline = deadline;
         }
         self.active += 1;
         let result = callback(self);
         self.active -= 1;
+        if outer {
+            self.task_deadline = None;
+        }
         result
     }
     /// Allow a worker's owning thread to request cooperative termination.
@@ -438,6 +461,15 @@ impl Vm {
     }
 
     fn check_interrupt(&self) -> Result<(), JsError> {
+        if self
+            .task_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Task deadline exceeded",
+            ));
+        }
         if self
             .interrupt
             .as_ref()
@@ -3857,7 +3889,7 @@ impl Vm {
                 self.consume_work(b.len())?;
                 return self.checked_string(a.append(&b));
             }
-            self.consume_work(len)?;
+            self.charge_buffer_work(len)?;
             return self.checked_string(a.concat(&b));
         }
         if matches!(op, "<" | ">" | "<=" | ">=") {
@@ -4065,5 +4097,33 @@ fn parse_number(s: &JsString) -> f64 {
         f64::NAN
     } else {
         s.parse().unwrap_or(f64::NAN)
+    }
+}
+
+#[cfg(test)]
+mod task_limit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn nested_callbacks_share_fuel_and_deadlines_and_next_tasks_recover() {
+        let mut vm = Vm::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let failure = vm
+            .with_task_limits(100, Some(deadline), |vm| {
+                vm.charge_work(80)?;
+                vm.with_task_limits(150, None, |vm| vm.charge_work(30))
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
+
+        let expired = Instant::now();
+        let failure = vm
+            .with_task_limits(u64::MAX, Some(expired), |vm| {
+                vm.with_task(|vm| vm.eval("while(true){}"))
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
+        assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
     }
 }

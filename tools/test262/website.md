@@ -24,7 +24,7 @@ The site’s default catalog lists `harness`, `language`, `annexB` and `built-in
 | Complete Run All | `--until complete --timeout-ms 7200000` |
 | Observe Run All making progress, pause and open Results | `--until first` |
 
-`--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. The default observation timeout is 420,000 ms and long runs can request up to 21,600,000 ms (six hours). Execution, startup and Results observation have separate deadlines. The native catalog and row waits are capped at two minutes each. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
+`--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. Full runs of the larger chapters and Run All allow six hours by default. First-result checks, harness and Annex B allow seven minutes. Use `--timeout-ms` to set a shorter deadline or allow up to six hours. Execution, startup and Results observation have separate deadlines. The native catalog and row waits are capped at two minutes each. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
 
 To run an existing HTTP(S) mirror, pass its document URL with `--site-url http://127.0.0.1:8000/default.html`. The report records the actual URL and identifies alternate sites separately from the public endpoint.
 

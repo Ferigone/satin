@@ -20,6 +20,10 @@ task’s remaining instructions and heap capacity. If it exhausts that share,
 the child’s error handler receives the failure and the parser can continue
 with the following script. Unsupported engine features also reach the child’s
 error handler. The parent and its children still share one overall task budget.
+A window timer and its microtasks can use up to 24 million instruction units
+and have a two-second cooperative deadline. Synchronous child parser scripts
+remain bounded to at most the ordinary per-script limit. After a long timer,
+the scheduler returns to input and rendering before starting another timer.
 
 Frame coverage is limited to initial blank documents. Frame navigation,
 `srcdoc`, sandboxed documents, nested frame loading and the full child

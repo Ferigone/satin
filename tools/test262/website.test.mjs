@@ -109,6 +109,16 @@ test('Satin chapter names and catalog paths select the same hit-tested chapter a
   assert.throws(() => parseOptions(['--satin', 'satin', '--chapter', 'json/language/nested']), /chapter name/);
 });
 
+test('large chapter commands allow completion on the default deadline', () => {
+  const options = (...args) => parseOptions(['--satin', 'satin', ...args]);
+  assert.equal(options('--chapter', 'json/language.json').timeoutMs, 21_600_000);
+  assert.equal(options('--chapter', 'built-ins').timeoutMs, 21_600_000);
+  assert.equal(options('--until', 'complete').timeoutMs, 21_600_000);
+  assert.equal(options('--chapter', 'harness').timeoutMs, 420_000);
+  assert.equal(options('--chapter', 'language', '--until', 'first').timeoutMs, 420_000);
+  assert.equal(options('--chapter', 'language', '--timeout-ms', '20000').timeoutMs, 20000);
+});
+
 test('native Run All records the initial catalog, and first mode pauses after a positive counter', () => {
   const args = ['--satin', 'satin', '--until', 'first', '--site-url', 'http://127.0.0.1:12345/default.html'];
   const options = parseOptions(args);
