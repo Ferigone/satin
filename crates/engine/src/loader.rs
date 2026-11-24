@@ -340,6 +340,7 @@ pub struct OpenedPage {
     pub(crate) input: DocumentInput,
     pub(crate) started: Instant,
     pub(crate) response_start: Instant,
+    pub(crate) http_status: Option<u16>,
 }
 pub(crate) enum DocumentInput {
     Html(String),
@@ -466,6 +467,7 @@ impl Loader {
 
     fn opened_response(&self, main: Response, started: Instant) -> Result<OpenedPage, String> {
         let url = Url::parse(&main.url).map_err(|error| error.to_string())?;
+        let http_status = matches!(url.scheme(), "http" | "https").then_some(main.status);
         let size = main.bytes.len();
         let mime = crate::mime::MimeType::parse(&main.content_type);
         let mut page = LoadedPage::empty(url, self.cookies.clone(), main.context);
@@ -507,6 +509,7 @@ impl Loader {
             input,
             started,
             response_start: main.response_start,
+            http_status,
         })
     }
 
@@ -618,6 +621,7 @@ impl Loader {
             input: DocumentInput::Streaming,
             started,
             response_start,
+            http_status: Some(response.status().as_u16()),
         };
         control
             .wait(send(NavigationPart::Open(Box::new(opened))))
@@ -1444,8 +1448,14 @@ const BASE_STYLE: &str = "body{margin:0;background:#f8fafc;color:#172936;font-fa
 fn builtin_source(name: &str) -> (String, bool) {
     let (title, body) = match name {
         "media" => ("Video playback", include_str!("../data/pages/media.html")),
-        "streaming" => ("Segmented playback", include_str!("../data/pages/streaming.html")),
-        "workers" => ("Worker and WebAssembly", include_str!("../data/pages/workers.html")),
+        "streaming" => (
+            "Segmented playback",
+            include_str!("../data/pages/streaming.html"),
+        ),
+        "workers" => (
+            "Worker and WebAssembly",
+            include_str!("../data/pages/workers.html"),
+        ),
         "time" => ("Zegar i układ", include_str!("../data/pages/time.html")),
         "canvas" => ("Płótno 2D", include_str!("../data/pages/canvas.html")),
         "numbers" => (
@@ -1487,19 +1497,27 @@ fn builtin_source(name: &str) -> (String, bool) {
             "Próba silnika",
             r#"<p class='eyebrow'>WŁASNY SILNIK · PRÓBA LOKALNA</p><h1>Od tekstu do pikseli.</h1><p>Ta strona przechodzi przez parser HTML, kaskadę CSS, układ i renderer napisane w Rust.</p><h2>Tekst i style</h2><p>Zwykły tekst, <strong>pogrubienie</strong>, <em>kursywa</em>, <code>kod o stałej szerokości</code> i <a href='#kotwica'>link do kotwicy</a>. Polskie litery: zażółć gęślą jaźń. Encje: &copy; &euro; &rarr;.</p><blockquote style='border:2px solid #16836a;padding:16px;background:#eaf6f0'>Układ jest przeliczany po zmianie rozmiaru okna.</blockquote><h2>Lista i obraz</h2><ol><li>Nawigacja przez wpisanie adresu lub kliknięcie linku.</li><li>Przewijanie kółkiem, Page Down i klawiszami strzałek.</li><li>Wstecz, dalej i odświeżanie oraz wiele kart.</li></ol><img src='about:sample-image' width='400' alt='Próbny obraz renderera'><h2 id='kotwica'>Jesteś przy kotwicy.</h2><pre>fn main() { println!("Rust Browser"); }</pre><p><a href='about:home'>Wróć na start</a> · <a href='about:version'>Informacje o wersji</a></p>"#,
         ),
-        "version" => (
-            "About Satin",
-            include_str!("../data/pages/version.html"),
-        ),
+        "version" => ("About Satin", include_str!("../data/pages/version.html")),
         _ => ("New Tab", include_str!("../data/pages/home.html")),
     };
-    let body = body.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")).replace("RUST BROWSER", "SATIN");
+    let body = body
+        .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+        .replace("RUST BROWSER", "SATIN");
     use base64::{Engine, engine::general_purpose::STANDARD};
     let body = match name {
-        "media" => body.replace("{{MEDIA_SAMPLE}}", &STANDARD.encode(include_bytes!("../data/pages/media-demo.mp4"))),
+        "media" => body.replace(
+            "{{MEDIA_SAMPLE}}",
+            &STANDARD.encode(include_bytes!("../data/pages/media-demo.mp4")),
+        ),
         "streaming" => body
-            .replace("{{STREAM_VIDEO}}", &STANDARD.encode(include_bytes!("../data/pages/mse-video.mp4")))
-            .replace("{{STREAM_AUDIO}}", &STANDARD.encode(include_bytes!("../data/pages/mse-audio.mp4"))),
+            .replace(
+                "{{STREAM_VIDEO}}",
+                &STANDARD.encode(include_bytes!("../data/pages/mse-video.mp4")),
+            )
+            .replace(
+                "{{STREAM_AUDIO}}",
+                &STANDARD.encode(include_bytes!("../data/pages/mse-audio.mp4")),
+            ),
         _ => body,
     };
     let home = title == "New Tab";
@@ -1535,6 +1553,16 @@ fn builtin_images(page: &mut LoadedPage, name: &str, home: bool) {
 }
 
 impl OpenedPage {
+    /// Final HTTP response accepted for this navigation, not a body-completion signal.
+    pub fn http_response(&self) -> Option<(u16, Duration)> {
+        self.http_status.map(|status| {
+            (
+                status,
+                self.response_start.saturating_duration_since(self.started),
+            )
+        })
+    }
+
     pub fn internal(url: &Url, cookies: CookieStore) -> Self {
         let started = Instant::now();
         let (source, home) = builtin_source(url.path());
@@ -1550,6 +1578,7 @@ impl OpenedPage {
             input: DocumentInput::Html(source),
             started,
             response_start: started,
+            http_status: None,
         }
     }
 }

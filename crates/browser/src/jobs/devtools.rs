@@ -46,25 +46,34 @@ pub(crate) struct Event {
 pub(crate) enum Phase {
     /// Initial request, not proof a socket was used. `None` is an invalid or
     /// overlong display method. The URL is already redacted and length capped.
-    Started { method: Option<String>, url: String },
-    /// The loader emitted Open, not necessarily at header arrival. Neither
-    /// final URL nor HTTP status is exposed on OpenedPage at this boundary.
-    NavigationOpened,
+    Started {
+        method: Option<String>,
+        url: String,
+    },
+    /// Final HTTP headers of a navigation the loader accepted. The elapsed
+    /// time measures header arrival even if Open required a buffered body.
+    NavigationOpened {
+        status: u16,
+        response_time: Duration,
+    },
     /// The navigation loader returned successfully, not DOM/load completion.
     NavigationFinished,
     /// The exposed Fetch response, not body completion. Opaque status is None.
-    FetchResponse { status: Option<u16> },
+    FetchResponse {
+        status: Option<u16>,
+    },
     /// One-shot event from a successful GET resource load. Only the sanitized
     /// final URL is visible; the request URL, subtype and HTTP status are not.
-    ResourceLoaded { url: String },
+    ResourceLoaded {
+        url: String,
+    },
     /// Loader/worker errors are deliberately not included as raw strings.
     Failed,
     Cancelled,
 }
 
 /// Consumers must filter by tab and navigation before storing or displaying.
-/// The tap does not wake the UI; drain opportunistically and poll if pending
-/// jobs or events without a corresponding page wake must be visible promptly.
+/// Jobs use the existing browser wake to make these observations visible.
 pub(crate) struct Receiver {
     rx: mpsc::Receiver<Event>,
     dropped: Arc<AtomicUsize>,
@@ -219,7 +228,9 @@ mod tests {
             trace.record(Phase::FetchResponse { status: Some(200) });
         }
         // The phase closure must not run when the queue is full or closed.
-        observer.record(key, Duration::ZERO, || panic!("full queue formatted a phase"));
+        observer.record(key, Duration::ZERO, || {
+            panic!("full queue formatted a phase")
+        });
         assert_eq!(receiver.take_dropped(), 1);
         assert_eq!(receiver.take_dropped(), 0);
         assert!(matches!(
@@ -246,7 +257,11 @@ mod tests {
         let (observer, mut receiver) = channel();
         for address in ["data:text/plain,secret", "file:///private", "about:home"] {
             let url = Url::parse(address).unwrap();
-            assert!(observer.begin(key(Request::Navigate), "GET", &url).is_none());
+            assert!(
+                observer
+                    .begin(key(Request::Navigate), "GET", &url)
+                    .is_none()
+            );
             observer.resource_loaded(key(Request::Resource(1)), Instant::now(), &url);
         }
         assert!(receiver.try_recv().is_none());

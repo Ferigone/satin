@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod devtools;
 mod file_picker;
 mod headless;
 mod jobs;
@@ -221,7 +222,6 @@ fn run() -> Result<(), String> {
         value("--smoke-actions").map(PathBuf::from),
         file_picker_responses,
         smoke_size,
-        // Register lane 09's native shell here once the facade is integrated.
-        None,
+        Some(devtools::DevTools::default()),
     )
 }

@@ -232,10 +232,18 @@ async fn run_job(
             let trace = observer.and_then(|observer| {
                 observer.begin(key(Request::Navigate), &request.method, &request.url)
             });
+            if trace.is_some() {
+                wake();
+            }
             let result = loader
                 .stream_navigation_cancellable(&request, &cancel, deadline, |part| {
-                    if let (Some(trace), NavigationPart::Open(_)) = (trace, &part) {
-                        trace.record(Phase::NavigationOpened);
+                    if let (Some(trace), NavigationPart::Open(opened)) = (trace, &part)
+                        && let Some((status, response_time)) = opened.http_response()
+                    {
+                        trace.record(Phase::NavigationOpened {
+                            status,
+                            response_time,
+                        });
                     }
                     async move {
                         results
@@ -253,6 +261,10 @@ async fn run_job(
                     Err(_) if cancel.is_cancelled() => Phase::Cancelled,
                     Err(_) => Phase::Failed,
                 });
+                // A successful stream has no separate terminal page message.
+                if result.is_ok() || cancel.is_cancelled() {
+                    wake();
+                }
             }
             match result {
                 Ok(()) => return,
@@ -268,6 +280,9 @@ async fn run_job(
             let trace = observer.and_then(|observer| {
                 observer.begin(key(Request::Fetch(id)), &request.method, &request.url)
             });
+            if trace.is_some() {
+                wake();
+            }
             let demand = upload.as_ref().map(|body| body.demand());
             let response = loader.open_web_fetch_with_upload(
                 &request,
@@ -331,6 +346,7 @@ async fn run_job(
                     Ok(_) => {
                         if let Some(trace) = trace {
                             trace.record(Phase::Cancelled);
+                            wake();
                         }
                         return;
                     }
@@ -348,6 +364,9 @@ async fn run_job(
                 } else {
                     Phase::Failed
                 });
+                if cancel.is_cancelled() {
+                    wake();
+                }
             }
             Payload::Fetch { id, result }
         }

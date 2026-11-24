@@ -20,7 +20,7 @@
 //! - Pass packets from `Workers::new_observed` to `observe_network(event)`.
 //!   Drain them without waiting, independently of App's job-generation check:
 //!   that check also rejects the final observation for a failed attempt. The
-//!   observer has no separate wake; App is responsible for drain scheduling.
+//!   jobs wake the existing event loop; App drains on that loop.
 //!   Drain available packets before routing Network Clear. The queue overflow
 //!   total is window-wide and must not be attributed to a document.
 
@@ -60,6 +60,7 @@ const MAX_DOCUMENTS: usize = 24;
 pub(crate) struct DevTools {
     section: Section,
     documents: HashMap<u64, Document>,
+    observer_dropped: usize,
 }
 
 struct Document {
@@ -152,6 +153,7 @@ impl Document {
         fonts: &mut Fonts,
         frame: DockFrame,
         bounds: Rect,
+        observer_dropped: usize,
     ) {
         let scale = frame.scale;
         match section {
@@ -173,6 +175,12 @@ impl Document {
                 let rows: Vec<_> = self.network.rows().map(network_row).collect();
                 let loss = self.network.loss();
                 let layout = NetworkLayout::new(bounds);
+                let coverage = if observer_dropped == 0 {
+                    "Partial HTTP(S): navigation final status, Fetch headers, loaded resources"
+                        .into()
+                } else {
+                    format!("Partial HTTP(S); {observer_dropped} events lost across all tabs")
+                };
                 network_view::draw_network(
                     canvas,
                     fonts,
@@ -189,9 +197,7 @@ impl Document {
                         clear_hovered: layout.clear_rect().is_some_and(|clear| {
                             window_pointer(frame).is_some_and(|(x, y)| clear.contains(x, y))
                         }),
-                        coverage_note: Some(
-                            "Partial HTTP(S): navigation, Fetch/XHR, loaded resources",
-                        ),
+                        coverage_note: Some(&coverage),
                     },
                 );
             }
@@ -249,7 +255,7 @@ impl Document {
         // The observer supplies elapsed durations rather than timestamps.
         // Use one origin for relative offsets: the model only compares two
         // offsets within the same request. Never display this origin as a time.
-        let at = self.network_clock.checked_add(event.elapsed);
+        let mut at = self.network_clock.checked_add(event.elapsed);
         let phase = match event.phase {
             Phase::Started { method, url } => {
                 let Ok(url) = url::Url::parse(&url) else {
@@ -260,7 +266,15 @@ impl Document {
                     url: DisplayUrl::from_url(&url),
                 }
             }
-            Phase::NavigationOpened => return false, // No observed HTTP status or header time.
+            Phase::NavigationOpened {
+                status,
+                response_time,
+            } => {
+                at = self.network_clock.checked_add(response_time);
+                NetworkPhase::ResponseHeaders {
+                    status: Some(status),
+                }
+            }
             Phase::NavigationFinished => NetworkPhase::Terminal(TerminalOutcome::Completed),
             Phase::FetchResponse { status } => NetworkPhase::ResponseHeaders { status },
             Phase::Failed => NetworkPhase::Terminal(TerminalOutcome::Failed),
@@ -547,6 +561,10 @@ mod tests {
 }
 
 impl DevTools {
+    pub(crate) fn note_observer_drops(&mut self, dropped: usize) {
+        self.observer_dropped = self.observer_dropped.saturating_add(dropped);
+    }
+
     pub(crate) fn begin_navigation(&mut self, tab: u64, navigation: u64) {
         let at_capacity = self.documents.len() >= MAX_DOCUMENTS;
         match self.documents.entry(tab) {
@@ -609,7 +627,14 @@ impl DevtoolsDock for DevTools {
             // The last registered inspection attempt remains visible after
             // App increments its own generation to install a recovery page.
             if let Some(document) = self.documents.get(&frame.tab) {
-                document.paint(self.section, canvas, fonts, frame, layout.body);
+                document.paint(
+                    self.section,
+                    canvas,
+                    fonts,
+                    frame,
+                    layout.body,
+                    self.observer_dropped,
+                );
             } else {
                 // A restored but not-yet-loaded tab (or an internal blank tab).
                 // Render the normal empty view without registering a navigation.
@@ -619,6 +644,7 @@ impl DevtoolsDock for DevTools {
                     fonts,
                     frame,
                     layout.body,
+                    self.observer_dropped,
                 );
             }
         }

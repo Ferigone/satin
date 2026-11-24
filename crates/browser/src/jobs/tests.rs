@@ -389,7 +389,15 @@ fn redirect_and_full_result_queue_share_the_navigation_deadline() {
     );
     let opened = events.try_recv().unwrap();
     assert_eq!(opened.key, key);
-    assert_eq!(opened.phase, Phase::NavigationOpened);
+    let Phase::NavigationOpened {
+        status,
+        response_time,
+    } = opened.phase
+    else {
+        panic!("Expected real navigation headers");
+    };
+    assert_eq!(status, 200);
+    assert!(response_time <= opened.elapsed);
     let failed = events.try_recv().unwrap();
     assert_eq!(failed.key, key);
     assert_eq!(failed.phase, Phase::Failed);

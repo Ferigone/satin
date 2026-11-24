@@ -271,7 +271,7 @@ pub(crate) fn run(
     smoke_actions: Option<PathBuf>,
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
-    devtools: Option<Box<dyn DevtoolsDock>>,
+    devtools: Option<crate::devtools::DevTools>,
 ) -> Result<(), String> {
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
@@ -285,9 +285,10 @@ pub(crate) fn run(
     events.set_control_flow(ControlFlow::Wait);
     let proxy = events.create_proxy();
     let (results, incoming) = mpsc::channel(16);
-    let jobs = Workers::new(profile.cookies(), results, move || {
-        let _ = proxy.send_event(());
-    })?;
+    let (jobs, network_observations) =
+        Workers::new_observed(profile.cookies(), results, move || {
+            let _ = proxy.send_event(());
+        })?;
     let media_proxy = events.create_proxy();
     let media = Bridge::new(move || {
         let _ = media_proxy.send_event(());
@@ -330,6 +331,7 @@ pub(crate) fn run(
         media,
         worker_wake,
         incoming,
+        network_observations,
         mouse: (0., 0.),
         pointer_inside: false,
         devtools,
@@ -416,9 +418,10 @@ struct App {
     media: Bridge,
     worker_wake: Arc<dyn Fn() + Send + Sync>,
     incoming: Receiver<Message>,
+    network_observations: crate::jobs::devtools::Receiver,
     mouse: (f32, f32),
     pointer_inside: bool,
-    devtools: Option<Box<dyn DevtoolsDock>>,
+    devtools: Option<crate::devtools::DevTools>,
     devtools_open: bool,
     devtools_focused: bool,
     modifiers: ModifiersState,
@@ -482,10 +485,39 @@ impl App {
     }
 
     fn send_dock_input(&mut self, frame: DockFrame, input: DockInput) {
+        // Clear must not leave queued observations that immediately refill the view.
+        self.sync_console(self.active);
+        self.drain_network_observations();
         if let Some(dock) = &mut self.devtools {
             dock.input(frame, input);
             self.redraw();
         }
+    }
+
+    fn sync_console(&mut self, index: usize) -> bool {
+        let tab = &self.tabs[index];
+        let (Some(dock), Some(runtime)) = (&mut self.devtools, &tab.runtime) else {
+            return false;
+        };
+        dock.sync_console(tab.id, tab.document_navigation, runtime)
+    }
+
+    fn drain_network_observations(&mut self) -> bool {
+        let Some(dock) = &mut self.devtools else {
+            return false;
+        };
+        let active = self.tabs[self.active].id;
+        let dropped = self.network_observations.take_dropped();
+        dock.note_observer_drops(dropped);
+        let mut redraw = dropped != 0;
+        for _ in 0..crate::jobs::devtools::CAPACITY {
+            let Some(event) = self.network_observations.try_recv() else {
+                break;
+            };
+            let visible = event.key.tab == active;
+            redraw |= dock.observe_network(event) && visible;
+        }
+        redraw && self.devtools_open
     }
 
     fn set_dock_focus(&mut self, focused: bool) {
@@ -550,6 +582,7 @@ impl App {
     }
 
     fn fail_page(&mut self, index: usize, error: &str) {
+        self.sync_console(index);
         if index == self.active {
             self.select_popup = None;
             self.hover = None;
@@ -680,6 +713,7 @@ impl App {
     }
 
     fn sync_runtime(&mut self, index: usize) -> bool {
+        let console_changed = self.sync_console(index);
         let tab = &mut self.tabs[index];
         let mut changed = tab
             .runtime
@@ -711,7 +745,7 @@ impl App {
             self.save();
             changed = true;
         }
-        changed
+        changed || (self.devtools_open && console_changed)
     }
     fn dispatch_fetches(&mut self, index: usize) {
         let tab = &self.tabs[index];
@@ -945,6 +979,9 @@ impl App {
         tab.document_session = None;
         tab.navigation += 1;
         tab.document_navigation = tab.navigation;
+        if let Some(dock) = &mut self.devtools {
+            dock.begin_navigation(tab.id, tab.document_navigation);
+        }
         tab.loading = true;
         tab.scroll = 0.;
         tab.scroll_x = 0.;
@@ -1173,6 +1210,9 @@ impl App {
                 let tab = &self.tabs[i];
                 self.media.close_page(tab.id, tab.document_navigation);
                 tab.cancel.cancel();
+                if let Some(dock) = &mut self.devtools {
+                    dock.close_tab(tab.id);
+                }
                 self.tabs.remove(i);
                 if self.tabs.is_empty() {
                     self.save();
@@ -2947,7 +2987,7 @@ impl ApplicationHandler<()> for App {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
-        let mut redraw = self.apply_media_updates();
+        let mut redraw = self.apply_media_updates() | self.drain_network_observations();
         let mut deadline = None;
         for index in 0..self.tabs.len() {
             let changed = self.advance_page(index) | self.sync_runtime(index);
@@ -3086,6 +3126,9 @@ impl ApplicationHandler<()> for App {
         self.finish_smoke(event_loop);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        if self.drain_network_observations() {
+            self.redraw();
+        }
         for _ in 0..16 {
             let Ok(message) = self.incoming.try_recv() else {
                 break;
