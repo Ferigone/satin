@@ -1062,15 +1062,15 @@ impl App {
         let mut viewport = regions.viewport(tab);
         let (width, height) = (viewport.width, viewport.height);
         if let Some(runtime) = &tab.runtime {
-            match runtime.layout_for_viewport(viewport) {
+            match runtime.layout_for_paint(viewport) {
                 Ok(layout) => tab.layout = Some(layout),
                 Err(error) => self.status = error.to_string(),
             }
         } else if tab.layout.as_ref().is_none_or(|l| {
             (l.width - width).abs() > 0.5
                 || (l.viewport.height - height).abs() > 0.5
-                || (l.viewport.scroll_x - tab.scroll_x).abs() > 0.1
-                || (l.depends_on_viewport_scroll && (l.viewport.scroll_y - tab.scroll).abs() > 0.1)
+                || (l.depends_on_viewport_scroll
+                    && (l.viewport.scroll_x != tab.scroll_x || l.viewport.scroll_y != tab.scroll))
         }) && let Some(page) = &tab.page
         {
             tab.layout = Some(Arc::new(Layout::for_scrolling(
@@ -1115,11 +1115,11 @@ impl App {
         }
         // Clamping after a shrink can change viewport-dependent positioning.
         if tab.layout.as_ref().is_some_and(|l| {
-            (l.viewport.scroll_x - tab.scroll_x).abs() > 0.1
-                || (l.depends_on_viewport_scroll && (l.viewport.scroll_y - tab.scroll).abs() > 0.1)
+            l.depends_on_viewport_scroll
+                && (l.viewport.scroll_x != tab.scroll_x || l.viewport.scroll_y != tab.scroll)
         }) {
             if let Some(runtime) = &tab.runtime {
-                if let Ok(layout) = runtime.layout_for_viewport(viewport) {
+                if let Ok(layout) = runtime.layout_for_paint(viewport) {
                     tab.layout = Some(layout);
                 }
             } else if let Some(page) = &tab.page {
@@ -1844,7 +1844,16 @@ impl App {
         if regions.page.height > 0.
             && let Some(layout) = &tab.layout
         {
-            canvas.document_scaled(layout, &mut self.fonts, TOP * u, tab.scroll, u * tab.zoom);
+            canvas.document_at(
+                layout,
+                &mut self.fonts,
+                TOP * u,
+                ScrollOffset {
+                    x: tab.scroll_x,
+                    y: tab.scroll,
+                },
+                u * tab.zoom,
+            );
         }
         if let (Some(frame), Some(dock)) = (dock_frame, &mut self.devtools) {
             let page = tab.inspected_page();

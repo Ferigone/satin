@@ -266,13 +266,27 @@ impl LayoutHost {
         }
         if viewport.width != old.width || viewport.height != old.height {
             d.invalidate();
-        } else if viewport.scroll_x != old.scroll_x
-            || (viewport.scroll_y != old.scroll_y
-                && d.layout
-                    .as_ref()
-                    .is_some_and(|l| l.depends_on_viewport_scroll))
-        {
-            d.scroll_dirty = true;
+        } else if viewport.scroll_x != old.scroll_x || viewport.scroll_y != old.scroll_y {
+            if d.layout
+                .as_ref()
+                .is_some_and(|l| l.depends_on_viewport_scroll)
+            {
+                d.scroll_dirty = true;
+            } else if d.layout_is_valid()
+                && let Some(layout) = &d.layout
+            {
+                let x = viewport
+                    .scroll_x
+                    .min((layout.content_width - viewport.width).max(0.));
+                let y = viewport
+                    .scroll_y
+                    .min((layout.height - viewport.height).max(0.));
+                if x != viewport.scroll_x || y != viewport.scroll_y {
+                    d.root_request = Some(ScrollOffset { x, y });
+                    viewport.scroll_x = x;
+                    viewport.scroll_y = y;
+                }
+            }
         }
         if viewport.scroll_x != old.scroll_x || viewport.scroll_y != old.scroll_y {
             d.event(None);
@@ -314,7 +328,7 @@ impl LayoutHost {
             .scroll_y
             .clamp(0., (layout.height - d.viewport.height).max(0.));
         if x != d.viewport.scroll_x || y != d.viewport.scroll_y {
-            let rebuild = layout.depends_on_viewport_scroll || x != d.viewport.scroll_x;
+            let rebuild = layout.depends_on_viewport_scroll;
             d.viewport.scroll_x = x;
             d.viewport.scroll_y = y;
             d.root_request = Some(ScrollOffset { x, y });
@@ -410,7 +424,7 @@ impl LayoutHost {
             if next.x != old.scroll_x || next.y != old.scroll_y {
                 d.viewport.scroll_x = next.x;
                 d.viewport.scroll_y = next.y;
-                if layout.depends_on_viewport_scroll || next.x != old.scroll_x {
+                if layout.depends_on_viewport_scroll {
                     d.scroll_dirty = true;
                 }
                 d.root_request = Some(next);
@@ -1519,6 +1533,22 @@ impl ScriptRuntime {
         self.layout.viewport()
     }
     pub fn layout_for_viewport(&self, viewport: Viewport) -> Result<Arc<Layout>, JsError> {
+        let snapshot = self.layout_for_paint(viewport)?;
+        let viewport = self.viewport();
+        if snapshot.viewport.scroll_x == viewport.scroll_x {
+            return Ok(snapshot);
+        }
+        // Legacy painters read X from the snapshot and receive Y separately.
+        // A caller holding the old scene must keep its original camera.
+        drop(snapshot);
+        let mut data = self.layout.0.borrow_mut();
+        let scene = data.layout.as_mut().expect("snapshot just built");
+        Arc::make_mut(scene).viewport = viewport;
+        Ok(scene.clone())
+    }
+    /// For painters that supply both scroll offsets separately, ordinary page
+    /// movement can reuse the same immutable scene on either axis.
+    pub fn layout_for_paint(&self, viewport: Viewport) -> Result<Arc<Layout>, JsError> {
         self.publish_canvas_frames();
         self.layout.set_viewport(viewport);
         self.layout.layout(None)

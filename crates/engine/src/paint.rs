@@ -1,7 +1,7 @@
 use crate::{
     css::Color,
     fonts::{Fonts, RasterFailure, Run},
-    layout::{Affine2D, DrawCommand, Layout, Rect},
+    layout::{Affine2D, DrawCommand, Layout, Rect, ScrollOffset},
 };
 mod box_border;
 mod controls;
@@ -248,6 +248,27 @@ impl Canvas {
         scroll: f32,
         scale: f32,
     ) {
+        self.document_at(
+            layout,
+            fonts,
+            offset,
+            ScrollOffset {
+                x: layout.viewport.scroll_x,
+                y: scroll,
+            },
+            scale,
+        );
+    }
+
+    /// Paint a document-space scene at the current scroll offset on both axes.
+    pub fn document_at(
+        &mut self,
+        layout: &Layout,
+        fonts: &mut Fonts,
+        offset: f32,
+        scroll: ScrollOffset,
+        scale: f32,
+    ) {
         fonts.prune_raster_cache();
         let ui_work = self.work_left;
         let depth = self.stack.len();
@@ -255,8 +276,8 @@ impl Canvas {
             Affine2D {
                 a: scale,
                 d: scale,
-                e: -layout.viewport.scroll_x * scale,
-                f: offset - scroll * scale,
+                e: -scroll.x * scale,
+                f: offset - scroll.y * scale,
                 ..Affine2D::IDENTITY
             },
             None,

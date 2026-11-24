@@ -93,9 +93,20 @@ impl WheelGesture {
         self.last_frame = now;
         self.next_frame = now + self.period;
         self.ease_left = self.ease_left.saturating_sub(elapsed);
+        // Keep intermediate detent positions on a binary subpixel grid. Repeated
+        // f32 additions at large offsets otherwise leave a small remainder even
+        // after equal wheel travel in the opposite direction. The last sample
+        // consumes the exact balance, including fractional distances from zoom.
+        let advance = |remaining: f32| {
+            if fraction == 1. {
+                remaining
+            } else {
+                ((remaining * fraction) * 64.).trunc() / 64.
+            }
+        };
         let step = ScrollOffset {
-            x: self.remaining.x * fraction,
-            y: self.remaining.y * fraction,
+            x: advance(self.remaining.x),
+            y: advance(self.remaining.y),
         };
         self.remaining.x -= step.x;
         self.remaining.y -= step.y;
@@ -238,7 +249,9 @@ impl App {
             return None;
         }
         let target = gesture.target;
-        if let Some(step) = gesture.sample(now) {
+        if let Some(step) = gesture.sample(now)
+            && step != ScrollOffset::default()
+        {
             if self.tabs[self.active].layout.is_none() {
                 self.ensure_layout();
             }
@@ -378,6 +391,32 @@ mod tests {
             frames += 1;
         }
         assert!((total - 162.).abs() < 0.001 && frames > 1);
+    }
+
+    #[test]
+    fn long_runs_of_animated_detents_return_to_the_exact_starting_offset() {
+        let start = Instant::now();
+        let mut g = gesture(start, true);
+        let mut offset = 3_584.;
+        for (direction, expected) in [(1., 6_176.), (-1., 3_584.)] {
+            let begin = g.last_input + Duration::from_secs(1);
+            for i in 0..24 {
+                let now = begin + Duration::from_micros(i * 16_701);
+                g.push(
+                    ScrollOffset {
+                        x: 0.,
+                        y: direction * 108.,
+                    },
+                    true,
+                    now,
+                );
+                offset += g.sample(now).unwrap().y;
+            }
+            while let Some(deadline) = g.deadline() {
+                offset += g.sample(deadline).unwrap().y;
+            }
+            assert_eq!(offset, expected);
+        }
     }
 
     #[test]
