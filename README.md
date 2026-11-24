@@ -31,7 +31,7 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
-Satin’s JavaScript engine passed **74,819 of 103,345 Test262 checks (72.40%)** on Linux x86_64. **38,888 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `607e1ba`](https://github.com/Ferigone/satin/commit/607e1ba3ce60b80c8dddb347388fadae34f4eea8) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
+Satin’s JavaScript engine passed **74,819 of 103,345 Test262 checks (72.40%)** on Linux x86_64. **38,888 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `440344d`](https://github.com/Ferigone/satin/commit/440344de7366eafaad3efc558d59deeca49ed7f1) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
