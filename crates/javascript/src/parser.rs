@@ -503,12 +503,25 @@ impl Parser {
         }
     }
     fn statement(&mut self) -> Result<Stmt, JsError> {
-        if self.depth >= MAX_PARSER_DEPTH {
-            return Err(self.error("Parser nesting limit exceeded"));
-        }
-        self.depth += 1;
-        let result = self.statement_inner();
-        self.depth -= 1;
+        // Neither a return nor an expression statement has a statement body.
+        // Its expression charges the recursive grammar edge when needed.
+        let result = if self.eat("return") {
+            self.return_statement()
+        } else if matches!(self.current().kind,
+            TokenKind::Punct("(" | "[" | "!" | "~" | "+" | "-" | "++" | "--" | "/" | "/=")
+                | TokenKind::Number(_) | TokenKind::BigInt(_) | TokenKind::String(_)
+                | TokenKind::Template { head: true, .. })
+        {
+            self.expression_statement()
+        } else {
+            if self.depth >= MAX_PARSER_DEPTH {
+                return Err(self.error("Parser nesting limit exceeded"));
+            }
+            self.depth += 1;
+            let result = self.statement_inner();
+            self.depth -= 1;
+            result
+        };
         let statement = result?;
         self.check_ast(Ast::Statement(&statement))?;
         Ok(statement)
@@ -563,9 +576,6 @@ impl Parser {
         if self.eat("for") {
             return self.for_statement();
         }
-        if self.eat("return") {
-            return self.return_statement();
-        }
         if self.eat("break") {
             let target = self.jump_target(false)?;
             self.semi()?;
@@ -615,6 +625,10 @@ impl Parser {
         if self.at("export") {
             return Err(self.error("An export declaration requires module code"));
         }
+        self.expression_statement()
+    }
+
+    fn expression_statement(&mut self) -> Result<Stmt, JsError> {
         let escaped = self.current().escaped_string;
         let e = self.expression(1)?;
         self.semi()?;
@@ -882,7 +896,7 @@ impl Parser {
                 return Err(self.error("let cannot be a lexical binding name"));
             }
             let init = if self.eat("=") {
-                Some(self.expression(2)?)
+                Some(self.initializer()?)
             } else {
                 None
             };
@@ -1161,7 +1175,11 @@ impl Parser {
         }
         loop {
             let spread = self.eat("...");
-            let value = self.expression_in(2)?;
+            let previous = self.allow_in;
+            self.allow_in = true;
+            let value = self.initializer();
+            self.allow_in = previous;
+            let value = value?;
             parts.push(if spread {
                 self.checked_expression(Expr::Spread(Box::new(value)))?
             } else {
@@ -1356,6 +1374,51 @@ impl Parser {
         }
         Ok(pattern)
     }
+    // These leading tokens identify a complete primary expression. Parse
+    // container entries or function bodies directly and keep only their
+    // real recursive grammar edges live while reading an initializer.
+    #[inline(always)]
+    fn initializer(&mut self) -> Result<Expr, JsError> {
+        if self.at("[") || self.at("{") {
+            self.literal_initializer()
+        } else if self.at("function") || self.async_function_ahead() {
+            self.function_initializer()
+        } else {
+            self.expression(2)
+        }
+    }
+    fn literal_initializer(&mut self) -> Result<Expr, JsError> {
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let literal = self.container_literal();
+        self.allow_in = previous;
+        self.initializer_tail(literal?)
+    }
+    fn function_initializer(&mut self) -> Result<Expr, JsError> {
+        let start = self.current().start;
+        let is_async = self.eat("async");
+        self.expect("function")?;
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let function = self.function(start, is_async, false);
+        self.allow_in = previous;
+        let primary = self.checked_expression(Expr::Function(Box::new(function?)))?;
+        self.initializer_tail(primary)
+    }
+    fn initializer_tail(&mut self, primary: Expr) -> Result<Expr, JsError> {
+        // The primary expression has already passed the prefix portion of parsing.
+        // Its postfix/infix suffix may recurse and still uses the grammar limit.
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(self.error("Expression nesting limit exceeded"));
+        }
+        self.depth += 1;
+        let result = self
+            .finish_unary(primary)
+            .and_then(|left| self.expression_tail(2, left, false));
+        self.depth -= 1;
+        self.checked_expression(result?)
+    }
+
     fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
         if self.depth >= MAX_PARSER_DEPTH {
             return Err(self.error("Expression nesting limit exceeded"));

@@ -152,6 +152,20 @@ fn nested_iterator_conditions_in_a_bundle_do_not_recurse_for_assignments() {
 }
 
 #[test]
+fn nested_callback_arguments_compile_and_execute_on_one_mib_stack() {
+    small_stack(|| {
+        // A returned call often receives an object with another rendering callback.
+        let source = format!(
+            "const queue=[]; function enqueue(options){{queue.push(options.read);}} \
+             {}42{}; let result; while(queue.length) result=queue.pop()(); result;",
+            "enqueue({read: function(){return ".repeat(8),
+            ";}})".repeat(8),
+        );
+        assert_eq!(Vm::new().eval(&source).unwrap(), Value::Number(42.0));
+    });
+}
+
+#[test]
 fn recursive_calls_functions_and_classes_stay_bounded_on_one_mib_stack() {
     small_stack(|| {
         // Each shape keeps different parser frames live at the guard. Do
