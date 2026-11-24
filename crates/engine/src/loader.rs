@@ -85,6 +85,7 @@ pub struct LoadedPage {
     pub(crate) meta_connect_policy: ConnectPolicy,
     pub navigation_context: CookieContext,
     pub(crate) document_policy: DocumentPolicy,
+    pub(crate) focused_element: Option<NodeId>,
     pub form_controls: Arc<HashMap<NodeId, Arc<crate::script::ControlSnapshot>>>,
     pub fonts: Arc<crate::fonts::FontSet>,
 }
@@ -132,6 +133,7 @@ impl LoadedPage {
             meta_connect_policy: ConnectPolicy::default(),
             navigation_context,
             document_policy: DocumentPolicy::default(),
+            focused_element: None,
             form_controls: Arc::default(),
             fonts: Arc::default(),
         }
@@ -244,6 +246,7 @@ impl LoadedPage {
                 "GET",
             ),
             document_policy,
+            focused_element: None,
             form_controls,
             fonts: Arc::new(crate::fonts::FontSet::default()),
         };
@@ -305,12 +308,17 @@ impl LoadedPage {
         node: NodeId,
         pseudo: crate::css::FormPseudoClass,
     ) -> bool {
-        self.form_controls
-            .get(&node)
-            .is_some_and(|state| match pseudo {
-                crate::css::FormPseudoClass::CheckedInput => state.checked,
-                crate::css::FormPseudoClass::PlaceholderShown => state.placeholder_shown,
-            })
+        match pseudo {
+            crate::css::FormPseudoClass::Focus => self.focused_element == Some(node),
+            crate::css::FormPseudoClass::CheckedInput => self
+                .form_controls
+                .get(&node)
+                .is_some_and(|state| state.checked),
+            crate::css::FormPseudoClass::PlaceholderShown => self
+                .form_controls
+                .get(&node)
+                .is_some_and(|state| state.placeholder_shown),
+        }
     }
     pub fn title(&self) -> String {
         let title = self.document.title();

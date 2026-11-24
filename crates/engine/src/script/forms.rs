@@ -875,6 +875,7 @@ impl FormHost {
     ) -> bool {
         let data = self.data.borrow();
         match pseudo {
+            css::FormPseudoClass::Focus => data.focused == Some(node) && connected(doc, node),
             css::FormPseudoClass::CheckedInput => checked(doc, &data, node),
             css::FormPseudoClass::PlaceholderShown => {
                 placeholder_shown(doc, node, data.controls.get(&node))
@@ -2009,6 +2010,7 @@ impl FormHost {
             data.user_edited = false;
         }
         if let Some(old) = old {
+            self.mark();
             if changed {
                 dispatch_checked(vm, &self.dom, Some(old), "change", true, false, &[])?;
             }
@@ -2017,7 +2019,6 @@ impl FormHost {
         }
         // A blur handler may have synchronously focused another element.
         if self.data.borrow().focused.is_some() {
-            self.mark();
             return Ok(true);
         }
         if let Some(id) = target {
@@ -2039,10 +2040,10 @@ impl FormHost {
                 }
                 data.focus_value = value;
             }
+            self.mark();
             dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &[])?;
             dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &[])?;
         }
-        self.mark();
         Ok(target.is_some())
     }
     pub(super) fn selected_text(&self) -> Option<String> {

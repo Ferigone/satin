@@ -583,3 +583,60 @@ fn placeholder_shown_tracks_default_dirty_and_user_edited_values() {
         "area.removeAttribute('placeholder'); !area.matches(':placeholder-shown')",
     );
 }
+
+#[test]
+fn focus_selectors_keep_assistive_text_and_reveal_the_keyboard_skip_link() {
+    let (mut page, mut runtime) = realm(
+        r#"
+        <style>
+          .assistive, .topbar .skip:not(:focus) {
+              position:absolute;width:1px;height:1px;overflow:hidden
+          }
+          input:focus { width:160px }
+        </style>
+        <header class=topbar><a id=skip class=skip href=#content>Skip to content</a>
+        <input id=query aria-describedby=hint><span id=hint class=assistive>Search by tag</span></header>
+        <main id=content>Questions</main>
+    "#,
+    );
+    js(
+        &mut runtime,
+        r#"
+        const skip = document.querySelector('.skip'), field = document.querySelector('input');
+        const hint = document.getElementById(field.getAttribute('aria-describedby'));
+        const position = el => getComputedStyle(el).position;
+        const events = [];
+        skip.addEventListener('focus', () => events.push(position(skip)));
+        skip.addEventListener('blur', () => events.push(position(skip)));
+        document.querySelector(':focus') === null && position(skip) === 'absolute' &&
+            hint.textContent === 'Search by tag' && hint.getBoundingClientRect().width === 1
+        "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        skip.focus();
+        document.querySelector(':focus') === skip && skip.matches(':focus') &&
+            position(skip) === 'static' && position(hint) === 'absolute'
+        "#,
+        true,
+    );
+    assert!(runtime.snapshot(&mut page));
+    let fonts = rust_browser_engine::Fonts::new().unwrap();
+    let layout = rust_browser_engine::Layout::build(&page, &fonts, 400.);
+    assert_eq!(
+        layout.computed_styles[id(&page, "skip").0].position,
+        rust_browser_engine::css::Position::Static
+    );
+    js(
+        &mut runtime,
+        r#"
+        field.focus();
+        document.querySelector(':focus') === field && !skip.matches(':focus') &&
+            getComputedStyle(field).width === '160px' && position(skip) === 'absolute' &&
+            events.join(',') === 'static,absolute'
+        "#,
+        true,
+    );
+}

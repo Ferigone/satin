@@ -1613,6 +1613,7 @@ enum Test {
     PseudoElement,
     Empty,
     Link,
+    Focus,
     Checked,
     PlaceholderShown,
     Disabled(bool),
@@ -1831,6 +1832,7 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                             }
                             ("empty", None) => Test::Empty,
                             ("link" | "any-link", None) => Test::Link,
+                            ("focus", None) => Test::Focus,
                             ("checked", None) => Test::Checked,
                             ("placeholder-shown", None) => Test::PlaceholderShown,
                             ("disabled", None) => Test::Disabled(true),
@@ -2100,12 +2102,14 @@ fn nth_offset(digits: &str, negative: bool) -> Option<i32> {
 }
 #[derive(Clone, Copy)]
 pub(crate) enum FormPseudoClass {
+    Focus,
     CheckedInput,
     PlaceholderShown,
 }
 impl FormPseudoClass {
     pub(crate) fn matches_markup(self, doc: &Document, node: NodeId) -> bool {
         match self {
+            Self::Focus => false,
             Self::CheckedInput => doc.attr(node, "checked").is_some(),
             Self::PlaceholderShown => crate::script::default_placeholder_shown(doc, node),
         }
@@ -2254,6 +2258,7 @@ impl Compound {
                     _ => true,
                 }),
             Test::Link => matches!(tag, "a" | "area") && doc.attr(id, "href").is_some(),
+            Test::Focus => form_state(id, FormPseudoClass::Focus),
             Test::PlaceholderShown => form_state(id, FormPseudoClass::PlaceholderShown),
             Test::Checked => {
                 doc.namespace(id) == Namespace::Html
