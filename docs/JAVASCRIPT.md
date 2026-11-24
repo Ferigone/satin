@@ -206,7 +206,8 @@ Default `VmLimits`:
 | Field | Default |
 | --- | ---: |
 | max_instructions | 1,000,000 per outer task/eval/call |
-| max_call_depth | Up to 64 on Windows with available native stack, up to 24 on other systems |
+| max_call_depth | Up to 64 on Linux and Windows with available native stack, up to 24 on other systems |
+| max_bytecode_depth | Up to 64 nested chunks on Linux and Windows with available native stack, up to 16 on other systems |
 | max_heap_objects | 100,000 objects/environments |
 | max_heap_bytes | 64 MiB conservative aggregate allowance |
 | max_source_bytes | 2 MiB, further constrained by the aggregate parser allowance |
@@ -222,11 +223,13 @@ retain and reinsert. The HTML parser retains its 100,000-node input limit.
 Accessed `children` and `childNodes` views keep their identity on the owning
 node, with a 64 MiB fixed-view allowance. Other live collection queries share
 a separate 2 MiB allowance. A live query charges for its actual subtree.
+Document callbacks may enter up to 96 nested bytecode chunks on Linux and
+Windows because DOM code can re-enter script from inside a block. Both
+platforms check for at least 256 KiB of remaining native stack at every entry
+above 16 chunks. Dedicated workers use the standalone chunk limit.
 
-Synchronous bytecode execution permits 16 native depth units by default.
-On Windows the VM allows up to 64 when the current thread has at least
-256 KiB of headroom at a deeper entry. The same check applies above
-24 nested calls. The browser and conformance worker reserve a 4 MiB virtual
+The same stack headroom check applies above 24 synchronous function calls
+on Linux and Windows. The browser and conformance worker reserve a 4 MiB virtual
 stack in their Windows MSVC executables. Additional pages commit as depth
 grows. A regression test exercises deeper execution on a 4 MiB thread and
 failure recovery on both 1 MiB and 4 MiB threads.

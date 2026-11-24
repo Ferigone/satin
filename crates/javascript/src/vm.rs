@@ -32,6 +32,7 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
+const MAX_BYTECODE_DEPTH: usize = 96;
 const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
@@ -89,11 +90,6 @@ fn native_stack_headroom() -> bool {
     }
 }
 
-#[inline]
-pub(crate) fn permits_bytecode_depth(depth: usize) -> bool {
-    depth <= DEFAULT_EXECUTION_DEPTH || (depth <= MAX_NATIVE_DEPTH && native_stack_headroom())
-}
-
 #[derive(Clone, Debug)]
 pub struct VmLimits {
     pub max_instructions: u64,
@@ -101,6 +97,8 @@ pub struct VmLimits {
     /// and backtracking still pay their normal instruction costs.
     pub buffer_units_per_instruction: usize,
     pub max_call_depth: usize,
+    /// Synchronous nested bytecode chunks, including blocks within a call.
+    pub max_bytecode_depth: usize,
     pub max_heap_objects: usize,
     /// Conservative aggregate allocation allowance, reset to traced live usage by GC.
     pub max_heap_bytes: usize,
@@ -115,6 +113,7 @@ impl Default for VmLimits {
             max_instructions: 1_000_000,
             buffer_units_per_instruction: 1,
             max_call_depth: MAX_CALL_DEPTH,
+            max_bytecode_depth: MAX_NATIVE_DEPTH,
             max_heap_objects: 100_000,
             max_heap_bytes: 64 * 1024 * 1024,
             max_source_bytes: 2 * 1024 * 1024,
@@ -249,6 +248,7 @@ impl Vm {
         // This first interpreter still uses bounded Rust calls for nested chunks.
         // Keep the host stack safe even when an embedder requests a larger limit.
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
+        limits.max_bytecode_depth = limits.max_bytecode_depth.min(MAX_BYTECODE_DEPTH);
         let mut heap = Heap::default();
         let global_env = realm::allocate_primary_core(&mut heap);
         let mut vm = Self {
@@ -370,17 +370,19 @@ impl Vm {
         self.limits.max_heap_objects -= reserved_cells;
         self.limits.max_heap_bytes -= reserved_bytes;
         let result = self.eval_with_identifier(source, identifier);
-        let used_allowance = result.as_ref().is_err_and(|error| match error.kind {
-            ErrorKind::ExecutionLimit => reserved != 0 && self.remaining == 0,
-            ErrorKind::HeapLimit => reserved_cells != 0 && reserved_bytes != 0,
-            _ => false,
-        });
         self.remaining += reserved;
         self.limits.max_heap_objects = parent_cells;
         self.limits.max_heap_bytes = parent_bytes;
-        let local_exhaustion = used_allowance && self.check_interrupt().is_ok()
-            && self.heap.live < parent_cells && self.ensure_allocation(0).is_ok();
-        (result, local_exhaustion)
+        // Fixed operation bounds (for example RegExp nesting) may fail with
+        // fuel left. Keep the original error and report it in the child when
+        // the enclosing task still has resources to deliver that report.
+        let recoverable_child_limit = result.as_ref().is_err_and(|error| {
+            matches!(error.kind, ErrorKind::ExecutionLimit | ErrorKind::HeapLimit)
+        }) && self.remaining > 0
+            && self.check_interrupt().is_ok()
+            && self.heap.live < parent_cells
+            && self.ensure_allocation(0).is_ok();
+        (result, recoverable_child_limit)
     }
 
     fn eval_with_referrer(
@@ -2897,8 +2899,14 @@ impl Vm {
             && (self.call_depth < DEFAULT_CALL_DEPTH || native_stack_headroom())
     }
 
+    #[inline]
+    pub(crate) fn permits_bytecode_depth(&self, depth: usize) -> bool {
+        depth <= self.limits.max_bytecode_depth
+            && (depth <= DEFAULT_EXECUTION_DEPTH || native_stack_headroom())
+    }
+
     pub(crate) fn run_chunk(&mut self, chunk: &Chunk, env: EnvId) -> Result<Completion, JsError> {
-        if !permits_bytecode_depth(self.execution_depth + 1) {
+        if !self.permits_bytecode_depth(self.execution_depth + 1) {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Nested bytecode depth budget exhausted",
@@ -2914,7 +2922,7 @@ impl Vm {
         chunk: &Chunk,
         env: EnvId,
     ) -> Result<Completion, JsError> {
-        if !permits_bytecode_depth(self.execution_depth + 1) {
+        if !self.permits_bytecode_depth(self.execution_depth + 1) {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Nested bytecode depth budget exhausted",
@@ -4104,6 +4112,31 @@ fn parse_number(s: &JsString) -> f64 {
 mod task_limit_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn embedded_errors_propagate_explicit_interrupts_and_expired_task_deadlines() {
+        let mut vm = Vm::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        vm.set_interrupt_flag(flag.clone());
+        vm.with_task(|vm| {
+            flag.store(true, Ordering::Relaxed);
+            let (result, recoverable) = vm.eval_embedded_script("0", "child");
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ExecutionLimit);
+            assert!(!recoverable);
+            flag.store(false, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+
+        vm.with_task_limits(100, Some(Instant::now()), |vm| {
+            let (result, recoverable) = vm.eval_embedded_script("0", "child");
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ExecutionLimit);
+            assert!(!recoverable);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
+    }
 
     #[test]
     fn nested_callbacks_share_fuel_and_deadlines_and_next_tasks_recover() {

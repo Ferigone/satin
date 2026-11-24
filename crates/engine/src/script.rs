@@ -149,14 +149,14 @@ fn mark_dirty(state: &mut State) {
 
 /// Bound each web realm independently. A response, its UTF-16 string and its
 /// parsed data can coexist. The scheduler supplies the separate timer task bounds.
-fn web_vm() -> Vm {
-    Vm::with_limits(VmLimits {
+fn web_vm_limits() -> VmLimits {
+    VmLimits {
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
         max_heap_objects: 512 * 1024,
         max_heap_bytes: 512 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
         ..VmLimits::default()
-    })
+    }
 }
 
 fn restrict_document_policy(vm: &mut Vm, state: &Shared, policy: DocumentPolicy) {
@@ -600,7 +600,12 @@ impl ScriptRuntime {
                 "DOM string data exceeds 16 MiB",
             ));
         }
-        let mut vm = web_vm();
+        // DOM callbacks can re-enter page code underneath several lexical blocks.
+        // The VM checks native stack headroom before every deeper bytecode entry.
+        let mut vm = Vm::with_limits(VmLimits {
+            max_bytecode_depth: 96,
+            ..web_vm_limits()
+        });
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());

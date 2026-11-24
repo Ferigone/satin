@@ -1,7 +1,7 @@
 {
   "test262Revision": "48221d7c1f7745dc13e420a2e850a248c0b2afb4",
   "runnerSha256": "d6764ff6f5050c00d35d1dc8d7d736d4d0a2c74cba225eed1e486ce8a29e4c5b",
-  "workerSha256": "4267bdb069d31385897acd4f126f6d8cb5709f5c3375e5346bfc32b8a7c888f7",
+  "workerSha256": "0f6560985361f223a2a60a681aa1a7f0d03320f62acc0ae9043f9d36c1fb1e0f",
   "limits": {
     "timeoutMs": 3000,
     "maxInstructions": 1000000
