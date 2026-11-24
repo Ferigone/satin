@@ -194,7 +194,7 @@ fn visit_operand(item: &Item, visit: &mut impl FnMut(&Value)) {
                 visit(&Value::Object(env.0));
                 visit(&Value::String(name.clone()));
             }
-            Reference::Global(object, name) => {
+            Reference::With(object, name) | Reference::Global(object, name) => {
                 visit(&Value::Object(*object));
                 visit(&Value::String(name.clone()));
             }

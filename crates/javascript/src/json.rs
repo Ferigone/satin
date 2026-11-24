@@ -426,7 +426,7 @@ fn internalize(
         let value = vm.get(holder.clone(), key)?;
         let matches = record.is_some_and(|record| same_value(&record.value, &value));
         if let Some(id) = value.as_object() {
-            let array = matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. });
+            let array = vm.is_array_exotic(&Value::Object(id))?;
             let keys = if array {
                 None
             } else {
@@ -702,7 +702,7 @@ impl Serializer {
     }
     fn object(&mut self, vm: &mut Vm, id: ObjectId, level: usize) -> Result<(), JsError> {
         let value = Value::Object(id);
-        if matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. }) {
+        if vm.is_array_exotic(&Value::Object(id))? {
             let length = vm.get_property(value.clone(), "length")?;
             let length = vm.to_number(&length)?.max(0.0).floor();
             if length > vm.limits.max_array_length as f64 {

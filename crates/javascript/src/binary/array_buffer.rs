@@ -52,6 +52,7 @@ impl Vm {
         length: Value,
         fixed: bool,
     ) -> Result<Value, JsError> {
+        self.require_unshared(id)?;
         let length = if length.is_undefined() {
             self.buffer_data(id)?.bytes.as_ref().map_or(0, Vec::len)
         } else {
@@ -147,12 +148,14 @@ pub(super) fn install(vm: &mut Vm) {
             name,
             move |vm, this, _| {
                 let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+                vm.require_unshared(id)?;
                 Ok(read(vm.buffer_data(id)?))
             },
         );
     }
     method(vm, prototype.clone(), "resize", 1, |vm, this, args| {
         let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+        vm.require_unshared(id)?;
         let maximum = vm
             .buffer_data(id)?
             .maximum
@@ -169,6 +172,7 @@ pub(super) fn install(vm: &mut Vm) {
     });
     method(vm, prototype.clone(), "slice", 2, move |vm, this, args| {
         let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+        vm.require_unshared(id)?;
         let length = vm
             .buffer_data(id)?
             .bytes
@@ -186,6 +190,7 @@ pub(super) fn install(vm: &mut Vm) {
         let create = species_constructor(vm, this, default_constructor)?;
         let result = vm.construct(create, &[count.into()])?;
         let destination = kind_id(vm, &result, "Invalid ArrayBuffer species result")?;
+        vm.require_unshared(destination)?;
         if id == destination
             || vm
                 .buffer_data(destination)?
@@ -212,7 +217,6 @@ pub(super) fn install(vm: &mut Vm) {
     for (name, fixed) in [("transfer", false), ("transferToFixedLength", true)] {
         method(vm, prototype.clone(), name, 0, move |vm, this, args| {
             let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
-            vm.buffer_data(id)?;
             vm.transfer_buffer(id, arg(args, 0), fixed)
         });
     }

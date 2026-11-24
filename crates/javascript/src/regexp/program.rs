@@ -876,6 +876,12 @@ fn member_matches(member: Member, actual: u32, flags: Flags) -> bool {
     let (first, last) = match member {
         Member::Point(point) => (point, point),
         Member::Range(first, last) => (first, last),
+        Member::Property(property, negated) => {
+            // In Unicode mode the complement is taken before case closure.
+            let in_set = |point| property.contains(point) != negated;
+            return in_set(actual)
+                || flags.has(Flags::IGNORE_CASE) && case::equivalents(actual, true).any(in_set);
+        }
         Member::Shorthand(shorthand, negated) => {
             let matches = match shorthand {
                 Shorthand::Digit => (48..=57).contains(&actual),

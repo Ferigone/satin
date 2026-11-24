@@ -141,6 +141,9 @@ impl Vm {
             let Some(id) = current else {
                 return Ok(Value::Undefined);
             };
+            if self.proxy(id) {
+                return self.proxy_get(id, key, receiver);
+            }
             if let PropertyKey::String(name) = key
                 && matches!(self.heap.object(id)?.kind, ObjectKind::TypedArray(_))
                 && let Some(index) = crate::binary::numeric_index(name)
@@ -151,7 +154,10 @@ impl Vm {
             current = self.heap.object(id)?.prototype;
             if let Some(p) = descriptor {
                 return match p.kind {
-                    PropertyKind::Data { value, .. } => Ok(value),
+                    PropertyKind::Data { value, .. } => {
+                        crate::temporal::force_property(self, key, &value)?;
+                        Ok(value)
+                    }
                     PropertyKind::Accessor { get: Some(get), .. } => {
                         self.invoke(get, receiver, &[])
                     }
@@ -178,6 +184,9 @@ impl Vm {
         for _ in 0..1024 {
             self.tick()?;
             let Some(id) = current else { break };
+            if self.proxy(id) {
+                return self.proxy_set(id, key, value, receiver);
+            }
             if let PropertyKey::String(name) = key
                 && receiver.as_object() == Some(id)
                 && let Some(provider) = self.host_named_setter(id)?
@@ -256,6 +265,7 @@ impl Vm {
             if !matches!(property.kind, PropertyKind::Data { writable: true, .. }) {
                 return Ok(false);
             }
+            if self.proxy(id) {return self.proxy_define(id,key,crate::proxy::PartialDescriptor::value_only(value))}
             property.kind = PropertyKind::Data {
                 value,
                 writable: true,
@@ -266,6 +276,8 @@ impl Vm {
                 }
                 result => result?,
             }
+        } else if self.proxy(id){
+            return self.proxy_define(id,key,crate::proxy::PartialDescriptor::full(Property::data(value)))
         } else if self.heap.object(id)?.extensible {
             self.define_key(receiver, key.clone(), Property::data(value))?;
         } else {

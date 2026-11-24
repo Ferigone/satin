@@ -18,7 +18,7 @@ The runner prepares sloppy and strict variants according to the `noStrict`, `onl
 
 `$262.evalScript` executes a classic script in the current realm's global environment, using the caller's remaining task budget. It returns the script completion or propagates the script's exception. The UTF-8 parser does not yet accept source text containing isolated UTF-16 surrogates.
 
-Accessing `$262.createRealm`, `$262.agent`, `$262.gc`, or `$262.AbstractModuleSource` records the missing facility as `unsupported`, whether reached by the test or by its setup. The worker aborts the variant rather than returning a dummy value or a catchable JS error. Other upstream setup failures remain `harness_error`. Separate realms need their own globals and intrinsics in a shared, GC-aware JS heap; `evalScript` is not a substitute for `createRealm`.
+`$262.createRealm()` creates a separate global and intrinsics in the same Satin heap. Its host supports nested realms, script evaluation and printing. Accessing `$262.agent`, `$262.gc`, or `$262.AbstractModuleSource` records the missing facility as `unsupported`, whether reached by the test or by its setup. The worker aborts the variant rather than returning a dummy value or a catchable JS error. Other upstream setup failures remain `harness_error`.
 
 ## Modules
 

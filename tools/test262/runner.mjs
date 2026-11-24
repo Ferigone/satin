@@ -376,7 +376,7 @@ export async function run(options) {
     counts, totalVariants: results.length,
     // All selected variants stay in the denominator, including missing features and harness failures.
     passFractionSelected: results.length ? (counts.pass ?? 0) / results.length : 0,
-    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await and async completion use VM jobs. Import attributes, additional realms, explicit GC during execution, agent hosts, and external timers remain unsupported.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
+    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await and async completion use VM jobs. Import attributes, explicit GC during execution, agent hosts, and external timers remain unsupported.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
     results,
   };
   const output = resolve(options.output);

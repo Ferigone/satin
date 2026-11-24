@@ -359,7 +359,9 @@ fn create(
         return vm.allocate_typed_array(element, length, prototype);
     };
     match vm.heap.object(id)?.kind {
-        ObjectKind::ArrayBuffer(_) => return from_buffer(vm, id, args, element, prototype),
+        ObjectKind::ArrayBuffer(_) | ObjectKind::SharedArrayBuffer(_) => {
+            return from_buffer(vm, id, args, element, prototype);
+        }
         ObjectKind::TypedArray(array) => {
             let range = vm.require_view_range(array.view, array.element.width())?;
             element.check_content_type(array.element)?;

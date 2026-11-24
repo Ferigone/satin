@@ -3,9 +3,11 @@ mod array_buffer;
 mod data_view;
 mod element;
 mod host_views;
+mod shared;
 mod structured_clone;
 mod typed_array;
 mod typed_methods;
+mod uint8_codec;
 
 use crate::{
     ErrorKind, JsError, ObjectId, PropertyKey, Value, Vm,
@@ -24,6 +26,7 @@ const MAX_BUFFER_BYTES: usize = u32::MAX as usize;
 #[derive(Default)]
 pub(crate) struct Intrinsics {
     array_buffer: Option<ObjectId>,
+    shared_array_buffer: Option<ObjectId>,
     data_view: Option<ObjectId>,
     typed: [Option<ObjectId>; Element::COUNT],
     typed_constructors: [Option<ObjectId>; Element::COUNT],
@@ -129,7 +132,22 @@ impl Vm {
         self.consume_work(bytes.div_ceil(64))
     }
 
+    fn backing_id(&self, id: ObjectId) -> Result<ObjectId, JsError> {
+        match self.heap.object(id)?.kind {
+            ObjectKind::ArrayBuffer(_) => Ok(id),
+            ObjectKind::SharedArrayBuffer(backing) => Ok(backing),
+            _ => Err(JsError::type_error("Expected a binary buffer")),
+        }
+    }
+    fn require_unshared(&self, id: ObjectId) -> Result<(), JsError> {
+        if matches!(self.heap.object(id)?.kind, ObjectKind::ArrayBuffer(_)) {
+            Ok(())
+        } else {
+            Err(JsError::type_error("Expected an unshared ArrayBuffer"))
+        }
+    }
     fn buffer_data(&self, id: ObjectId) -> Result<&Buffer, JsError> {
+        let id = self.backing_id(id)?;
         match &self.heap.object(id)?.kind {
             ObjectKind::ArrayBuffer(data) => Ok(data),
             _ => Err(JsError::type_error("Receiver is not an ArrayBuffer")),
@@ -137,6 +155,7 @@ impl Vm {
     }
 
     fn buffer_data_mut(&mut self, id: ObjectId) -> Result<&mut Buffer, JsError> {
+        let id = self.backing_id(id)?;
         match &mut self.heap.object_mut(id)?.kind {
             ObjectKind::ArrayBuffer(data) => Ok(data),
             _ => Err(JsError::type_error("Receiver is not an ArrayBuffer")),
@@ -396,6 +415,7 @@ impl Vm {
     /// Detaches an ArrayBuffer and releases its bytes. A view itself cannot be detached.
     pub fn detach_array_buffer(&mut self, value: &Value) -> Result<(), JsError> {
         let id = kind_id(self, value, "Expected an ArrayBuffer to detach")?;
+        self.require_unshared(id)?;
         let buffer = self.buffer_data_mut(id)?;
         if buffer.wasm {
             return Err(JsError::type_error("Cannot detach a WebAssembly buffer"));
@@ -416,6 +436,7 @@ impl Vm {
             ObjectKind::DataView(view) => (view.buffer, Some(view)),
             _ => return Err(JsError::type_error("Expected a BufferSource")),
         };
+        self.require_unshared(buffer)?;
         let data = self.buffer_data(buffer)?;
         if data.maximum.is_some() {
             return Err(JsError::type_error("Resizable BufferSource is not allowed"));
@@ -439,6 +460,7 @@ impl Vm {
         if array.element != Element::Uint8 {
             return Err(JsError::type_error("Expected a Uint8Array"));
         }
+        self.require_unshared(array.view.buffer)?;
         if self.buffer_data(array.view.buffer)?.maximum.is_some() {
             return Err(JsError::type_error("Resizable Uint8Array is not allowed"));
         }
@@ -495,6 +517,8 @@ impl Vm {
         target: ObjectId,
         offset: usize,
     ) -> Result<(), JsError> {
+        let source = self.backing_id(source)?;
+        let target = self.backing_id(target)?;
         self.binary_work(range.len())?;
         let end = offset.checked_add(range.len()).ok_or_else(type_error)?;
         if source == target {
@@ -607,5 +631,7 @@ fn tag(vm: &mut Vm, object: Value, text: &str) {
 pub(crate) fn install(vm: &mut Vm) {
     array_buffer::install(vm);
     typed_array::install(vm);
+    uint8_codec::install(vm);
     data_view::install(vm);
+    shared::install(vm);
 }

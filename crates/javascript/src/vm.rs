@@ -12,11 +12,11 @@ use crate::{
 use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
-    time::Instant,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use crate::dynamic_import::SourceReferrer;
@@ -80,9 +80,11 @@ fn native_stack_headroom() -> bool {
         }
         let marker = 0u8;
         let current = std::ptr::addr_of!(marker).addr();
-        STACK.with(|bounds| bounds.is_some_and(|(low, high)| {
-            (low..high).contains(&current) && current - low >= 256 * 1024
-        }))
+        STACK.with(|bounds| {
+            bounds.is_some_and(|(low, high)| {
+                (low..high).contains(&current) && current - low >= 256 * 1024
+            })
+        })
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -92,6 +94,8 @@ fn native_stack_headroom() -> bool {
 
 #[derive(Clone, Debug)]
 pub struct VmLimits {
+    /// Expose shared memory only to hosts that permit it.
+    pub shared_array_buffer: bool,
     pub max_instructions: u64,
     /// Linear, bounded native buffer work per instruction. Bytecode, callbacks
     /// and backtracking still pay their normal instruction costs.
@@ -110,6 +114,7 @@ pub struct VmLimits {
 impl Default for VmLimits {
     fn default() -> Self {
         Self {
+            shared_array_buffer: true,
             max_instructions: 1_000_000,
             buffer_units_per_instruction: 1,
             max_call_depth: MAX_CALL_DEPTH,
@@ -173,6 +178,7 @@ pub struct Vm {
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
     Global(ObjectId, JsString),
+    With(ObjectId, JsString),
     Property(Value, Value),
     Private(Value, crate::private::PrivateId),
     Super(Value, Value, Value),
@@ -838,7 +844,8 @@ impl Vm {
             .is_some_and(|o| {
                 matches!(
                     o.kind,
-                    ObjectKind::Function { .. }
+                    ObjectKind::Proxy(crate::proxy::Proxy { callable: true, .. })
+                        | ObjectKind::Function { .. }
                         | ObjectKind::Native { .. }
                         | ObjectKind::Bound { .. }
                         | ObjectKind::PromiseFunction(..)
@@ -857,7 +864,7 @@ impl Vm {
         let Some(id) = value.as_object() else {
             return Ok(false);
         };
-        let mut current = self.heap.object(id)?.prototype;
+        let mut current = self.object_prototype_of(id)?;
         for _ in 0..1024 {
             self.consume_work(1)?;
             let Some(id) = current else {
@@ -866,7 +873,7 @@ impl Vm {
             if id == prototype {
                 return Ok(true);
             }
-            current = self.heap.object(id)?.prototype;
+            current = self.object_prototype_of(id)?;
         }
         Err(JsError::new(
             ErrorKind::RangeError,
@@ -1213,7 +1220,10 @@ impl Vm {
     /// string builders retain their per-unit costs through `finish_string`.
     pub fn finish_buffer_string(&mut self, units: Vec<u16>) -> Result<Value, JsError> {
         self.check_string_length(units.len())?;
-        let peak = units.capacity().saturating_add(units.len()).saturating_mul(2);
+        let peak = units
+            .capacity()
+            .saturating_add(units.len())
+            .saturating_mul(2);
         self.ensure_allocation(peak.saturating_add(128))?;
         self.charge_buffer_work(units.len())?;
         self.checked_string(JsString::from_utf16(units))
@@ -1257,6 +1267,9 @@ impl Vm {
                     ErrorKind::RangeError,
                     "Prototype chain limit exceeded",
                 ));
+            }
+            if self.proxy(id) {
+                return self.proxy_get(id, &PropertyKey::String(key.clone()), receiver);
             }
             let object = self.heap.object(id)?;
             if matches!(object.kind, ObjectKind::ModuleNamespace(_)) {
@@ -1302,7 +1315,10 @@ impl Vm {
             }
             if let Some(property) = property {
                 return match property.kind {
-                    PropertyKind::Data { value, .. } => Ok(value),
+                    PropertyKind::Data { value, .. } => {
+                        crate::temporal::force_named(self, key, &value)?;
+                        Ok(value)
+                    }
                     PropertyKind::Accessor {
                         get: Some(getter), ..
                     } => self.invoke(getter, receiver, &[]),
@@ -1312,13 +1328,16 @@ impl Vm {
         }
         Ok(Value::Undefined)
     }
-    pub(crate) fn has(&self, receiver: &Value, key: &JsString) -> Result<bool, JsError> {
+    pub(crate) fn has(&mut self, receiver: &Value, key: &JsString) -> Result<bool, JsError> {
         let Some(mut id) = receiver.as_object() else {
             return Err(JsError::type_error(
                 "Right-hand side of 'in' is not an object",
             ));
         };
         for _ in 0..1024 {
+            if self.proxy(id) {
+                return self.proxy_has(id, &PropertyKey::String(key.clone()));
+            }
             let o = self.heap.object(id)?;
             if let ObjectKind::ModuleNamespace(ns) = &o.kind {
                 return Ok(ns.exports.contains_key(key));
@@ -1440,6 +1459,15 @@ impl Vm {
             let Some(owner) = current else {
                 break;
             };
+            if self.proxy(owner) {
+                let ok =
+                    self.proxy_set(owner, &PropertyKey::String(key.clone()), value, receiver)?;
+                return if !ok && strict {
+                    Err(JsError::type_error("Proxy rejected assignment"))
+                } else {
+                    Ok(())
+                };
+            }
             if matches!(self.heap.object(owner)?.kind, ObjectKind::TypedArray(_))
                 && let Some(index) = crate::binary::numeric_index(key)
             {
@@ -1526,6 +1554,17 @@ impl Vm {
         let id = receiver
             .as_object()
             .ok_or_else(|| JsError::type_error("Property target is not an object"))?;
+        if self.proxy(id) {
+            return if self.proxy_define(
+                id,
+                &PropertyKey::String(key),
+                crate::proxy::PartialDescriptor::full(property),
+            )? {
+                Ok(())
+            } else {
+                Err(JsError::type_error("Proxy rejected property definition"))
+            };
+        }
         if let Some(provider) = self.host_named_definition(id, &key)? {
             if let PropertyKind::Data { value, .. } = property.kind {
                 return provider.set(self, key, value);
@@ -1693,6 +1732,16 @@ impl Vm {
         key: &JsString,
         strict: bool,
     ) -> Result<bool, JsError> {
+        if let Some(id) = receiver.as_object()
+            && self.proxy(id)
+        {
+            let ok = self.proxy_delete(id, &PropertyKey::String(key.clone()))?;
+            return if !ok && strict {
+                Err(JsError::type_error("Proxy rejected deletion"))
+            } else {
+                Ok(ok)
+            };
+        }
         let Some(id) = receiver.as_object() else {
             if receiver.is_nullish() {
                 return Err(JsError::type_error(
@@ -1789,6 +1838,9 @@ impl Vm {
         target: ObjectId,
         prototype: Option<ObjectId>,
     ) -> Result<bool, JsError> {
+        if self.proxy(target) {
+            return self.proxy_set_proto(target, prototype);
+        }
         let object = self.heap.object(target)?;
         if object.prototype == prototype {
             return Ok(true);
@@ -1920,6 +1972,17 @@ impl Vm {
     ) -> Result<Vec<JsString>, JsError> {
         let value = self.coerce_object(value)?;
         let id = value.as_object().unwrap();
+        if self.proxy(id) {
+            let mut result = Vec::new();
+            for key in self.proxy_keys(id)? {
+                if let PropertyKey::String(name) = &key
+                    && (!enumerable || self.own_enumerability(id, &key)?.unwrap_or(false))
+                {
+                    result.push(name.clone())
+                }
+            }
+            return Ok(result);
+        }
         if let ObjectKind::ModuleNamespace(ns) = &self.heap.object(id)?.kind {
             let count = ns.exports.len();
             if count > self.limits.max_array_length as usize {
@@ -1991,7 +2054,16 @@ impl Vm {
         }
         Ok(keys)
     }
-    pub(crate) fn resolve(&self, mut env: EnvId, key: &JsString) -> Result<Reference, JsError> {
+    pub(crate) fn with_scope(&mut self, parent: EnvId, value: Value) -> Result<EnvId, JsError> {
+        let binding_object = self.coerce_object(value)?.as_object().unwrap();
+        self.ensure_allocation(std::mem::size_of::<Environment>())?;
+        Ok(self.heap.allocate_env(Environment::new(
+            Some(parent),
+            EnvKind::With { binding_object },
+            None,
+        )))
+    }
+    pub(crate) fn resolve(&mut self, mut env: EnvId, key: &JsString) -> Result<Reference, JsError> {
         loop {
             let e = self.heap.environment(env);
             if e.aliases.contains_key(key) {
@@ -2001,7 +2073,18 @@ impl Vm {
                 return Ok(Reference::Binding(env, key.clone()));
             }
             let parent = e.parent;
-            if let EnvKind::Global { binding_object } = e.kind
+            let kind = e.kind;
+            if let EnvKind::With { binding_object } = kind {
+                let object = Value::Object(binding_object);
+                if self.has(&object, key)? {
+                    let block =
+                        self.get_property_key(object.clone(), self.well_known_key("unscopables"))?;
+                    if block.as_object().is_none() || !self.get(block, key)?.is_truthy() {
+                        return Ok(Reference::With(binding_object, key.clone()));
+                    }
+                }
+            }
+            if let EnvKind::Global { binding_object } = kind
                 && self.has(&Value::Object(binding_object), key)?
             {
                 return Ok(Reference::Global(binding_object, key.clone()));
@@ -2064,6 +2147,14 @@ impl Vm {
                 let key = self.to_property_key(&key)?;
                 self.get_from(base, &key, receiver)
             }
+            Reference::With(object, key) => {
+                let object = Value::Object(object);
+                if self.has(&object, &key)? {
+                    self.get(object, &key)
+                } else {
+                    Ok(Value::Undefined)
+                }
+            }
             Reference::Global(object, key) => self.get(Value::Object(object), &key),
             Reference::Property(object, key) => {
                 let key = self.property_reference_key(&object, &key)?;
@@ -2117,7 +2208,7 @@ impl Vm {
                 }
                 Ok(())
             }
-            Reference::Global(object, key) => {
+            Reference::With(object, key) | Reference::Global(object, key) => {
                 let global = Value::Object(object);
                 // A getter, coercion, or right-hand side may have removed a
                 // binding since the identifier was resolved.
@@ -2214,7 +2305,10 @@ impl Vm {
             let mut target = declarations;
             loop {
                 let e = self.heap.environment(target);
-                if !matches!(e.kind, EnvKind::Block | EnvKind::Inspector) {
+                if !matches!(
+                    e.kind,
+                    EnvKind::Block | EnvKind::Inspector | EnvKind::With { .. }
+                ) {
                     break;
                 }
                 if e.bindings.contains_key(name) {
@@ -2463,6 +2557,9 @@ impl Vm {
         let id = function
             .as_object()
             .ok_or_else(|| JsError::type_error("Value is not callable"))?;
+        if self.proxy(id) {
+            return self.proxy_call(id, this, args);
+        }
         self.with_function_realm(id, |vm| vm.invoke_in_own_realm(id, function, this, args))
     }
 
@@ -2612,6 +2709,9 @@ impl Vm {
         let id = function
             .as_object()
             .ok_or_else(|| JsError::type_error("Value is not a constructor"))?;
+        if self.proxy(id) {
+            return self.proxy_construct(id, args, new_target);
+        }
         self.with_function_realm(id, |vm| {
             vm.construct_in_own_realm(id, function, args, new_target)
         })
@@ -3175,9 +3275,9 @@ impl Vm {
                         let key = self.property_reference_key(&object, &key)?;
                         self.delete_key(object, &key, strict)?
                     }
-                    Item::Reference(Reference::Global(object, key)) => {
-                        self.delete(Value::Object(object), &key, strict)?
-                    }
+                    Item::Reference(
+                        Reference::Global(object, key) | Reference::With(object, key),
+                    ) => self.delete(Value::Object(object), &key, strict)?,
                     Item::Reference(Reference::Binding(_, _) | Reference::Import(_, _)) => false,
                     Item::Reference(Reference::Super(..)) => {
                         return Err(JsError::new(
@@ -3385,6 +3485,7 @@ impl Vm {
                     && match &callee {
                         Item::Reference(
                             Reference::Binding(_, name)
+                            | Reference::With(_, name)
                             | Reference::Global(_, name)
                             | Reference::Unresolvable(name),
                         ) => name == &JsString::from("eval"),
@@ -3394,6 +3495,7 @@ impl Vm {
                     Item::Reference(
                         Reference::Property(object, _) | Reference::Private(object, _),
                     ) => object.clone(),
+                    Item::Reference(Reference::With(object, _)) => Value::Object(*object),
                     Item::Reference(Reference::Super(_, receiver, _)) => receiver.clone(),
                     _ => Value::Undefined,
                 };
@@ -3551,6 +3653,13 @@ impl Vm {
                 }
             }
             Op::Label(label, body) => return Ok(self.run_chunk(body, env)?.leave_label(*label)),
+            Op::With(object, body) => {
+                let object = self.expression_value(object, env)?;
+                let scope = self.with_scope(env, object)?;
+                return Ok(self
+                    .run_chunk(body, scope)?
+                    .update_empty(Some(Value::Undefined)));
+            }
             Op::Branch(test, yes, no) => {
                 let selected = if self.expression_value(test, env)?.is_truthy() {
                     Some(yes)

@@ -303,7 +303,7 @@ impl Cloner<'_, '_> {
                     .expect("initialized Date prototype"),
             )?,
             ObjectKind::RegExp(program) => crate::regexp::literal(self.vm, program.clone())?,
-            ObjectKind::ArrayBuffer(_) => self.vm.clone_buffer_bytes(source)?,
+            ObjectKind::ArrayBuffer(_) | ObjectKind::SharedArrayBuffer(_) => self.vm.clone_buffer_bytes(source)?,
             ObjectKind::TypedArray(_) | ObjectKind::DataView(_) => {
                 let (buffer, layout) = self.vm.clone_view_layout(source)?;
                 let target_buffer = if let Some(&copy) = self.copies.get(&buffer) {

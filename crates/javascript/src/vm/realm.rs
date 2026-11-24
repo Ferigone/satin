@@ -49,6 +49,7 @@ pub(crate) struct RealmState {
     pub(crate) async_iterator_prototype: Option<ObjectId>,
     pub(crate) async_from_sync_prototype: Option<ObjectId>,
     pub(crate) array_prototype: ObjectId,
+    pub(crate) intl_prototypes: Vec<(&'static str, ObjectId)>,
     pub(crate) binary: crate::binary::Intrinsics,
     pub(crate) clone_intrinsics: crate::structured_clone::Intrinsics,
     pub(crate) string_prototype: ObjectId,
@@ -103,6 +104,7 @@ impl RealmState {
             async_iterator_prototype: None,
             async_from_sync_prototype: None,
             array_prototype,
+            intl_prototypes: Vec::new(),
             binary: crate::binary::Intrinsics::default(),
             clone_intrinsics: crate::structured_clone::Intrinsics::default(),
             string_prototype,
@@ -256,7 +258,17 @@ impl Vm {
             vm: self,
             previous: previous_id,
         };
-        body(scope.vm)
+        // Complete the throw in the defining realm before restoring the caller.
+        // User-thrown values already have their own identity.
+        body(scope.vm).map_err(|mut error| {
+            if error.thrown.is_none() && !error.uncatchable() {
+                match scope.vm.error_value(&error) {
+                    Ok(value) => error.thrown = Some(value),
+                    Err(allocation_error) => return allocation_error,
+                }
+            }
+            error
+        })
     }
 
     pub(crate) fn with_function_realm<T>(
@@ -327,6 +339,7 @@ impl Vm {
             .flatten(),
         );
         intrinsics.extend(realm.error_prototypes.values().copied());
+        intrinsics.extend(realm.intl_prototypes.iter().map(|(_, id)| *id));
         self.heap
             .attach_realm_intrinsics(realm.global_env, intrinsics);
     }

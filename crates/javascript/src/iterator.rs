@@ -1,5 +1,6 @@
 //! Shared synchronous iterator protocol. Records are local to active VM execution;
 //! iterator objects/captured targets are ordinary traced heap records.
+mod helpers;
 use crate::{
     ErrorKind, JsError, JsString, Value, Vm,
     builtins::method,
@@ -23,24 +24,49 @@ pub(crate) enum IteratorData {
         string: JsString,
         index: usize,
     },
+    Helpers(Option<Box<helpers::Helper>>),
+    FinishedHelper,
+    Wrapper(Box<IteratorRecord>),
     Done {
         string_kind: bool,
     },
 }
 impl IteratorData {
     pub(crate) fn trace(&self, out: &mut TraceEdges) {
-        if let Self::Array { target, .. } = self {
-            out.value(target);
+        self.visit(&mut |value| out.value(value));
+    }
+    fn visit(&self, f: &mut impl FnMut(&Value)) {
+        match self {
+            Self::Array { target, .. } => f(target),
+            Self::Helpers(Some(helper)) => helper.visit(f),
+            Self::Wrapper(r) => {
+                f(&r.iterator);
+                f(&r.next);
+            }
+            _ => {}
+        }
+    }
+    pub(crate) fn extra_bytes(&self) -> usize {
+        match self {
+            Self::Helpers(Some(helper)) => helper.extra_bytes(),
+            Self::Wrapper(_) => size_of::<IteratorRecord>(),
+            _ => 0,
         }
     }
     pub(crate) fn strings(&self, out: &mut Vec<JsString>) {
         if let Self::String { string, .. } = self {
             out.push(string.clone());
         }
+        self.visit(&mut |value| {
+            if let Value::String(s) = value {
+                out.push(s.clone())
+            }
+        });
     }
 }
 /// A synchronous iterator and its cached next method. Hosts must use the
 /// record within one VM task so that collection cannot invalidate its handles.
+#[derive(Clone)]
 pub struct IteratorRecord {
     pub(crate) iterator: Value,
     pub(crate) next: Value,
@@ -220,7 +246,12 @@ impl Vm {
         let ObjectKind::Iterator(data) = &self.heap.object(id)?.kind else {
             return Err(JsError::type_error("Illegal iterator receiver"));
         };
-        let data = data.clone();
+        let data = match data {
+            IteratorData::Array { .. }
+            | IteratorData::String { .. }
+            | IteratorData::Done { .. } => data.clone(),
+            _ => return Err(JsError::type_error("Illegal iterator receiver")),
+        };
         match data {
             IteratorData::Done { string_kind: brand } if brand == string_kind => {
                 self.iterator_result(Value::Undefined, true)
@@ -309,6 +340,7 @@ pub(crate) fn install(vm: &mut Vm) {
         true,
     )
     .unwrap();
+    helpers::install(vm, &prototype);
     let array = vm.new_object_with_prototype(prototype.clone()).unwrap();
     let string = vm.new_object_with_prototype(prototype).unwrap();
     vm.realm.array_iterator_prototype = array.as_object();

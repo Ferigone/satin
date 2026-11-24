@@ -14,6 +14,16 @@ impl Vm {
         &mut self,
         source: ObjectId,
     ) -> Result<Value, StructuredCloneError> {
+        if let ObjectKind::SharedArrayBuffer(backing) = self.heap.object(source)?.kind {
+            let proto =
+                self.realm
+                    .binary
+                    .shared_array_buffer
+                    .ok_or(StructuredCloneError::DataClone(
+                        "Shared memory is unavailable in this realm",
+                    ))?;
+            return Ok(self.allocate_constructed(ObjectKind::SharedArrayBuffer(backing), proto)?);
+        }
         let (len, maximum) = self.clone_buffer_layout(source)?;
         self.check_binary_allocation(len, 1)?;
         let bytes = self.copy_binary_range(source, 0..len)?;
@@ -24,6 +34,9 @@ impl Vm {
         &self,
         source: ObjectId,
     ) -> Result<(usize, Option<usize>), StructuredCloneError> {
+        self.require_unshared(source).map_err(|_| {
+            StructuredCloneError::DataClone("Shared memory cannot cross this host agent boundary")
+        })?;
         let buffer = self.buffer_data(source)?;
         Ok((
             buffer.bytes.as_ref().ok_or(detached())?.len(),
@@ -119,6 +132,8 @@ impl Vm {
         &self,
         source: ObjectId,
     ) -> Result<usize, StructuredCloneError> {
+        self.require_unshared(source)
+            .map_err(|_| StructuredCloneError::DataClone("Shared buffers cannot be transferred"))?;
         let buffer = self.buffer_data(source)?;
         if buffer.wasm {
             return Err(StructuredCloneError::DataClone(

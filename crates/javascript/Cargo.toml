@@ -9,9 +9,23 @@ name = "rust_browser_javascript"
 path = "src/lib.rs"
 
 [dependencies]
+icu_properties = "=2.4.0"
 regex-automata = { version = "=0.4.13", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
 num-bigint = "=0.4.6"
 num-traits = "0.2.19"
+icu_locale = "=2.4.0"
+icu_calendar = "=2.4.0"
+icu_datetime = "=2.4.0"
+icu_time = "=2.4.0"
+icu_decimal = "=2.4.0"
+icu_experimental = "=0.7.0"
+writeable = "0.6.4"
+fixed_decimal = { version = "=0.7.3", features = ["ryu"] }
+jiff = "0.2"
+icu_collator = "=2.4.0"
+icu_list = "=2.4.0"
+icu_plurals = "=2.4.0"
+unicode-segmentation = "=1.13.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

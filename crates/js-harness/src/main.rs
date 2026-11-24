@@ -83,7 +83,26 @@ fn value_json(value: &Value) -> Json {
     }
 }
 
-fn install_test262_host(vm: &mut Vm, identifier: String) -> Result<(), JsError> {
+fn install_test262_host(
+    vm: &mut Vm,
+    identifier: String,
+    messages: Rc<RefCell<Vec<String>>>,
+    printed_status: Rc<RefCell<AsyncStatus>>,
+) -> Result<Value, JsError> {
+    let next_identifier = identifier.clone();
+    let child_messages = messages.clone();
+    let child_status = printed_status.clone();
+    let create = vm.new_native_function("createRealm", move |vm, _, _| {
+        let (realm, _) = vm.new_realm()?;
+        vm.with_realm(realm, |vm| {
+            install_test262_host(
+                vm,
+                next_identifier.clone(),
+                child_messages.clone(),
+                child_status.clone(),
+            )
+        })
+    });
     let host = vm.new_object();
     let eval_script = vm.new_native_function("evalScript", move |vm, _, args| {
         let Some(Value::String(source)) = args.first() else {
@@ -120,27 +139,8 @@ fn install_test262_host(vm: &mut Vm, identifier: String) -> Result<(), JsError> 
     vm.define_data_property(host.clone(), "evalScript", eval_script, true, true, true)?;
     vm.define_data_property(host.clone(), "detachArrayBuffer", detach, true, true, true)?;
     vm.define_data_property(host.clone(), "global", vm.global(), true, true, true)?;
+    vm.define_data_property(host.clone(), "createRealm", create, true, true, true)?;
     missing_host::install(vm, &host)?;
-    vm.define_data_property(vm.global(), "$262", host, true, false, true)
-}
-
-fn execute(request: Request) -> Json {
-    let start = Instant::now();
-    let limits = VmLimits {
-        max_instructions: request
-            .max_instructions
-            .unwrap_or(1_000_000)
-            .clamp(1, 100_000_000),
-        ..VmLimits::default()
-    };
-    let mut vm = Vm::with_limits(limits);
-    if let Err(error) = install_test262_host(&mut vm, request.id.clone()) {
-        return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
-    }
-    let logs = Rc::new(RefCell::new(Vec::<String>::new()));
-    let messages = logs.clone();
-    let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
-    let printed_status = async_status.clone();
     let print = vm.new_native_function("print", move |vm, _, args| {
         // INTERPRETING.md specifies print's first argument. Keep protocol
         // observations even after the diagnostic log's capacity is exhausted.
@@ -167,7 +167,29 @@ fn execute(request: Request) -> Json {
         }
         Ok(Value::Undefined)
     });
-    if let Err(error) = vm.define_data_property(vm.global(), "print", print, true, false, true) {
+    vm.define_data_property(vm.global(), "print", print, true, false, true)?;
+    vm.define_data_property(vm.global(), "$262", host.clone(), true, false, true)?;
+    Ok(host)
+}
+
+fn execute(request: Request) -> Json {
+    let start = Instant::now();
+    let limits = VmLimits {
+        max_instructions: request
+            .max_instructions
+            .unwrap_or(1_000_000)
+            .clamp(1, 100_000_000),
+        ..VmLimits::default()
+    };
+    let mut vm = Vm::with_limits(limits);
+    let logs = Rc::new(RefCell::new(Vec::<String>::new()));
+    let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
+    if let Err(error) = install_test262_host(
+        &mut vm,
+        request.id.clone(),
+        logs.clone(),
+        async_status.clone(),
+    ) {
         return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
     }
     let original_for_import = request
@@ -474,8 +496,27 @@ mod tests {
         assert_eq!(result["outcome"], "ok", "{result}");
     }
     #[test]
+    fn created_realms_preserve_identity_globals_errors_and_nested_hosts() {
+        let result = request(
+            r#"
+            let child = $262.createRealm(), other = child.createRealm();
+            if (child.evalScript("globalThis") !== child.global) throw "global";
+            let arr = child.evalScript("var data = []; data");
+            if (arr !== child.global.data || !(arr instanceof child.global.Array) ||
+                arr instanceof Array || other.global.Array === child.global.Array)
+                throw "identity";
+            try { child.evalScript("null.x"); throw "missing error" }
+            catch (e) { if (!(e instanceof child.global.TypeError)) throw "wrong realm" }
+            child.evalScript("print('from child')");
+        "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+        assert_eq!(result["logs"][0], "from child");
+    }
+    #[test]
     fn unknown_host_operations_expose_no_dummy_result_and_cannot_be_caught() {
-        for property in ["createRealm", "agent", "gc", "AbstractModuleSource"] {
+        for property in ["agent", "gc", "AbstractModuleSource"] {
             let result = request(
                 &format!("try {{ typeof $262.{property}; }} catch (e) {{ 42; }}"),
                 false,
@@ -493,7 +534,10 @@ mod tests {
     #[test]
     fn unsupported_setup_host_is_distinct_from_an_upstream_setup_exception() {
         for (setup, expected) in [
-            ("$262.agent.getReport.bind($262.agent);", json!("$262.agent")),
+            (
+                "$262.agent.getReport.bind($262.agent);",
+                json!("$262.agent"),
+            ),
             ("throw new TypeError('$262.agent');", Json::Null),
         ] {
             let result = execute(

@@ -1,4 +1,4 @@
-use super::{Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit, syntax, unsupported};
+use super::{Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit, syntax};
 use crate::{JsError, JsString};
 use std::ops::Range;
 
@@ -14,6 +14,7 @@ pub(super) enum Member {
     Point(u32),
     Range(u32, u32),
     Shorthand(Shorthand, bool),
+    Property(super::property::Property, bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -674,7 +675,28 @@ impl Parser<'_> {
                 Ok(Escape::Name(name))
             }
             Some(b'p' | b'P') if unicode => {
-                Err(unsupported("Unicode property escapes are unsupported"))
+                if !self.eat(b'{') {
+                    return Err(syntax("Expected a Unicode property name in braces"));
+                }
+                let start = self.at;
+                while self
+                    .byte()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'='))
+                {
+                    self.at += 1;
+                }
+                let end = self.at;
+                if !self.eat(b'}') {
+                    return Err(syntax("Invalid Unicode property escape"));
+                }
+                let name =
+                    String::from_utf16(&self.units[start..end]).expect("ASCII property name");
+                let property = super::property::Property::parse(&name)
+                    .ok_or_else(|| syntax("Unknown Unicode property name or value"))?;
+                Ok(Escape::Character(Member::Property(
+                    property,
+                    ch == Some(b'P'),
+                )))
             }
             Some(b'0'..=b'9') => {
                 self.at = start;

@@ -224,6 +224,9 @@ impl Vm {
     }
 
     pub(crate) fn prevent_extensions(&mut self, id: ObjectId) -> Result<bool, JsError> {
+        if self.proxy(id) {
+            return self.proxy_prevent(id);
+        }
         if !self.typed_can_prevent_extensions(id)? {
             return Ok(false);
         }

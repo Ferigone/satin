@@ -122,6 +122,13 @@ impl Vm {
             return self.iterator_from_method(iterable, method);
         }
         let sync = self.get_iterator(iterable)?;
+        self.async_from_sync_record(sync)
+    }
+
+    pub(crate) fn async_from_sync_record(
+        &mut self,
+        sync: IteratorRecord,
+    ) -> Result<IteratorRecord, JsError> {
         let wrapped = self.allocate_constructed(
             ObjectKind::AsyncFromSyncIterator(AsyncFromSyncIterator {
                 iterator: sync.iterator,

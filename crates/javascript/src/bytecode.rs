@@ -165,6 +165,7 @@ pub(crate) enum Op {
     Initialize(VarKind, Rc<PatternCode>, Option<Rc<Chunk>>),
     Block(Rc<Chunk>),
     Label(LabelId, Rc<Chunk>),
+    With(Rc<Chunk>, Rc<Chunk>),
     Branch(Rc<Chunk>, Rc<Chunk>, Option<Rc<Chunk>>),
     While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
@@ -229,7 +230,8 @@ impl Op {
                     || yes.can_suspend
                     || no.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
-            Self::While(test, body, _)
+            Self::With(test, body)
+            | Self::While(test, body, _)
             | Self::DoWhile(body, test, _)
             | Self::ForOf(_, _, test, body, false, _)
             | Self::ForIn(_, _, test, body, _) => test.can_suspend || body.can_suspend,
@@ -401,7 +403,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     chunks.push(b.clone());
                     chunks.extend(c.iter().cloned());
                 }
-                Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
+                Op::With(a, b) | Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
                     chunks.push(a.clone());
                     chunks.push(b.clone());
                 }
@@ -810,7 +812,7 @@ fn collect_vars(stmts: &[Stmt], out: &mut BTreeSet<JsString>) {
                     collect_vars(std::slice::from_ref(&**no), out);
                 }
             }
-            Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
+            Stmt::With(_, b) | Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
                 collect_vars(std::slice::from_ref(&**b), out)
             }
             Stmt::For(init, _, _, body) => {
@@ -980,6 +982,15 @@ fn compile_statement(
             if_clause(yes, strict)?,
             no.as_ref().map(|s| if_clause(s, strict)).transpose()?,
         )),
+        Stmt::With(object, body) => {
+            if strict {
+                return Err(syntax("with is forbidden in strict mode"));
+            }
+            out.push(Op::With(
+                expression(object, strict)?,
+                stmt_chunk(body, strict)?,
+            ));
+        }
         Stmt::While(test, body) => out.push(Op::While(
             expression(test, strict)?,
             stmt_chunk(body, strict)?,

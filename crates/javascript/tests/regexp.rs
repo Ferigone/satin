@@ -69,7 +69,8 @@ fn regex_literal_syntax_is_checked_even_in_dead_code() {
         assert_eq!(error.kind, ErrorKind::SyntaxError, "{source}: {error}");
         assert!(error.line.is_some(), "{source}: {error}");
     }
-    for source in [r"/\p{Alphabetic}/u", r"/[a&&b]/v"] {
+    vm.check_syntax(r"/\p{Alphabetic}/u").unwrap();
+    for source in [r"/[a&&b]/v"] {
         assert_eq!(
             vm.check_syntax(source).unwrap_err().kind,
             ErrorKind::UnsupportedFeature
@@ -439,4 +440,21 @@ fn large_regexp_speculative_scans_still_consume_the_vm_work_budget() {
         .unwrap();
     let result = vm.eval("input.replace(/a*b|a/g, 'x')");
     assert_eq!(result.unwrap_err().kind, ErrorKind::ExecutionLimit);
+}
+
+#[test]
+fn unicode_properties_match_categories_scripts_and_closed_complements() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        /\p{gc=Lu}/u.test('Ł') && /[\p{Script=Greek}]/u.test('Ω') &&
+        /\p{scx=Hira}/u.test('ー') && /\p{ASCII}/u.test('x') &&
+        /\P{Lowercase_Letter}/iu.test('k') && !/\p{L}/u.test('3') &&
+        (()=>{try{new RegExp('\\p{letter}','u')}catch(e){return e instanceof SyntaxError}})()
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
 }

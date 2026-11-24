@@ -41,8 +41,12 @@ impl Property {
     }
 }
 pub(crate) enum ObjectKind {
+    DeferredTemporal,
+    InitializingTemporal,
     Ordinary,
     RawJson(JsString),
+    Proxy(crate::proxy::Proxy),
+    Intl,
     Array {
         length: u32,
         length_writable: bool,
@@ -66,6 +70,7 @@ pub(crate) enum ObjectKind {
     Boxed(Value),
     Date(f64),
     ArrayBuffer(crate::binary::Buffer),
+    SharedArrayBuffer(ObjectId),
     TypedArray(crate::binary::TypedArray),
     DataView(crate::binary::View),
     RegExp(Rc<crate::regexp::Program>),
@@ -203,6 +208,7 @@ pub(crate) struct Binding {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum EnvKind {
     Global { binding_object: ObjectId },
+    With { binding_object: ObjectId },
     Function,
     Block,
     // A Console command resolves helper names here and declares script bindings in its parent.
@@ -597,7 +603,7 @@ impl Heap {
     fn trace_cell(cell: &Cell, pending: &mut TraceEdges) {
         match cell {
             Cell::Environment(env) => {
-                if let EnvKind::Global { binding_object } = env.kind {
+                if let EnvKind::Global { binding_object } | EnvKind::With{binding_object} = env.kind {
                     pending.push(binding_object);
                 }
                 if let Some(intrinsics) = &env.realm_intrinsics {
@@ -650,6 +656,9 @@ impl Heap {
                     ObjectKind::Native {
                         realm_environment, ..
                     } => pending.push(realm_environment.0),
+                    ObjectKind::Proxy(proxy) => {
+                        if let Some((target,handler))=proxy.pair {pending.push(target);pending.push(handler);}
+                    }
                     ObjectKind::Bound { target, this, args } => {
                         pending.value(target);
                         pending.value(this);
@@ -658,6 +667,7 @@ impl Heap {
                         }
                     }
                     ObjectKind::Boxed(v) => pending.value(v),
+                    ObjectKind::SharedArrayBuffer(backing) => pending.push(*backing),
                     ObjectKind::TypedArray(array) => pending.push(array.view.buffer),
                     ObjectKind::WasmMemory(memory) => pending.push(memory.buffer),
                     ObjectKind::DataView(view) => pending.push(view.buffer),
@@ -732,6 +742,7 @@ fn cell_bytes(cell: &Cell) -> usize {
                     data.values.capacity() * std::mem::size_of::<Value>()
                 }
                 ObjectKind::Generator(state) => state.extra_bytes(),
+                ObjectKind::Iterator(state) => state.extra_bytes(),
                 ObjectKind::AsyncGenerator(state) => state.extra_bytes(),
                 _ => 0,
             })

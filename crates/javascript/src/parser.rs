@@ -207,6 +207,7 @@ pub(crate) enum Stmt {
     DefaultExport(Expr),
     DefaultFunction(Function),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
+    With(Expr, Box<Stmt>),
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
@@ -674,7 +675,13 @@ impl Parser {
         {
             return Err(self.error("Module declaration outside module top level"));
         }
-        for unsupported in ["with", "export"] {
+        if self.eat("with") {
+            self.expect("(")?;
+            let object = self.expression(1)?;
+            self.expect(")")?;
+            return Ok(Stmt::With(object, Box::new(self.controlled_statement()?)));
+        }
+        for unsupported in ["export"] {
             if self.at(unsupported) {
                 return Err(self.error(format!("'{unsupported}' is not implemented")));
             }
@@ -2079,7 +2086,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Statement(yes), child_depth));
                     pending.extend(no.iter().map(|s| (Ast::Statement(s), child_depth)));
                 }
-                Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
+                Stmt::With(test, body) | Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
                     pending.push((Ast::Expression(test), child_depth));
                     pending.push((Ast::Statement(body), child_depth));
                 }

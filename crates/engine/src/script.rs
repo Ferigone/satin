@@ -152,6 +152,8 @@ fn mark_dirty(state: &mut State) {
 /// parsed data can coexist. The scheduler supplies the separate timer task bounds.
 fn web_vm_limits() -> VmLimits {
     VmLimits {
+        // Document and worker hosts do not yet provide cross-origin isolation.
+        shared_array_buffer: false,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
         max_heap_objects: 512 * 1024,
         max_heap_bytes: 512 * 1024 * 1024,

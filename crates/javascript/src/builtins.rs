@@ -8,6 +8,7 @@ use crate::{
 use std::{cmp::Ordering, mem::size_of, rc::Rc};
 
 mod array_iteration;
+mod array_methods;
 
 pub(crate) fn install(vm: &mut Vm) {
     for (name, value) in [
@@ -28,6 +29,8 @@ pub(crate) fn install(vm: &mut Vm) {
     install_errors(vm);
     crate::uri::install(vm);
     crate::symbol::install(vm);
+    crate::proxy::install(vm);
+    array_methods::install_unscopables(vm);
     let math = vm.get_global("Math").expect("Math is installed");
     vm.define_data_property_key(
         math,
@@ -49,12 +52,14 @@ pub(crate) fn install(vm: &mut Vm) {
     crate::collections::install(vm);
     crate::promise::install(vm);
     crate::json::install(vm);
+    crate::intl::install(vm);
     crate::wasm::install(vm);
     let global = vm.global();
     let eval = method(vm, global, "eval", 1, |vm, _, a| {
         vm.direct_eval(arg(a, 0), vm.realm.global_env, false)
     });
     vm.realm.intrinsic_eval = eval.as_object();
+    crate::temporal::install(vm);
 }
 pub(crate) fn method<F>(vm: &mut Vm, object: Value, name: &str, length: usize, callback: F) -> Value
 where
@@ -142,6 +147,8 @@ fn install_object(vm: &mut Vm) {
             Value::BigInt(_) | Value::Symbol(_) => "Object",
             Value::Bool(_) => "Boolean",
             Value::Object(id) => match &vm.heap.object(*id)?.kind {
+                ObjectKind::Proxy(_) if vm.is_array_exotic(&this)? => "Array",
+                ObjectKind::Proxy(p) if p.callable => "Function",
                 ObjectKind::Array { .. } => "Array",
                 ObjectKind::Function { .. }
                 | ObjectKind::Native { .. }
@@ -208,7 +215,7 @@ fn install_object(vm: &mut Vm) {
             let Some(id) = current else {
                 return Ok(Value::Bool(false));
             };
-            current = vm.heap.object(id)?.prototype;
+            current = vm.object_prototype_of(id)?;
             if current == this.as_object() {
                 return Ok(Value::Bool(true));
             }
@@ -221,9 +228,7 @@ fn install_object(vm: &mut Vm) {
     let get = vm.new_native_function("get __proto__", |vm, this, _| {
         let object = vm.coerce_object(this)?;
         Ok(vm
-            .heap
-            .object(object.as_object().unwrap())?
-            .prototype
+            .object_prototype_of(object.as_object().unwrap())?
             .map(Value::Object)
             .unwrap_or(Value::Null))
     });
@@ -319,9 +324,7 @@ fn install_object(vm: &mut Vm) {
     method(vm, object.clone(), "getPrototypeOf", 1, |vm, _, a| {
         let object = vm.coerce_object(arg(a, 0))?;
         Ok(vm
-            .heap
-            .object(object.as_object().unwrap())?
-            .prototype
+            .object_prototype_of(object.as_object().unwrap())?
             .map(Value::Object)
             .unwrap_or(Value::Null))
     });
@@ -436,7 +439,7 @@ fn install_object(vm: &mut Vm) {
     }
     method(vm, object, "isExtensible", 1, |vm, _, a| {
         Ok(Value::Bool(if let Some(id) = arg(a, 0).as_object() {
-            vm.heap.object(id)?.extensible
+            vm.object_extensible(id)?
         } else {
             false
         }))
@@ -452,7 +455,10 @@ pub(crate) fn own_property_descriptor_value(
     };
     let result = vm.new_object();
     let contents = match property.kind {
-        PropertyKind::Data { value, writable } => [("value", value), ("writable", writable.into())],
+        PropertyKind::Data { value, writable } => {
+            crate::temporal::force_property(vm, key, &value)?;
+            [("value", value), ("writable", writable.into())]
+        }
         PropertyKind::Accessor { get, set } => [
             ("get", get.unwrap_or_default()),
             ("set", set.unwrap_or_default()),
@@ -468,6 +474,7 @@ pub(crate) fn own_property_descriptor_value(
 }
 pub(crate) enum Definition {
     Ordinary(Property),
+    Proxy(crate::proxy::PartialDescriptor),
     Typed(NumericIndex, TypedDescriptor),
     Named(Option<Value>),
 }
@@ -482,6 +489,11 @@ impl Definition {
     ) -> Result<bool, JsError> {
         let id = target.as_object().unwrap();
         match self {
+            Self::Proxy(descriptor) => {
+                let ok=vm.proxy_define(id,&key,descriptor)?;
+                if !ok && throw {return Err(JsError::type_error("Proxy rejected property definition"))}
+                Ok(ok)
+            }
             Self::Named(value) => {
                 let PropertyKey::String(name) = key else {
                     unreachable!()
@@ -535,6 +547,7 @@ pub(crate) fn descriptor(
     if descriptor.as_object().is_none() {
         return Err(JsError::type_error("Property descriptor must be an object"));
     }
+    if vm.proxy(id){return Ok(Definition::Proxy(crate::proxy::PartialDescriptor::read(vm,descriptor)?))}
     if let PropertyKey::String(name) = key
         && matches!(vm.heap.object(id)?.kind, ObjectKind::TypedArray(_))
         && let Some(index) = numeric_index(name)
@@ -1130,13 +1143,9 @@ fn install_array(vm: &mut Vm) {
         create_array(vm, args, prototype)
     });
     method(vm, array.clone(), "isArray", 1, |vm, _, a| {
-        Ok(Value::Bool(arg(a, 0).as_object().is_some_and(|id| {
-            vm.heap
-                .object(id)
-                .is_ok_and(|o| matches!(o.kind, ObjectKind::Array { .. }))
-        })))
+        Ok(Value::Bool(vm.is_array_exotic(&arg(a,0))?))
     });
-    method(vm, array, "of", 0, |vm, _, a| vm.try_new_array(a));
+    method(vm, array, "of", 0, array_methods::array_of);
     method(vm, proto.clone(), "at", 1, |vm, this, args| {
         let object = vm.coerce_object(this)?;
         let length = vm.get_property(object.clone(), "length")?;
@@ -1298,7 +1307,7 @@ fn install_array(vm: &mut Vm) {
                 let spread =
                     vm.get_property_key(source.clone(), vm.well_known_key("isConcatSpreadable"))?;
                 if spread.is_undefined() {
-                    vm.is_array(&source)
+                    vm.is_array_exotic(&source)?
                 } else {
                     spread.is_truthy()
                 }
@@ -1382,6 +1391,7 @@ fn install_array(vm: &mut Vm) {
         });
     }
     array_iteration::install(vm, &proto);
+    array_methods::install(vm, &proto);
     for name in ["find", "findIndex"] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {
             let object = vm.coerce_object(this)?;

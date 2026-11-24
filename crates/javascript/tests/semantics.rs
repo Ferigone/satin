@@ -596,7 +596,10 @@ fn compilation_budget_charges_syntax_density_and_retains_large_literals() {
     // These statements are cheap to execute but expensive to represent in
     // parser/bytecode buffers. Reject them during compilation.
     let dense = ";".repeat(20_000);
-    assert_eq!(bounded.check_syntax(&dense).unwrap_err().kind, ErrorKind::HeapLimit);
+    assert_eq!(
+        bounded.check_syntax(&dense).unwrap_err().kind,
+        ErrorKind::HeapLimit
+    );
     assert_eq!(bounded.eval("1 + 2").unwrap(), Value::from(3));
 }
 
@@ -840,5 +843,31 @@ fn only_sloppy_if_clauses_allow_a_direct_ordinary_function() {
     assert!(
         vm.eval("if(false) function f() {} else function g() {}")
             .is_ok()
+    );
+}
+
+#[test]
+fn with_environment_tracks_live_properties_unscopables_and_suspended_frames() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        var x=1, box={x:2, method(){return this}};
+        var seen, receiver;
+        with(box) { seen=()=>x; receiver=method(); }
+        function* gen(){with(box){yield x; yield x}}
+        var iter=gen(), first=iter.next().value;
+        box[Symbol.unscopables]={x:true};
+        first===2 && seen()===1 && receiver===box && iter.next().value===1
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        vm.check_syntax("'use strict'; with({}){}")
+            .unwrap_err()
+            .kind,
+        ErrorKind::SyntaxError
     );
 }

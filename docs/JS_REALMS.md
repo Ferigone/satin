@@ -30,8 +30,8 @@ the scheduler returns to input and rendering before starting another timer.
 Frame coverage is limited to initial blank documents. Frame navigation,
 `srcdoc`, sandboxed documents, nested frame loading and the full child
 DOM are still open. Realm handles are valid inside the VM that created
-them. The Test262 CLI still needs a separate `$262.createRealm()` host
-entry point.
+them. The Test262 CLI uses the same heap and realm entry mechanism for
+`$262.createRealm()`.
 
 The [initial-frame regression tests](../crates/engine/src/script/frames.rs)
 check live callbacks, distinct intrinsics, split writes, error delivery and

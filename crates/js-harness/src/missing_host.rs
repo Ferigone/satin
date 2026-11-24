@@ -3,8 +3,7 @@
 
 use rust_browser_javascript::{ErrorKind, JsError, Value, Vm};
 
-const FACILITIES: [(&str, &str); 4] = [
-    ("createRealm", "$262.createRealm"),
+const FACILITIES: [(&str, &str); 3] = [
     ("agent", "$262.agent"),
     ("gc", "$262.gc"),
     ("AbstractModuleSource", "$262.AbstractModuleSource"),
