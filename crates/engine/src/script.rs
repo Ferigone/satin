@@ -62,7 +62,10 @@ use rust_browser_javascript::{ErrorKind, JsError, ObjectId, RootId, Value, Vm, V
 use scheduler::schedule_timer;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
-const NODE_LIMIT: usize = 100_000;
+// Script-created identities remain valid across detach/reinsert and user-held
+// DOM references. Bound the tab's lifetime arena separately from the parser's
+// per-document input limit and the independent byte/depth budgets.
+const NODE_LIMIT: usize = 512 * 1024;
 const DOM_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const DOM_DEPTH_LIMIT: usize = 256;
 const DIAGNOSTIC_LIMIT: usize = 64;
@@ -149,6 +152,7 @@ fn mark_dirty(state: &mut State) {
 fn web_vm() -> Vm {
     Vm::with_limits(VmLimits {
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
+        max_heap_objects: 512 * 1024,
         max_heap_bytes: 512 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
         ..VmLimits::default()

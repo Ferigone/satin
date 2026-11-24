@@ -7,7 +7,12 @@ use std::{cell::Cell, collections::VecDeque, rc::Weak};
 
 const CACHE_ENTRIES: usize = 24;
 const CACHE_NODES: usize = 128 * 1024;
-const MAX_SAME_OBJECT_COLLECTIONS: usize = 8192;
+// Owner-backed children/childNodes have a fixed-size filter and one traced
+// slot per accessed property. Arbitrary caller-supplied queries keep their
+// own lower byte ceiling and cannot consume this allowance.
+const MAX_CHILD_VIEW_BYTES: usize = 64 * 1024 * 1024;
+const CHILDREN_SLOT: u32 = 0x434f_4c00;
+const CHILD_NODES_SLOT: u32 = 0x434f_4c01;
 const MAX_COLLECTION_QUERY_BYTES: usize = 16 * 1024;
 const MAX_REFLECTION_SCAN_WORK: usize = 128 * 1024 * 1024;
 const MAX_LIVE_QUERY_BYTES: usize = 2 * 1024 * 1024;
@@ -86,12 +91,7 @@ impl Collection {
         }
         let document = &state.document;
         let root = self.query.root;
-        let budget = if matches!(self.query.filter, Filter::Children | Filter::ChildNodes) {
-            document.nodes[root.0].children.len()
-        } else {
-            document.nodes.len()
-        };
-        charge_scan(&mut cache, &mut vm, budget)?;
+        charge_scan(&mut cache, &mut vm, document.nodes[root.0].children.len())?;
         let nodes: Arc<[NodeId]> = match &self.query.filter {
             Filter::Children | Filter::ChildNodes => document.nodes[root.0]
                 .children
@@ -105,7 +105,16 @@ impl Collection {
                 let html_document = document.scripting_enabled;
                 let quirks = document.quirks_mode == QuirksMode::Quirks;
                 let mut matches = Vec::new();
-                for id in descendants(document, root) {
+                let mut pending: Vec<_> = document.nodes[root.0]
+                    .children
+                    .iter()
+                    .rev()
+                    .copied()
+                    .collect();
+                while let Some(id) = pending.pop() {
+                    let children = &document.nodes[id.0].children;
+                    charge_scan(&mut cache, &mut vm, children.len())?;
+                    pending.extend(children.iter().rev().copied());
                     let tag = document.tag(id);
                     if tag.is_empty() {
                         continue;
@@ -147,6 +156,9 @@ impl Collection {
                 matches.into()
             }
         };
+        if nodes.len() > CACHE_NODES {
+            return Ok(nodes);
+        }
         while cache.matches.len() >= CACHE_ENTRIES || cache.retained + nodes.len() > CACHE_NODES {
             let Some((_, discarded)) = cache.matches.pop_back() else {
                 break;
@@ -230,21 +242,20 @@ struct Host {
     collection: Value,
     node_list: Value,
     cache: Rc<RefCell<Cache>>,
-    same: Rc<RefCell<HashMap<Query, Value>>>,
+    child_view_bytes: Rc<Cell<usize>>,
     resident: Rc<Cell<usize>>,
 }
 impl Host {
-    fn new_value(&self, vm: &mut Vm, query: Query, same_object: bool) -> Result<Value, JsError> {
-        if same_object {
-            if let Some(value) = self.same.borrow().get(&query) {
-                return Ok(value.clone());
-            }
-            if self.same.borrow().len() >= MAX_SAME_OBJECT_COLLECTIONS {
-                return Err(JsError::new(
-                    ErrorKind::HeapLimit,
-                    "Live child view budget exceeded",
-                ));
-            }
+    fn new_value(
+        &self,
+        vm: &mut Vm,
+        query: Query,
+        owner: Option<(Value, u32)>,
+    ) -> Result<Value, JsError> {
+        if let Some((owner, slot)) = &owner
+            && let Some(view) = vm.host_slot(owner, *slot)
+        {
+            return Ok(view);
         }
         let bytes = 256
             + match &query.filter {
@@ -259,15 +270,20 @@ impl Host {
                 Filter::Name(name) => name.capacity(),
                 Filter::Children | Filter::ChildNodes => 0,
             };
-        if self.resident.get() + bytes > MAX_LIVE_QUERY_BYTES {
+        let (resident, limit) = if owner.is_some() {
+            (&self.child_view_bytes, MAX_CHILD_VIEW_BYTES)
+        } else {
+            (&self.resident, MAX_LIVE_QUERY_BYTES)
+        };
+        if resident.get() + bytes > limit {
             return Err(JsError::new(
                 ErrorKind::HeapLimit,
                 "Retained live collection query budget exceeded",
             ));
         }
-        self.resident.set(self.resident.get() + bytes);
+        resident.set(resident.get() + bytes);
         let allocation = QueryAllocation {
-            resident: self.resident.clone(),
+            resident: resident.clone(),
             bytes,
         };
         let value = vm.new_object_with_prototype(if query.filter.node_list() {
@@ -286,9 +302,8 @@ impl Host {
         provider.nodes(Some(vm))?;
         vm.set_host_data(value.clone(), provider.clone())?;
         vm.set_host_indexed_properties(value.clone(), provider)?;
-        if same_object {
-            vm.root(value.clone());
-            self.same.borrow_mut().insert(query, value.clone());
+        if let Some((owner, slot)) = owner {
+            vm.set_host_slot(owner, slot, value.clone())?;
         }
         Ok(value)
     }
@@ -526,12 +541,12 @@ pub(super) fn install(
         collection,
         node_list,
         cache: Rc::default(),
-        same: Rc::default(),
+        child_view_bytes: Rc::default(),
         resident: Rc::default(),
     };
-    for (name, filter) in [
-        ("children", Filter::Children),
-        ("childNodes", Filter::ChildNodes),
+    for (name, filter, slot) in [
+        ("children", Filter::Children, CHILDREN_SLOT),
+        ("childNodes", Filter::ChildNodes, CHILD_NODES_SLOT),
     ] {
         let host = host.clone();
         getter(vm, node_prototype.clone(), name, move |vm, this, _| {
@@ -542,7 +557,7 @@ pub(super) fn install(
                     root,
                     filter: filter.clone(),
                 },
-                true,
+                Some((this, slot)),
             )
         })?;
     }
@@ -612,7 +627,7 @@ pub(super) fn install(
                     Filter::Tag { original, lower }
                 }
             };
-            host.new_value(vm, Query { root, filter }, false)
+            host.new_value(vm, Query { root, filter }, None)
         })?;
     }
     Ok(StaticNodeLists {

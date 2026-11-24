@@ -193,7 +193,7 @@ directly.
 Headers, Request, Response and readable streams store their JavaScript
 references in traced host slots. Fetch retains capability roots until response
 headers arrive and the stream keeps in-flight read promises alive until they
-settle. The 16 MiB Fetch budget counts shared body backing once. Streams manage
+settle. The 128 MiB retained Fetch budget counts shared body backing once. Each response body is limited to 64 MiB after content decoding. Streams manage
 their separate queue and collection budgets. [Fetch host](../crates/engine/src/script/fetch.rs) ·
 [Readable streams](../crates/engine/src/script/streams.rs) · [Transport](NAVIGATION.md)
 
@@ -213,6 +213,15 @@ Default `VmLimits`:
 | max_string_units | 8 Mi UTF-16 code units per string |
 | max_array_length | 1,000,000 |
 | max_pending_jobs | 4,096 jobs, reactions per pending promise, or unhandled rejection records |
+
+Browser documents and dedicated workers use a 512 MiB aggregate heap allowance,
+up to 524,288 objects and environments, and up to 64 Mi UTF-16 code units per
+string. A scripted top-level document can allocate 524,288 stable DOM node
+identifiers over its lifetime. This includes detached nodes that script can
+retain and reinsert. The HTML parser retains its 100,000-node input limit.
+Accessed `children` and `childNodes` views keep their identity on the owning
+node, with a 64 MiB fixed-view allowance. Other live collection queries share
+a separate 2 MiB allowance. A live query charges for its actual subtree.
 
 Synchronous bytecode execution permits 16 native depth units by default.
 On Windows the VM allows up to 64 when the current thread has at least

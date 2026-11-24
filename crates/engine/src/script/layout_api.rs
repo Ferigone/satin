@@ -86,13 +86,29 @@ impl Data {
                     .sum::<usize>();
             // Layout initializes small slot-indexed arrays. Only connected
             // elements enter the cascade and expose attributes to selectors.
-            let mut tree_work = document.nodes.len();
+            // Slot indices are contiguous machine words initialized in bulk.
+            vm.charge_buffer_work(
+                document
+                    .nodes
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )?;
+            let mut tree_work = 0usize;
             for id in document.connected_nodes() {
                 tree_work = tree_work.saturating_add(1);
                 if let NodeKind::Element { attrs, .. } = &document.nodes[id.0].kind {
-                    tree_work = tree_work.saturating_add(16);
+                    // Style resolution uses the connected element and its parent.
+                    // Ordinary selector comparisons scan bytes; inline declarations
+                    // enter the CSS parser and pay their full source cost.
+                    tree_work = tree_work.saturating_add(4);
                     for (name, value) in attrs {
-                        tree_work = tree_work.saturating_add(name.len() + value.len());
+                        let bytes = name.len().saturating_add(value.len());
+                        let cost = if name.eq_ignore_ascii_case("style") {
+                            bytes
+                        } else {
+                            1 + bytes.div_ceil(std::mem::size_of::<usize>())
+                        };
+                        tree_work = tree_work.saturating_add(cost);
                     }
                 }
             }

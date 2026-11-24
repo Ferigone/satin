@@ -119,3 +119,51 @@ fn invalid_dom_selector_list_throws_before_any_member_can_match() {
         .unwrap();
     assert_eq!(result, Value::Bool(true));
 }
+
+#[test]
+fn repeated_fragment_views_keep_identity_and_charge_only_the_searched_subtree() {
+    let page = LoadedPage::from_html("https://example.test", "<body><main></main></body>");
+    let mut realm = ScriptRuntime::new(&page).unwrap();
+    realm
+        .eval(
+            r#"
+        var holder = document.createDocumentFragment();
+        var list = holder.childNodes, elementList = holder.children;
+        list.tag = 'preserved';
+        var main = document.getElementsByTagName('main')[0];
+        function updateViews() {
+            for (var i = 0; i < 96; i++) {
+                var fragment = document.createDocumentFragment();
+                var child = document.createTextNode('value');
+                fragment.appendChild(child);
+                if (fragment.childNodes[0] !== child) throw Error('lost child');
+                main.replaceChildren(fragment);
+            }
+        }
+    "#,
+        )
+        .unwrap();
+    // More than the former lifetime cap of 8192 temporary owner views.
+    for _ in 0..87 {
+        realm.eval("updateViews()").unwrap();
+        realm.pump_with_network_errors().unwrap();
+    }
+    assert_eq!(
+        realm
+            .eval(
+                r#"
+        holder.appendChild(document.createElement('span'));
+        var found = holder.getElementsByTagName('span');
+        for (var i = 0; i < 80; i++) {
+            main.firstChild.data = String(i);
+            if (found.length !== 1) throw Error('incorrect live subtree');
+        }
+        list === holder.childNodes && elementList === holder.children &&
+            list.tag === 'preserved' && list[0] === elementList[0] &&
+            list[0] === found[0] && main.childNodes.length === 1
+    "#
+            )
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
