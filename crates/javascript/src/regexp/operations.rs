@@ -16,7 +16,7 @@ use crate::{
 use std::{mem::size_of, rc::Rc};
 
 pub(crate) fn install(vm: &mut Vm) {
-    let regexp = Value::Object(vm.regexp_prototype.unwrap());
+    let regexp = Value::Object(vm.realm.regexp_prototype.unwrap());
     for (name, length, callback) in [
         ("match", 1, match_string as Protocol),
         ("matchAll", 1, match_all as Protocol),
@@ -41,9 +41,9 @@ pub(crate) fn install(vm: &mut Vm) {
         .unwrap();
     }
     let iterator_prototype = vm
-        .new_object_with_prototype(Value::Object(vm.iterator_prototype.unwrap()))
+        .new_object_with_prototype(Value::Object(vm.realm.iterator_prototype.unwrap()))
         .unwrap();
-    vm.regexp_iterator_prototype = iterator_prototype.as_object();
+    vm.realm.regexp_iterator_prototype = iterator_prototype.as_object();
     vm.root(iterator_prototype.clone());
     vm.define_data_property_key(
         iterator_prototype.clone(),
@@ -57,7 +57,7 @@ pub(crate) fn install(vm: &mut Vm) {
     method(vm, iterator_prototype, "next", 0, |vm, this, _| {
         next(vm, this)
     });
-    let string = Value::Object(vm.string_prototype);
+    let string = Value::Object(vm.realm.string_prototype);
     for name in ["match", "matchAll", "search"] {
         method(vm, string.clone(), name, 1, move |vm, this, args| {
             let regexp = arg(args, 0);
@@ -207,7 +207,7 @@ fn search(vm: &mut Vm, regexp: Value, args: &[Value]) -> Result<Value, JsError> 
 }
 
 fn species(vm: &mut Vm, regexp: &Value) -> Result<Value, JsError> {
-    let intrinsic = Value::Object(vm.regexp_constructor.unwrap());
+    let intrinsic = Value::Object(vm.realm.regexp_constructor.unwrap());
     let constructor = vm.get_property(regexp.clone(), "constructor")?;
     if constructor.is_undefined() {
         return Ok(intrinsic);
@@ -255,7 +255,7 @@ fn match_all(vm: &mut Vm, regexp: Value, args: &[Value]) -> Result<Value, JsErro
     };
     vm.allocate_constructed(
         ObjectKind::RegExpStringIterator(data),
-        vm.regexp_iterator_prototype.unwrap(),
+        vm.realm.regexp_iterator_prototype.unwrap(),
     )
 }
 

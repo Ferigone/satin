@@ -214,9 +214,11 @@ impl Vm {
         mut execution: Box<Execution>,
         input: Option<ResumeValue>,
     ) -> Result<(), JsError> {
-        let referrer = self.referrer_for_owner(execution.owner())?;
-        let result =
-            self.with_referrer(referrer, |vm| Ok(vm.run_execution(&mut execution, input)))?;
+        let owner = execution.owner();
+        let result = self.with_function_realm(owner, |vm| {
+            let referrer = vm.referrer_for_owner(owner)?;
+            vm.with_referrer(referrer, |vm| Ok(vm.run_execution(&mut execution, input)))
+        })?;
         match result {
             RunResult::Await(promise) => {
                 self.wait_for_async_generator(promise, id, GeneratorAwait::Body(execution))

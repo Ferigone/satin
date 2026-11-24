@@ -79,7 +79,7 @@ pub(super) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
     let intrinsic = prototype.as_object().unwrap();
     vm.root(prototype.clone());
-    vm.binary.array_buffer = Some(intrinsic);
+    vm.realm.binary.array_buffer = Some(intrinsic);
     let constructor = constructor(vm, "ArrayBuffer", 1, prototype.clone(), |_, _, _| {
         Err(JsError::type_error("ArrayBuffer requires new"))
     });

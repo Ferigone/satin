@@ -71,3 +71,24 @@ fn shared_string_reads_do_not_charge_for_nonexistent_copies() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn short_appends_preserve_utf16_and_saved_prefixes_within_one_task() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+            var value = '', saved;
+            for (var i = 0; i < 1800; i++) {
+                value = value + String.fromCharCode(0xd800 + i % 1024);
+                if (i === 512) saved = value;
+            }
+            saved.length === 513 && value.length === 1800 &&
+                value.slice(0, saved.length) === saved &&
+                value.charCodeAt(1799) === 0xd800 + 1799 % 1024;
+        "#
+        )
+        .unwrap(),
+        Value::Bool(true),
+    );
+}

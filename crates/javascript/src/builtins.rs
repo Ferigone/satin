@@ -52,9 +52,9 @@ pub(crate) fn install(vm: &mut Vm) {
     crate::wasm::install(vm);
     let global = vm.global();
     let eval = method(vm, global, "eval", 1, |vm, _, a| {
-        vm.direct_eval(arg(a, 0), vm.global_env, false)
+        vm.direct_eval(arg(a, 0), vm.realm.global_env, false)
     });
-    vm.intrinsic_eval = eval.as_object();
+    vm.realm.intrinsic_eval = eval.as_object();
 }
 pub(crate) fn method<F>(vm: &mut Vm, object: Value, name: &str, length: usize, callback: F) -> Value
 where
@@ -111,7 +111,7 @@ where
     }
 }
 fn install_object(vm: &mut Vm) {
-    let proto = Value::Object(vm.object_prototype);
+    let proto = Value::Object(vm.realm.object_prototype);
     let object = constructor(vm, "Object", 1, proto.clone(), |vm, _, a| {
         let v = arg(a, 0);
         if v.is_nullish() {
@@ -122,12 +122,12 @@ fn install_object(vm: &mut Vm) {
     });
     replace_construct(vm, object.clone(), |vm, function, args, target| {
         if target != function {
-            let prototype = vm.prototype_from_constructor(target, vm.object_prototype)?;
+            let prototype = vm.prototype_from_constructor(target, vm.realm.object_prototype)?;
             vm.allocate_constructed(ObjectKind::Ordinary, prototype)
         } else {
             let value = arg(args, 0);
             if value.is_nullish() {
-                vm.allocate_constructed(ObjectKind::Ordinary, vm.object_prototype)
+                vm.allocate_constructed(ObjectKind::Ordinary, vm.realm.object_prototype)
             } else {
                 vm.coerce_object(value)
             }
@@ -146,7 +146,7 @@ fn install_object(vm: &mut Vm) {
                 ObjectKind::Function { .. }
                 | ObjectKind::Native { .. }
                 | ObjectKind::Bound { .. }
-                | ObjectKind::PromiseFunction(_) => "Function",
+                | ObjectKind::PromiseFunction(..) => "Function",
                 ObjectKind::Boxed(Value::String(_)) => "String",
                 ObjectKind::Boxed(Value::Number(_)) => "Number",
                 ObjectKind::Boxed(Value::Bool(_)) => "Boolean",
@@ -643,7 +643,7 @@ fn define_properties(vm: &mut Vm, target: Value, properties: Value) -> Result<()
     Ok(())
 }
 fn install_function(vm: &mut Vm) {
-    let proto = Value::Object(vm.function_prototype);
+    let proto = Value::Object(vm.realm.function_prototype);
     vm.define_data_property(proto.clone(), "length", Value::from(0), false, false, true)
         .unwrap();
     vm.define_data_property(proto.clone(), "name", Value::from(""), false, false, true)
@@ -660,7 +660,7 @@ fn install_function(vm: &mut Vm) {
         false,
         Rc::new(|_, _, _| Err(JsError::type_error("Restricted function property"))),
     );
-    vm.throw_type_error = throw_type_error.as_object();
+    vm.realm.throw_type_error = throw_type_error.as_object();
     vm.heap
         .object_mut(throw_type_error.as_object().unwrap())
         .unwrap()
@@ -775,9 +775,9 @@ fn install_function(vm: &mut Vm) {
 }
 fn install_async_function(vm: &mut Vm) {
     let prototype = vm
-        .new_object_with_prototype(Value::Object(vm.function_prototype))
+        .new_object_with_prototype(Value::Object(vm.realm.function_prototype))
         .unwrap();
-    vm.async_function_prototype = prototype.as_object();
+    vm.realm.async_function_prototype = prototype.as_object();
     let constructor = vm.native(
         "AsyncFunction",
         1,
@@ -1121,12 +1121,12 @@ pub(crate) fn stable_merge_sort<T: Clone>(
 }
 
 fn install_array(vm: &mut Vm) {
-    let proto = Value::Object(vm.array_prototype);
+    let proto = Value::Object(vm.realm.array_prototype);
     let array = constructor(vm, "Array", 1, proto.clone(), |vm, _, args| {
-        create_array(vm, args, vm.array_prototype)
+        create_array(vm, args, vm.realm.array_prototype)
     });
     replace_construct(vm, array.clone(), |vm, _, args, target| {
-        let prototype = vm.prototype_from_constructor(target, vm.array_prototype)?;
+        let prototype = vm.prototype_from_constructor(target, vm.realm.array_prototype)?;
         create_array(vm, args, prototype)
     });
     method(vm, array.clone(), "isArray", 1, |vm, _, a| {
@@ -1256,7 +1256,7 @@ fn install_array(vm: &mut Vm) {
         if vm.is_callable(&join) {
             vm.invoke(join, this, &[])
         } else {
-            let method = vm.get_property(Value::Object(vm.object_prototype), "toString")?;
+            let method = vm.get_property(Value::Object(vm.realm.object_prototype), "toString")?;
             vm.invoke(method, this, &[])
         }
     });
@@ -1475,6 +1475,17 @@ pub(crate) fn find_units(
     if needle.len() > haystack.len() - start {
         return Ok(None);
     }
+    if let [unit] = needle {
+        const CHUNK: usize = 256;
+        for (block, units) in haystack[start..].chunks(CHUNK).enumerate() {
+            let found = units.iter().position(|candidate| candidate == unit);
+            vm.consume_work(found.map_or(units.len(), |index| index + 1))?;
+            if let Some(index) = found {
+                return Ok(Some(start + block * CHUNK + index));
+            }
+        }
+        return Ok(None);
+    }
     for i in start..=haystack.len() - needle.len() {
         vm.tick()?;
         if equal_units(vm, &haystack[i..i + needle.len()], needle)? {
@@ -1588,7 +1599,7 @@ fn string_case(vm: &mut Vm, this: Value, upper: bool) -> Result<Value, JsError> 
 }
 
 fn install_string(vm: &mut Vm) {
-    let proto = Value::Object(vm.string_prototype);
+    let proto = Value::Object(vm.realm.string_prototype);
     let string = constructor(vm, "String", 1, proto.clone(), |vm, _, a| {
         Ok(Value::String(if a.is_empty() {
             JsString::default()
@@ -1604,7 +1615,7 @@ fn install_string(vm: &mut Vm) {
         } else {
             vm.to_string(&a[0])?
         };
-        let prototype = vm.prototype_from_constructor(target, vm.string_prototype)?;
+        let prototype = vm.prototype_from_constructor(target, vm.realm.string_prototype)?;
         vm.allocate_constructed(ObjectKind::Boxed(Value::String(string)), prototype)
     });
     method(vm, string.clone(), "raw", 1, |vm, _, args| {
@@ -1963,7 +1974,7 @@ pub(crate) fn js_whitespace(c: u16) -> bool {
     matches!(c,0x0009..=0x000d|0x0020|0x00a0|0x1680|0x2000..=0x200a|0x2028|0x2029|0x202f|0x205f|0x3000|0xfeff)
 }
 fn install_number(vm: &mut Vm) {
-    let proto = Value::Object(vm.number_prototype);
+    let proto = Value::Object(vm.realm.number_prototype);
     let number = constructor(vm, "Number", 1, proto.clone(), |vm, _, a| {
         Ok(Value::Number(if a.is_empty() {
             0.0
@@ -1977,7 +1988,7 @@ fn install_number(vm: &mut Vm) {
         } else {
             vm.number_constructor_value(&a[0])?
         };
-        let prototype = vm.prototype_from_constructor(target, vm.number_prototype)?;
+        let prototype = vm.prototype_from_constructor(target, vm.realm.number_prototype)?;
         vm.allocate_constructed(ObjectKind::Boxed(Value::Number(number)), prototype)
     });
     for (name, value) in [
@@ -2075,12 +2086,12 @@ fn install_number(vm: &mut Vm) {
             Ok(Value::from(format!("{:.*}", digits as usize, n)))
         }
     });
-    let boolean_proto = Value::Object(vm.boolean_prototype);
+    let boolean_proto = Value::Object(vm.realm.boolean_prototype);
     let boolean = constructor(vm, "Boolean", 1, boolean_proto.clone(), |_, _, a| {
         Ok(Value::Bool(arg(a, 0).is_truthy()))
     });
     replace_construct(vm, boolean, |vm, _, a, target| {
-        let prototype = vm.prototype_from_constructor(target, vm.boolean_prototype)?;
+        let prototype = vm.prototype_from_constructor(target, vm.realm.boolean_prototype)?;
         vm.allocate_constructed(
             ObjectKind::Boxed(Value::Bool(arg(a, 0).is_truthy())),
             prototype,
@@ -2336,7 +2347,7 @@ fn install_math(vm: &mut Vm) {
     });
 }
 fn install_errors(vm: &mut Vm) {
-    let error_proto = Value::Object(vm.error_prototype);
+    let error_proto = Value::Object(vm.realm.error_prototype);
     vm.define_data_property(
         error_proto.clone(),
         "name",
@@ -2404,7 +2415,9 @@ fn install_errors(vm: &mut Vm) {
                 .unwrap();
             proto
         };
-        vm.error_prototypes.insert(kind, proto.as_object().unwrap());
+        vm.realm
+            .error_prototypes
+            .insert(kind, proto.as_object().unwrap());
         vm.define_data_property(
             proto.clone(),
             "name",
@@ -2415,7 +2428,7 @@ fn install_errors(vm: &mut Vm) {
         )
         .unwrap();
         let constructor = constructor(vm, kind.name(), 1, proto, move |vm, _, args| {
-            create_error(vm, kind, args, vm.error_prototypes[&kind])
+            create_error(vm, kind, args, vm.realm.error_prototypes[&kind])
         });
         if kind != ErrorKind::Error {
             let error = vm.get_global("Error").unwrap();
@@ -2423,7 +2436,8 @@ fn install_errors(vm: &mut Vm) {
                 .unwrap();
         }
         replace_construct(vm, constructor, move |vm, _, args, target| {
-            let prototype = vm.prototype_from_constructor(target, vm.error_prototypes[&kind])?;
+            let prototype =
+                vm.prototype_from_constructor(target, vm.realm.error_prototypes[&kind])?;
             create_error(vm, kind, args, prototype)
         });
     }

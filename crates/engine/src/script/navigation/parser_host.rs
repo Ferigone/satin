@@ -499,7 +499,9 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
         return Ok(());
     }
     if !state.navigation_attached {
-        return Err(unsupported("Opening an HTML stream requires a browsing session"));
+        return Err(unsupported(
+            "Opening an HTML stream requires a browsing session",
+        ));
     }
 
     let doc = &state.document;
@@ -553,6 +555,7 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     state.parser_wakeup = true;
     mark_dirty(&mut state);
     drop(state);
+    super::super::frames::sweep(vm, host);
     mutation_observers::schedule(vm, host);
     Ok(())
 }

@@ -40,26 +40,30 @@ impl GeneratorState {
 }
 
 pub(crate) fn install(vm: &mut Vm) {
-    install_kind(vm, vm.iterator_prototype.unwrap(), FunctionKind::Generator);
+    install_kind(
+        vm,
+        vm.realm.iterator_prototype.unwrap(),
+        FunctionKind::Generator,
+    );
     let async_iterator = crate::async_iterator::install(vm);
     install_kind(vm, async_iterator, FunctionKind::AsyncGenerator);
 }
 
 fn install_kind(vm: &mut Vm, iterator: ObjectId, kind: FunctionKind) {
     let function = vm
-        .new_object_with_prototype(Value::Object(vm.function_prototype))
+        .new_object_with_prototype(Value::Object(vm.realm.function_prototype))
         .unwrap();
     let generator = vm
         .new_object_with_prototype(Value::Object(iterator))
         .unwrap();
     let asynchronous = kind == FunctionKind::AsyncGenerator;
     let (constructor_name, tag_name) = if asynchronous {
-        vm.async_generator_prototype = generator.as_object();
-        vm.async_generator_function_prototype = function.as_object();
+        vm.realm.async_generator_prototype = generator.as_object();
+        vm.realm.async_generator_function_prototype = function.as_object();
         ("AsyncGeneratorFunction", "AsyncGenerator")
     } else {
-        vm.generator_prototype = generator.as_object();
-        vm.generator_function_prototype = function.as_object();
+        vm.realm.generator_prototype = generator.as_object();
+        vm.realm.generator_function_prototype = function.as_object();
         ("GeneratorFunction", "Generator")
     };
     vm.root(function.clone());
@@ -160,9 +164,9 @@ impl Vm {
         self.prepare(&code.body.scope, env)?;
         let asynchronous = code.kind == FunctionKind::AsyncGenerator;
         let fallback = if asynchronous {
-            self.async_generator_prototype
+            self.realm.async_generator_prototype
         } else {
-            self.generator_prototype
+            self.realm.generator_prototype
         }
         .unwrap();
         let prototype = self.prototype_from_constructor(function, fallback)?;
@@ -199,13 +203,11 @@ impl Vm {
             GeneratorState::SuspendedYield(execution) => (execution, Some(input)),
             _ => unreachable!(),
         };
-        let referrer = self.referrer_for_owner(execution.owner());
-        let result = match referrer {
-            Ok(referrer) => {
-                self.with_referrer(referrer, |vm| Ok(vm.run_execution(&mut execution, input)))
-            }
-            Err(error) => Err(error),
-        };
+        let owner = execution.owner();
+        let result = self.with_function_realm(owner, |vm| {
+            let referrer = vm.referrer_for_owner(owner)?;
+            vm.with_referrer(referrer, |vm| Ok(vm.run_execution(&mut execution, input)))
+        });
         if let Ok(RunResult::Yield(value)) = result {
             *self.generator_state(id)? = GeneratorState::SuspendedYield(execution);
             return Ok(value);

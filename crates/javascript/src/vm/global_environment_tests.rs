@@ -5,7 +5,7 @@ fn global_bindings_and_global_this_have_distinct_traced_objects() {
     let mut vm = Vm::new();
     let bindings = vm.global();
     let receiver = vm.new_object();
-    vm.global_env = vm.heap.allocate_env(Environment::new_global(
+    vm.realm.global_env = vm.heap.allocate_env(Environment::new_global(
         bindings.as_object().unwrap(),
         receiver.as_object().unwrap(),
     ));
@@ -52,11 +52,12 @@ fn escaped_native_function_traces_and_releases_its_owner_environment() {
 
     // Select the environment only for native allocation. This does not
     // bootstrap a second set of intrinsics or execute code in a new realm.
-    let first_env = std::mem::replace(&mut vm.global_env, owner);
-    let first_object = std::mem::replace(&mut vm.global_object, bindings.as_object().unwrap());
+    let first_env = std::mem::replace(&mut vm.realm.global_env, owner);
+    let first_object =
+        std::mem::replace(&mut vm.realm.global_object, bindings.as_object().unwrap());
     let callback = vm.new_native_function("escaped", |_, _, _| Ok(Value::Undefined));
-    vm.global_object = first_object;
-    vm.global_env = first_env;
+    vm.realm.global_object = first_object;
+    vm.realm.global_env = first_env;
     assert_eq!(vm.global(), first_global);
 
     vm.set_property(bindings.clone(), "escaped", callback.clone())

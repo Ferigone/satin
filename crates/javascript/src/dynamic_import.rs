@@ -31,7 +31,7 @@ impl Vm {
     where
         F: Fn(&mut Vm, DynamicImportRequest) -> Result<(), JsError> + 'static,
     {
-        self.dynamic_import_hook = Some(Rc::new(hook));
+        self.realm.dynamic_import_hook = Some(Rc::new(hook));
     }
 
     /// Evaluate an already linked module and settle the import capability from
@@ -55,9 +55,9 @@ impl Vm {
         referrer: Option<SourceReferrer>,
         run: impl FnOnce(&mut Self) -> Result<T, JsError>,
     ) -> Result<T, JsError> {
-        let previous = std::mem::replace(&mut self.active_referrer, referrer);
+        let previous = std::mem::replace(&mut self.realm.active_referrer, referrer);
         let result = run(self);
-        self.active_referrer = previous;
+        self.realm.active_referrer = previous;
         result
     }
 
@@ -67,9 +67,10 @@ impl Vm {
     ) -> Result<Option<SourceReferrer>, JsError> {
         Ok(match &self.heap.object(owner)?.kind {
             ObjectKind::Function { referrer, .. } => referrer.clone(),
-            ObjectKind::Module(_) => {
-                Some(SourceReferrer::Module(ModuleId(owner, self.module_realm)))
-            }
+            ObjectKind::Module(_) => Some(SourceReferrer::Module(ModuleId(
+                owner,
+                self.realm.module_realm,
+            ))),
             _ => None,
         })
     }
@@ -79,7 +80,7 @@ impl Vm {
         let result = (|| {
             let specifier = self.to_string(&value)?;
             self.account_value(Value::String(specifier.clone()))?;
-            let (referrer, referrer_module) = match self.active_referrer.as_ref() {
+            let (referrer, referrer_module) = match self.realm.active_referrer.as_ref() {
                 Some(SourceReferrer::Script(identifier)) => (Some(identifier.clone()), None),
                 Some(SourceReferrer::Module(module)) => {
                     (Some(self.module_identifier(*module)?), Some(*module))
@@ -87,6 +88,7 @@ impl Vm {
                 None => (None, None),
             };
             let hook = self
+                .realm
                 .dynamic_import_hook
                 .clone()
                 .ok_or_else(|| JsError::type_error("No dynamic import loader is installed"))?;

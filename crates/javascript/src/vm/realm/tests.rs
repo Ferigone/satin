@@ -1,4 +1,85 @@
 use super::*;
+
+#[test]
+fn executable_realms_keep_intrinsics_and_live_values_in_the_defining_realm() {
+    let mut vm = Vm::new();
+    vm.eval("var shared = {}; function receive(value) { shared.value = value; return [value]; }")
+        .unwrap();
+    let (realm, child) = vm.new_realm().unwrap();
+    vm.set_global("child", child).unwrap();
+    let callback = vm.get_global("receive").unwrap();
+    let shared = vm.get_global("shared").unwrap();
+    vm.with_realm(realm, |vm| {
+        vm.set_global("receive", callback)?;
+        vm.set_global("shared", shared)?;
+        vm.eval(
+            r#"
+                var own = {};
+                var received = receive(own);
+                var symbol = Symbol.iterator;
+                var registered = Symbol.for('shared');
+                var dynamic = Function('return []');
+            "#,
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        vm.eval(
+            r#"
+                child.Object !== Object && child.Array !== Array &&
+                child.symbol === Symbol.iterator && child.registered === Symbol.for('shared') &&
+                shared.value === child.own && child.received[0] === child.own &&
+                child.received instanceof Array && child.dynamic() instanceof child.Array &&
+                Object.getPrototypeOf(child.own) === child.Object.prototype
+            "#,
+        )
+        .unwrap(),
+        Value::Bool(true),
+    );
+}
+
+#[test]
+fn released_executable_realm_is_collected_with_its_builtin_graph() {
+    let mut vm = Vm::new();
+    let baseline = vm.collect_garbage().after;
+    let (realm, global) = vm.new_realm().unwrap();
+    let root = vm.root(global);
+    vm.collect_garbage();
+    vm.with_realm(realm, |vm| vm.eval("var saved = Uint8Array.of(9)"))
+        .unwrap();
+    vm.unroot(root);
+    assert_eq!(vm.collect_garbage().after, baseline);
+    assert!(vm.with_realm(realm, |vm| vm.eval("saved")).is_err());
+}
+
+#[test]
+fn awaiting_a_parent_promise_resumes_with_child_intrinsics() {
+    let mut vm = Vm::new();
+    let promise = vm
+        .eval("var resolve; new Promise(function (r) { resolve = r; });")
+        .unwrap();
+    let (realm, child) = vm.new_realm().unwrap();
+    vm.set_global("child", child).unwrap();
+    vm.with_realm(realm, |vm| {
+        vm.set_global("pending", promise)?;
+        vm.eval(
+            r#"
+            var result;
+            async function after() { return [await pending]; }
+            after().then(function (value) { result = value; });
+        "#,
+        )
+    })
+    .unwrap();
+    vm.eval("resolve(7)").unwrap();
+    vm.drain_jobs(100).unwrap();
+    assert_eq!(
+        vm.eval("child.result[0] === 7 && child.result instanceof child.Array")
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
 use crate::{ErrorKind, Vm};
 use entry::with_current_core;
 
@@ -10,7 +91,7 @@ fn additional_core_has_distinct_intrinsics_without_copying_host_state() {
     vm.set_global("hostCapability", capability).unwrap();
     let agent_symbol = vm.well_known_symbol("iterator").unwrap();
     let primary_global = vm.global();
-    let primary = vm.heap.realm_core(vm.global_env).unwrap().1.objects();
+    let primary = vm.heap.realm_core(vm.realm.global_env).unwrap().1.objects();
 
     let other_env = allocate_additional_core(&mut vm).unwrap();
     let (other_global, other) = vm.heap.realm_core(other_env).unwrap();
@@ -36,7 +117,7 @@ fn additional_core_has_distinct_intrinsics_without_copying_host_state() {
     );
     assert_eq!(vm.global(), primary_global);
     assert_eq!(vm.well_known_symbol("iterator"), Some(agent_symbol));
-    assert!(!vm.wasm_compilation_allowed);
+    assert!(!vm.realm.wasm_compilation_allowed);
 
     vm.set_property(Value::Object(prototypes[0]), "isolatedMark", 17.into())
         .unwrap();
@@ -81,7 +162,7 @@ fn rooted_native_keeps_its_additional_core_alive_without_a_permanent_root() {
     assert!(vm.heap.realm_core(other_env).is_none());
     assert!(vm.heap.object(global).is_err());
     assert!(objects.iter().all(|id| vm.heap.object(*id).is_err()));
-    assert!(vm.heap.realm_core(vm.global_env).is_some());
+    assert!(vm.heap.realm_core(vm.realm.global_env).is_some());
 
     let replacement = allocate_additional_core(&mut vm).unwrap();
     assert_ne!(replacement, other_env);
@@ -92,8 +173,8 @@ fn rooted_native_keeps_its_additional_core_alive_without_a_permanent_root() {
 fn realm_core_lookup_rejects_foreign_and_wrong_kind_handles() {
     let vm = Vm::new();
     let foreign = Vm::new();
-    assert!(vm.heap.realm_core(foreign.global_env).is_none());
-    assert!(vm.heap.realm_core(EnvId(vm.global_object)).is_none());
+    assert!(vm.heap.realm_core(foreign.realm.global_env).is_none());
+    assert!(vm.heap.realm_core(EnvId(vm.realm.global_object)).is_none());
 }
 
 #[test]
@@ -101,7 +182,7 @@ fn additional_core_admission_preserves_shared_task_and_heap_limits() {
     let mut vm = Vm::new();
     let cells = vm.heap.live;
     let bytes = vm.estimated_heap_bytes();
-    let core_bytes = 9 * Heap::EMPTY_CELL_BYTES + std::mem::size_of::<CoreIntrinsics>();
+    let core_bytes = 9 * Heap::EMPTY_CELL_BYTES + Heap::REALM_CORE_BYTES;
     vm.limits.max_heap_objects = cells + 8;
     assert_eq!(
         allocate_additional_core(&mut vm).unwrap_err().kind,
@@ -142,7 +223,7 @@ fn stored_core(vm: &Vm, env: EnvId) -> (EnvId, Value, [ObjectId; 7]) {
 #[test]
 fn current_core_restores_after_nested_errors_and_keeps_parked_roots_live() {
     let mut vm = Vm::new();
-    let primary = stored_core(&vm, vm.global_env);
+    let primary = stored_core(&vm, vm.realm.global_env);
     let outer_env = allocate_additional_core(&mut vm).unwrap();
     let inner_env = allocate_additional_core(&mut vm).unwrap();
     let unused_env = allocate_additional_core(&mut vm).unwrap();
@@ -174,10 +255,10 @@ fn current_core_restores_after_nested_errors_and_keeps_parked_roots_live() {
     .unwrap_err();
     assert_eq!(error.kind, ErrorKind::RangeError);
     assert_eq!(error.message, "outer error");
-    assert_eq!(vm.global_env, primary.0);
+    assert_eq!(vm.realm.global_env, primary.0);
     assert_eq!(vm.global(), primary.1);
-    assert_eq!(vm.object_prototype, primary.2[0]);
-    assert_eq!(vm.array_prototype, primary.2[2]);
+    assert_eq!(vm.realm.object_prototype, primary.2[0]);
+    assert_eq!(vm.realm.array_prototype, primary.2[2]);
     assert_eq!(vm.call_depth, 0);
     assert_eq!(vm.roots.len(), roots_before);
     vm.collect_garbage();
@@ -235,8 +316,8 @@ fn current_core_rejects_invalid_handles_and_checks_native_depth_before_entering(
     let foreign = Vm::new();
     let fuel_before = vm.remaining;
     let roots_before = vm.roots.len();
-    let object_env = EnvId(vm.global_object);
-    for invalid in [stale, foreign.global_env, object_env] {
+    let object_env = EnvId(vm.realm.global_object);
+    for invalid in [stale, foreign.realm.global_env, object_env] {
         let error = with_current_core::<()>(&mut vm, invalid, |_| panic!("invalid core entered"))
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::TypeError);
@@ -247,13 +328,14 @@ fn current_core_rejects_invalid_handles_and_checks_native_depth_before_entering(
 
     let other = allocate_additional_core(&mut vm).unwrap();
     let selected = stored_core(&vm, other);
-    let original_object = std::mem::replace(&mut vm.global_object, selected.1.as_object().unwrap());
+    let original_object =
+        std::mem::replace(&mut vm.realm.global_object, selected.1.as_object().unwrap());
     let error = with_current_core::<()>(&mut vm, other, |_| panic!("inconsistent parent entered"))
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::InternalError);
     assert_eq!(vm.global(), selected.1);
     assert_eq!(vm.roots.len(), roots_before);
-    vm.global_object = original_object;
+    vm.realm.global_object = original_object;
 
     vm.limits.max_call_depth = 1;
     with_current_core(&mut vm, other, |scope| {

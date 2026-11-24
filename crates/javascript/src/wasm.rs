@@ -47,7 +47,7 @@ fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
 }
 
 fn create_module(vm: &mut Vm, bytes: &Value, prototype: ObjectId) -> Result<Value, JsError> {
-    if !vm.wasm_compilation_allowed {
+    if !vm.realm.wasm_compilation_allowed {
         return Err(compile_error(
             "WebAssembly compilation is disallowed by policy",
         ));
@@ -577,9 +577,10 @@ pub(crate) fn install(vm: &mut Vm) {
         ("RuntimeError", ErrorKind::RuntimeError),
     ] {
         let prototype = vm
-            .new_object_with_prototype(Value::Object(vm.error_prototype))
+            .new_object_with_prototype(Value::Object(vm.realm.error_prototype))
             .unwrap();
-        vm.error_prototypes
+        vm.realm
+            .error_prototypes
             .insert(kind, prototype.as_object().unwrap());
         vm.define_data_property(
             prototype.clone(),

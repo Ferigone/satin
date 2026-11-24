@@ -52,7 +52,7 @@ fn species(
     args: &[Value],
     minimum: usize,
 ) -> Result<(Value, TypedArray), JsError> {
-    let fallback = vm.binary.typed_constructors[source.element as usize].unwrap();
+    let fallback = vm.realm.binary.typed_constructors[source.element as usize].unwrap();
     let ctor = species_constructor(vm, this, fallback)?;
     let (result, array) = construct(vm, ctor, args, minimum)?;
     source.element.check_content_type(array.element)?;
@@ -64,7 +64,7 @@ fn same_type(
     source: TypedArray,
     length: usize,
 ) -> Result<(Value, TypedArray), JsError> {
-    let prototype = vm.binary.typed[source.element as usize].unwrap();
+    let prototype = vm.realm.binary.typed[source.element as usize].unwrap();
     let value = vm.allocate_typed_array(source.element, length, prototype)?;
     let array = receiver(vm, &value)?;
     Ok((value, array))
@@ -740,7 +740,7 @@ pub(super) fn install(vm: &mut Vm, prototype: Value, ctor: Value) {
         });
     }
     let to_string = vm
-        .get_property(Value::Object(vm.array_prototype), "toString")
+        .get_property(Value::Object(vm.realm.array_prototype), "toString")
         .unwrap();
     vm.define_data_property(prototype, "toString", to_string, true, false, true)
         .unwrap();

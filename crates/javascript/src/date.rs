@@ -269,7 +269,7 @@ pub(crate) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
     let intrinsic = prototype.as_object().unwrap();
     vm.root(prototype.clone());
-    vm.clone_intrinsics.date = Some(intrinsic);
+    vm.realm.clone_intrinsics.date = Some(intrinsic);
     let date = constructor(vm, "Date", 7, prototype.clone(), |_, _, _| {
         Ok(local_string(now(), LocalFormat::Full))
     });

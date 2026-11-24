@@ -223,6 +223,18 @@ pub(super) fn report_error(
     error: &JsError,
     legacy: impl FnOnce() -> String,
 ) {
+    record_error(state, phase, source, error);
+    if state.borrow().diagnostics.len() < DIAGNOSTIC_LIMIT {
+        diagnostic(state, legacy());
+    }
+}
+
+pub(super) fn record_error(
+    state: &Shared,
+    phase: ConsolePhase,
+    source: Option<&str>,
+    error: &JsError,
+) {
     state.borrow_mut().devtools_console.push(|| {
         // JsError already contains a VM-produced message. Never inspect `thrown`.
         let mut record = ConsoleRecord::new(
@@ -240,9 +252,6 @@ pub(super) fn report_error(
         record.column = error.column;
         record
     });
-    if state.borrow().diagnostics.len() < DIAGNOSTIC_LIMIT {
-        diagnostic(state, legacy());
-    }
 }
 
 pub(super) fn report_rejection(state: &Shared, value: &Value) {

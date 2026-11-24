@@ -293,8 +293,8 @@ impl Vm {
         rejected: bool,
     ) -> Result<(), JsError> {
         let owner = execution.owner();
-        let result = (|| {
-            if !self.can_enter_call() {
+        let result = self.with_function_realm(owner, |vm| {
+            if !vm.can_enter_call() {
                 return Err(JsError::new(
                     ErrorKind::ExecutionLimit,
                     "Call depth budget exhausted",
@@ -305,12 +305,12 @@ impl Vm {
             } else {
                 ResumeValue::Normal(argument)
             };
-            let referrer = self.referrer_for_owner(owner)?;
-            self.call_depth += 1;
-            let result = self.with_referrer(referrer, |vm| vm.drive_async(execution, Some(input)));
-            self.call_depth -= 1;
+            let referrer = vm.referrer_for_owner(owner)?;
+            vm.call_depth += 1;
+            let result = vm.with_referrer(referrer, |vm| vm.drive_async(execution, Some(input)));
+            vm.call_depth -= 1;
             result
-        })();
+        });
         if let Err(error) = &result {
             self.record_async_execution_limit(owner, error);
         }

@@ -1,5 +1,6 @@
 //! An independently implemented, deliberately incomplete browser host for our VM.
-//! Each tab owns one realm. Native callbacks never borrow the DOM across VM calls.
+//! A tab shares one VM between its document and accessible child realms.
+//! Native callbacks never borrow the DOM across VM calls.
 mod abort;
 mod blobs;
 mod canvas;
@@ -13,6 +14,7 @@ mod fetch;
 mod file_list;
 mod form_data;
 mod forms;
+mod frames;
 mod history_api;
 mod image_element;
 mod intersection_observers;
@@ -39,8 +41,8 @@ pub use forms::{
     ControlSnapshot, FilePickerRequest, FormKey, FormSubmission, MAX_PICKER_BYTES,
     MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, OptionSnapshot, SelectedFile,
 };
-pub use navigation::{DocumentSession, ResourceLoad};
 pub use media::{MediaCommand, MediaKey, MediaStatus, MediaUpdate};
+pub use navigation::{DocumentSession, ResourceLoad};
 
 pub(crate) fn initial_control_snapshots(document: &Document) -> HashMap<NodeId, ControlSnapshot> {
     forms::initial_snapshots(document)
@@ -74,6 +76,8 @@ struct State {
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
     element_prototype: Value,
+    iframe_prototype: Value,
+    frames: frames::Frames,
     script_prototype: Value,
     canvas_prototype: Value,
     media_prototypes: media::Prototypes,
@@ -230,6 +234,10 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
         let state = state.borrow();
         if dynamic_scripts::is_script(&state.document, id) {
             state.script_prototype.clone()
+        } else if state.document.namespace(id) == crate::dom::Namespace::Html
+            && state.document.tag(id) == "iframe"
+        {
+            state.iframe_prototype.clone()
         } else if crate::canvas::is_canvas(&state.document, id) {
             state.canvas_prototype.clone()
         } else if let Some(prototype) = state.media_prototypes.element(&state.document, id) {
@@ -403,6 +411,7 @@ fn set_attribute(
         }
         image_element::attribute_changed(&mut state, id, &key);
         drop(state);
+        frames::attribute_changed(vm, host, id, &key);
         if key == "src" && media::is_media(&host.borrow().document, id) {
             media::source_changed(vm, host, id)?;
         }
@@ -476,6 +485,7 @@ fn set_text(vm: &mut Vm, host: &Shared, id: NodeId, value: String) -> Result<(),
     state.dom_bytes = next_bytes;
     mark_dirty(&mut state);
     drop(state);
+    frames::sweep(vm, host);
     mutation_observers::schedule(vm, host);
     Ok(())
 }
@@ -577,6 +587,8 @@ impl ScriptRuntime {
         vm.root(prototype.clone());
         let element_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(element_prototype.clone());
+        let iframe_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        vm.root(iframe_prototype.clone());
         let script_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(script_prototype.clone());
         let canvas_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
@@ -605,6 +617,8 @@ impl ScriptRuntime {
             nodes: HashMap::new(),
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
+            iframe_prototype: iframe_prototype.clone(),
+            frames: frames::Frames::default(),
             script_prototype: script_prototype.clone(),
             canvas_prototype: canvas_prototype.clone(),
             media_prototypes,
@@ -648,6 +662,7 @@ impl ScriptRuntime {
             media: media::Store::default(),
         }));
         install_node(&mut vm, &state, prototype.clone(), &element_prototype)?;
+        frames::install(&mut vm, &state, iframe_prototype)?;
         image_element::install(&mut vm, &state, image_prototype)?;
         install_character_data(&mut vm, &state, prototype.clone(), character_data_prototype)?;
         dynamic_scripts::install(&mut vm, &state, script_prototype)?;
@@ -981,9 +996,13 @@ impl ScriptRuntime {
                 Ok(allowed)
             })
             .unwrap_or_else(|error| {
-                report_error(&state, ConsolePhase::HostTask, Some("click"), &error, || {
-                    error.to_string()
-                });
+                report_error(
+                    &state,
+                    ConsolePhase::HostTask,
+                    Some("click"),
+                    &error,
+                    || error.to_string(),
+                );
                 false
             });
         report_unhandled(&mut self.vm, &self.state);
@@ -1005,9 +1024,13 @@ impl ScriptRuntime {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
             }
-            report_error(&self.state, ConsolePhase::HostTask, Some(kind), &error, || {
-                format!("{kind}: {error}")
-            });
+            report_error(
+                &self.state,
+                ConsolePhase::HostTask,
+                Some(kind),
+                &error,
+                || format!("{kind}: {error}"),
+            );
         }
     }
     /// HTML chooses the activation target before dispatch. Its href may be
@@ -1280,6 +1303,7 @@ impl ScriptRuntime {
     }
 
     pub fn pump_with_network_errors(&mut self) -> Result<(), JsError> {
+        frames::sweep(&mut self.vm, &self.state);
         self.drain_microtasks();
         // These continuations are fetch tasks. Cap each pump's batch and
         // use the usual per-task checkpoint, not a reset inside a handler.
@@ -1391,9 +1415,13 @@ impl ScriptRuntime {
                 dispatch_checked(vm, &state, target, "scroll", bubbles, false, &[])?;
                 drain_microtask_queue(vm, &state)
             }) {
-                report_error(&state, ConsolePhase::HostTask, Some("scroll"), &error, || {
-                    error.to_string()
-                });
+                report_error(
+                    &state,
+                    ConsolePhase::HostTask,
+                    Some("scroll"),
+                    &error,
+                    || error.to_string(),
+                );
                 break;
             }
         }
@@ -1546,11 +1574,13 @@ fn run_classic(
             state.borrow_mut().executed += 1;
             Ok(())
         }
-        Err(error) => match error_event::report(vm, state, &error, external.then_some(identifier)) {
-            Ok(false) => Ok(()),
-            Ok(true) => Err(error),
-            Err(reporting_failure) => Err(reporting_failure),
-        },
+        Err(error) => {
+            match error_event::report(vm, state, &error, external.then_some(identifier)) {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(error),
+                Err(reporting_failure) => Err(reporting_failure),
+            }
+        }
     };
     let drained = if checkpoint && evaluated.as_ref().err().is_none_or(|error| !fatal(error)) {
         drain_microtask_queue(vm, state)
@@ -2126,32 +2156,42 @@ fn write_inline_style(
 }
 
 fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<(), JsError> {
-    install_event_handler_list(vm, state, object, &[
-        "onclick",
-        "onload",
-        "onerror",
-        "onDOMContentLoaded",
-        "onbeforeinput",
-        "oninput",
-        "onchange",
-        "onsubmit",
-        "onformdata",
-        "onreset",
-        "oninvalid",
-        "onfocus",
-        "onblur",
-        "onfocusin",
-        "onfocusout",
-        "onkeydown",
-        "onscroll",
-        "onresize",
-        "onpopstate",
-        "onhashchange",
-        "onstorage",
-    ])
+    install_event_handler_list(
+        vm,
+        state,
+        object,
+        &[
+            "onclick",
+            "onload",
+            "onerror",
+            "onDOMContentLoaded",
+            "onbeforeinput",
+            "oninput",
+            "onchange",
+            "onsubmit",
+            "onformdata",
+            "onreset",
+            "oninvalid",
+            "onfocus",
+            "onblur",
+            "onfocusin",
+            "onfocusout",
+            "onkeydown",
+            "onscroll",
+            "onresize",
+            "onpopstate",
+            "onhashchange",
+            "onstorage",
+        ],
+    )
 }
 
-fn install_event_handler_list(vm: &mut Vm, state: &Shared, object: Value, properties: &[&str]) -> Result<(), JsError> {
+fn install_event_handler_list(
+    vm: &mut Vm,
+    state: &Shared,
+    object: Value,
+    properties: &[&str],
+) -> Result<(), JsError> {
     for &property in properties {
         let name = property.strip_prefix("on").unwrap().to_owned();
         let get_state = state.clone();

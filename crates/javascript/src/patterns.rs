@@ -119,7 +119,7 @@ impl Vm {
                     configurable: true,
                 }
             } else {
-                let poison = self.throw_type_error.map(Value::Object);
+                let poison = self.realm.throw_type_error.map(Value::Object);
                 Property {
                     kind: PropertyKind::Accessor {
                         get: poison.clone(),

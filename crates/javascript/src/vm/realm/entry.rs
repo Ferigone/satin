@@ -15,16 +15,16 @@ pub(super) type Current = (EnvId, Value, [ObjectId; 7]);
 
 fn current(vm: &Vm) -> Current {
     (
-        vm.global_env,
+        vm.realm.global_env,
         vm.global(),
         [
-            vm.object_prototype,
-            vm.function_prototype,
-            vm.array_prototype,
-            vm.string_prototype,
-            vm.number_prototype,
-            vm.boolean_prototype,
-            vm.error_prototype,
+            vm.realm.object_prototype,
+            vm.realm.function_prototype,
+            vm.realm.array_prototype,
+            vm.realm.string_prototype,
+            vm.realm.number_prototype,
+            vm.realm.boolean_prototype,
+            vm.realm.error_prototype,
         ],
     )
 }
@@ -52,15 +52,15 @@ impl Selection {
             boolean_prototype,
             error_prototype,
         } = self.intrinsics;
-        vm.global_env = self.env;
-        vm.global_object = self.global;
-        vm.object_prototype = object_prototype;
-        vm.function_prototype = function_prototype;
-        vm.array_prototype = array_prototype;
-        vm.string_prototype = string_prototype;
-        vm.number_prototype = number_prototype;
-        vm.boolean_prototype = boolean_prototype;
-        vm.error_prototype = error_prototype;
+        vm.realm.global_env = self.env;
+        vm.realm.global_object = self.global;
+        vm.realm.object_prototype = object_prototype;
+        vm.realm.function_prototype = function_prototype;
+        vm.realm.array_prototype = array_prototype;
+        vm.realm.string_prototype = string_prototype;
+        vm.realm.number_prototype = number_prototype;
+        vm.realm.boolean_prototype = boolean_prototype;
+        vm.realm.error_prototype = error_prototype;
     }
 }
 
@@ -77,7 +77,7 @@ pub(super) fn with_current_core<T>(
     body: impl FnOnce(&mut EnteredCore<'_>) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
     let target = Selection::load(vm, env)?;
-    let parent = Selection::load(vm, vm.global_env)?;
+    let parent = Selection::load(vm, vm.realm.global_env)?;
     let expected = (
         parent.env,
         Value::Object(parent.global),

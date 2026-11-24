@@ -297,7 +297,7 @@ impl Vm {
                 },
             );
         }
-        let mut constructor_parent = self.function_prototype;
+        let mut constructor_parent = self.realm.function_prototype;
         let prototype_parent = if let Some(heritage) = &code.heritage {
             let superclass = self.expression_value(heritage, class_env)?;
             if superclass == Value::Null {
@@ -321,7 +321,7 @@ impl Vm {
                 prototype.as_object()
             }
         } else {
-            Some(self.object_prototype)
+            Some(self.realm.object_prototype)
         };
         // Heritage expressions can create closures. Those closures retain the
         // outer private names, so the class body needs a distinct environment.
@@ -692,7 +692,7 @@ impl Vm {
             let prototype = self
                 .get_property(new_target.clone(), "prototype")?
                 .as_object()
-                .unwrap_or(self.object_prototype);
+                .unwrap_or(self.realm.object_prototype);
             let object = Value::Object(self.heap.allocate(Cell::Object(Object::new(
                 ObjectKind::Ordinary,
                 Some(prototype),

@@ -373,7 +373,7 @@ impl Vm {
             && let Ok(object) = self.heap.object(owner)
             && matches!(object.kind, ObjectKind::Module(_))
         {
-            let module = ModuleId(owner, self.module_realm);
+            let module = ModuleId(owner, self.realm.module_realm);
             let _ = self.fail_module_evaluations(vec![module], None, error.clone());
         }
     }

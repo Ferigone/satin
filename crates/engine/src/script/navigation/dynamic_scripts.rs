@@ -211,6 +211,7 @@ pub(in crate::script) fn post_connection(
     state: &Shared,
     candidates: impl IntoIterator<Item = NodeId>,
 ) -> Result<(), JsError> {
+    super::super::frames::sweep(vm, state);
     for id in candidates {
         prepare(vm, state, id)?;
     }

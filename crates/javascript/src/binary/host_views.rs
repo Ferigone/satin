@@ -69,13 +69,15 @@ impl Vm {
         match kind.0 {
             Some(element) => self.new_typed_view(
                 TypedArray { view, element },
-                self.binary.typed[element as usize].expect("initialized typed array prototype"),
+                self.realm.binary.typed[element as usize]
+                    .expect("initialized typed array prototype"),
             ),
             None => {
                 self.check_binary_allocation(0, 1)?;
                 self.allocate_constructed(
                     ObjectKind::DataView(view),
-                    self.binary
+                    self.realm
+                        .binary
                         .data_view
                         .expect("initialized DataView prototype"),
                 )

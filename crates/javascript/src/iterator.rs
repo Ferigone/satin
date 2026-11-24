@@ -50,7 +50,8 @@ impl Vm {
     /// The realm's shared iterator prototype, used by native host iterators.
     pub fn intrinsic_iterator_prototype(&self) -> Value {
         Value::Object(
-            self.iterator_prototype
+            self.realm
+                .iterator_prototype
                 .expect("initialized iterator prototype"),
         )
     }
@@ -193,7 +194,7 @@ impl Vm {
                     index: 0,
                     kind,
                 }),
-                self.array_iterator_prototype,
+                self.realm.array_iterator_prototype,
             ),
         ))))
     }
@@ -208,7 +209,7 @@ impl Vm {
         Ok(Value::Object(self.heap.allocate(Cell::Object(
             Object::new(
                 ObjectKind::Iterator(IteratorData::String { string, index: 0 }),
-                self.string_iterator_prototype,
+                self.realm.string_iterator_prototype,
             ),
         ))))
     }
@@ -292,7 +293,7 @@ impl Vm {
 }
 pub(crate) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
-    vm.iterator_prototype = prototype.as_object();
+    vm.realm.iterator_prototype = prototype.as_object();
     let identity = vm.native(
         "[Symbol.iterator]",
         0,
@@ -310,8 +311,8 @@ pub(crate) fn install(vm: &mut Vm) {
     .unwrap();
     let array = vm.new_object_with_prototype(prototype.clone()).unwrap();
     let string = vm.new_object_with_prototype(prototype).unwrap();
-    vm.array_iterator_prototype = array.as_object();
-    vm.string_iterator_prototype = string.as_object();
+    vm.realm.array_iterator_prototype = array.as_object();
+    vm.realm.string_iterator_prototype = string.as_object();
     method(vm, array.clone(), "next", 0, |vm, this, _| {
         vm.iterator_next_native(this, false)
     });
@@ -343,14 +344,14 @@ pub(crate) fn install(vm: &mut Vm) {
     ] {
         let function = method(
             vm,
-            Value::Object(vm.array_prototype),
+            Value::Object(vm.realm.array_prototype),
             name,
             0,
             move |vm, this, _| vm.array_iterator(this, kind),
         );
         if name == "values" {
             vm.define_data_property_key(
-                Value::Object(vm.array_prototype),
+                Value::Object(vm.realm.array_prototype),
                 vm.well_known_key("iterator"),
                 function,
                 true,
@@ -367,7 +368,7 @@ pub(crate) fn install(vm: &mut Vm) {
         Rc::new(|vm, this, _| vm.string_iterator(this)),
     );
     vm.define_data_property_key(
-        Value::Object(vm.string_prototype),
+        Value::Object(vm.realm.string_prototype),
         vm.well_known_key("iterator"),
         iter,
         true,

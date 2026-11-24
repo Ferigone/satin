@@ -17,7 +17,7 @@ pub(super) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
     let intrinsic = prototype.as_object().unwrap();
     vm.root(prototype.clone());
-    vm.binary.data_view = Some(intrinsic);
+    vm.realm.binary.data_view = Some(intrinsic);
     let constructor = constructor(vm, "DataView", 1, prototype.clone(), |_, _, _| {
         Err(JsError::type_error("DataView requires new"))
     });

@@ -18,7 +18,7 @@ use std::{
     },
 };
 
-use crate::dynamic_import::{DynamicImportHook, SourceReferrer};
+use crate::dynamic_import::SourceReferrer;
 
 pub(crate) mod realm;
 
@@ -103,33 +103,12 @@ pub struct GcStats {
 /// values retained outside the callback. Captured Rust/DOM data needs no JS tracing.
 pub struct Vm {
     pub(crate) heap: Heap,
-    /// Binding object of `global_env`; it need not be the global this value.
-    pub(crate) global_object: ObjectId,
-    pub(crate) global_env: EnvId,
-    pub(crate) object_prototype: ObjectId,
-    pub(crate) function_prototype: ObjectId,
-    pub(crate) async_function_prototype: Option<ObjectId>,
-    pub(crate) generator_function_prototype: Option<ObjectId>,
-    pub(crate) generator_prototype: Option<ObjectId>,
-    pub(crate) async_generator_function_prototype: Option<ObjectId>,
-    pub(crate) async_generator_prototype: Option<ObjectId>,
-    pub(crate) async_iterator_prototype: Option<ObjectId>,
-    pub(crate) async_from_sync_prototype: Option<ObjectId>,
-    pub(crate) array_prototype: ObjectId,
-    pub(crate) binary: crate::binary::Intrinsics,
-    pub(crate) clone_intrinsics: crate::structured_clone::Intrinsics,
-    pub(crate) string_prototype: ObjectId,
-    pub(crate) regexp_prototype: Option<ObjectId>,
-    pub(crate) regexp_constructor: Option<ObjectId>,
-    pub(crate) regexp_iterator_prototype: Option<ObjectId>,
-    pub(crate) number_prototype: ObjectId,
-    pub(crate) bigint_prototype: Option<ObjectId>,
+    pub(crate) realm: realm::RealmState,
+    inactive_realms: BTreeMap<EnvId, realm::RealmState>,
+    realm_depth: usize,
+    realm_bootstrap_bytes: usize,
+    realm_bootstrap_cells: usize,
     pub(crate) bigint_storage: crate::bigint::Storage,
-    pub(crate) boolean_prototype: ObjectId,
-    pub(crate) error_prototype: ObjectId,
-    pub(crate) error_prototypes: BTreeMap<ErrorKind, ObjectId>,
-    pub(crate) intrinsic_eval: Option<ObjectId>,
-    pub(crate) throw_type_error: Option<ObjectId>,
     roots: BTreeMap<RootId, Value>,
     next_root: u64,
     pub(crate) next_private_id: u64,
@@ -143,26 +122,16 @@ pub struct Vm {
     string_bytes: usize,
     pub(crate) code_bytes: usize,
     initializing: bool,
-    pub(crate) promise_prototype: Option<ObjectId>,
-    pub(crate) promise_constructor: Option<ObjectId>,
     pub(crate) jobs: VecDeque<crate::promise::Job>,
     pub(crate) unhandled_promises: Vec<ObjectId>,
     pub(crate) json_depth: usize,
-    pub(crate) symbol_prototype: Option<ObjectId>,
     pub(crate) well_known_symbols: BTreeMap<&'static str, SymbolId>,
     pub(crate) symbol_registry: BTreeMap<JsString, SymbolId>,
     pub(crate) symbol_storage: BTreeMap<usize, std::rc::Weak<crate::value::SymbolData>>,
-    pub(crate) iterator_prototype: Option<ObjectId>,
-    pub(crate) array_iterator_prototype: Option<ObjectId>,
-    pub(crate) string_iterator_prototype: Option<ObjectId>,
     pub(crate) template_objects: BTreeMap<usize, (std::rc::Weak<bytecode::TemplateSite>, Value)>,
     pub(crate) pattern_depth: usize,
     pub(crate) module_evaluation_active: bool,
     pub(crate) module_async_order: u64,
-    pub(crate) module_realm: u64,
-    pub(crate) active_referrer: Option<SourceReferrer>,
-    pub(crate) dynamic_import_hook: Option<DynamicImportHook>,
-    pub(crate) wasm_compilation_allowed: bool,
 }
 #[derive(Clone)]
 pub(crate) enum Reference {
@@ -244,46 +213,14 @@ impl Vm {
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
         let mut heap = Heap::default();
         let global_env = realm::allocate_primary_core(&mut heap);
-        let (
-            global_object,
-            &realm::CoreIntrinsics {
-                object_prototype,
-                function_prototype,
-                array_prototype,
-                string_prototype,
-                number_prototype,
-                boolean_prototype,
-                error_prototype,
-            },
-        ) = heap.realm_core(global_env).expect("fresh realm core");
         let mut vm = Self {
+            realm: realm::RealmState::new(&heap, global_env, true),
             heap,
-            global_object,
-            global_env,
-            object_prototype,
-            function_prototype,
-            async_function_prototype: None,
-            generator_function_prototype: None,
-            generator_prototype: None,
-            async_generator_function_prototype: None,
-            async_generator_prototype: None,
-            async_iterator_prototype: None,
-            async_from_sync_prototype: None,
-            array_prototype,
-            binary: crate::binary::Intrinsics::default(),
-            clone_intrinsics: crate::structured_clone::Intrinsics::default(),
-            string_prototype,
-            regexp_prototype: None,
-            regexp_constructor: None,
-            regexp_iterator_prototype: None,
-            number_prototype,
-            bigint_prototype: None,
+            inactive_realms: BTreeMap::new(),
+            realm_depth: 0,
+            realm_bootstrap_bytes: 0,
+            realm_bootstrap_cells: 0,
             bigint_storage: crate::bigint::Storage::default(),
-            boolean_prototype,
-            error_prototype,
-            error_prototypes: BTreeMap::new(),
-            intrinsic_eval: None,
-            throw_type_error: None,
             roots: BTreeMap::new(),
             next_root: 1,
             next_private_id: 1,
@@ -297,29 +234,20 @@ impl Vm {
             string_bytes: 0,
             code_bytes: 0,
             initializing: true,
-            promise_prototype: None,
-            promise_constructor: None,
             jobs: VecDeque::new(),
             unhandled_promises: Vec::new(),
             json_depth: 0,
-            symbol_prototype: None,
             well_known_symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             symbol_storage: BTreeMap::new(),
-            iterator_prototype: None,
-            array_iterator_prototype: None,
-            string_iterator_prototype: None,
             template_objects: BTreeMap::new(),
             pattern_depth: 0,
             module_evaluation_active: false,
             module_async_order: 0,
-            module_realm: crate::modules::module_realm_id(),
-            active_referrer: None,
-            dynamic_import_hook: None,
-            wasm_compilation_allowed: true,
         };
-        crate::builtins::install(&mut vm);
-        vm.initializing = false;
+        vm.install_realm_builtins();
+        vm.realm_bootstrap_cells = vm.heap.live;
+        vm.realm_bootstrap_bytes = vm.estimated_heap_bytes();
         vm
     }
     pub fn limits(&self) -> &VmLimits {
@@ -330,7 +258,7 @@ impl Vm {
     /// Standalone VMs allow compilation by default. Validation and instantiation
     /// of an already compiled module are unaffected.
     pub fn set_wasm_compilation_allowed(&mut self, allowed: bool) {
-        self.wasm_compilation_allowed = allowed;
+        self.realm.wasm_compilation_allowed = allowed;
     }
     pub fn check_syntax(&mut self, source: &str) -> Result<(), JsError> {
         let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
@@ -392,7 +320,7 @@ impl Vm {
         }
         self.active += 1;
         let result = self
-            .with_referrer(referrer, |vm| vm.run_chunk(&chunk, vm.global_env))
+            .with_referrer(referrer, |vm| vm.run_chunk(&chunk, vm.realm.global_env))
             .and_then(|c| match c {
                 Completion::Normal(v) => Ok(v.unwrap_or_default()),
                 _ => Err(JsError::new(
@@ -448,11 +376,11 @@ impl Vm {
     }
 
     pub fn global(&self) -> Value {
-        Value::Object(self.global_object)
+        Value::Object(self.realm.global_object)
     }
     pub(crate) fn global_this(&self) -> Value {
         self.heap
-            .environment(self.global_env)
+            .environment(self.realm.global_env)
             .this
             .clone()
             .expect("global environment has a this binding")
@@ -470,7 +398,7 @@ impl Vm {
     }
 
     pub fn get_global(&mut self, key: &str) -> Result<Value, JsError> {
-        let reference = self.resolve(self.global_env, &key.into())?;
+        let reference = self.resolve(self.realm.global_env, &key.into())?;
         if matches!(reference, Reference::Unresolvable(_)) {
             Ok(Value::Undefined)
         } else {
@@ -478,13 +406,13 @@ impl Vm {
         }
     }
     pub fn set_global(&mut self, key: &str, value: Value) -> Result<(), JsError> {
-        let reference = self.resolve(self.global_env, &key.into())?;
+        let reference = self.resolve(self.realm.global_env, &key.into())?;
         self.write_reference(reference, value, false)
     }
     pub fn new_object(&mut self) -> Value {
         Value::Object(self.heap.allocate(Cell::Object(Object::new(
             ObjectKind::Ordinary,
-            Some(self.object_prototype),
+            Some(self.realm.object_prototype),
         ))))
     }
     /// Host metadata must contain Rust data only, with its own host byte budget.
@@ -567,7 +495,7 @@ impl Vm {
         ))))
     }
     pub fn new_array(&mut self, values: &[Value]) -> Value {
-        self.new_array_with_prototype(values, self.array_prototype)
+        self.new_array_with_prototype(values, self.realm.array_prototype)
     }
     fn new_array_with_prototype(&mut self, values: &[Value], prototype: ObjectId) -> Value {
         let mut object = Object::new(
@@ -584,7 +512,7 @@ impl Vm {
     }
     /// Constructs an ordinary array while charging its elements and storage.
     pub fn try_new_array(&mut self, values: &[Value]) -> Result<Value, JsError> {
-        self.try_new_array_with_prototype(values, self.array_prototype)
+        self.try_new_array_with_prototype(values, self.realm.array_prototype)
     }
     pub(crate) fn try_new_array_with_prototype(
         &mut self,
@@ -609,6 +537,7 @@ impl Vm {
     pub fn estimated_heap_bytes(&self) -> usize {
         self.heap
             .estimated_bytes
+            .saturating_add(self.inactive_realms.len() * std::mem::size_of::<realm::RealmState>())
             .saturating_add(self.string_bytes)
             .saturating_add(self.code_bytes)
             .saturating_add(self.bigint_storage.bytes)
@@ -641,16 +570,21 @@ impl Vm {
         self.ensure_allocation(Self::source_allocation(bytes))
     }
     fn account_string(&mut self, string: &JsString) -> Result<(), JsError> {
-        let bytes = string.len().saturating_mul(2).saturating_add(64);
-        let old = self
-            .string_storage
-            .get(&string.storage_id())
-            .copied()
-            .unwrap_or(0);
-        if bytes > old {
+        let mut part = Some(string);
+        while let Some(string) = part {
+            let bytes = string.allocation_bytes();
+            let old = self
+                .string_storage
+                .get(&string.storage_id())
+                .copied()
+                .unwrap_or(0);
+            if bytes <= old {
+                break;
+            }
             self.ensure_allocation(bytes - old)?;
             self.string_bytes = self.string_bytes.saturating_add(bytes - old);
             self.string_storage.insert(string.storage_id(), bytes);
+            part = string.prefix();
         }
         Ok(())
     }
@@ -755,9 +689,9 @@ impl Vm {
             ObjectKind::Native {
                 callback,
                 construct,
-                realm_environment: self.global_env,
+                realm_environment: self.realm.global_env,
             },
-            Some(self.function_prototype),
+            Some(self.realm.function_prototype),
         );
         object.insert(
             "length".into(),
@@ -793,7 +727,7 @@ impl Vm {
                     ObjectKind::Function { .. }
                         | ObjectKind::Native { .. }
                         | ObjectKind::Bound { .. }
-                        | ObjectKind::PromiseFunction(_)
+                        | ObjectKind::PromiseFunction(..)
                 )
             })
     }
@@ -889,7 +823,7 @@ impl Vm {
     }
     pub fn collect_garbage(&mut self) -> GcStats {
         let before = self.heap.live;
-        if self.active > 0 {
+        if self.active > 0 || self.realm_depth > 0 {
             return GcStats {
                 before,
                 after: before,
@@ -898,30 +832,11 @@ impl Vm {
             };
         }
         let mut roots = self.heap.trace_roots();
-        roots.extend([
-            self.global_env.0,
-            self.object_prototype,
-            self.function_prototype,
-            self.array_prototype,
-            self.string_prototype,
-            self.number_prototype,
-            self.boolean_prototype,
-            self.error_prototype,
-        ]);
-        roots.extend(self.intrinsic_eval);
-        roots.extend(self.async_function_prototype);
-        roots.extend(self.throw_type_error);
-        roots.extend(self.promise_constructor);
-        roots.extend(self.promise_prototype);
-        roots.extend(self.symbol_prototype);
-        roots.extend(self.iterator_prototype);
-        roots.extend(self.array_iterator_prototype);
-        roots.extend(self.string_iterator_prototype);
+        roots.push(self.realm.global_env.0);
         roots.extend(self.unhandled_promises.iter().copied());
         for job in &self.jobs {
             job.trace(&mut roots);
         }
-        roots.extend(self.error_prototypes.values().copied());
         for value in self.roots.values() {
             roots.value(value);
         }
@@ -936,6 +851,8 @@ impl Vm {
                 .filter_map(|(_, value)| value.as_object()),
         );
         let collected = self.heap.collect(roots);
+        self.inactive_realms
+            .retain(|realm, _| self.heap.realm_core(*realm).is_some());
         self.bigint_storage.reclaim();
         self.recompute_memory();
         GcStats {
@@ -1018,7 +935,7 @@ impl Vm {
                         }
                         ObjectKind::Boxed(v) => value(v, &mut strings),
                         ObjectKind::Promise(data) => data.strings(&mut strings),
-                        ObjectKind::PromiseFunction(function) => function.strings(&mut strings),
+                        ObjectKind::PromiseFunction(function, _) => function.strings(&mut strings),
                         ObjectKind::Iterator(data) => data.strings(&mut strings),
                         ObjectKind::RegExpStringIterator(
                             crate::regexp::StringIterator::Active { input, .. },
@@ -1088,16 +1005,19 @@ impl Vm {
             .estimated_bytes
             .saturating_add(self.template_objects.len() * 128);
         self.string_bytes = 0;
-        for s in strings {
-            let bytes = s.len().saturating_mul(2).saturating_add(64);
-            let old = self
-                .string_storage
-                .get(&s.storage_id())
-                .copied()
-                .unwrap_or(0);
-            if bytes > old {
-                self.string_storage.insert(s.storage_id(), bytes);
-                self.string_bytes = self.string_bytes.saturating_add(bytes - old);
+        for s in &strings {
+            let mut part = Some(s);
+            while let Some(string) = part {
+                let bytes = string.allocation_bytes();
+                if self
+                    .string_storage
+                    .insert(string.storage_id(), bytes)
+                    .is_some()
+                {
+                    break;
+                }
+                self.string_bytes = self.string_bytes.saturating_add(bytes);
+                part = string.prefix();
             }
         }
         self.code_bytes = bytecode::retained_size_with_chunks(codes, chunks);
@@ -1109,6 +1029,9 @@ impl Vm {
         Ok(())
     }
     pub(crate) fn tick(&mut self) -> Result<(), JsError> {
+        if self.initializing {
+            return Ok(());
+        }
         self.ensure_allocation(0)?;
         if self.remaining & 255 == 0 {
             self.check_interrupt()?;
@@ -1191,11 +1114,11 @@ impl Vm {
         }
         let mut current = match &receiver {
             Value::Object(id) => Some(*id),
-            Value::String(_) => Some(self.string_prototype),
-            Value::Number(_) => Some(self.number_prototype),
-            Value::BigInt(_) => self.bigint_prototype,
-            Value::Bool(_) => Some(self.boolean_prototype),
-            Value::Symbol(_) => self.symbol_prototype,
+            Value::String(_) => Some(self.realm.string_prototype),
+            Value::Number(_) => Some(self.realm.number_prototype),
+            Value::BigInt(_) => self.realm.bigint_prototype,
+            Value::Bool(_) => Some(self.realm.boolean_prototype),
+            Value::Symbol(_) => self.realm.symbol_prototype,
             _ => None,
         };
         let mut depth = 0;
@@ -1742,7 +1665,7 @@ impl Vm {
         if object.prototype == prototype {
             return Ok(true);
         }
-        if target == self.object_prototype || !object.extensible {
+        if target == self.realm.object_prototype || !object.extensible {
             return Ok(false);
         }
         let mut current = prototype;
@@ -1850,11 +1773,11 @@ impl Vm {
             | Value::Bool(_)
             | Value::Symbol(_) => {
                 let prototype = match value {
-                    Value::String(_) => self.string_prototype,
-                    Value::Number(_) => self.number_prototype,
-                    Value::BigInt(_) => self.bigint_prototype.unwrap(),
-                    Value::Symbol(_) => self.symbol_prototype.unwrap(),
-                    _ => self.boolean_prototype,
+                    Value::String(_) => self.realm.string_prototype,
+                    Value::Number(_) => self.realm.number_prototype,
+                    Value::BigInt(_) => self.realm.bigint_prototype.unwrap(),
+                    Value::Symbol(_) => self.realm.symbol_prototype.unwrap(),
+                    _ => self.realm.boolean_prototype,
                 };
                 Ok(Value::Object(self.heap.allocate(Cell::Object(
                     Object::new(ObjectKind::Boxed(value), Some(prototype)),
@@ -2141,9 +2064,9 @@ impl Vm {
                     format!("Identifier '{name}' has already been declared"),
                 ));
             }
-            if env == self.global_env
+            if env == self.realm.global_env
                 && self
-                    .own_descriptor(self.global_object, name)?
+                    .own_descriptor(self.realm.global_object, name)?
                     .is_some_and(|p| !p.configurable)
             {
                 return Err(JsError::new(
@@ -2176,14 +2099,17 @@ impl Vm {
                     "Var conflicts with lexical binding",
                 ));
             }
-            if target == self.global_env {
+            if target == self.realm.global_env {
                 if self.heap.environment(target).bindings.contains_key(name) {
                     return Err(JsError::new(
                         ErrorKind::SyntaxError,
                         "Var conflicts with global lexical binding",
                     ));
                 }
-                if self.own_descriptor(self.global_object, name)?.is_none() {
+                if self
+                    .own_descriptor(self.realm.global_object, name)?
+                    .is_none()
+                {
                     self.define_data_property(
                         self.global(),
                         &name.to_string_lossy(),
@@ -2287,8 +2213,8 @@ impl Vm {
         };
         let constructible = code.constructible();
         let generator_prototype = match code.kind {
-            FunctionKind::Generator => self.generator_prototype,
-            FunctionKind::AsyncGenerator => self.async_generator_prototype,
+            FunctionKind::Generator => self.realm.generator_prototype,
+            FunctionKind::AsyncGenerator => self.realm.async_generator_prototype,
             _ => None,
         };
         let name = code.name.clone().unwrap_or_default();
@@ -2299,7 +2225,7 @@ impl Vm {
             ObjectKind::Function {
                 code,
                 environment,
-                referrer: self.active_referrer.clone(),
+                referrer: self.realm.active_referrer.clone(),
             },
             Some(prototype),
         )));
@@ -2402,7 +2328,17 @@ impl Vm {
         let id = function
             .as_object()
             .ok_or_else(|| JsError::type_error("Value is not callable"))?;
-        if let ObjectKind::PromiseFunction(function) = &self.heap.object(id)?.kind {
+        self.with_function_realm(id, |vm| vm.invoke_in_own_realm(id, function, this, args))
+    }
+
+    fn invoke_in_own_realm(
+        &mut self,
+        id: ObjectId,
+        function: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<Value, JsError> {
+        if let ObjectKind::PromiseFunction(function, _) = &self.heap.object(id)?.kind {
             let function = function.clone();
             self.call_depth += 1;
             let result = self.invoke_promise_function(id, function, this, args);
@@ -2529,6 +2465,18 @@ impl Vm {
         let id = function
             .as_object()
             .ok_or_else(|| JsError::type_error("Value is not a constructor"))?;
+        self.with_function_realm(id, |vm| {
+            vm.construct_in_own_realm(id, function, args, new_target)
+        })
+    }
+
+    fn construct_in_own_realm(
+        &mut self,
+        id: ObjectId,
+        function: Value,
+        args: &[Value],
+        new_target: Value,
+    ) -> Result<Value, JsError> {
         if self.heap.object(id)?.class_data.is_some() {
             let referrer = self.referrer_for_owner(id)?;
             return self.with_referrer(referrer, |vm| vm.construct_class(id, args, new_target));
@@ -2583,7 +2531,7 @@ impl Vm {
             _ => return Err(JsError::type_error("Value is not a constructor")),
         }
         let prototype =
-            self.prototype_from_constructor(new_target.clone(), self.object_prototype)?;
+            self.prototype_from_constructor(new_target.clone(), self.realm.object_prototype)?;
         let object = self.allocate_constructed(ObjectKind::Ordinary, prototype)?;
         let (code, parent, referrer) = if let ObjectKind::Function {
             code,
@@ -2762,10 +2710,10 @@ impl Vm {
     }
     fn function_object_prototype(&self, kind: FunctionKind) -> ObjectId {
         match kind {
-            FunctionKind::Ordinary => self.function_prototype,
-            FunctionKind::Async => self.async_function_prototype.unwrap(),
-            FunctionKind::Generator => self.generator_function_prototype.unwrap(),
-            FunctionKind::AsyncGenerator => self.async_generator_function_prototype.unwrap(),
+            FunctionKind::Ordinary => self.realm.function_prototype,
+            FunctionKind::Async => self.realm.async_function_prototype.unwrap(),
+            FunctionKind::Generator => self.realm.generator_function_prototype.unwrap(),
+            FunctionKind::AsyncGenerator => self.realm.async_generator_function_prototype.unwrap(),
         }
     }
 
@@ -2792,7 +2740,7 @@ impl Vm {
         } else {
             fallback
         };
-        let function = self.make_function(code, self.global_env)?;
+        let function = self.make_function(code, self.realm.global_env)?;
         self.heap
             .object_mut(function.as_object().unwrap())?
             .prototype = Some(prototype);
@@ -3330,7 +3278,7 @@ impl Vm {
                 else {
                     unreachable!()
                 };
-                let value = if direct_eval && function.as_object() == self.intrinsic_eval {
+                let value = if direct_eval && function.as_object() == self.realm.intrinsic_eval {
                     self.direct_eval(args.first().cloned().unwrap_or_default(), env, strict)?
                 } else {
                     self.invoke(function, this, &args)?
@@ -3676,10 +3624,11 @@ impl Vm {
     }
     pub fn error_value(&mut self, error: &JsError) -> Result<Value, JsError> {
         let prototype = self
+            .realm
             .error_prototypes
             .get(&error.kind)
             .copied()
-            .unwrap_or(self.error_prototype);
+            .unwrap_or(self.realm.error_prototype);
         let value = Value::Object(self.heap.allocate(Cell::Object(Object::new(
             ObjectKind::Error(error.kind),
             Some(prototype),
@@ -3782,8 +3731,19 @@ impl Vm {
                     "String code-unit budget exhausted",
                 ));
             }
-            self.ensure_string_allocation(a.len().saturating_add(b.len()))?;
-            self.consume_work(a.len().saturating_add(b.len()).saturating_mul(2))?;
+            if a.is_empty() {
+                return self.checked_string(b);
+            }
+            if b.is_empty() {
+                return self.checked_string(a);
+            }
+            let len = a.len().saturating_add(b.len());
+            self.ensure_string_allocation(len)?;
+            if a.can_append(&b) {
+                self.consume_work(b.len())?;
+                return self.checked_string(a.append(&b));
+            }
+            self.consume_work(len)?;
             return self.checked_string(a.concat(&b));
         }
         if matches!(op, "<" | ">" | "<=" | ">=") {

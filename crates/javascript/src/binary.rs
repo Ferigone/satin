@@ -151,7 +151,8 @@ impl Vm {
     }
 
     fn array_buffer_prototype(&self) -> ObjectId {
-        self.binary
+        self.realm
+            .binary
             .array_buffer
             .expect("initialized ArrayBuffer prototype")
     }
@@ -296,7 +297,7 @@ impl Vm {
                 },
                 element,
             },
-            self.binary.typed[element as usize].expect("initialized typed array prototype"),
+            self.realm.binary.typed[element as usize].expect("initialized typed array prototype"),
         )
     }
 

@@ -26,7 +26,7 @@ fn receiver(vm: &Vm, value: Value) -> Result<JsBigInt, JsError> {
 
 pub(crate) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
-    vm.bigint_prototype = prototype.as_object();
+    vm.realm.bigint_prototype = prototype.as_object();
     vm.root(prototype.clone());
     let constructor = constructor(vm, "BigInt", 1, prototype.clone(), |vm, _, args| {
         let primitive = vm.coerce_primitive(arg(args, 0), false)?;

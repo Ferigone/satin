@@ -19,12 +19,12 @@ const FLAG_GETTERS: [(&str, u8, u8); 8] = [
 
 pub(crate) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
-    vm.regexp_prototype = prototype.as_object();
+    vm.realm.regexp_prototype = prototype.as_object();
     vm.root(prototype.clone());
     let regexp = constructor(vm, "RegExp", 2, prototype.clone(), |vm, _, args| {
         create_from_args(vm, args, None)
     });
-    vm.regexp_constructor = regexp.as_object();
+    vm.realm.regexp_constructor = regexp.as_object();
     vm.root(regexp.clone());
     replace_construct(vm, regexp.clone(), |vm, _, args, new_target| {
         create_from_args(vm, args, Some(new_target))
@@ -48,7 +48,9 @@ pub(crate) fn install(vm: &mut Vm) {
             move |vm, this, _| {
                 if let Some(program) = native_program(vm, &this) {
                     Ok(Value::Bool(program.flags.has(flag)))
-                } else if this.as_object().is_some() && this.as_object() == vm.regexp_prototype {
+                } else if this.as_object().is_some()
+                    && this.as_object() == vm.realm.regexp_prototype
+                {
                     Ok(Value::Undefined)
                 } else {
                     Err(JsError::type_error(
@@ -82,7 +84,7 @@ pub(crate) fn install(vm: &mut Vm) {
         |vm, this, _| {
             if let Some(program) = native_program(vm, &this) {
                 source(vm, &program.source)
-            } else if this.as_object().is_some() && this.as_object() == vm.regexp_prototype {
+            } else if this.as_object().is_some() && this.as_object() == vm.realm.regexp_prototype {
                 vm.account_value(Value::from("(?:)"))
             } else {
                 Err(JsError::type_error(
@@ -211,7 +213,7 @@ fn create_from_args(
     let pattern = arg(args, 0);
     let mut flags = arg(args, 1);
     let pattern_is_regexp = is_regexp(vm, &pattern)?;
-    let intrinsic = Value::Object(vm.regexp_constructor.unwrap());
+    let intrinsic = Value::Object(vm.realm.regexp_constructor.unwrap());
     if new_target.is_none()
         && pattern_is_regexp
         && flags.is_undefined()
@@ -233,7 +235,7 @@ fn create_from_args(
     };
     let prototype = vm.prototype_from_constructor(
         new_target.unwrap_or(intrinsic),
-        vm.regexp_prototype.unwrap(),
+        vm.realm.regexp_prototype.unwrap(),
     )?;
     let program = match native {
         Some(program) if flags.is_undefined() => program,
@@ -264,7 +266,7 @@ fn compile_args(vm: &mut Vm, source: Value, flags: Value) -> Result<Rc<Program>,
 }
 
 pub(crate) fn literal(vm: &mut Vm, program: Rc<Program>) -> Result<Value, JsError> {
-    allocate(vm, program, vm.regexp_prototype.unwrap())
+    allocate(vm, program, vm.realm.regexp_prototype.unwrap())
 }
 
 pub(super) fn create(vm: &mut Vm, pattern: Value, flags: Value) -> Result<Value, JsError> {

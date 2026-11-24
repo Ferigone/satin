@@ -268,8 +268,8 @@ impl Vm {
         let count = collection.entries.len();
         let kind = collection.kind;
         let prototype = match kind {
-            Kind::Map => self.clone_intrinsics.map,
-            Kind::Set => self.clone_intrinsics.set,
+            Kind::Map => self.realm.clone_intrinsics.map,
+            Kind::Set => self.realm.clone_intrinsics.set,
         }
         .expect("initialized collection prototype");
         self.consume_work(count)?;
@@ -416,7 +416,7 @@ fn alias(vm: &mut Vm, object: Value, key: crate::PropertyKey, value: Value) {
 
 fn install_iterator(vm: &mut Vm, kind: Kind) -> ObjectId {
     let prototype = vm
-        .new_object_with_prototype(Value::Object(vm.iterator_prototype.unwrap()))
+        .new_object_with_prototype(Value::Object(vm.realm.iterator_prototype.unwrap()))
         .unwrap();
     // Native callbacks returning iterators capture the intrinsic prototype.
     vm.root(prototype.clone());
@@ -454,8 +454,8 @@ fn install_collection(vm: &mut Vm, kind: Kind) {
     let intrinsic = prototype.as_object().unwrap();
     vm.root(prototype.clone());
     match kind {
-        Kind::Map => vm.clone_intrinsics.map = Some(intrinsic),
-        Kind::Set => vm.clone_intrinsics.set = Some(intrinsic),
+        Kind::Map => vm.realm.clone_intrinsics.map = Some(intrinsic),
+        Kind::Set => vm.realm.clone_intrinsics.set = Some(intrinsic),
     }
     let constructor = constructor(vm, kind.name(), 0, prototype.clone(), move |_, _, _| {
         Err(JsError::type_error(format!("{} requires new", kind.name())))

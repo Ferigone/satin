@@ -1,43 +1,180 @@
-use std::{fmt, rc::Rc};
+use std::{
+    cell::OnceCell,
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    rc::Rc,
+};
+
+const INLINE_UNITS: usize = 8;
+const MAX_APPEND_DEPTH: u8 = 48;
+
+enum StringStorage {
+    Inline {
+        units: [u16; INLINE_UNITS],
+        len: u8,
+    },
+    Flat(Box<[u16]>),
+    Appended {
+        prefix: JsString,
+        suffix: [u16; INLINE_UNITS],
+        suffix_len: u8,
+        len: usize,
+        depth: u8,
+        flattened: OnceCell<Box<[u16]>>,
+    },
+}
 
 /// JavaScript text is a sequence of UTF-16 code units, not Unicode scalar values.
 /// In particular, this representation round-trips isolated surrogate code units.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
-pub struct JsString(Rc<[u16]>);
+#[derive(Clone)]
+pub struct JsString(Rc<StringStorage>);
 
 impl JsString {
     pub fn from_utf16(units: impl Into<Vec<u16>>) -> Self {
-        Self(units.into().into())
+        let units = units.into();
+        if units.len() <= INLINE_UNITS {
+            return Self::from_utf16_slice(&units);
+        }
+        Self(Rc::new(StringStorage::Flat(units.into_boxed_slice())))
     }
     pub(crate) fn from_utf16_slice(units: &[u16]) -> Self {
-        Self(Rc::from(units))
+        if units.len() <= INLINE_UNITS {
+            let mut inline = [0; INLINE_UNITS];
+            inline[..units.len()].copy_from_slice(units);
+            Self(Rc::new(StringStorage::Inline {
+                units: inline,
+                len: units.len() as u8,
+            }))
+        } else {
+            Self(Rc::new(StringStorage::Flat(units.into())))
+        }
     }
     pub fn as_utf16(&self) -> &[u16] {
-        &self.0
+        match self.0.as_ref() {
+            StringStorage::Inline { units, len } => &units[..*len as usize],
+            StringStorage::Flat(units) => units,
+            StringStorage::Appended { len, flattened, .. } => flattened.get_or_init(|| {
+                let mut units = Vec::with_capacity(*len);
+                self.copy_units(&mut units);
+                units.into_boxed_slice()
+            }),
+        }
     }
     pub(crate) fn storage_id(&self) -> usize {
-        Rc::as_ptr(&self.0) as *const u16 as usize
+        Rc::as_ptr(&self.0) as usize
+    }
+    pub(crate) fn allocation_bytes(&self) -> usize {
+        // Appended strings reserve their eventual contiguous representation.
+        // Native code may borrow the UTF-16 slice without a fallible allocation API.
+        self.len()
+            .saturating_mul(2)
+            .saturating_add(std::mem::size_of::<StringStorage>() + 16)
     }
     pub fn len(&self) -> usize {
-        self.0.len()
+        match self.0.as_ref() {
+            StringStorage::Inline { len, .. } => *len as usize,
+            StringStorage::Flat(units) => units.len(),
+            StringStorage::Appended { len, .. } => *len,
+        }
     }
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.len() == 0
     }
     /// Lossy conversion is for display/host APIs only. VM string operations use code units.
     pub fn to_string_lossy(&self) -> String {
-        String::from_utf16_lossy(&self.0)
+        String::from_utf16_lossy(self.as_utf16())
     }
     pub(crate) fn concat(&self, other: &Self) -> Self {
         let mut units = Vec::with_capacity(self.len() + other.len());
-        units.extend_from_slice(&self.0);
-        units.extend_from_slice(&other.0);
+        self.copy_units(&mut units);
+        other.copy_units(&mut units);
         Self::from_utf16(units)
+    }
+    pub(crate) fn can_append(&self, other: &Self) -> bool {
+        other.len() <= INLINE_UNITS && self.depth() < MAX_APPEND_DEPTH
+    }
+    pub(crate) fn append(self, other: &Self) -> Self {
+        let len = self.len() + other.len();
+        let depth = self.depth() + 1;
+        let suffix_len = other.len();
+        let mut suffix = [0; INLINE_UNITS];
+        suffix[..suffix_len].copy_from_slice(other.as_utf16());
+        Self(Rc::new(StringStorage::Appended {
+            prefix: self,
+            suffix,
+            suffix_len: suffix_len as u8,
+            len,
+            depth,
+            flattened: OnceCell::new(),
+        }))
+    }
+    pub(crate) fn prefix(&self) -> Option<&Self> {
+        match self.0.as_ref() {
+            StringStorage::Appended { prefix, .. } => Some(prefix),
+            _ => None,
+        }
+    }
+    fn depth(&self) -> u8 {
+        match self.0.as_ref() {
+            StringStorage::Appended { depth, .. } => *depth,
+            _ => 0,
+        }
+    }
+    fn copy_units(&self, out: &mut Vec<u16>) {
+        if let StringStorage::Appended {
+            prefix,
+            suffix,
+            suffix_len,
+            flattened,
+            ..
+        } = self.0.as_ref()
+        {
+            if let Some(units) = flattened.get() {
+                out.extend_from_slice(units);
+            } else {
+                prefix.copy_units(out);
+                out.extend_from_slice(&suffix[..*suffix_len as usize]);
+            }
+        } else {
+            out.extend_from_slice(self.as_utf16());
+        }
+    }
+}
+impl Default for JsString {
+    fn default() -> Self {
+        Self::from_utf16_slice(&[])
+    }
+}
+impl PartialEq for JsString {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+            || self.len() == other.len() && self.as_utf16() == other.as_utf16()
+    }
+}
+impl Eq for JsString {}
+impl PartialOrd for JsString {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for JsString {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if Rc::ptr_eq(&self.0, &other.0) {
+            Ordering::Equal
+        } else {
+            self.as_utf16().cmp(other.as_utf16())
+        }
+    }
+}
+impl Hash for JsString {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_utf16().hash(state);
     }
 }
 impl From<&str> for JsString {
     fn from(s: &str) -> Self {
-        Self(s.encode_utf16().collect::<Vec<_>>().into())
+        Self::from_utf16(s.encode_utf16().collect::<Vec<_>>())
     }
 }
 impl From<String> for JsString {
@@ -48,7 +185,7 @@ impl From<String> for JsString {
 impl fmt::Debug for JsString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("\"")?;
-        for unit in &*self.0 {
+        for unit in self.as_utf16() {
             match *unit {
                 0x20..=0x21 | 0x23..=0x5b | 0x5d..=0x7e => {
                     write!(f, "{}", char::from_u32(*unit as u32).unwrap())?

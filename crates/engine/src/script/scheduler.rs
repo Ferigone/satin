@@ -2,10 +2,10 @@
 mod user_timing;
 
 use super::{
-    Shared, arg, diagnostic, drain_microtask_queue, error_event, event_target, fatal, getter,
-    unsupported, webidl,
+    Shared, arg, diagnostic, drain_microtask_queue, error_event, event_target, fatal, frames,
+    getter, unsupported, webidl,
 };
-use rust_browser_javascript::{JsError, JsString, RootId, Value, Vm};
+use rust_browser_javascript::{JsError, JsString, RealmId, RootId, Value, Vm};
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -28,12 +28,17 @@ struct Timer {
     nesting: u32,
     interval: Option<Duration>,
     internal: bool,
+    owner: Option<Rc<frames::FrameWindow>>,
     handler: Handler,
     args: Vec<Value>,
     roots: Vec<RootId>,
 }
 
 impl Timer {
+    fn realm(&self) -> Option<RealmId> {
+        self.owner.as_ref().map(|owner| owner.realm)
+    }
+
     fn release(self, vm: &mut Vm) {
         for root in self.roots {
             vm.unroot(root);
@@ -46,6 +51,7 @@ struct ActiveTimer {
     nesting: u32,
     cancelled: bool,
     internal: bool,
+    realm: Option<RealmId>,
 }
 
 struct Frame {
@@ -148,6 +154,7 @@ impl Scheduler {
         args: Vec<Value>,
         requested: Duration,
         kind: TimerKind,
+        owner: Option<Rc<frames::FrameWindow>>,
     ) -> Result<u32, JsError> {
         if self.timers.len() + usize::from(self.current.is_some()) >= MAX_TIMERS {
             return Err(unsupported("Timer budget exceeded"));
@@ -167,8 +174,11 @@ impl Scheduler {
             Handler::Callable(value) => value.clone(),
             Handler::Source(text) => Value::String(text.clone()),
         };
-        let mut roots = Vec::with_capacity(args.len() + 1);
+        let mut roots = Vec::with_capacity(args.len() + 1 + usize::from(owner.is_some()));
         roots.push(vm.root(callback));
+        if owner.is_some() {
+            roots.push(vm.root(vm.global()));
+        }
         roots.extend(args.iter().cloned().map(|arg| vm.root(arg)));
         self.timers.push(Timer {
             id,
@@ -180,6 +190,7 @@ impl Scheduler {
             },
             interval: matches!(kind, TimerKind::Interval).then_some(delay),
             internal,
+            owner,
             handler,
             args,
             roots,
@@ -187,19 +198,34 @@ impl Scheduler {
         Ok(id)
     }
 
-    fn clear_timer(&mut self, vm: &mut Vm, id: u32) {
+    fn clear_timer(&mut self, vm: &mut Vm, id: u32, realm: Option<RealmId>) {
         if let Some(active) = &mut self.current
             && active.id == id
             && !active.internal
+            && active.realm == realm
         {
             active.cancelled = true;
         }
         if let Some(index) = self
             .timers
             .iter()
-            .position(|timer| timer.id == id && !timer.internal)
+            .position(|timer| timer.id == id && !timer.internal && timer.realm() == realm)
         {
             self.timers.remove(index).release(vm);
+        }
+    }
+
+    pub(super) fn clear_realm_timers(&mut self, vm: &mut Vm, realm: RealmId) {
+        if let Some(active) = &mut self.current
+            && active.realm == Some(realm)
+        {
+            active.cancelled = true;
+        }
+        for timer in self
+            .timers
+            .extract_if(.., |timer| timer.realm() == Some(realm))
+        {
+            timer.release(vm);
         }
     }
 
@@ -216,6 +242,7 @@ impl Scheduler {
             nesting: timer.nesting,
             cancelled: false,
             internal: timer.internal,
+            realm: timer.realm(),
         });
         Some(timer)
     }
@@ -337,6 +364,7 @@ pub(super) fn schedule_timer(
         arguments,
         delay,
         TimerKind::Internal,
+        None,
     )
 }
 
@@ -350,43 +378,8 @@ fn idl_long(vm: &mut Vm, value: &Value) -> Result<i32, JsError> {
 }
 
 pub(super) fn install_timers(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
+    install_timeout_methods(vm, state, None)?;
     let window = vm.global();
-    for (name, kind) in [
-        ("setTimeout", TimerKind::Timeout),
-        ("setInterval", TimerKind::Interval),
-    ] {
-        let state = state.clone();
-        webidl::operation(vm, window.clone(), name, 1, move |vm, _, args| {
-            webidl::required(args, 1, name)?;
-            let (handler, arguments) = if vm.is_callable(&args[0]) {
-                (
-                    Handler::Callable(args[0].clone()),
-                    args.get(2..).unwrap_or_default().to_vec(),
-                )
-            } else {
-                (Handler::Source(vm.to_string(&args[0])?), Vec::new())
-            };
-            let delay = idl_long(vm, &arg(args, 1))?.max(0) as u64;
-            let id = state.borrow_mut().scheduler.timer(
-                vm,
-                handler,
-                arguments,
-                Duration::from_millis(delay),
-                kind,
-            )?;
-            Ok(id.into())
-        })?;
-    }
-    for name in ["clearTimeout", "clearInterval"] {
-        let state = state.clone();
-        webidl::operation(vm, window.clone(), name, 0, move |vm, _, args| {
-            let id = idl_long(vm, &arg(args, 0))?;
-            if id > 0 {
-                state.borrow_mut().scheduler.clear_timer(vm, id as u32);
-            }
-            Ok(Value::Undefined)
-        })?;
-    }
     let owner = state.clone();
     webidl::operation(
         vm,
@@ -423,6 +416,73 @@ pub(super) fn install_timers(vm: &mut Vm, state: &Shared) -> Result<(), JsError>
         },
     )?;
     install_queue_microtask(vm, window)
+}
+
+pub(super) fn install_frame_timers(
+    vm: &mut Vm,
+    state: &Shared,
+    window: &Rc<frames::FrameWindow>,
+) -> Result<(), JsError> {
+    install_timeout_methods(vm, state, Some(window.clone()))
+}
+
+fn install_timeout_methods(
+    vm: &mut Vm,
+    state: &Shared,
+    owner: Option<Rc<frames::FrameWindow>>,
+) -> Result<(), JsError> {
+    let window = vm.global();
+    for (name, kind) in [
+        ("setTimeout", TimerKind::Timeout),
+        ("setInterval", TimerKind::Interval),
+    ] {
+        let state = Rc::downgrade(state);
+        let owner = owner.clone();
+        webidl::operation(vm, window.clone(), name, 1, move |vm, _, args| {
+            webidl::required(args, 1, name)?;
+            let (handler, arguments) = if vm.is_callable(&args[0]) {
+                (
+                    Handler::Callable(args[0].clone()),
+                    args.get(2..).unwrap_or_default().to_vec(),
+                )
+            } else {
+                (Handler::Source(vm.to_string(&args[0])?), Vec::new())
+            };
+            let delay = idl_long(vm, &arg(args, 1))?.max(0) as u64;
+            let Some(state) = state
+                .upgrade()
+                .filter(|_| owner.as_ref().is_none_or(|w| w.is_attached()))
+            else {
+                return Ok(0.into());
+            };
+            let id = state.borrow_mut().scheduler.timer(
+                vm,
+                handler,
+                arguments,
+                Duration::from_millis(delay),
+                kind,
+                owner.clone(),
+            )?;
+            Ok(id.into())
+        })?;
+    }
+    let realm = owner.as_ref().map(|owner| owner.realm);
+    for name in ["clearTimeout", "clearInterval"] {
+        let state = Rc::downgrade(state);
+        webidl::operation(vm, window.clone(), name, 0, move |vm, _, args| {
+            let id = idl_long(vm, &arg(args, 0))?;
+            if id > 0
+                && let Some(state) = state.upgrade()
+            {
+                state
+                    .borrow_mut()
+                    .scheduler
+                    .clear_timer(vm, id as u32, realm);
+            }
+            Ok(Value::Undefined)
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn install_queue_microtask(vm: &mut Vm, target: Value) -> Result<(), JsError> {
@@ -508,7 +568,11 @@ pub(super) fn install_performance(vm: &mut Vm, state: &Shared) -> Result<(), JsE
     vm.set_global("performance", result)
 }
 
-fn report_callback(vm: &mut Vm, state: &Shared, result: Result<Value, JsError>) -> Result<(), JsError> {
+fn report_callback(
+    vm: &mut Vm,
+    state: &Shared,
+    result: Result<Value, JsError>,
+) -> Result<(), JsError> {
     match result {
         Err(error) if fatal(&error) => Err(error),
         Err(error) => {
@@ -530,11 +594,15 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
             (state.window.clone(), state.url.to_string())
         };
         let result = vm.with_task(|vm| {
-            let result = match &timer.handler {
-                Handler::Callable(callback) => vm.call(callback.clone(), window, &timer.args),
-                Handler::Source(code) => vm.eval_with_identifier(&code.to_string_lossy(), &url),
-            };
-            report_callback(vm, state, result)?;
+            if let Some(owner) = &timer.owner {
+                vm.with_realm(owner.realm, |vm| {
+                    let result = run_timer(vm, &timer, vm.global(), "about:blank");
+                    owner.report_script_error(vm, result)
+                })?;
+            } else {
+                let result = run_timer(vm, &timer, window, &url);
+                report_callback(vm, state, result)?;
+            }
             drain_microtask_queue(vm, state)
         });
         state
@@ -545,6 +613,13 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
             diagnostic(state, error.to_string());
             break;
         }
+    }
+}
+
+fn run_timer(vm: &mut Vm, timer: &Timer, window: Value, url: &str) -> Result<Value, JsError> {
+    match &timer.handler {
+        Handler::Callable(callback) => vm.call(callback.clone(), window, &timer.args),
+        Handler::Source(code) => vm.eval_with_identifier(&code.to_string_lossy(), url),
     }
 }
 

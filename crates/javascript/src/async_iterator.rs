@@ -62,7 +62,7 @@ enum Method {
 
 pub(crate) fn install(vm: &mut Vm) -> ObjectId {
     let async_iterator = vm.new_object();
-    vm.async_iterator_prototype = async_iterator.as_object();
+    vm.realm.async_iterator_prototype = async_iterator.as_object();
     vm.root(async_iterator.clone());
     let identity = vm.native(
         "[Symbol.asyncIterator]",
@@ -82,7 +82,7 @@ pub(crate) fn install(vm: &mut Vm) -> ObjectId {
     let prototype = vm
         .new_object_with_prototype(async_iterator.clone())
         .unwrap();
-    vm.async_from_sync_prototype = prototype.as_object();
+    vm.realm.async_from_sync_prototype = prototype.as_object();
     vm.root(prototype.clone());
     let tag = vm.well_known_key("toStringTag");
     vm.define_data_property_key(
@@ -109,7 +109,7 @@ pub(crate) fn install(vm: &mut Vm) -> ObjectId {
 impl Vm {
     /// %AsyncIteratorPrototype% shared by generators and host asynchronous iterables.
     pub fn async_iterator_prototype(&self) -> Value {
-        Value::Object(self.async_iterator_prototype.unwrap())
+        Value::Object(self.realm.async_iterator_prototype.unwrap())
     }
 
     pub(crate) fn get_async_iterator(
@@ -127,7 +127,7 @@ impl Vm {
                 iterator: sync.iterator,
                 next: sync.next,
             }),
-            self.async_from_sync_prototype.unwrap(),
+            self.realm.async_from_sync_prototype.unwrap(),
         )?;
         let next = self.get_property(wrapped.clone(), "next")?;
         Ok(IteratorRecord {

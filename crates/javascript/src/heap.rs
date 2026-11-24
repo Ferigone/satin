@@ -72,7 +72,7 @@ pub(crate) enum ObjectKind {
     RegExpStringIterator(crate::regexp::StringIterator),
     Error(ErrorKind),
     Promise(crate::promise::PromiseData),
-    PromiseFunction(crate::promise::PromiseFunction),
+    PromiseFunction(crate::promise::PromiseFunction, EnvId),
     Iterator(crate::iterator::IteratorData),
     Collection(Box<crate::collections::CollectionData>),
     CollectionIterator(crate::collections::CollectionIterator),
@@ -189,7 +189,7 @@ pub(crate) fn array_index(key: &JsString) -> Option<u32> {
     if n == u32::MAX { None } else { Some(n) }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct EnvId(pub ObjectId);
 #[derive(Clone)]
 pub(crate) struct Binding {
@@ -207,11 +207,16 @@ pub(crate) enum EnvKind {
     Block,
     Module,
 }
+struct RealmIntrinsics {
+    core: CoreIntrinsics,
+    installed: Vec<ObjectId>,
+}
+
 pub(crate) struct Environment {
     pub parent: Option<EnvId>,
     pub kind: EnvKind,
     // Only bootstrapped global environments own intrinsic roots.
-    core_intrinsics: Option<Box<CoreIntrinsics>>,
+    realm_intrinsics: Option<Box<RealmIntrinsics>>,
     pub bindings: BTreeMap<JsString, Binding>,
     pub this: Option<Value>,
     pub this_initialized: bool,
@@ -236,7 +241,7 @@ impl Environment {
         Self {
             parent,
             kind,
-            core_intrinsics: None,
+            realm_intrinsics: None,
             bindings: BTreeMap::new(),
             this,
             this_initialized: true,
@@ -349,6 +354,7 @@ impl Default for Heap {
 }
 impl Heap {
     pub(crate) const EMPTY_CELL_BYTES: usize = 256;
+    pub(crate) const REALM_CORE_BYTES: usize = std::mem::size_of::<RealmIntrinsics>() + 128;
 
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
         self.estimated_bytes = self.estimated_bytes.saturating_add(cell_bytes(&cell));
@@ -454,12 +460,21 @@ impl Heap {
     }
     pub(crate) fn attach_core_intrinsics(&mut self, env: EnvId, intrinsics: CoreIntrinsics) {
         let environment = self.environment_mut(env);
-        assert!(matches!(environment.kind, EnvKind::Global { .. }));
-        assert!(environment.core_intrinsics.is_none());
-        environment.core_intrinsics = Some(Box::new(intrinsics));
-        self.estimated_bytes = self
-            .estimated_bytes
-            .saturating_add(std::mem::size_of::<CoreIntrinsics>());
+        let EnvKind::Global { binding_object } = environment.kind else {
+            unreachable!("only global environments own realm intrinsics");
+        };
+        assert!(environment.realm_intrinsics.is_none());
+        environment.realm_intrinsics = Some(Box::new(RealmIntrinsics {
+            core: intrinsics,
+            installed: Vec::new(),
+        }));
+        // A retained global object keeps its lexical environment alive even
+        // after author code deletes all of its builtin properties.
+        self.object_mut(binding_object)
+            .expect("global binding object")
+            .host_slots
+            .insert(u32::MAX, Value::Object(env.0));
+        self.estimated_bytes = self.estimated_bytes.saturating_add(Self::REALM_CORE_BYTES);
     }
     pub(crate) fn realm_core(&self, env: EnvId) -> Option<(ObjectId, &CoreIntrinsics)> {
         // A realm handle is not a root. Validate heap identity, generation and
@@ -470,7 +485,15 @@ impl Heap {
         let EnvKind::Global { binding_object } = environment.kind else {
             return None;
         };
-        Some((binding_object, environment.core_intrinsics.as_deref()?))
+        Some((binding_object, &environment.realm_intrinsics.as_ref()?.core))
+    }
+    pub(crate) fn attach_realm_intrinsics(&mut self, env: EnvId, intrinsics: Vec<ObjectId>) {
+        self.estimated_bytes += intrinsics.capacity() * std::mem::size_of::<ObjectId>();
+        self.environment_mut(env)
+            .realm_intrinsics
+            .as_mut()
+            .expect("realm core installed")
+            .installed = intrinsics;
     }
     pub(crate) fn trace_roots(&self) -> TraceEdges {
         TraceEdges {
@@ -575,8 +598,9 @@ impl Heap {
                 if let EnvKind::Global { binding_object } = env.kind {
                     pending.push(binding_object);
                 }
-                if let Some(intrinsics) = &env.core_intrinsics {
-                    pending.extend(intrinsics.objects());
+                if let Some(intrinsics) = &env.realm_intrinsics {
+                    pending.extend(intrinsics.core.objects());
+                    pending.extend(intrinsics.installed.iter().copied());
                 }
                 if let Some(p) = env.parent {
                     pending.push(p.0);
@@ -640,7 +664,10 @@ impl Heap {
                         ..
                     }) => pending.value(matcher),
                     ObjectKind::Promise(data) => data.trace(pending),
-                    ObjectKind::PromiseFunction(function) => function.trace(pending),
+                    ObjectKind::PromiseFunction(function, realm) => {
+                        pending.push(realm.0);
+                        function.trace(pending);
+                    }
                     ObjectKind::Iterator(data) => data.trace(pending),
                     ObjectKind::Collection(data) => data.trace(pending),
                     ObjectKind::CollectionIterator(data) => pending.extend(data.target),
@@ -733,10 +760,10 @@ fn cell_bytes(cell: &Cell) -> usize {
                     .keys()
                     .map(crate::private::name_bytes)
                     .sum::<usize>()
-                + env
-                    .core_intrinsics
-                    .as_ref()
-                    .map_or(0, |_| std::mem::size_of::<CoreIntrinsics>())
+                + env.realm_intrinsics.as_ref().map_or(0, |intrinsics| {
+                    std::mem::size_of::<RealmIntrinsics>()
+                        + intrinsics.installed.capacity() * std::mem::size_of::<ObjectId>()
+                })
         }
     })
 }

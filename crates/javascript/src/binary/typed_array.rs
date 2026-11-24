@@ -536,8 +536,8 @@ pub(super) fn install(vm: &mut Vm) {
             )
             .unwrap();
         }
-        vm.binary.typed[element as usize] = Some(intrinsic);
-        vm.binary.typed_constructors[element as usize] = Some(
+        vm.realm.binary.typed[element as usize] = Some(intrinsic);
+        vm.realm.binary.typed_constructors[element as usize] = Some(
             vm.get_property(Value::Object(intrinsic), "constructor")
                 .unwrap()
                 .as_object()

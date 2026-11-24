@@ -45,4 +45,5 @@ pub use structured_clone::{
     StructuredCloneOutput, StructuredClonePacket,
 };
 pub use value::{ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value};
+pub use vm::realm::RealmId;
 pub use vm::{GcStats, RootId, Vm, VmLimits};

@@ -91,11 +91,11 @@ impl Vm {
     pub(crate) fn property_start(&self, value: &Value) -> Option<ObjectId> {
         match value {
             Value::Object(id) => Some(*id),
-            Value::String(_) => Some(self.string_prototype),
-            Value::Number(_) => Some(self.number_prototype),
-            Value::BigInt(_) => self.bigint_prototype,
-            Value::Bool(_) => Some(self.boolean_prototype),
-            Value::Symbol(_) => self.symbol_prototype,
+            Value::String(_) => Some(self.realm.string_prototype),
+            Value::Number(_) => Some(self.realm.number_prototype),
+            Value::BigInt(_) => self.realm.bigint_prototype,
+            Value::Bool(_) => Some(self.realm.boolean_prototype),
+            Value::Symbol(_) => self.realm.symbol_prototype,
             _ => None,
         }
     }
@@ -601,7 +601,7 @@ fn validate_descriptor(old: &Property, new: &Property) -> Result<(), JsError> {
 }
 pub(crate) fn install(vm: &mut Vm) {
     let prototype = vm.new_object();
-    vm.symbol_prototype = prototype.as_object();
+    vm.realm.symbol_prototype = prototype.as_object();
     let constructor = vm.native(
         "Symbol",
         0,
@@ -662,13 +662,18 @@ pub(crate) fn install(vm: &mut Vm) {
         "dispose",
         "asyncDispose",
     ] {
-        let Value::Symbol(symbol) = vm
-            .new_symbol(Some(format!("Symbol.{name}").into()))
-            .unwrap()
-        else {
-            unreachable!()
+        let symbol = if let Some(symbol) = vm.well_known_symbols.get(name) {
+            symbol.clone()
+        } else {
+            let Value::Symbol(symbol) = vm
+                .new_symbol(Some(format!("Symbol.{name}").into()))
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            vm.well_known_symbols.insert(name, symbol.clone());
+            symbol
         };
-        vm.well_known_symbols.insert(name, symbol.clone());
         vm.define_data_property(
             constructor.clone(),
             name,
@@ -765,7 +770,7 @@ pub(crate) fn install(vm: &mut Vm) {
         }),
     );
     vm.define_data_property_key(
-        Value::Object(vm.function_prototype),
+        Value::Object(vm.realm.function_prototype),
         vm.well_known_key("hasInstance"),
         has_instance,
         false,

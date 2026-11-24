@@ -567,8 +567,8 @@ impl Vm {
     fn promise_function(&mut self, kind: PromiseFunction, length: usize) -> Result<Value, JsError> {
         self.ensure_allocation(1024)?;
         let function = Value::Object(self.heap.allocate(Cell::Object(Object::new(
-            ObjectKind::PromiseFunction(kind),
-            Some(self.function_prototype),
+            ObjectKind::PromiseFunction(kind, self.realm.global_env),
+            Some(self.realm.function_prototype),
         ))));
         self.define_data_property(
             function.clone(),
@@ -609,7 +609,7 @@ impl Vm {
         Ok((resolve, reject))
     }
     fn intrinsic_promise_capability(&mut self) -> Result<PromiseCapability, JsError> {
-        self.promise_capability_with_prototype(self.promise_prototype)
+        self.promise_capability_with_prototype(self.realm.promise_prototype)
     }
     fn promise_capability_with_prototype(
         &mut self,
@@ -641,7 +641,7 @@ impl Vm {
         &mut self,
         constructor: Value,
     ) -> Result<PromiseCapability, JsError> {
-        if constructor.as_object() == self.promise_constructor {
+        if constructor.as_object() == self.realm.promise_constructor {
             return self.intrinsic_promise_capability();
         }
         let executor = self.promise_function(
@@ -652,7 +652,7 @@ impl Vm {
             2,
         )?;
         let promise = self.construct(constructor, std::slice::from_ref(&executor))?;
-        let ObjectKind::PromiseFunction(PromiseFunction::CapabilityExecutor { resolve, reject }) =
+        let ObjectKind::PromiseFunction(PromiseFunction::CapabilityExecutor { resolve, reject }, _) =
             &self.heap.object(executor.as_object().unwrap())?.kind
         else {
             unreachable!()
@@ -677,11 +677,11 @@ impl Vm {
             ));
         }
         if constructor.is_undefined() {
-            return Ok(Value::Object(self.promise_constructor.unwrap()));
+            return Ok(Value::Object(self.realm.promise_constructor.unwrap()));
         }
         let species = self.get_property_key(constructor, self.well_known_key("species"))?;
         if species.is_nullish() {
-            return Ok(Value::Object(self.promise_constructor.unwrap()));
+            return Ok(Value::Object(self.realm.promise_constructor.unwrap()));
         }
         if !self.is_constructor(&species) {
             return Err(JsError::type_error("Promise species is not a constructor"));
@@ -835,7 +835,7 @@ impl Vm {
     }
 
     pub(crate) fn promise_for_await(&mut self, value: Value) -> Result<ObjectId, JsError> {
-        let constructor = Value::Object(self.promise_constructor.unwrap());
+        let constructor = Value::Object(self.realm.promise_constructor.unwrap());
         let promise = self.promise_resolve(constructor, value)?;
         Ok(promise.as_object().unwrap())
     }
@@ -1065,7 +1065,7 @@ impl Vm {
                         "Promise capability executor called more than once",
                     ));
                 }
-                let ObjectKind::PromiseFunction(function) = &mut self.heap.object_mut(id)?.kind
+                let ObjectKind::PromiseFunction(function, _) = &mut self.heap.object_mut(id)?.kind
                 else {
                     unreachable!()
                 };
@@ -1125,7 +1125,7 @@ impl Vm {
     fn aggregate_error_values(&mut self, errors: &[Value]) -> Result<Value, JsError> {
         let list = self.try_new_array(errors)?;
         self.ensure_allocation(1024)?;
-        let prototype = self.error_prototypes[&ErrorKind::AggregateError];
+        let prototype = self.realm.error_prototypes[&ErrorKind::AggregateError];
         let result = Value::Object(self.heap.allocate(Cell::Object(Object::new(
             ObjectKind::Error(ErrorKind::AggregateError),
             Some(prototype),
@@ -1266,9 +1266,10 @@ impl Vm {
 
 fn install_aggregate_error(vm: &mut Vm) {
     let prototype = vm
-        .new_object_with_prototype(Value::Object(vm.error_prototype))
+        .new_object_with_prototype(Value::Object(vm.realm.error_prototype))
         .unwrap();
-    vm.error_prototypes
+    vm.realm
+        .error_prototypes
         .insert(ErrorKind::AggregateError, prototype.as_object().unwrap());
     vm.define_data_property(
         prototype.clone(),
@@ -1293,12 +1294,18 @@ fn install_aggregate_error(vm: &mut Vm) {
         2,
         true,
         Rc::new(|vm, _, args| {
-            self_aggregate_constructor(vm, args, vm.error_prototypes[&ErrorKind::AggregateError])
+            self_aggregate_constructor(
+                vm,
+                args,
+                vm.realm.error_prototypes[&ErrorKind::AggregateError],
+            )
         }),
     );
     replace_construct(vm, constructor.clone(), |vm, _, args, target| {
-        let prototype =
-            vm.prototype_from_constructor(target, vm.error_prototypes[&ErrorKind::AggregateError])?;
+        let prototype = vm.prototype_from_constructor(
+            target,
+            vm.realm.error_prototypes[&ErrorKind::AggregateError],
+        )?;
         self_aggregate_constructor(vm, args, prototype)
     });
     vm.define_data_property(
@@ -1368,20 +1375,23 @@ fn self_aggregate_constructor(
 pub(crate) fn install(vm: &mut Vm) {
     install_aggregate_error(vm);
     let prototype = vm.new_object();
-    vm.promise_prototype = prototype.as_object();
+    vm.realm.promise_prototype = prototype.as_object();
     let constructor = vm.native(
         "Promise",
         1,
         false,
         Rc::new(|_, _, _| Err(JsError::type_error("Promise constructor requires new"))),
     );
-    vm.promise_constructor = constructor.as_object();
+    vm.realm.promise_constructor = constructor.as_object();
     replace_construct(vm, constructor.clone(), |vm, _, args, target| {
         let executor = arg(args, 0);
         if !vm.is_callable(&executor) {
             return Err(JsError::type_error("Promise executor is not callable"));
         }
-        let fallback = vm.promise_prototype.expect("installed Promise prototype");
+        let fallback = vm
+            .realm
+            .promise_prototype
+            .expect("installed Promise prototype");
         let prototype = vm.prototype_from_constructor(target, fallback)?;
         let capability = vm.promise_capability_with_prototype(Some(prototype))?;
         if let Err(error) = vm.invoke(

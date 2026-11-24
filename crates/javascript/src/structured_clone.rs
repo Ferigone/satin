@@ -297,6 +297,7 @@ impl Cloner<'_, '_> {
             ObjectKind::Date(time) => self.vm.allocate_constructed(
                 ObjectKind::Date(*time),
                 self.vm
+                    .realm
                     .clone_intrinsics
                     .date
                     .expect("initialized Date prototype"),
@@ -390,10 +391,11 @@ impl Cloner<'_, '_> {
             .unwrap_or(ErrorKind::Error);
         let prototype = self
             .vm
+            .realm
             .error_prototypes
             .get(&kind)
             .copied()
-            .unwrap_or(self.vm.error_prototype);
+            .unwrap_or(self.vm.realm.error_prototype);
         let message = self
             .own_data(source, "message")?
             .map(|value| self.vm.to_string(&value))
@@ -530,10 +532,10 @@ fn new_record(vm: &mut Vm, length: Option<u32>) -> Result<Value, JsError> {
                 length,
                 length_writable: true,
             },
-            vm.array_prototype,
+            vm.realm.array_prototype,
         )
     } else {
-        vm.allocate_constructed(ObjectKind::Ordinary, vm.object_prototype)
+        vm.allocate_constructed(ObjectKind::Ordinary, vm.realm.object_prototype)
     }
 }
 

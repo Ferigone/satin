@@ -148,7 +148,7 @@ pub(crate) enum ExportTarget {
 }
 impl Vm {
     fn validate_module_realm(&self, id: ModuleId) -> Result<(), JsError> {
-        if id.1 == self.module_realm {
+        if id.1 == self.realm.module_realm {
             Ok(())
         } else {
             Err(JsError::type_error("Module handle belongs to another VM"))
@@ -201,7 +201,7 @@ impl Vm {
             })),
             None,
         )));
-        Ok(ModuleId(object, self.module_realm))
+        Ok(ModuleId(object, self.realm.module_realm))
     }
     pub fn check_module_syntax(&mut self, source: &str) -> Result<(), JsError> {
         let code = compile_module(source, self.compilation_budget(source)?)?;
@@ -238,7 +238,7 @@ impl Vm {
         loop {
             let e = self.heap.environment(env);
             if let Some(id) = e.module {
-                return self.module_import_meta(ModuleId(id, self.module_realm));
+                return self.module_import_meta(ModuleId(id, self.realm.module_realm));
             }
             env = e.parent.ok_or_else(|| {
                 JsError::new(ErrorKind::SyntaxError, "import.meta outside a module")
@@ -336,7 +336,7 @@ impl Vm {
             self.tick()?;
             self.ensure_allocation(512)?;
             let mut env = Environment::new(
-                Some(self.global_env),
+                Some(self.realm.global_env),
                 EnvKind::Module,
                 Some(Value::Undefined),
             );
