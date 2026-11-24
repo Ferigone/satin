@@ -12,7 +12,7 @@ pub(crate) mod inline_style;
 pub(crate) use grid::GRID_TRACK_LIMIT;
 pub use grid::{GridAreas, GridLine, GridTemplate};
 
-use crate::dom::{Document, Namespace, NodeId};
+use crate::dom::{Document, Namespace, NodeId, NodeKind};
 use crate::fonts::{
     FontDisplay, FontFaceRule, FontFamily, FontFormat, FontSource, FontStyle, GenericFamily,
     UnicodeRange,
@@ -2903,26 +2903,6 @@ impl Stylesheet {
         let mut style = user_agent_style(doc, id, parent);
         let is_root = doc.nodes[id.0].parent == Some(doc.root);
         let is_svg = doc.namespace(id) == crate::dom::Namespace::Svg;
-        if is_svg {
-            for (name, property) in [
-                ("color", Property::Color),
-                ("visibility", Property::Visibility),
-            ] {
-                if let Some(value) = doc
-                    .attr(id, name)
-                    .and_then(|value| parse_value(property, value))
-                {
-                    apply_value(
-                        &mut style,
-                        parent,
-                        property,
-                        &value,
-                        root_font,
-                        self.viewport,
-                    );
-                }
-            }
-        }
         let inline = doc.attr(id, "style").map(declarations).unwrap_or_default();
         let inline_svg = if is_svg {
             svg_declarations(&inline)
@@ -3017,6 +2997,31 @@ impl Stylesheet {
             }
             style.custom = Arc::new(compute_custom(raw, inherited));
         }
+        if is_svg {
+            for (name, property) in [
+                ("color", Property::Color),
+                ("visibility", Property::Visibility),
+            ] {
+                let Some(raw) = doc.attr(id, name) else {
+                    continue;
+                };
+                let value = if contains_variable(raw) {
+                    resolve_variables(raw, &style.custom, 0).and_then(|v| parse_value(property, &v))
+                } else {
+                    parse_value(property, raw)
+                };
+                if let Some(value) = value {
+                    apply_value(
+                        &mut style,
+                        parent,
+                        property,
+                        &value,
+                        root_font,
+                        self.viewport,
+                    );
+                }
+            }
+        }
         if let Some(winner) = winners[Property::Direction as usize] {
             style.rtl = match winner.value(&style.custom).as_ref() {
                 Value::Bool(rtl) => *rtl,
@@ -3073,6 +3078,35 @@ impl Stylesheet {
                 }
             }
         }
+        // Literal presentation attributes are handled by the SVG scene. Add
+        // deferred attributes only where the author cascade has no winner.
+        let presentation: Vec<_> =
+            if is_svg && let NodeKind::Element { attrs, .. } = &doc.nodes[id.0].kind {
+                attrs
+                    .iter()
+                    .filter(|(name, raw)| {
+                        svg_property(name)
+                            && !svg_winners.contains_key(name.as_str())
+                            && raw.len() <= 16384
+                            && contains_variable(raw)
+                    })
+                    .map(|(name, raw)| SvgDeclaration {
+                        name: Arc::from(name.as_str()),
+                        value: Arc::from(raw.as_str()),
+                        important: false,
+                        order: 0,
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+        choose_svg(
+            &mut svg_winners,
+            &presentation,
+            false,
+            Specificity::default(),
+            0,
+        );
         if !svg_winners.is_empty() {
             let mut values = HashMap::new();
             let mut budget = 65536;

@@ -596,16 +596,19 @@ fn visibility_preserves_layout_and_visible_descendants_but_excludes_hidden_paint
 #[test]
 fn inline_svg_can_restore_visibility_inside_a_hidden_html_parent() {
     let (page, layout) = fixture(
-        "<div style='visibility:hidden'><svg width='100' height='30'>
+        "<div style='visibility:hidden; --show:visible'><svg width='150' height='30'>
           <rect width='50' height='30' fill='red'/>
           <rect id='visible' x='50' width='50' height='30' fill='green' visibility='visible'/>
+          <rect id='variable' x='100' width='50' height='30' fill='blue' visibility='var(--show)'/>
         </svg></div>",
     );
     assert_eq!(layout.element_at(60., 10.), Some(node(&page, "visible")));
+    assert_eq!(layout.element_at(110., 10.), Some(node(&page, "variable")));
     let mut canvas = Canvas::new(400, 50, Color::WHITE);
     canvas.document(&layout, &mut Fonts::new().unwrap(), 0., 0.);
     assert_eq!(canvas.pixels[10 * 400 + 10], 0xffffff);
     assert_eq!(canvas.pixels[10 * 400 + 60], 0x008000);
+    assert_eq!(canvas.pixels[10 * 400 + 110], 0x0000ff);
 }
 
 #[test]
