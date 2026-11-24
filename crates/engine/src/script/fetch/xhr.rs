@@ -4,6 +4,7 @@ mod progress_event;
 #[cfg(test)]
 mod timeout_tests;
 mod xml_document;
+pub(in crate::script) use xml_document::xml_node_type;
 
 use super::{Shared, byte_string, typed, usv};
 use crate::{

@@ -621,6 +621,8 @@ impl DocumentSession {
                 let step = step.map_err(|error| error.to_string())?;
                 if let Some(realm) = runtime {
                     mutation_observers::schedule(&mut realm.vm, &realm.state);
+                    custom_elements::flush(&mut realm.vm, &realm.state)
+                        .map_err(|error| error.to_string())?;
                 }
                 self.dirty = true;
                 match step {

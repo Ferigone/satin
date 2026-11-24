@@ -64,7 +64,8 @@ pub(super) fn install(
         )?;
         if namespace != Namespace::Html {
             state.borrow_mut().document.namespaces.insert(id, namespace);
+            return wrap(vm, &state, Some(id));
         }
-        wrap(vm, &state, Some(id))
+        custom_elements::created(vm, &state, id)
     })
 }

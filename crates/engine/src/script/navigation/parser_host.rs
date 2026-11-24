@@ -144,6 +144,10 @@ impl ParserHost {
             .as_ref()
             .map(|state| state.mutations.clone())
             .filter(|observers| observers.borrow().active());
+        let registry = state
+            .as_ref()
+            .map(|state| state.custom_elements.clone())
+            .filter(|registry| registry.borrow().has_definitions());
         let mut restored = Ok(());
         if let Some(state) = state.as_deref_mut() {
             if self.revision != Some(state.revision) || self.client.as_ref() != &state.url {
@@ -157,16 +161,25 @@ impl ParserHost {
                 .stream
                 .restore_document_from_host(std::mem::take(&mut state.document), state.dom_bytes);
         }
-        self.stream
-            .set_mutation_sink(observers.as_ref().map(|observers| {
+        self.stream.set_mutation_sink(
+            (observers.is_some() || registry.is_some()).then(|| {
                 let observers = observers.clone();
+                let registry = registry.clone();
                 let sink: MutationSink = Box::new(move |document, change| {
-                    observers.borrow_mut().note(document, change);
+                    if let Some(registry) = &registry {
+                        mutation_observers::note_connections(registry, document, &change);
+                    }
+                    if let Some(observers) = &observers {
+                        observers.borrow_mut().note(document, change);
+                    }
                 });
                 sink
-            }));
+            }),
+        );
         let before = self.stream.report();
-        let result = restored.and_then(|_| self.advance_owned(write, observers.as_deref()));
+        let result = restored.and_then(|_| {
+            self.advance_owned(write, observers.as_deref(), registry.as_deref())
+        });
         self.stream.set_mutation_sink(None);
         if let Some(state) = state.as_deref_mut() {
             state.dom_bytes = self.stream.document_bytes();
@@ -188,6 +201,7 @@ impl ParserHost {
         &mut self,
         write: Option<WriteId>,
         observers: Option<&RefCell<mutation_observers::Observers>>,
+        registry: Option<&RefCell<super::super::custom_elements::Registry>>,
     ) -> Result<Step, HtmlStreamError> {
         let slice_end = Instant::now() + Duration::from_millis(3);
         for index in 0..MAX_PARSE_STEPS {
@@ -229,6 +243,11 @@ impl ParserHost {
                 }
                 Ok(ParserEvent::Paused { .. }) => return Err(HtmlStreamError::ScriptMismatch),
                 Err(error) => return Err(error),
+            }
+            // Return the arena to the realm before invoking author code,
+            // and before the next token adds children to a newly connected host.
+            if registry.is_some_and(|registry| registry.borrow().pending()) {
+                return Ok(Step::Yield);
             }
             if index % 32 == 31 && Instant::now() >= slice_end {
                 break;
@@ -440,6 +459,7 @@ impl ParserHost {
             restrict_document_policy(vm, state, policy);
             let step = step.map_err(parser_error)?;
             mutation_observers::schedule(vm, state);
+            super::super::custom_elements::flush(vm, state)?;
             if let Step::Blocking(tag) = step {
                 let node = tag.node;
                 let external = tag.external();
@@ -557,7 +577,7 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     drop(state);
     super::super::frames::sweep(vm, host);
     mutation_observers::schedule(vm, host);
-    Ok(())
+    super::super::custom_elements::flush(vm, host)
 }
 
 fn require_document(host: &Shared, receiver: &Value) -> Result<(), JsError> {

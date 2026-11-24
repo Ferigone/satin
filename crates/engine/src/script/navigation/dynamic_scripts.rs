@@ -66,17 +66,19 @@ impl DynamicScripts {
         self.flags.insert(node, Flags::FRAGMENT_INERT);
     }
 
-    pub(in crate::script) fn clone_state(&mut self, source: NodeId, clone: NodeId) {
-        // The script cloning steps copy only the already-started flag.
-        if self.flags.get(&source).is_some_and(|flags| flags.started) {
-            self.flags.insert(
-                clone,
-                Flags {
-                    started: true,
-                    ..Flags::default()
-                },
-            );
-        }
+    pub(in crate::script) fn has_started(&self, source: NodeId) -> bool {
+        self.flags.get(&source).is_some_and(|flags| flags.started)
+    }
+
+    pub(in crate::script) fn mark_clone_started(&mut self, clone: NodeId) {
+        // Cloning copies only the already-started flag.
+        self.flags.insert(
+            clone,
+            Flags {
+                started: true,
+                ..Flags::default()
+            },
+        );
     }
 
     pub(in crate::script) fn seed_prepared(&mut self, doc: &Document) {
@@ -106,7 +108,7 @@ pub(super) fn child_text(doc: &Document, node: NodeId) -> impl Iterator<Item = &
         })
 }
 
-pub(super) fn has_source(doc: &Document, node: NodeId) -> bool {
+pub(in crate::script) fn has_source(doc: &Document, node: NodeId) -> bool {
     doc.attr(node, "src").is_some() || child_text(doc, node).any(|text| !text.is_empty())
 }
 
@@ -127,7 +129,7 @@ fn ascii_trim(value: &str) -> &str {
     value.trim_matches(['\t', '\n', '\x0c', '\r', ' '])
 }
 
-pub(super) fn kind(doc: &Document, id: NodeId) -> Option<ParserScriptKind> {
+pub(in crate::script) fn kind(doc: &Document, id: NodeId) -> Option<ParserScriptKind> {
     let value = match doc.attr(id, "type") {
         Some(value) if value.eq_ignore_ascii_case("module") => {
             return Some(ParserScriptKind::Module);
@@ -212,10 +214,9 @@ pub(in crate::script) fn post_connection(
     candidates: impl IntoIterator<Item = NodeId>,
 ) -> Result<(), JsError> {
     super::super::frames::sweep(vm, state);
-    for id in candidates {
-        prepare(vm, state, id)?;
-    }
-    Ok(())
+    let result = candidates.into_iter().try_for_each(|id| prepare(vm, state, id));
+    let reactions = super::super::custom_elements::flush(vm, state);
+    result.and(reactions)
 }
 
 fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {

@@ -6,6 +6,7 @@ mod blobs;
 mod canvas;
 mod class_list;
 mod collections;
+mod custom_elements;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
@@ -37,6 +38,7 @@ mod structured_clone;
 mod text_encoding;
 mod url_api;
 mod webidl;
+mod tree_walker;
 mod workers;
 pub use devtools_console::{
     CONSOLE_RECORD_LIMIT, CONSOLE_TEXT_BYTES, ConsoleLevel, ConsoleOrigin, ConsolePhase,
@@ -79,11 +81,14 @@ type FormCloneHook = Rc<dyn Fn(&mut Vm, &[NodeId], usize) -> Result<(), JsError>
 
 struct State {
     document: Document,
+    custom_elements: Rc<RefCell<custom_elements::Registry>>,
     wrappers: HashMap<NodeId, Value>,
     styles: HashMap<NodeId, Value>,
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
     element_prototype: Value,
+    html_element_prototype: Value,
+    fragment_prototype: Value,
     iframe_prototype: Value,
     frames: frames::Frames,
     script_prototype: Value,
@@ -279,11 +284,28 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
         ) {
             state.character_data_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
-            state.element_prototype.clone()
+            if state.document.namespace(id) == crate::dom::Namespace::Html {
+                state.html_element_prototype.clone()
+            } else {
+                state.element_prototype.clone()
+            }
+        } else if id != state.document.root
+            && matches!(state.document.nodes[id.0].kind, NodeKind::Document)
+        {
+            state.fragment_prototype.clone()
         } else {
             state.prototype.clone()
         }
     };
+    wrap_new_node(vm, state, id, prototype)
+}
+
+fn wrap_new_node(
+    vm: &mut Vm,
+    state: &Shared,
+    id: NodeId,
+    prototype: Value,
+) -> Result<Value, JsError> {
     let value = vm.new_object_with_prototype(prototype)?;
     vm.mark_platform_object(&value)?;
     // Wrappers are cached for node identity, including detached nodes. Reclaimed
@@ -377,6 +399,9 @@ fn set_attribute(
         key.to_owned()
     };
     let old = state.document.attr(id, &key);
+    let custom_reaction = custom_elements::attribute(
+        &state, id, &key, old, value.as_deref(), state.document.attribute_namespace(id, &key),
+    );
     let changes_canvas_attribute = matches!(key.as_str(), "width" | "height")
         && (present || old.is_some())
         && state.document.attribute_namespace(id, &key).is_none();
@@ -441,7 +466,11 @@ fn set_attribute(
             media::source_changed(vm, host, id)?;
         }
         mutation_observers::schedule(vm, host);
-        dynamic_scripts::attribute_changed(vm, host, id, &key, present)
+        dynamic_scripts::attribute_changed(vm, host, id, &key, present)?;
+        if let Some(reaction) = custom_reaction {
+            custom_elements::deliver(vm, host, reaction)?;
+        }
+        Ok(())
     } else {
         Err(JsError::type_error("Expected an Element"))
     }
@@ -615,18 +644,22 @@ impl ScriptRuntime {
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
+        let fragment_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(fragment_prototype.clone());
         let element_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(element_prototype.clone());
-        let iframe_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let html_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        vm.root(html_element_prototype.clone());
+        let iframe_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(iframe_prototype.clone());
-        let script_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let script_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(script_prototype.clone());
-        let canvas_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let canvas_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(canvas_prototype.clone());
-        let media_prototypes = media::Prototypes::new(&mut vm, &element_prototype)?;
-        let input_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
+        let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
-        let image_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(character_data_prototype.clone());
@@ -647,6 +680,9 @@ impl ScriptRuntime {
             nodes: HashMap::new(),
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
+            html_element_prototype: html_element_prototype.clone(),
+            fragment_prototype,
+            custom_elements: Rc::default(),
             iframe_prototype: iframe_prototype.clone(),
             frames: frames::Frames::default(),
             script_prototype: script_prototype.clone(),
@@ -820,6 +856,7 @@ impl ScriptRuntime {
             },
         )?;
         let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        tree_walker::install(&mut vm, &state, &document, &dom_errors)?;
         class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =
@@ -863,7 +900,9 @@ impl ScriptRuntime {
         text_encoding::install(&mut vm)?;
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
         devtools_console::install_public_error(&mut vm, &state, console)?;
-        element_interface::install(&mut vm, prototype, element_prototype)?;
+        element_interface::install(&mut vm, &state, prototype, element_prototype, &dom_errors)?;
+        element_interface::install_html(&mut vm, &state, html_element_prototype)?;
+        custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;
         let blobs = blobs::install(&mut vm, streams.clone())?;

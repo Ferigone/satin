@@ -6,12 +6,12 @@ use super::{
     fatal, node, webidl, wrap,
 };
 use crate::dom::{
-    NodeId,
+    Document, NodeId,
     mutation::{Mutation, siblings},
 };
 pub(super) use queue::Observers;
 use queue::{ObserverId, Options, Record};
-use std::{cell::Cell, collections::BTreeSet, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::BTreeSet, rc::Rc};
 
 const CALLBACK_SLOT: u32 = 1;
 const ADDED_SLOT: u32 = 1;
@@ -67,12 +67,38 @@ impl RecordFactory {
     }
 }
 
+/// Queue lifecycle reactions under the same DOM snapshot as a child-list
+/// mutation. The streaming parser owns the arena while this hook is running.
+pub(super) fn note_connections(
+    registry: &RefCell<super::custom_elements::Registry>,
+    document: &Document,
+    change: &Mutation<'_>,
+) {
+    let Mutation::Children { target, added, removed, .. } = change else { return };
+    let mut registry = registry.borrow_mut();
+    if !registry.has_definitions() {
+        return;
+    }
+    for &root in *removed {
+        registry.connection(document, *target, root, false);
+    }
+    for &root in *added {
+        registry.connection(document, *target, root, true);
+    }
+}
+
 pub(super) fn note(state: &State, change: Mutation<'_>) {
+    note_connections(&state.custom_elements, &state.document, &change);
     state.mutations.borrow_mut().note(&state.document, change);
 }
 
 /// Capture sibling identities before an individual child is unlinked.
 pub(super) fn removing(state: &State, parent: NodeId, child: NodeId, suppress: bool) {
+    // Suppressed children are reported together by the caller's combined
+    // child-list change. An individual removal has no later notification.
+    if !suppress {
+        super::custom_elements::connection(state, parent, child, false);
+    }
     let mut observers = state.mutations.borrow_mut();
     if !observers.can_track() {
         return;

@@ -1871,7 +1871,8 @@ impl Vm {
         object.properties.remove(key);
         Ok(true)
     }
-    pub(crate) fn set_prototype(
+    /// Set a prototype using the ordinary ECMAScript invariants, including extensibility.
+    pub fn set_prototype(
         &mut self,
         target: ObjectId,
         prototype: Option<ObjectId>,

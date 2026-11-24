@@ -563,3 +563,110 @@ fn class_list_tracks_attribute_edits_and_validates_before_mutating() {
         true,
     );
 }
+
+#[test]
+fn document_fragment_constructor_brands_real_fragments_and_supports_subclasses() {
+    let (_, mut runtime) = realm("<!doctype html><template id=tmpl><p>template</p></template>");
+    js(
+        &mut runtime,
+        r#"
+        const proto = DocumentFragment.prototype;
+        const a = new DocumentFragment(), b = document.createDocumentFragment();
+        class Section extends DocumentFragment {}
+        const section = new Section();
+        const elem = document.createElement("article");
+        section.append(elem);
+        const copy = section.cloneNode(true);
+        document.body.append(section);
+        let needsNew = false;
+        try { DocumentFragment(); } catch (err) { needsNew = err instanceof TypeError; }
+        function F() {}
+        F.prototype = null;
+        const fallback = Reflect.construct(DocumentFragment, [], F);
+        needsNew && Object.getPrototypeOf(DocumentFragment) === Node &&
+        Object.getPrototypeOf(proto) === Node.prototype && proto.constructor === DocumentFragment &&
+        document.createElement('template').content.cloneNode() instanceof DocumentFragment &&
+        a !== b && [a,b,document.getElementById('tmpl').content,copy].every(
+            f => Object.getPrototypeOf(f) === proto && f instanceof Node &&
+                 f.nodeType === 11 && f.ownerDocument === document) &&
+        Object.prototype.toString.call(a) === '[object DocumentFragment]' &&
+        !(document instanceof DocumentFragment) && !(elem instanceof DocumentFragment) &&
+        section instanceof Section && section instanceof DocumentFragment &&
+        section.firstChild === null && document.body.lastChild === elem &&
+        copy.firstChild.tagName === 'ARTICLE' && Object.getPrototypeOf(fallback) === proto
+    "#,
+        true,
+    );
+}
+
+#[test]
+fn import_node_copies_template_contents_into_detached_target_nodes() {
+    let (mut page, mut runtime) = realm(
+        "<!doctype html><main></main><template id=t><b>Hi</b><!--marker--><template><i>nested</i></template></template>",
+    );
+    js(
+        &mut runtime,
+        r#"
+        const source = document.getElementById('t').content;
+        const copy = document.importNode(source, true);
+        const section = document.querySelector('main');
+        const bold = copy.firstChild;
+        const nested = copy.lastChild.content.firstChild;
+        const owned = copy.ownerDocument === document && bold.ownerDocument === document;
+        section.insertBefore(copy, null);
+        owned && copy.nodeType === 11 && copy.parentNode === null && copy.firstChild === null &&
+        bold === section.firstChild && bold !== source.firstChild && bold.textContent === 'Hi' &&
+        nested.textContent === 'nested' && nested !== source.lastChild.content.firstChild &&
+        section.firstChild.nextSibling.nodeType === 8 && source.firstChild.parentNode === source
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        const name = f => {try { f(); return ''; } catch(e) { return e.name; }};
+        document.importNode.length === 1 &&
+        document.importNode(source).firstChild === null &&
+        document.importNode(source, {selfOnly:true}).firstChild === null &&
+        document.importNode(source, {}).firstChild.textContent === 'Hi' &&
+        name(() => document.importNode(document)) === 'NotSupportedError' &&
+        name(() => document.importNode({nodeType:11})) === 'TypeError' &&
+        name(() => document.importNode.call(source, source)) === 'TypeError'
+    "#,
+        true,
+    );
+    runtime.snapshot(&mut page);
+    arena(&page.document);
+}
+
+#[test]
+fn import_node_reads_the_source_frame_arena_and_keeps_executed_scripts_inert() {
+    let (mut page, mut runtime) =
+        realm("<!doctype html><main><u>different tree</u></main><iframe></iframe>");
+    js(
+        &mut runtime,
+        r#"
+        const child = document.querySelector('iframe').contentDocument;
+        child.write("<b id='book'>Frame<!--marker--><i>text</i><script>parent.count++<" + "/script></b>");
+        child.close();
+        const original = child.getElementById('book');
+        const imported = document.importNode(original, true);
+        const target = document.querySelector('main');
+        var count = 0;
+        target.replaceChildren(imported);
+        child.open(); child.write("<p>New frame document</p>"); child.close();
+        imported.tagName === 'B' && imported.ownerDocument === document &&
+        imported.firstChild.nodeValue === 'Frame' && imported.querySelector('i').textContent === 'text' &&
+        count === 0 && document.importNode(original, true).innerHTML === imported.innerHTML &&
+        document.importNode(original, false).firstChild === null
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        "try { document.importNode(child); false } catch(e) { e instanceof DOMException && e.name==='NotSupportedError' }",
+        true,
+    );
+    runtime.snapshot(&mut page);
+    arena(&page.document);
+}

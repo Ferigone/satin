@@ -32,6 +32,11 @@ const XMLNS: &str = "http://www.w3.org/2000/xmlns/";
 
 struct XmlNode;
 
+pub(in crate::script) fn xml_node_type(vm: &Vm, value: &Value) -> Option<u16> {
+    vm.host_data::<XmlNode>(value)?;
+    Some(vm.host_slot(value, KIND)?.as_number()? as u16)
+}
+
 struct Children(Vec<Value>);
 
 impl HostIndexedProperties for Children {
