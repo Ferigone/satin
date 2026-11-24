@@ -551,3 +551,59 @@ fn visible_and_clip_overflow_report_scroll_area_without_creating_scroll_offsets(
         .unwrap();
     assert_eq!(clip.max_y, 0.);
 }
+
+#[test]
+fn visibility_preserves_layout_and_visible_descendants_but_excludes_hidden_paint_and_hits() {
+    let (page, layout) = fixture(
+        "<style>
+            #link { display:block; width:120px; height:30px; background:blue }
+            #cover { position:fixed; top:0; left:0; width:120px; height:30px; z-index:2 }
+            .hidden { visibility:hidden; background:red }
+            #child { display:block; visibility:visible; width:20px; height:30px; background:green }
+            #transparent { position:fixed; top:0; left:100px; width:20px; height:30px; opacity:0 }
+            #space { height:40px }
+        </style>
+        <a id=link href='/forum'></a>
+        <div id=space class=hidden>invisible</div><div id=after>after</div>
+        <div id=cover class=hidden><div><a id=child href='/child'></a></div></div>
+        <div id=transparent></div>",
+    );
+    rect(r(&page, &layout, "space"), [0., 30., 400., 40.]);
+    close(r(&page, &layout, "after").y, 70.);
+    assert_eq!(
+        layout.link_at(50., 10.),
+        Some("https://position.test/forum")
+    );
+    assert_eq!(
+        layout.link_at(10., 10.),
+        Some("https://position.test/child")
+    );
+    assert_eq!(
+        layout.element_at(110., 10.),
+        Some(node(&page, "transparent"))
+    );
+    let mut canvas = Canvas::new(400, 120, Color::WHITE);
+    canvas.document(&layout, &mut Fonts::new().unwrap(), 0., 0.);
+    assert_eq!(canvas.pixels[10 * 400 + 50], 0x0000ff);
+    assert_eq!(canvas.pixels[10 * 400 + 10], 0x008000);
+    assert!(
+        canvas.pixels[30 * 400..70 * 400]
+            .iter()
+            .all(|&pixel| pixel == 0xffffff)
+    );
+}
+
+#[test]
+fn inline_svg_can_restore_visibility_inside_a_hidden_html_parent() {
+    let (page, layout) = fixture(
+        "<div style='visibility:hidden'><svg width='100' height='30'>
+          <rect width='50' height='30' fill='red'/>
+          <rect id='visible' x='50' width='50' height='30' fill='green' visibility='visible'/>
+        </svg></div>",
+    );
+    assert_eq!(layout.element_at(60., 10.), Some(node(&page, "visible")));
+    let mut canvas = Canvas::new(400, 50, Color::WHITE);
+    canvas.document(&layout, &mut Fonts::new().unwrap(), 0., 0.);
+    assert_eq!(canvas.pixels[10 * 400 + 10], 0xffffff);
+    assert_eq!(canvas.pixels[10 * 400 + 60], 0x008000);
+}

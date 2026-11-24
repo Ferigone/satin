@@ -56,8 +56,14 @@ impl Builder<'_> {
                     .copied(),
             );
         }
-        overrides.entry(id).or_default().color = Some(self.styles[id.0].color);
-        overrides.entry(id).or_default().inherit.remove("color");
+        let root_style = overrides.entry(id).or_default();
+        root_style.color = Some(self.styles[id.0].color);
+        root_style.inherit.remove("color");
+        // The SVG scene has its own cascade. Seed its root with the visibility
+        // inherited from HTML, allowing SVG descendants to override it.
+        root_style.visibility =
+            Some(self.styles[id.0].visibility == crate::css::Visibility::Visible);
+        root_style.inherit.remove("visibility");
         let scene = Arc::new(crate::svg::SvgScene::build(
             doc,
             id,
