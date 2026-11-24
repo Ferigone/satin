@@ -607,3 +607,39 @@ fn inline_svg_can_restore_visibility_inside_a_hidden_html_parent() {
     assert_eq!(canvas.pixels[10 * 400 + 10], 0xffffff);
     assert_eq!(canvas.pixels[10 * 400 + 60], 0x008000);
 }
+
+#[test]
+fn shrink_to_fit_sizes_adjacent_floats_to_one_row_until_cleared() {
+    let (page, layout) = fixture(
+        "<style>
+            #menu { position:absolute; left:20px }
+            #menu a { display:block; float:inline-start; width:60px; height:25px; margin:0 3px 0 2px }
+        </style>
+        <div id=menu>
+            <a id=first></a> <a id=second style='clear:right'></a>
+            <a id=third></a> <a id=next style='clear:both'></a>
+        </div>",
+    );
+    rect(r(&page, &layout, "menu"), [20., 0., 195., 50.]);
+    rect(r(&page, &layout, "first"), [22., 0., 60., 25.]);
+    rect(r(&page, &layout, "second"), [87., 0., 60., 25.]);
+    rect(r(&page, &layout, "third"), [152., 0., 60., 25.]);
+    rect(r(&page, &layout, "next"), [22., 25., 60., 25.]);
+}
+
+#[test]
+fn source_indentation_does_not_widen_text_floats_or_wrap_an_exact_subpixel_fit() {
+    let (page, layout) = fixture(
+        "<style>nav {position:absolute; left:0} a {display:block;float:left}
+            #fraction {left:370px; top:40px; width:404.6px} #fraction a {width:101.15px;height:10px}
+        </style><nav><a id=formatted>  Store
+               and    Support    </a><a id=compact>Store and Support</a></nav>
+        <nav id=fraction><a></a><a></a><a></a><a id=last></a></nav>",
+    );
+    close(
+        r(&page, &layout, "formatted").width,
+        r(&page, &layout, "compact").width,
+    );
+    close(r(&page, &layout, "last").y, 40.);
+    close(r(&page, &layout, "fraction").height, 10.);
+}
