@@ -96,6 +96,83 @@ impl TabStorage {
     }
 }
 
+/// Use the same origin that the Storage API binds to the document.
+pub fn storage_origin(url: &url::Url) -> Option<String> {
+    match url.scheme() {
+        "http" | "https" => Some(url.origin().ascii_serialization()),
+        "about" if url.as_str() == "about:home" => Some("about:home".into()),
+        _ => None,
+    }
+}
+
+/// Read access to one origin and one storage area. It neither subscribes to
+/// storage events nor creates a connection with mutation rights.
+pub struct StorageInspector(Rc<Area>);
+
+pub struct InspectedEntry {
+    pub key: String,
+    pub value: String,
+    pub key_units: usize,
+    pub value_units: usize,
+}
+
+impl TabStorage {
+    pub fn inspect_storage(
+        &self,
+        url: &url::Url,
+        session: bool,
+    ) -> Result<Option<StorageInspector>, String> {
+        let Some(origin) = storage_origin(url) else {
+            return Ok(None);
+        };
+        let store = if session {
+            &self.session
+        } else {
+            &self.local.0
+        };
+        let area = store.area(&origin);
+        area.ensure_loaded(store).map_err(|err| match err {
+            StorageFailure::Unavailable(message) => message,
+            StorageFailure::Quota => "Storage quota exceeded".to_owned(),
+        })?;
+        Ok(Some(StorageInspector(area)))
+    }
+}
+
+impl StorageInspector {
+    pub fn usage(&self) -> (usize, usize) {
+        let slot = self.0.contents.borrow();
+        let entries = slot
+            .as_ref()
+            .expect("inspector loads storage before opening");
+        (entries.order.len(), entries.bytes)
+    }
+
+    /// Copy only the requested row. The list and the detail viewer each have
+    /// a fixed preview budget; storage values themselves remain unchanged.
+    pub fn entry(&self, index: usize, detail: bool) -> Option<InspectedEntry> {
+        fn preview(text: &JsString, limit: usize) -> String {
+            let units = text.as_utf16();
+            let mut s = String::from_utf16_lossy(&units[..units.len().min(limit)]);
+            if units.len() > limit {
+                s.push('…');
+            }
+            s
+        }
+        let slot = self.0.contents.borrow();
+        let entries = slot.as_ref()?;
+        let key = entries.order.get(index)?;
+        let value = entries.values.get(key)?;
+        let (key_limit, value_limit) = if detail { (512, 4096) } else { (96, 120) };
+        Some(InspectedEntry {
+            key: preview(key, key_limit),
+            value: preview(value, value_limit),
+            key_units: key.len(),
+            value_units: value.len(),
+        })
+    }
+}
+
 #[derive(Default)]
 struct Store {
     persistence: Option<Rc<dyn StoragePersistence>>,
@@ -132,6 +209,24 @@ struct Area {
 }
 
 impl Area {
+    fn ensure_loaded(&self, store: &Store) -> Result<(), StorageFailure> {
+        if self.contents.borrow().is_some() {
+            return Ok(());
+        }
+        let mut entries = Entries::default();
+        if let Some(persistence) = &store.persistence
+            && let Some(bytes) = persistence
+                .load(&self.file_id())
+                .map_err(StorageFailure::Unavailable)?
+        {
+            entries = Entries::decode(&bytes, &self.origin).ok_or_else(|| {
+                StorageFailure::Unavailable("Cannot load invalid origin storage data".into())
+            })?;
+        }
+        *self.contents.borrow_mut() = Some(entries);
+        Ok(())
+    }
+
     fn file_id(&self) -> String {
         let hash = digest(&SHA256, self.origin.as_bytes());
         hash.as_ref()
@@ -272,21 +367,7 @@ pub(crate) struct Connection {
 
 impl Connection {
     pub(crate) fn ensure_loaded(&self) -> Result<(), StorageFailure> {
-        if self.area.contents.borrow().is_some() {
-            return Ok(());
-        }
-        let mut entries = Entries::default();
-        if let Some(persistence) = &self.store.persistence
-            && let Some(bytes) = persistence
-                .load(&self.area.file_id())
-                .map_err(StorageFailure::Unavailable)?
-        {
-            entries = Entries::decode(&bytes, &self.area.origin).ok_or_else(|| {
-                StorageFailure::Unavailable("Cannot load invalid origin storage data".into())
-            })?;
-        }
-        *self.area.contents.borrow_mut() = Some(entries);
-        Ok(())
+        self.area.ensure_loaded(&self.store)
     }
 
     pub(crate) fn len(&self) -> usize {

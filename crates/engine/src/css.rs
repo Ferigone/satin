@@ -3,6 +3,8 @@
 mod calc;
 pub(crate) mod canvas_font;
 mod grid;
+mod inspection;
+pub use inspection::InspectorStylesheets;
 pub(crate) mod inline_style;
 pub(crate) use grid::GRID_TRACK_LIMIT;
 pub use grid::{GridAreas, GridLine, GridTemplate};

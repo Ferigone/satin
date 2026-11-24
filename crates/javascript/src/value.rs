@@ -424,6 +424,8 @@ pub struct JsError {
     pub line: Option<usize>,
     pub column: Option<usize>,
     pub thrown: Option<Value>,
+    /// Actual synchronous interpreted functions at the error boundary, innermost first.
+    pub inspected_calls: Option<Rc<Vec<String>>>,
 }
 impl JsError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
@@ -433,6 +435,7 @@ impl JsError {
             line: None,
             column: None,
             thrown: None,
+            inspected_calls: None,
         }
     }
     pub fn type_error(message: impl Into<String>) -> Self {
@@ -445,6 +448,7 @@ impl JsError {
             line: Some(line),
             column: Some(column),
             thrown: None,
+            inspected_calls: None,
         }
     }
     pub(crate) fn uncatchable(&self) -> bool {

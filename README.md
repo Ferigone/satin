@@ -21,12 +21,11 @@ Satin brings tabs, browsing history, zoom, and a persistent profile to a desktop
 | Interact | Links, forms, JavaScript events, and DOM updates |
 | Render | Text and images, CSS Flexbox and Grid, SVG, and Canvas 2D |
 | Play media | Progressive and segmented H.264/AAC MP4 playback on Windows |
-| Inspect | **F12** opens DevTools with **Console** and **Network** |
+| Inspect | **F12** opens Console, Network, Elements, Sources, Performance and Application. [DevTools guide](docs/DEVTOOLS.md) |
 
 Website compatibility is partial. YouTube and Twitch playback remains in development.
 
-Console displays page logs and reported JavaScript errors. Network shows observed
-HTTP(S) request metadata, not a complete capture of all browser traffic.
+Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
 ## Compatibility roadmap
 

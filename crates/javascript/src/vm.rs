@@ -20,6 +20,7 @@ use std::{
 
 use crate::dynamic_import::SourceReferrer;
 
+mod inspection;
 pub(crate) mod realm;
 
 #[cfg(test)]
@@ -117,6 +118,7 @@ pub struct Vm {
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
+    inspected_calls: Option<Vec<Option<JsString>>>,
     pub(crate) execution_depth: usize,
     string_storage: BTreeMap<usize, usize>,
     string_bytes: usize,
@@ -229,6 +231,7 @@ impl Vm {
             interrupt: None,
             active: 0,
             call_depth: 0,
+            inspected_calls: None,
             execution_depth: 0,
             string_storage: BTreeMap::new(),
             string_bytes: 0,
@@ -2385,7 +2388,10 @@ impl Vm {
             callback(self, this, args)
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
-            self.with_referrer(referrer, |vm| {
+            if let Some(stack) = &mut self.inspected_calls {
+                stack.push(code.name.clone());
+            }
+            let mut result = self.with_referrer(referrer, |vm| {
                 let invocation = Invocation {
                     function,
                     this,
@@ -2410,7 +2416,16 @@ impl Vm {
                             "Unexpected function abrupt completion",
                         )),
                     })
-            })
+            });
+            if self.inspected_calls.is_some() {
+                if let Err(error) = &mut result
+                    && error.inspected_calls.is_none()
+                {
+                    error.inspected_calls = self.inspect_call_stack();
+                }
+                self.inspected_calls.as_mut().unwrap().pop();
+            }
+            result
         };
         self.call_depth -= 1;
         result
@@ -3337,6 +3352,7 @@ impl Vm {
             line: None,
             column: None,
             thrown: Some(value),
+            inspected_calls: None,
         })
     }
 

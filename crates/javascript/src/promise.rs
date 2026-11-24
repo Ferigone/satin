@@ -1112,6 +1112,7 @@ impl Vm {
                         line: None,
                         column: None,
                         thrown: Some(value),
+                        inspected_calls: None,
                     })
                 } else {
                     Ok(value)

@@ -194,3 +194,80 @@ fn persistence_restores_utf16_and_retries_failed_origin_writes() {
     );
     assert_eq!(disk.files.borrow().values().next().unwrap().len(), 4);
 }
+
+#[test]
+fn inspector_reads_live_entries_with_origin_tab_and_preview_boundaries() {
+    let profile = StorageProfile::default();
+    let a = TabStorage::new(profile.clone());
+    let b = TabStorage::new(profile);
+    let url = url::Url::parse("https://site.test/a").unwrap();
+    let mut runtime = realm(url.as_str(), &a);
+    let inspect = a.inspect_storage(&url, false).unwrap().unwrap();
+    assert_eq!(inspect.usage(), (0, 0));
+    runtime
+        .eval("localStorage.title='ż'; sessionStorage.tab='A'")
+        .unwrap();
+    let same = b
+        .inspect_storage(&url.join("/b").unwrap(), false)
+        .unwrap()
+        .unwrap();
+    let row = same.entry(0, true).unwrap();
+    assert_eq!((row.key.as_str(), row.value.as_str()), ("title", "ż"));
+    assert_eq!(inspect.usage(), (1, 12));
+    assert_eq!(
+        a.inspect_storage(&url, true)
+            .unwrap()
+            .unwrap()
+            .entry(0, true)
+            .unwrap()
+            .value,
+        "A"
+    );
+    assert_eq!(b.inspect_storage(&url, true).unwrap().unwrap().usage().0, 0);
+    let other = url::Url::parse("https://other.test/").unwrap();
+    assert_eq!(
+        a.inspect_storage(&other, false).unwrap().unwrap().usage().0,
+        0
+    );
+    let opaque = url::Url::parse("data:text/html,hello").unwrap();
+    assert!(a.inspect_storage(&opaque, false).unwrap().is_none());
+    runtime.eval("localStorage.title='x'.repeat(6000)").unwrap();
+    let long = inspect.entry(0, true).unwrap();
+    assert_eq!(long.value_units, 6000);
+    assert_eq!(long.value.chars().count(), 4097);
+    runtime.eval("localStorage.removeItem('title')").unwrap();
+    assert!(inspect.entry(0, true).is_none());
+}
+
+#[test]
+fn inspector_loads_persisted_local_storage_without_a_page_runtime() {
+    #[derive(Default)]
+    struct Disk(RefCell<Option<Vec<u8>>>);
+    impl StoragePersistence for Disk {
+        fn load(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.borrow().clone())
+        }
+        fn save(&self, _: &str, data: &[u8]) -> Result<(), String> {
+            *self.0.borrow_mut() = Some(data.to_vec());
+            Ok(())
+        }
+    }
+    let disk = Rc::new(Disk::default());
+    let url = url::Url::parse("https://storage.test/").unwrap();
+    {
+        let profile = StorageProfile::with_persistence(disk.clone());
+        let tab = TabStorage::new(profile.clone());
+        realm(url.as_str(), &tab)
+            .eval("localStorage.key1 = 'from disk'")
+            .unwrap();
+        profile.flush().unwrap();
+    }
+    let tab = TabStorage::new(StorageProfile::with_persistence(disk));
+    let r = tab
+        .inspect_storage(&url, false)
+        .unwrap()
+        .unwrap()
+        .entry(0, false)
+        .unwrap();
+    assert_eq!(r.value, "from disk");
+}

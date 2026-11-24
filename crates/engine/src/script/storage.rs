@@ -283,12 +283,7 @@ impl StorageHost {
         let prototype = vm.root(prototype);
         let exception = vm.get_global("DOMException")?;
         let exception = vm.root(exception);
-        let origin = match url.scheme() {
-            "http" | "https" => Some(url.origin().ascii_serialization()),
-            // The built-in start page stores its shortcuts in this profile.
-            "about" if url.as_str() == "about:home" => Some("about:home".into()),
-            _ => None,
-        };
+        let origin = crate::web_storage::storage_origin(url);
         let inbox = Rc::new(Inbox::default());
         let areas = [false, true].map(|session| {
             origin.as_ref().map(|origin| {

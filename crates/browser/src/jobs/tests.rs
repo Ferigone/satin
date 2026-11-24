@@ -275,20 +275,18 @@ fn request_abort_is_reported_without_canceling_the_page() {
             Phase::Started {
                 method: Some("GET".into()),
                 url: client.join("headers").unwrap().to_string(),
+                resource_type: None,
             },
             Phase::Cancelled,
         ]
     );
-    assert_eq!(
-        streaming,
-        [
-            Phase::Started {
-                method: Some("GET".into()),
-                url: client.join("body").unwrap().to_string(),
-            },
-            Phase::FetchResponse { status: Some(200) },
-        ],
-        "The observer must not infer an outcome from body progress"
+    assert!(
+        matches!(streaming.as_slice(), [
+        Phase::Started { method: Some(method), url, resource_type: None },
+        Phase::Response { status: Some(200), headers_at: Some(_), .. },
+        Phase::Cancelled
+    ] if method == "GET" && url == client.join("body").unwrap().as_str()),
+        "The transfer reported the per-request abort: {streaming:?}"
     );
     submit(3, "healthy", None);
     let (path, mut healthy) = accept(&server, Instant::now() + WAIT);
@@ -314,6 +312,18 @@ fn request_abort_is_reported_without_canceling_the_page() {
     let mut transfer = head.transfer.unwrap();
     assert_eq!(read(&mut transfer, &mut rx).unwrap().unwrap(), b"OK");
     assert!(read(&mut transfer, &mut rx).unwrap().is_none());
+    let healthy: Vec<_> = std::iter::from_fn(|| events.try_recv())
+        .filter(|e| e.key.request == Request::Fetch(3))
+        .collect();
+    assert!(
+        matches!(healthy.as_slice(), [start, head, end] if
+            matches!(&start.phase, Phase::Started {method:Some(m), ..} if m=="GET") &&
+            matches!(&head.phase, Phase::Response {status: Some(200), details, ..} if details.mime.as_deref()==Some("text/html") && details.declared_bytes==Some(2)) &&
+            end.phase == Phase::Finished { body_bytes: Some(2) } &&
+            start.started == head.started && head.started == end.started && head.elapsed <= end.elapsed
+        ),
+        "{healthy:?}"
+    );
     drop(old_connections);
 }
 
@@ -385,19 +395,26 @@ fn redirect_and_full_result_queue_share_the_navigation_deadline() {
         Phase::Started {
             method: Some("GET".into()),
             url: format!("http://{}/redirect", server.local_addr().unwrap()),
+            resource_type: None,
         }
     );
     let opened = events.try_recv().unwrap();
     assert_eq!(opened.key, key);
-    let Phase::NavigationOpened {
+    let Phase::Response {
         status,
-        response_time,
+        headers_at: Some(headers_at),
+        details,
     } = opened.phase
     else {
         panic!("Expected real navigation headers");
     };
-    assert_eq!(status, 200);
-    assert!(response_time <= opened.elapsed);
+    assert_eq!(status, Some(200));
+    assert_eq!(details.mime.as_deref(), Some("text/html"));
+    assert!(headers_at.duration_since(opened.started) <= opened.elapsed);
+    assert_eq!(
+        details.final_url,
+        Some(format!("http://{}/stream", server.local_addr().unwrap()))
+    );
     let failed = events.try_recv().unwrap();
     assert_eq!(failed.key, key);
     assert_eq!(failed.phase, Phase::Failed);
@@ -478,14 +495,38 @@ fn successful_document_resource_uses_its_existing_id_and_sanitized_final_url() {
     };
     assert_eq!(result_id, id);
     assert_eq!(resource.url.query(), Some("private=2"));
-    let event = std::iter::from_fn(|| events.try_recv())
-        .find(|event| event.key.request == Request::Resource(id))
-        .expect("The HTTP resource was observed");
-    assert_eq!((event.key.tab, event.key.navigation), (12, 7));
+    let resource_events: Vec<_> = std::iter::from_fn(|| events.try_recv())
+        .filter(|event| event.key.request == Request::Resource(id))
+        .collect();
+    assert_eq!(resource_events.len(), 3);
+    assert!(
+        resource_events
+            .iter()
+            .all(|event| (event.key.tab, event.key.navigation) == (12, 7))
+    );
+    assert!(
+        matches!(&resource_events[0].phase, Phase::Started { url, resource_type: Some("Stylesheet"), .. }
+        if url == &format!("http://{}/style.css", server.local_addr().unwrap()))
+    );
+    let Phase::Response {
+        status: Some(200),
+        details,
+        ..
+    } = &resource_events[1].phase
+    else {
+        panic!("missing HTTP response");
+    };
     assert_eq!(
-        event.phase,
-        Phase::ResourceLoaded {
-            url: format!("http://{}/final.css", server.local_addr().unwrap()),
+        details.final_url,
+        Some(format!("http://{}/final.css", server.local_addr().unwrap()))
+    );
+    assert_eq!(details.body_bytes, Some(0));
+    assert_eq!(details.mime.as_deref(), Some("text/css"));
+    assert_eq!(details.declared_bytes, Some(0));
+    assert_eq!(
+        resource_events[2].phase,
+        Phase::Finished {
+            body_bytes: Some(0)
         }
     );
 }
@@ -506,6 +547,7 @@ fn a_full_metadata_queue_does_not_delay_the_page_fetch_result() {
                 },
                 "GET",
                 &client,
+                None,
             )
             .unwrap();
     }

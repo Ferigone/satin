@@ -2,7 +2,7 @@ use rust_browser_engine::{Fonts, Rect, css::Color, paint::Canvas};
 
 const HEADER_HEIGHT: f32 = 36.;
 const TAB_INSET: f32 = 6.;
-const TAB_WIDTH: f32 = 88.;
+const TAB_WIDTH: f32 = 103.;
 const PANEL: Color = Color(26, 26, 28, 255);
 const TOOLBAR: Color = Color(33, 32, 35, 255);
 const ACTIVE_TAB: Color = Color(43, 41, 47, 255);
@@ -16,15 +16,30 @@ pub(super) enum Section {
     #[default]
     Console,
     Network,
+    Elements,
+    Sources,
+    Performance,
+    Application,
 }
 
 impl Section {
-    const ALL: [Self; 2] = [Self::Console, Self::Network];
+    pub(super) const ALL: [Self; 6] = [
+        Self::Console,
+        Self::Network,
+        Self::Elements,
+        Self::Sources,
+        Self::Performance,
+        Self::Application,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Console => "Console",
             Self::Network => "Network",
+            Self::Elements => "Elements",
+            Self::Sources => "Sources",
+            Self::Performance => "Performance",
+            Self::Application => "Application",
         }
     }
 }
@@ -32,7 +47,8 @@ impl Section {
 pub(super) struct Layout {
     bounds: Rect,
     header: Rect,
-    tabs: [Rect; 2],
+    tabs: [Rect; Section::ALL.len()],
+    picker: Rect,
     pub(super) body: Rect,
 }
 
@@ -46,7 +62,7 @@ impl Layout {
             ..bounds
         };
         let inset = TAB_INSET.min(bounds.width / 12.);
-        let width = TAB_WIDTH.min((bounds.width - 2. * inset) / 2.);
+        let width = TAB_WIDTH.min((bounds.width - 2. * inset) / (Section::ALL.len() + 1) as f32);
         let tab = Rect {
             x: bounds.x + inset,
             y: bounds.y + 1.,
@@ -56,13 +72,14 @@ impl Layout {
         Some(Self {
             bounds,
             header,
-            tabs: [
-                tab,
-                Rect {
-                    x: tab.x + tab.width,
-                    ..tab
-                },
-            ],
+            tabs: std::array::from_fn(|i| Rect {
+                x: tab.x + i as f32 * width,
+                ..tab
+            }),
+            picker: Rect {
+                x: tab.x + Section::ALL.len() as f32 * width,
+                ..tab
+            },
             body: Rect {
                 y: bounds.y + header.height,
                 height: bounds.height - header.height,
@@ -75,7 +92,12 @@ impl Layout {
         Section::ALL
             .into_iter()
             .zip(self.tabs)
+            .rev()
             .find_map(|(section, rect)| contains(rect, x, y).then_some(section))
+    }
+
+    pub(super) fn picker_at(&self, x: f32, y: f32) -> bool {
+        contains(self.picker, x, y)
     }
 
     pub(super) fn paint(
@@ -84,6 +106,7 @@ impl Layout {
         fonts: &mut Fonts,
         scale: f32,
         active: Section,
+        picking: bool,
     ) {
         let physical = |rect| scaled(rect, scale);
         canvas.clip(physical(self.bounds));
@@ -117,7 +140,36 @@ impl Layout {
                 fonts,
             );
         }
+        canvas.clip(physical(self.picker));
+        if picking {
+            canvas.fill_rect(physical(self.picker), ACTIVE_TAB);
+        }
+        canvas.label(
+            if picking {
+                "Picking…"
+            } else {
+                "Pick element"
+            },
+            (self.picker.x + 6.) * scale,
+            (self.picker.y + self.picker.height / 2. + 4.) * scale,
+            13. * scale,
+            if picking { ACCENT } else { MUTED },
+            picking,
+            fonts,
+        );
         canvas.clip(physical(self.header));
+        let guide_x = self.picker.x + self.picker.width + 12.;
+        if self.header.x + self.header.width - guide_x > 230. {
+            canvas.label(
+                "Alt+1–6   Switch panel",
+                guide_x * scale,
+                (self.header.y + self.header.height / 2. + 4.) * scale,
+                12. * scale,
+                MUTED,
+                false,
+                fonts,
+            );
+        }
         for y in [self.header.y, self.header.y + self.header.height - 1.] {
             canvas.fill_rect(
                 physical(Rect {
@@ -169,7 +221,7 @@ mod tests {
             height: 220.,
         })
         .unwrap();
-        let [console, network] = layout.tabs;
+        let [console, network, elements, ..] = layout.tabs;
         assert_eq!(
             layout.section_at(console.x, console.y),
             Some(Section::Console)
@@ -179,8 +231,8 @@ mod tests {
             Some(Section::Network)
         );
         assert_eq!(
-            layout.section_at(network.x + network.width, network.y),
-            None
+            layout.section_at(elements.x, network.y),
+            Some(Section::Elements)
         );
         assert_eq!(layout.section_at(network.x, layout.body.y), None);
         assert!(!contains(layout.bounds, 10., 340.));

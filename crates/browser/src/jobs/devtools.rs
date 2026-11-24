@@ -4,6 +4,10 @@
 //! Jobs skipped before entering the loader, redirect hops, CORS preflights,
 //! and traffic that does not use these workers are not observed. Dropped
 //! events or worker shutdown can leave a lifecycle incomplete.
+use rust_browser_engine::{
+    loader::{HttpContentMetadata, ResourceKind},
+    network::WebResponse,
+};
 use std::{
     sync::{
         Arc,
@@ -39,6 +43,7 @@ pub(crate) struct Event {
     pub key: Key,
     /// Wall time since entering the loader path: not wire or socket timing.
     pub elapsed: Duration,
+    pub started: Instant,
     pub phase: Phase,
 }
 
@@ -49,27 +54,64 @@ pub(crate) enum Phase {
     Started {
         method: Option<String>,
         url: String,
+        resource_type: Option<&'static str>,
     },
-    /// Final HTTP headers of a navigation the loader accepted. The elapsed
-    /// time measures header arrival even if Open required a buffered body.
-    NavigationOpened {
-        status: u16,
-        response_time: Duration,
-    },
-    /// The navigation loader returned successfully, not DOM/load completion.
-    NavigationFinished,
-    /// The exposed Fetch response, not body completion. Opaque status is None.
-    FetchResponse {
+    /// Only the final (or Fetch-exposed) response. Header arrival may be
+    /// unavailable for buffered policy-checked resources.
+    Response {
         status: Option<u16>,
+        headers_at: Option<Instant>,
+        details: ResponseDetails,
     },
-    /// One-shot event from a successful GET resource load. Only the sanitized
-    /// final URL is visible; the request URL, subtype and HTTP status are not.
-    ResourceLoaded {
-        url: String,
+    Finished {
+        body_bytes: Option<u64>,
     },
     /// Loader/worker errors are deliberately not included as raw strings.
     Failed,
     Cancelled,
+}
+
+/// Only allowlisted, bounded display fields cross the observer queue.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ResponseDetails {
+    pub final_url: Option<String>,
+    pub mime: Option<String>,
+    pub declared_bytes: Option<u64>,
+    pub body_bytes: Option<u64>,
+    pub response_type: Option<&'static str>,
+}
+
+impl ResponseDetails {
+    pub(super) fn from_url(url: &str) -> Self {
+        let final_url = Url::parse(url)
+            .ok()
+            .filter(is_http)
+            .map(|url| display_url(&url));
+        Self {
+            final_url,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn from_fetch(response: &WebResponse) -> Self {
+        let mut details = Self::from_url(&response.url);
+        details.response_type = Some(response.response_type.as_str());
+        let content = HttpContentMetadata::from_exposed_headers(&response.headers);
+        details.mime = content.mime;
+        details.declared_bytes = content.declared_bytes;
+        details
+    }
+}
+
+pub(super) fn resource_label(kind: &ResourceKind) -> &'static str {
+    match kind {
+        ResourceKind::Stylesheet => "Stylesheet",
+        ResourceKind::ClassicScript => "Script",
+        ResourceKind::ModuleScript => "Module",
+        ResourceKind::Image => "Image",
+        ResourceKind::Media => "Media",
+        ResourceKind::Font | ResourceKind::LocalFont(_) => "Font",
+    }
 }
 
 /// Consumers must filter by tab and navigation before storing or displaying.
@@ -110,13 +152,14 @@ pub(super) fn channel() -> (Observer, Receiver) {
 }
 
 impl Observer {
-    fn record(&self, key: Key, elapsed: Duration, phase: impl FnOnce() -> Phase) {
+    fn record(&self, key: Key, started: Instant, elapsed: Duration, phase: impl FnOnce() -> Phase) {
         // Reserve without waiting, even if no one drains the observer. Format
         // strings only after reserving space; never enqueue raw request data.
         match self.tx.try_reserve() {
             Ok(slot) => slot.send(Event {
                 key,
                 elapsed,
+                started,
                 phase: phase(),
             }),
             Err(mpsc::error::TrySendError::Full(())) => {
@@ -126,42 +169,41 @@ impl Observer {
         }
     }
 
-    pub(super) fn begin(&self, key: Key, method: &str, url: &Url) -> Option<Trace<'_>> {
+    pub(super) fn begin(
+        &self,
+        key: Key,
+        method: &str,
+        url: &Url,
+        resource_type: Option<&'static str>,
+    ) -> Option<Trace> {
         if !is_http(url) || self.tx.is_closed() {
             return None;
         }
         let trace = Trace {
-            observer: self,
+            observer: self.clone(),
             key,
             started: Instant::now(),
         };
-        self.record(key, Duration::ZERO, || Phase::Started {
+        self.record(key, trace.started, Duration::ZERO, || Phase::Started {
             method: display_method(method),
             url: display_url(url),
+            resource_type,
         });
         Some(trace)
     }
-
-    pub(super) fn resource_loaded(&self, key: Key, started: Instant, url: &Url) {
-        if is_http(url) {
-            self.record(key, started.elapsed(), || Phase::ResourceLoaded {
-                url: display_url(url),
-            });
-        }
-    }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct Trace<'a> {
-    observer: &'a Observer,
+#[derive(Clone)]
+pub(super) struct Trace {
+    observer: Observer,
     key: Key,
-    started: Instant,
+    pub(super) started: Instant,
 }
 
-impl Trace<'_> {
-    pub(super) fn record(self, phase: Phase) {
+impl Trace {
+    pub(super) fn record(&self, phase: Phase) {
         self.observer
-            .record(self.key, self.started.elapsed(), || phase);
+            .record(self.key, self.started, self.started.elapsed(), || phase);
     }
 }
 
@@ -219,16 +261,53 @@ mod tests {
     }
 
     #[test]
+    fn response_metadata_keeps_only_bounded_display_fields() {
+        use rust_browser_engine::network::ResponseType;
+        let response = WebResponse {
+            url: "https://user:private@example.test/route?token=private#private".into(),
+            status: 200,
+            status_text: "private".into(),
+            headers: vec![
+                ("content-type".into(), "Text/HTML; boundary=private".into()),
+                ("content-length".into(), "23".into()),
+                ("set-cookie".into(), "private".into()),
+                ("authorization".into(), "private".into()),
+                ("x-not-displayed".into(), "private".into()),
+            ],
+            body: Some(Arc::new(b"private".to_vec())),
+            response_type: ResponseType::Basic,
+            redirected: true,
+        };
+        let details = ResponseDetails::from_fetch(&response);
+        assert_eq!(details.mime.as_deref(), Some("text/html"));
+        assert_eq!(details.declared_bytes, Some(23));
+        assert_eq!(
+            details.final_url.as_deref(),
+            Some("https://example.test/route")
+        );
+        assert!(!format!("{details:?}").contains("private"));
+        for invalid in ["+12", "-2", "1, 2", "18446744073709551616"] {
+            assert!(
+                HttpContentMetadata::from_fields(None, Some(invalid))
+                    .declared_bytes
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn overflow_and_disconnect_never_require_the_consumer() {
         let (observer, mut receiver) = channel();
         let key = key(Request::Fetch(1));
         let url = Url::parse("https://example.test/").unwrap();
-        let trace = observer.begin(key, "GET", &url).unwrap();
+        let trace = observer.begin(key, "GET", &url, None).unwrap();
         for _ in 1..CAPACITY {
-            trace.record(Phase::FetchResponse { status: Some(200) });
+            trace.record(Phase::Finished {
+                body_bytes: Some(7),
+            });
         }
         // The phase closure must not run when the queue is full or closed.
-        observer.record(key, Duration::ZERO, || {
+        observer.record(key, Instant::now(), Duration::ZERO, || {
             panic!("full queue formatted a phase")
         });
         assert_eq!(receiver.take_dropped(), 1);
@@ -241,13 +320,15 @@ mod tests {
         for _ in 1..CAPACITY {
             assert_eq!(
                 receiver.try_recv().unwrap().phase,
-                Phase::FetchResponse { status: Some(200) }
+                Phase::Finished {
+                    body_bytes: Some(7)
+                }
             );
         }
         assert_eq!(receiver.try_recv().unwrap().phase, Phase::Cancelled);
         assert!(receiver.try_recv().is_none());
         drop(receiver);
-        observer.record(key, Duration::ZERO, || {
+        observer.record(key, Instant::now(), Duration::ZERO, || {
             panic!("closed queue formatted a phase")
         });
     }
@@ -259,10 +340,14 @@ mod tests {
             let url = Url::parse(address).unwrap();
             assert!(
                 observer
-                    .begin(key(Request::Navigate), "GET", &url)
+                    .begin(key(Request::Navigate), "GET", &url, None)
                     .is_none()
             );
-            observer.resource_loaded(key(Request::Resource(1)), Instant::now(), &url);
+            assert!(
+                observer
+                    .begin(key(Request::Resource(1)), "GET", &url, Some("Image"))
+                    .is_none()
+            );
         }
         assert!(receiver.try_recv().is_none());
         assert_eq!(receiver.take_dropped(), 0);

@@ -1,6 +1,7 @@
 //! In-memory Network rows for one tab/document. Only the observer can report
 //! an actual request or lifecycle milestone; the log does no transport work.
 
+use crate::jobs::devtools::ResponseDetails;
 use std::{
     collections::VecDeque,
     time::{Duration, Instant},
@@ -102,12 +103,14 @@ pub(crate) enum NetworkPhase {
     Started {
         method: DisplayMethod,
         url: DisplayUrl,
+        resource_type: Option<&'static str>,
     },
     // The observed response head; None if its HTTP status isn't exposed.
     ResponseHeaders {
         status: Option<u16>,
+        details: ResponseDetails,
     },
-    Terminal(TerminalOutcome),
+    Terminal(TerminalOutcome, Option<u64>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,7 +139,9 @@ pub(crate) struct NetworkRow {
     pub key: RequestKey,
     pub method: DisplayMethod,
     pub url: DisplayUrl,
-    started_at: Option<Instant>,
+    pub started_at: Option<Instant>,
+    pub resource_type: Option<&'static str>,
+    pub details: ResponseDetails,
     headers: Option<Observation<Option<u16>>>,
     terminal: Option<Observation<TerminalOutcome>>,
 }
@@ -157,6 +162,28 @@ impl NetworkRow {
     }
 
     /// Time to the row's displayed phase, never wall time since start.
+    pub(crate) fn headers_elapsed(&self) -> Option<Duration> {
+        self.headers
+            .as_ref()?
+            .at?
+            .checked_duration_since(self.started_at?)
+    }
+
+    pub(crate) fn end_elapsed(&self) -> Option<Duration> {
+        self.terminal
+            .as_ref()?
+            .at?
+            .checked_duration_since(self.started_at?)
+    }
+
+    pub(crate) fn category(&self) -> &'static str {
+        self.resource_type.unwrap_or(match self.key.kind {
+            RequestKind::Navigation => "Document",
+            RequestKind::Resource => "Resource",
+            RequestKind::FetchOrXhr => "Fetch/XHR",
+        })
+    }
+
     pub(crate) fn elapsed(&self) -> Option<Duration> {
         let at = match &self.terminal {
             Some(terminal) => terminal.at,
@@ -228,7 +255,14 @@ impl NetworkLog {
         // after eviction/clear. No unbounded orphan or tombstone storage.
         let row = self.rows.iter_mut().find(|row| row.key == key);
         match (phase, row) {
-            (NetworkPhase::Started { method, url }, None) => {
+            (
+                NetworkPhase::Started {
+                    method,
+                    url,
+                    resource_type,
+                },
+                None,
+            ) => {
                 if self.rows.len() == ROW_LIMIT {
                     self.rows.pop_front();
                     self.loss.evicted_rows = self.loss.evicted_rows.saturating_add(1);
@@ -238,12 +272,20 @@ impl NetworkLog {
                     method,
                     url,
                     started_at: at,
+                    resource_type,
+                    details: ResponseDetails::default(),
                     headers: None,
                     terminal: None,
                 });
             }
             (NetworkPhase::Started { .. }, Some(_)) => {}
-            (NetworkPhase::ResponseHeaders { status }, Some(row)) => {
+            (NetworkPhase::ResponseHeaders { status, details }, Some(row)) => {
+                if row.headers.is_none() {
+                    row.details = ResponseDetails {
+                        body_bytes: row.details.body_bytes.or(details.body_bytes),
+                        ..details
+                    };
+                }
                 // A delayed head can fill in status without undoing a terminal
                 // observation. Retain the first head if replayed.
                 row.headers.get_or_insert(Observation {
@@ -251,7 +293,10 @@ impl NetworkLog {
                     at,
                 });
             }
-            (NetworkPhase::Terminal(value), Some(row)) => {
+            (NetworkPhase::Terminal(value, bytes), Some(row)) => {
+                if row.terminal.is_none() && bytes.is_some() {
+                    row.details.body_bytes = bytes;
+                }
                 row.terminal.get_or_insert(Observation { value, at });
             }
             (_, None) => {
@@ -300,6 +345,7 @@ mod tests {
             NetworkPhase::Started {
                 method: DisplayMethod::from_method("GET"),
                 url: DisplayUrl::from_url(&url),
+                resource_type: None,
             },
         );
     }
@@ -326,7 +372,7 @@ mod tests {
                 &mut log,
                 foreign,
                 None,
-                NetworkPhase::Terminal(TerminalOutcome::Failed),
+                NetworkPhase::Terminal(TerminalOutcome::Failed, None),
             );
             log.note_dropped_events(scope, 99);
         }
@@ -334,7 +380,10 @@ mod tests {
             &mut log,
             fetch,
             None,
-            NetworkPhase::ResponseHeaders { status: Some(404) },
+            NetworkPhase::ResponseHeaders {
+                status: Some(404),
+                details: ResponseDetails::default(),
+            },
         );
         assert_eq!(
             log.rows()
@@ -362,7 +411,10 @@ mod tests {
             &mut log,
             key,
             at + to_headers,
-            NetworkPhase::ResponseHeaders { status: Some(404) },
+            NetworkPhase::ResponseHeaders {
+                status: Some(404),
+                details: ResponseDetails::default(),
+            },
         );
         let row = log.rows().next().unwrap();
         assert_eq!(row.outcome(), NetworkOutcome::HeadersReceived);
@@ -379,7 +431,7 @@ mod tests {
             &mut log,
             key,
             at + to_end,
-            NetworkPhase::Terminal(TerminalOutcome::Completed),
+            NetworkPhase::Terminal(TerminalOutcome::Completed, None),
         );
         let row = log.rows().next().unwrap();
         assert_eq!(
@@ -397,25 +449,31 @@ mod tests {
             let key = key(RequestKind::FetchOrXhr, 2);
             let at = Instant::now();
             start(&mut log, key, at);
-            send(&mut log, key, None, NetworkPhase::Terminal(outcome));
+            send(&mut log, key, None, NetworkPhase::Terminal(outcome, None));
             send(
                 &mut log,
                 key,
                 at,
-                NetworkPhase::ResponseHeaders { status: Some(200) },
+                NetworkPhase::ResponseHeaders {
+                    status: Some(200),
+                    details: ResponseDetails::default(),
+                },
             );
             send(
                 &mut log,
                 key,
                 at,
-                NetworkPhase::ResponseHeaders { status: Some(202) },
+                NetworkPhase::ResponseHeaders {
+                    status: Some(202),
+                    details: ResponseDetails::default(),
+                },
             );
             start(&mut log, key, at);
             send(
                 &mut log,
                 key,
                 at,
-                NetworkPhase::Terminal(TerminalOutcome::Completed),
+                NetworkPhase::Terminal(TerminalOutcome::Completed, None),
             );
             let row = log.rows().next().unwrap();
             assert_eq!(row.outcome(), NetworkOutcome::Terminal(outcome));
@@ -435,7 +493,10 @@ mod tests {
             &mut log,
             key,
             at,
-            NetworkPhase::ResponseHeaders { status: Some(0) },
+            NetworkPhase::ResponseHeaders {
+                status: Some(0),
+                details: ResponseDetails::default(),
+            },
         );
         let row = log.rows().next().unwrap();
         assert_eq!(row.status(), None);
@@ -451,13 +512,16 @@ mod tests {
             &mut log,
             key,
             None,
-            NetworkPhase::ResponseHeaders { status: Some(200) },
+            NetworkPhase::ResponseHeaders {
+                status: Some(200),
+                details: ResponseDetails::default(),
+            },
         );
         send(
             &mut log,
             key,
             None,
-            NetworkPhase::Terminal(TerminalOutcome::Completed),
+            NetworkPhase::Terminal(TerminalOutcome::Completed, None),
         );
         assert_eq!(log.rows().len(), 0);
         assert_eq!(log.loss().unmatched_events, 2);
@@ -478,7 +542,10 @@ mod tests {
             &mut log,
             oldest,
             None,
-            NetworkPhase::ResponseHeaders { status: Some(200) },
+            NetworkPhase::ResponseHeaders {
+                status: Some(200),
+                details: ResponseDetails::default(),
+            },
         );
         let newest = key(RequestKind::Resource, ROW_LIMIT as u64);
         start(&mut log, newest, None);
@@ -486,7 +553,7 @@ mod tests {
             &mut log,
             oldest,
             None,
-            NetworkPhase::Terminal(TerminalOutcome::Failed),
+            NetworkPhase::Terminal(TerminalOutcome::Failed, None),
         );
         assert_eq!(log.rows().len(), ROW_LIMIT);
         assert_eq!(log.rows().next().unwrap().key.id, 1);
@@ -517,7 +584,7 @@ mod tests {
             &mut log,
             old_key,
             None,
-            NetworkPhase::Terminal(TerminalOutcome::Cancelled),
+            NetworkPhase::Terminal(TerminalOutcome::Cancelled, None),
         );
         assert_eq!(log.loss().unmatched_events, 1);
         assert_eq!(log.rows().len(), 0);
@@ -534,7 +601,7 @@ mod tests {
             &mut log,
             old_key,
             None,
-            NetworkPhase::Terminal(TerminalOutcome::Cancelled),
+            NetworkPhase::Terminal(TerminalOutcome::Cancelled, None),
         );
         let row = log.rows().next().unwrap();
         assert_eq!(row.key, new_key);

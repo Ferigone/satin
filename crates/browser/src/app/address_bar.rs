@@ -2,7 +2,7 @@ use std::ops::Range;
 
 const MAX_ADDRESS_BYTES: usize = 16_384;
 
-pub(super) enum Movement {
+pub(crate) enum Movement {
     Left,
     Right,
     Start,
@@ -12,41 +12,41 @@ pub(super) enum Movement {
 /// Both ends of the selection are UTF-8 character boundaries. The caret is
 /// the moving end, so Shift can shrink or reverse a selection.
 #[derive(Default)]
-pub(super) struct AddressBar {
+pub(crate) struct AddressBar {
     text: String,
     anchor: usize,
     caret: usize,
 }
 
 impl AddressBar {
-    pub(super) fn text(&self) -> &str {
+    pub(crate) fn text(&self) -> &str {
         &self.text
     }
 
-    pub(super) fn set_text(&mut self, text: String) {
+    pub(crate) fn set_text(&mut self, text: String) {
         self.text = text;
         self.collapse(self.text.len());
     }
 
-    pub(super) fn caret(&self) -> usize {
+    pub(crate) fn caret(&self) -> usize {
         self.caret
     }
 
-    pub(super) fn selection(&self) -> Range<usize> {
+    pub(crate) fn selection(&self) -> Range<usize> {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
     }
 
-    pub(super) fn selected_text(&self) -> Option<&str> {
+    pub(crate) fn selected_text(&self) -> Option<&str> {
         let range = self.selection();
         (!range.is_empty()).then(|| &self.text[range])
     }
 
-    pub(super) fn select_all(&mut self) {
+    pub(crate) fn select_all(&mut self) {
         self.anchor = 0;
         self.caret = self.text.len();
     }
 
-    pub(super) fn move_caret(&mut self, movement: Movement, extend: bool) {
+    pub(crate) fn move_caret(&mut self, movement: Movement, extend: bool) {
         let selected = self.selection();
         self.caret = match movement {
             Movement::Left if !extend && !selected.is_empty() => selected.start,
@@ -61,19 +61,25 @@ impl AddressBar {
         }
     }
 
-    pub(super) fn insert(&mut self, text: &str) -> bool {
+    pub(crate) fn insert(&mut self, text: &str) -> bool {
         let filtered: String = text.chars().filter(|c| !c.is_control()).collect();
+        self.insert_text(&filtered)
+    }
+
+    /// Insert unchanged text, including line boundaries in a developer command.
+    pub(crate) fn insert_text(&mut self, text: &str) -> bool {
         let selected = self.selection();
-        if filtered.is_empty()
-            || self.text.len() - selected.len() + filtered.len() > MAX_ADDRESS_BYTES
+        if text.is_empty()
+            || text.len()
+                > MAX_ADDRESS_BYTES - (self.text.len() - selected.len()).min(MAX_ADDRESS_BYTES)
         {
             return false;
         }
-        self.replace(selected, &filtered);
+        self.replace(selected, text);
         true
     }
 
-    pub(super) fn delete(&mut self, backward: bool) {
+    pub(crate) fn delete(&mut self, backward: bool) {
         let mut range = self.selection();
         if range.is_empty() {
             range = if backward {
@@ -85,7 +91,7 @@ impl AddressBar {
         self.replace(range, "");
     }
 
-    pub(super) fn delete_selection(&mut self) {
+    pub(crate) fn delete_selection(&mut self) {
         self.replace(self.selection(), "");
     }
 

@@ -1,42 +1,25 @@
-//! Desktop DevTools contract for App integration (`mod devtools` in `main.rs`):
-//!
-//! - Store one `DevTools::default()` per window, using lane 08's `DevtoolsDock`
-//!   `draw` / `input` methods. App owns F12, visibility, placement, viewport
-//!   sizing, focus, and event routing. Prefer `Option<DevTools>` over
-//!   `Option<Box<dyn DevtoolsDock>>` in App so it can also call the concrete
-//!   lifecycle and capture methods below.
-//! - `begin_navigation(tab_id, navigation_id)` at the real navigation boundary,
-//!   before dispatching any work, clears the previous attempt. Never call it
-//!   for same-document history/fragment changes, tab switches, or dock toggles.
-//!   The error-page replacement advances App's job generation but is not a new
-//!   inspection attempt: keep the failed attempt and its real outcome visible.
-//! - `close_tab(tab_id)` drops that tab's data. Ingestion uses the originating
-//!   tab and navigation IDs even for an inactive tab; unregistered, closed,
-//!   and superseded scopes must not be created from events.
-//! - Call `sync_console(tab_id, navigation_id, runtime)` after script work,
-//!   regardless of visibility or whether the page changed. This drains only the
-//!   structured Console batch, not legacy diagnostics. Sync before routing
-//!   Console Clear and before discarding a failed document's runtime.
-//! - Pass packets from `Workers::new_observed` to `observe_network(event)`.
-//!   Drain them without waiting, independently of App's job-generation check:
-//!   that check also rejects the final observation for a failed attempt. The
-//!   jobs wake the existing event loop; App drains on that loop.
-//!   Drain available packets before routing Network Clear. The queue overflow
-//!   total is window-wide and must not be attributed to a document.
+//! The native dock belongs to its window. Each top-level navigation owns
+//! its logs, editor state, selections and measurements. A failed navigation
+//! keeps its network observations through the recovery page. Capture never
+//! creates or reopens a tab, and stale observer packets are ignored.
 
+mod application;
 mod console;
+mod console_interaction;
 mod console_view;
+mod elements;
 mod network;
 mod network_view;
 mod panel;
+mod performance;
+mod sources;
 
 use self::console::{Console, ConsoleFilter, ConsoleInput, ConsoleOrigin, ConsoleSeverity};
-use self::console_view::{ConsoleLayout, ConsoleRow, Failure, Severity};
+use self::console_view::{ConsoleRow, Failure, Severity};
 use self::network::{
     DisplayMethod, DisplayUrl, NetworkEvent, NetworkLog, NetworkOutcome, NetworkPhase,
     NetworkScope, RequestKey, RequestKind, TerminalOutcome,
 };
-use self::network_view::{NetworkLayout, NetworkView};
 use self::panel::{Layout, Section};
 use crate::app::{DevtoolsDock, DockFrame, DockInput};
 use crate::jobs::devtools as observer;
@@ -47,10 +30,7 @@ use rust_browser_engine::{
         ConsoleLevel, ConsoleOrigin as RuntimeOrigin, ConsolePhase, ConsoleSnapshot, ScriptRuntime,
     },
 };
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    time::Instant,
-};
+use std::collections::{HashMap, hash_map::Entry};
 use winit::keyboard::{Key, NamedKey};
 
 // Match App's MAX_TABS. Never evict a live tab because another scope appeared.
@@ -61,72 +41,83 @@ pub(crate) struct DevTools {
     section: Section,
     documents: HashMap<u64, Document>,
     observer_dropped: usize,
+    pub(crate) picking: bool,
 }
 
 struct Document {
+    elements: elements::Elements,
+    application: application::Application,
+    sources: sources::Sources,
+    performance: performance::Performance,
     navigation: u64,
     console: Console,
     console_source_dropped: u64,
     console_scroll: f32,
+    console_controls: console_interaction::ConsoleControls,
     network: NetworkLog,
-    network_scroll: f32,
-    network_clock: Instant,
+    network_inspector: network_view::Inspector,
 }
 
 impl Document {
     fn new(tab: u64, navigation: u64) -> Self {
         Self {
             navigation,
+            elements: Default::default(),
+            application: Default::default(),
+            sources: Default::default(),
+            performance: Default::default(),
             console: Console::default(),
             console_source_dropped: 0,
             console_scroll: f32::INFINITY,
+            console_controls: console_interaction::ConsoleControls::default(),
             network: NetworkLog::new(NetworkScope { tab, navigation }),
-            network_scroll: 0.,
-            network_clock: Instant::now(),
+            network_inspector: network_view::Inspector::default(),
         }
-    }
-
-    fn console_layout(&self, bounds: Rect) -> ConsoleLayout {
-        ConsoleLayout::new(
-            bounds,
-            self.console.rows(ConsoleFilter::ALL).count(),
-            self.console_scroll,
-            self.console
-                .discarded()
-                .saturating_add(self.console_source_dropped),
-        )
     }
 
     fn click(&mut self, section: Section, bounds: Rect, x: f32, y: f32) {
         match section {
-            Section::Console => {
-                if self
-                    .console_layout(bounds)
-                    .clear
-                    .is_some_and(|rect| rect.contains(x, y))
-                {
-                    self.console.clear();
-                    self.console_source_dropped = 0;
-                    self.console_scroll = f32::INFINITY;
-                }
+            Section::Application => {
+                self.application.click(bounds, x, y);
             }
-            Section::Network => {
-                if NetworkLayout::new(bounds)
-                    .clear_rect()
-                    .is_some_and(|rect| rect.contains(x, y))
-                {
-                    self.network.clear();
-                    self.network_scroll = 0.;
-                }
+            Section::Elements => {
+                self.elements.click(bounds, x, y);
             }
+            Section::Sources => self.sources.click(bounds, x, y),
+            Section::Performance => self.performance.click(bounds, x, y),
+            Section::Console => self.console_click(bounds, x, y),
+            Section::Network => self
+                .network_inspector
+                .click(&mut self.network, bounds, x, y),
         }
     }
 
     fn scroll(&mut self, section: Section, bounds: Rect, x: f32, y: f32, delta_y: f32) {
         match section {
+            Section::Application => {
+                self.application.scroll(bounds, x, y, delta_y);
+            }
+            Section::Elements => {
+                self.elements.scroll(bounds, x, y, delta_y);
+            }
+            Section::Sources => self.sources.scroll(bounds, x, delta_y),
+            Section::Performance => {}
             Section::Console => {
                 let layout = self.console_layout(bounds);
                 if layout.list.contains(x, y) {
+                    if self.console_controls.detail.is_some() {
+                        let lines = (delta_y / 19.).round();
+                        if self.console_detail_scroll(
+                            layout.list,
+                            if lines == 0. {
+                                delta_y.signum() as isize
+                            } else {
+                                lines as isize
+                            },
+                        ) {
+                            return;
+                        }
+                    }
                     let next = layout.scroll_by(delta_y);
                     // Keep following new rows while the reader is at the bottom.
                     self.console_scroll = if next == layout.scroll_by(f32::MAX) {
@@ -136,13 +127,9 @@ impl Document {
                     };
                 }
             }
-            Section::Network => {
-                let layout = NetworkLayout::new(bounds);
-                if layout.list_rect().contains(x, y) {
-                    self.network_scroll =
-                        layout.scroll_by(self.network.rows().len(), self.network_scroll, delta_y);
-                }
-            }
+            Section::Network => self
+                .network_inspector
+                .scroll(&self.network, bounds, x, y, delta_y),
         }
     }
 
@@ -157,51 +144,28 @@ impl Document {
     ) {
         let scale = frame.scale;
         match section {
-            Section::Console => {
-                let rows: Vec<_> = self
-                    .console
-                    .rows(ConsoleFilter::ALL)
-                    .map(console_row)
-                    .collect();
-                self.console_layout(bounds).draw(
-                    canvas,
-                    fonts,
-                    &rows,
-                    scale,
-                    panel::scaled(bounds, scale),
-                );
-            }
-            Section::Network => {
-                let rows: Vec<_> = self.network.rows().map(network_row).collect();
-                let loss = self.network.loss();
-                let layout = NetworkLayout::new(bounds);
-                let coverage = if observer_dropped == 0 {
-                    "Partial HTTP(S): navigation final status, Fetch headers, loaded resources"
-                        .into()
-                } else {
-                    format!("Partial HTTP(S); {observer_dropped} events lost across all tabs")
-                };
-                network_view::draw_network(
-                    canvas,
-                    fonts,
-                    scale,
-                    panel::scaled(bounds, scale),
-                    &layout,
-                    NetworkView {
-                        rows: &rows,
-                        discarded: loss
-                            .evicted_rows
-                            .saturating_add(loss.dropped_events)
-                            .saturating_add(loss.unmatched_events),
-                        scroll: self.network_scroll,
-                        clear_hovered: layout.clear_rect().is_some_and(|clear| {
-                            window_pointer(frame).is_some_and(|(x, y)| clear.contains(x, y))
-                        }),
-                        coverage_note: Some(&coverage),
-                    },
-                );
-            }
+            Section::Application => self.application.draw(canvas, fonts, bounds, scale),
+            Section::Elements => self.elements.draw(canvas, fonts, bounds, scale),
+            Section::Sources => self.sources.draw(canvas, fonts, bounds, scale),
+            Section::Performance => self.performance.draw(canvas, fonts, bounds, scale),
+            Section::Console => self.draw_console(canvas, fonts, frame, bounds),
+            Section::Network => self.network_inspector.draw(
+                &self.network,
+                canvas,
+                fonts,
+                frame,
+                bounds,
+                observer_dropped,
+            ),
         }
+    }
+
+    fn network_copy(&self) -> Option<String> {
+        self.network_inspector.copy(&self.network)
+    }
+
+    fn network_key(&mut self, key: &Key, bounds: Rect) -> bool {
+        self.network_inspector.key(&self.network, key, bounds)
     }
 
     fn ingest_console(&mut self, snapshot: ConsoleSnapshot) -> bool {
@@ -214,9 +178,19 @@ impl Document {
                     (ConsoleOrigin::BrowserReported, Some(console_phase(phase)))
                 }
             };
+            let location = record.line.map(|line| {
+                let base = record.source.as_deref().unwrap_or("line");
+                match record.column {
+                    Some(column) => format!("{base}:{line}:{column}"),
+                    None => format!("{base}:{line}"),
+                }
+            });
+            let diagnostic = record
+                .error_kind
+                .map(|kind| format!("{} · {}", phase.unwrap_or("JavaScript"), kind.name()));
             // Engine snapshots drain in order and expose aggregate source loss
             // separately; model sequence numbers only order the received records.
-            self.console.record(
+            self.console.record_with_context(
                 self.console.last_sequence().saturating_add(1),
                 ConsoleInput {
                     severity: match record.level {
@@ -228,9 +202,14 @@ impl Document {
                     },
                     origin,
                     message: &record.text,
-                    source: record.source.as_deref(),
-                    phase,
+                    source: location.as_deref().or(record.source.as_deref()),
+                    phase: diagnostic.as_deref().or(phase),
                     capture_truncated: record.truncated,
+                },
+                console::ConsoleContext {
+                    script_node: record.script_node.map(|id| id.0),
+                    line: record.line,
+                    calls: record.calls,
                 },
             );
         }
@@ -253,49 +232,35 @@ impl Document {
             kind,
             id,
         };
-        // The observer supplies elapsed durations rather than timestamps.
-        // Use one origin for relative offsets: the model only compares two
-        // offsets within the same request. Never display this origin as a time.
-        let mut at = self.network_clock.checked_add(event.elapsed);
+        let mut at = event.started.checked_add(event.elapsed);
         let phase = match event.phase {
-            Phase::Started { method, url } => {
+            Phase::Started {
+                method,
+                url,
+                resource_type,
+            } => {
                 let Ok(url) = url::Url::parse(&url) else {
                     return false;
                 };
                 NetworkPhase::Started {
                     method: DisplayMethod::from_method(method.as_deref().unwrap_or_default()),
                     url: DisplayUrl::from_url(&url),
+                    resource_type,
                 }
             }
-            Phase::NavigationOpened {
+            Phase::Response {
                 status,
-                response_time,
+                headers_at,
+                details,
             } => {
-                at = self.network_clock.checked_add(response_time);
-                NetworkPhase::ResponseHeaders {
-                    status: Some(status),
-                }
+                at = headers_at;
+                NetworkPhase::ResponseHeaders { status, details }
             }
-            Phase::NavigationFinished => NetworkPhase::Terminal(TerminalOutcome::Completed),
-            Phase::FetchResponse { status } => NetworkPhase::ResponseHeaders { status },
-            Phase::Failed => NetworkPhase::Terminal(TerminalOutcome::Failed),
-            Phase::Cancelled => NetworkPhase::Terminal(TerminalOutcome::Cancelled),
-            Phase::ResourceLoaded { url } => {
-                let Ok(url) = url::Url::parse(&url) else {
-                    return false;
-                };
-                // A single successful buffered GET observation admits one
-                // row with the observed final URL, not a separate start row.
-                self.network.observe(NetworkEvent {
-                    key,
-                    at: Some(self.network_clock),
-                    phase: NetworkPhase::Started {
-                        method: DisplayMethod::from_method("GET"),
-                        url: DisplayUrl::from_url(&url),
-                    },
-                });
-                NetworkPhase::Terminal(TerminalOutcome::Completed)
+            Phase::Finished { body_bytes } => {
+                NetworkPhase::Terminal(TerminalOutcome::Completed, body_bytes)
             }
+            Phase::Failed => NetworkPhase::Terminal(TerminalOutcome::Failed, None),
+            Phase::Cancelled => NetworkPhase::Terminal(TerminalOutcome::Cancelled, None),
         };
         self.network.observe(NetworkEvent { key, at, phase });
         true
@@ -326,11 +291,14 @@ fn console_row(row: &console::ConsoleRow) -> ConsoleRow<'_> {
         },
         message: &row.message,
         failure: match row.origin {
-            ConsoleOrigin::ConsoleApi => None,
+            ConsoleOrigin::ConsoleApi | ConsoleOrigin::Command | ConsoleOrigin::Evaluation => None,
             ConsoleOrigin::BrowserReported => Some(Failure::BrowserReported),
         },
         source: row.source.as_deref(),
-        phase: row.phase.as_deref(),
+        phase: row
+            .phase
+            .as_deref()
+            .or_else(|| console_interaction::origin_label(row.origin)),
         capture_truncated: row.capture_truncated,
         repeat: 1, // Each call is a separate record; never infer grouping or caught errors.
     }
@@ -341,11 +309,7 @@ fn network_row(row: &network::NetworkRow) -> network_view::NetworkRow<'_> {
     network_view::NetworkRow {
         method: Some(row.method.as_str()),
         display_url: Some(row.url.as_str()),
-        category: Some(match row.key.kind {
-            RequestKind::Navigation => "Navigation",
-            RequestKind::Resource => "Resource",
-            RequestKind::FetchOrXhr => "Fetch/XHR",
-        }),
+        category: Some(row.category()),
         http_status: row.status(),
         outcome: match row.outcome() {
             NetworkOutcome::Started => Some(ViewOutcome::Pending),
@@ -355,6 +319,8 @@ fn network_row(row: &network::NetworkRow) -> network_view::NetworkRow<'_> {
             | NetworkOutcome::Terminal(TerminalOutcome::Completed) => None,
         },
         elapsed: row.elapsed(),
+        started_at: row.started_at,
+        headers_elapsed: row.headers_elapsed(),
     }
 }
 
@@ -517,7 +483,7 @@ mod tests {
         assert_eq!(devtools.section, Section::Console);
         devtools.input(dock(4, Some((100., 20.))), DockInput::Click);
         assert_eq!(devtools.section, Section::Network);
-        devtools.input(dock(7, Some((300., 20.))), DockInput::Click);
+        devtools.input(dock(7, Some((399., 20.))), DockInput::Click);
         assert_eq!(devtools.section, Section::Network);
         assert!(devtools.document_mut(4, 5).is_some());
         devtools.input(dock(7, Some((20., 20.))), DockInput::Click);
@@ -529,7 +495,9 @@ mod tests {
     fn network_adaptation_keeps_real_elapsed_time_without_inventing_a_fetch_completion() {
         let mut devtools = DevTools::default();
         devtools.begin_navigation(4, 5);
+        let started = std::time::Instant::now();
         let event = |navigation, elapsed_ms, phase| observer::Event {
+            started,
             key: observer::Key {
                 tab: 4,
                 navigation,
@@ -545,12 +513,17 @@ mod tests {
             observer::Phase::Started {
                 method: Some("GET".into()),
                 url: "https://name:pass@example.test/main?private=1#frag".into(),
+                resource_type: None,
             },
         )));
         assert!(devtools.observe_network(event(
             5,
             23,
-            observer::Phase::FetchResponse { status: Some(404) },
+            observer::Phase::Response {
+                status: Some(404),
+                headers_at: Some(started + Duration::from_millis(23)),
+                details: observer::ResponseDetails::default()
+            },
         )));
         let row = devtools.documents[&4].network.rows().next().unwrap();
         assert_eq!(row.outcome(), NetworkOutcome::HeadersReceived);
@@ -624,7 +597,7 @@ impl DevtoolsDock for DevTools {
         let Some(layout) = Layout::new(frame.bounds) else {
             return;
         };
-        layout.paint(canvas, fonts, scale, self.section);
+        layout.paint(canvas, fonts, scale, self.section, self.picking);
         if panel::has_area(layout.body) {
             canvas.clip(panel::scaled(layout.body, scale));
             // The last registered inspection attempt remains visible after
@@ -668,8 +641,11 @@ impl DevtoolsDock for DevTools {
                 let Some((x, y)) = window_pointer(frame) else {
                     return;
                 };
-                if let Some(section) = layout.section_at(x, y) {
+                if layout.picker_at(x, y) {
+                    self.toggle_picker();
+                } else if let Some(section) = layout.section_at(x, y) {
                     self.section = section;
+                    self.picking = false;
                 } else if panel::contains(layout.body, x, y)
                     && let Some(document) = self.documents.get_mut(&frame.tab)
                 {
@@ -687,13 +663,177 @@ impl DevtoolsDock for DevTools {
             DockInput::Key {
                 key,
                 modifiers,
-                repeat: false,
-            } if frame.focused && modifiers.is_empty() => match key {
-                Key::Named(NamedKey::ArrowLeft) => self.section = Section::Console,
-                Key::Named(NamedKey::ArrowRight) => self.section = Section::Network,
-                _ => {}
-            },
+                repeat,
+            } if frame.focused => {
+                if !repeat
+                    && modifiers.alt_key()
+                    && !modifiers.control_key()
+                    && !modifiers.super_key()
+                    && let Key::Character(c) = &key
+                    && let Some(i) = c.parse::<usize>().ok().and_then(|i| i.checked_sub(1))
+                    && let Some(section) = Section::ALL.get(i)
+                {
+                    self.section = *section;
+                    self.picking = false;
+                    return;
+                }
+                if self.picking && key == Key::Named(NamedKey::Escape) {
+                    self.picking = false;
+                    return;
+                }
+                if self.section == Section::Console {
+                    self.console_key(frame, &key, modifiers, repeat);
+                    return;
+                }
+                if let Some(doc) = self.documents.get_mut(&frame.tab) {
+                    match self.section {
+                        Section::Application => {
+                            doc.application.key(layout.body, &key, modifiers);
+                        }
+                        Section::Elements => {
+                            doc.elements.key(layout.body, &key, modifiers);
+                        }
+                        Section::Sources => {
+                            doc.sources.key(layout.body, &key, modifiers);
+                        }
+                        Section::Network if modifiers.is_empty() => {
+                            doc.network_key(&key, layout.body);
+                        }
+                        Section::Performance if key == Key::Named(NamedKey::Space) && !repeat => {
+                            doc.performance.click(
+                                layout.body,
+                                layout.body.x + 1.,
+                                layout.body.y + 1.,
+                            )
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
+    }
+}
+
+impl DevTools {
+    pub(crate) fn toggle_picker(&mut self) {
+        self.picking = !self.picking;
+        self.section = Section::Elements;
+    }
+    pub(crate) fn is_console(&self) -> bool {
+        self.section == Section::Console
+    }
+
+    pub(crate) fn sync_inspector(
+        &mut self,
+        frame: DockFrame,
+        page: Option<&rust_browser_engine::LoadedPage>,
+        layout: Option<&std::sync::Arc<rust_browser_engine::Layout>>,
+        runtime: Option<&ScriptRuntime>,
+        session: Option<&rust_browser_engine::script::DocumentSession>,
+        storage: &rust_browser_engine::web_storage::TabStorage,
+    ) {
+        let Some(doc) = self.documents.get_mut(&frame.tab) else {
+            return;
+        };
+        match self.section {
+            Section::Elements => doc.elements.sync_page(page, layout),
+            Section::Sources => doc.sources.sync(page, runtime, session),
+            Section::Application => doc.application.sync(page, storage),
+            _ => {}
+        }
+    }
+    pub(crate) fn inspect(&mut self, frame: DockFrame, node: rust_browser_engine::dom::NodeId) {
+        self.section = Section::Elements;
+        self.picking = false;
+        if let (Some(layout), Some(doc)) = (
+            Layout::new(frame.bounds),
+            self.documents.get_mut(&frame.tab),
+        ) {
+            doc.elements.inspect(node, layout.body);
+        }
+    }
+    pub(crate) fn selected_rect(&self, tab: u64) -> Option<Rect> {
+        if self.section != Section::Elements {
+            return None;
+        }
+        self.documents.get(&tab)?.elements.selected_rect()
+    }
+    pub(crate) fn monitoring(&self) -> bool {
+        self.section == Section::Performance
+    }
+    pub(crate) fn sample(
+        &mut self,
+        tab: u64,
+        layout_time: std::time::Duration,
+        paint_time: std::time::Duration,
+        page: Option<&rust_browser_engine::LoadedPage>,
+        layout: Option<&rust_browser_engine::Layout>,
+        runtime: Option<&ScriptRuntime>,
+    ) {
+        if let Some(doc) = self.documents.get_mut(&tab) {
+            doc.performance
+                .sample(layout_time, paint_time, page, layout, runtime);
+        }
+    }
+}
+
+impl DevTools {
+    pub(crate) fn take_style_edit(
+        &mut self,
+        frame: DockFrame,
+    ) -> Option<(rust_browser_engine::dom::NodeId, String, String, bool)> {
+        self.document_mut(frame.tab, frame.document_navigation)?
+            .elements
+            .take_style_edit()
+    }
+    pub(crate) fn style_edit_result(&mut self, frame: DockFrame, result: Result<(), String>) {
+        if let Some(doc) = self.document_mut(frame.tab, frame.document_navigation) {
+            doc.elements.style_edit_result(result);
+        }
+    }
+}
+
+impl DevTools {
+    pub(crate) fn clipboard_selection(&mut self, frame: DockFrame, cut: bool) -> Option<String> {
+        if self.section == Section::Elements {
+            return self
+                .document_mut(frame.tab, frame.document_navigation)?
+                .elements
+                .clipboard_selection(cut);
+        }
+        if !cut && self.section == Section::Sources {
+            return self
+                .document_mut(frame.tab, frame.document_navigation)?
+                .sources
+                .copy_line();
+        }
+        if !cut && self.section == Section::Network {
+            return self.documents.get(&frame.tab)?.network_copy();
+        }
+        self.console_selection(frame, cut)
+    }
+}
+
+impl DevTools {
+    pub(crate) fn reveal_console_source(
+        &mut self,
+        frame: DockFrame,
+        page: Option<&rust_browser_engine::LoadedPage>,
+        runtime: Option<&ScriptRuntime>,
+        session: Option<&rust_browser_engine::script::DocumentSession>,
+    ) -> bool {
+        let Some((node, line)) = self.console_source_target(frame) else {
+            return false;
+        };
+        let Some(doc) = self.document_mut(frame.tab, frame.document_navigation) else {
+            return false;
+        };
+        doc.sources.sync(page, runtime, session);
+        if !doc.sources.reveal(node, line) {
+            return false;
+        }
+        self.section = Section::Sources;
+        true
     }
 }

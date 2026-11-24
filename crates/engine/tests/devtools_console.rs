@@ -129,8 +129,14 @@ fn only_failures_that_reach_the_reporter_are_recorded() {
             .collect::<Vec<_>>(),
         [
             (BrowserReported(ConsolePhase::Microtask), "microtask"),
-            (BrowserReported(ConsolePhase::ClassicScript), "<thrown object>"),
-            (BrowserReported(ConsolePhase::UnhandledPromiseRejection), "object"),
+            (
+                BrowserReported(ConsolePhase::ClassicScript),
+                "<thrown object>"
+            ),
+            (
+                BrowserReported(ConsolePhase::UnhandledPromiseRejection),
+                "object"
+            ),
             (
                 BrowserReported(ConsolePhase::EventTargetListener),
                 "Thrown: direct listener"
@@ -231,4 +237,97 @@ fn drain_bounds_overflow_and_unicode_without_resetting_diagnostics_or_other_real
     assert_eq!(next.records[0].text, "after drain");
     assert_eq!(next.records[1].text, "new rejection");
     assert_eq!(runtime.diagnostics(), diagnostics);
+}
+
+#[test]
+fn developer_evaluation_uses_the_page_globals_and_previews_inert_descriptors() {
+    let page = LoadedPage::from_html("https://console.test/", "<title>before</title>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval("var calls = 0; var obj = { answer: 42, get loud() { calls++; } };")
+        .unwrap();
+    let value = runtime.evaluate_console("obj").unwrap();
+    assert!(
+        value.contains("answer: 42") && value.contains("loud: [accessor]"),
+        "{value}"
+    );
+    assert_eq!(runtime.evaluate_console("calls").unwrap(), "0");
+    assert_eq!(
+        runtime
+            .evaluate_console("document.title = 'after'; 40 + 2")
+            .unwrap(),
+        "42"
+    );
+    assert_eq!(
+        runtime.evaluate_console("document.title").unwrap(),
+        "\"after\""
+    );
+    assert!(
+        runtime
+            .evaluate_console("unknownIdentifier")
+            .unwrap_err()
+            .contains("ReferenceError")
+    );
+    runtime
+        .evaluate_console("Promise.resolve().then(() => console.info('checkpoint'))")
+        .unwrap();
+    assert!(
+        runtime
+            .take_console_snapshot()
+            .records
+            .iter()
+            .any(|r| r.text == "checkpoint")
+    );
+}
+
+#[test]
+fn utility_methods_report_real_measurements_and_reset_per_document() {
+    let page = LoadedPage::from_html("https://console.test/", "");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval("console.assert(true); console.assert(false, 'oops'); console.count('a'); console.count('a'); console.countReset('a'); console.count('a'); console.time('t'); console.timeLog('t', 'step'); console.timeEnd('t'); console.timeEnd('missing');").unwrap();
+    let batch = runtime.take_console_snapshot();
+    let text: Vec<_> = batch.records.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        &text[..4],
+        &["Assertion failed: oops", "a: 1", "a: 2", "a: 1"]
+    );
+    assert!(text[4].starts_with("t: ") && text[4].ends_with(" ms step"));
+    assert!(text[5].starts_with("t: ") && text[5].ends_with(" ms"));
+    assert_eq!(text[6], "Unknown timer: missing");
+    assert_eq!(batch.records[6].level, Warn);
+    let mut fresh = ScriptRuntime::new(&page).unwrap();
+    fresh.eval("console.count('a')").unwrap();
+    assert_eq!(fresh.take_console_snapshot().records[0].text, "a: 1");
+}
+
+#[test]
+fn real_interpreted_calls_and_active_script_node_are_recorded_without_made_up_lines() {
+    let mut page = LoadedPage::from_html(
+        "https://console.test/",
+        r#"<script>
+        function inner() { console.trace("trace"); console.error("log"); throw new Error("failure"); }
+        function outer() { inner(); }
+        outer();
+    </script>"#,
+    );
+    let node = page.document.elements("script").next().unwrap();
+    let runtime = ScriptRuntime::for_page(&mut page).unwrap().unwrap();
+    let rows = runtime.take_console_snapshot().records;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    for row in &rows {
+        assert_eq!(row.script_node, Some(node), "{row:?}");
+        let calls = row.calls.as_deref().unwrap();
+        assert!(calls.len() >= 2, "{calls:?}");
+        assert_eq!(&calls[..2], &["inner", "outer"]);
+        assert!(row.line.is_none() && row.column.is_none());
+    }
+    let mut page = LoadedPage::from_html("https://console.test/", "<script>\n\nvar = ;</script>");
+    let runtime = ScriptRuntime::for_page(&mut page).unwrap().unwrap();
+    let row = runtime.take_console_snapshot().records.remove(0);
+    assert_eq!(row.line, Some(3));
+    assert!(row.calls.is_none());
+    assert_eq!(
+        row.script_node,
+        Some(page.document.elements("script").next().unwrap())
+    );
 }

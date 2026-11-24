@@ -39,6 +39,7 @@ pub(super) enum Readiness {
 #[derive(Default)]
 pub(super) struct ModuleGraph {
     pub(super) imports: ImportMap,
+    pub(super) sources: crate::script::inspection_sources::SourceArchive,
     records: Vec<Record>,
     requests: HashMap<Arc<Url>, ModuleKey>,
     ids: HashMap<ModuleId, ModuleKey>,
@@ -153,6 +154,13 @@ impl ModuleGraph {
                 return Err("Module source byte budget exceeded".into());
             }
             self.source_bytes += source.len();
+            let external = self.requests.values().any(|entry| entry.0 == key.0);
+            self.sources.capture(
+                None,
+                external.then_some(base.as_str()),
+                || format!("Module #{}", key.0 + 1),
+                &source,
+            );
             let id = vm
                 .parse_module(&source, base.as_str())
                 .map_err(|e| e.to_string())?;

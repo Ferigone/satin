@@ -58,6 +58,7 @@ pub struct HttpResourceObservation {
     /// Body bytes delivered by the HTTP client (possibly decompressed), not
     /// wire bytes. `None` means the HTTP client did not deliver a body.
     pub body_bytes: Option<usize>,
+    pub content: HttpContentMetadata,
     /// When the loader received headers, if the chosen fetch path exposes it.
     pub headers_at: Option<Instant>,
     /// When the buffered HTTP result reached this loader boundary.
@@ -87,6 +88,7 @@ impl HttpResourceObservation {
             url: format!("{}://{}", url.scheme(), &url[BeforeHost..AfterPath]),
             status,
             body_bytes,
+            content: Default::default(),
             headers_at,
             observed_at,
         })
@@ -121,7 +123,10 @@ impl Loader {
         &self,
         request: &ResourceRequest,
         cancel: &CancelSignal,
-    ) -> (Result<DocumentResource, String>, Option<HttpResourceObservation>) {
+    ) -> (
+        Result<DocumentResource, String>,
+        Option<HttpResourceObservation>,
+    ) {
         let control = RequestControl::new(cancel, request.transport_deadline());
         let mut observation = None;
         let result = self
@@ -192,6 +197,9 @@ impl Loader {
                     data.body.as_ref().map(|body| body.len()),
                     None,
                 );
+                if let Some(record) = observation {
+                    record.content = HttpContentMetadata::from_exposed_headers(&data.headers);
+                }
             }
             if !(200..300).contains(&data.status) {
                 return Err(format!("HTTP {} loading resource", data.status));
@@ -231,6 +239,9 @@ impl Loader {
                     Some(data.bytes.len()),
                     Some(data.response_start),
                 );
+                if let Some(record) = observation {
+                    record.content = data.http_content.clone();
+                }
             }
             let data = data.resource()?;
             (
@@ -275,6 +286,14 @@ impl Loader {
 }
 
 impl ResourceRequest {
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    pub fn kind(&self) -> &ResourceKind {
+        &self.kind
+    }
+
     fn transport_deadline(&self) -> Instant {
         self.deadline.min(Instant::now() + Duration::from_secs(6))
     }

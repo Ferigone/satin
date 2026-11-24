@@ -259,6 +259,254 @@ impl ConsoleLayout {
     }
 }
 
+const PROMPT_HEIGHT: f32 = 29.;
+
+impl ConsoleLayout {
+    pub(super) fn with_prompt(bounds: Rect, rows: usize, scroll: f32, discarded: u64) -> Self {
+        Self::new(
+            Rect {
+                height: (bounds.height - PROMPT_HEIGHT).max(0.),
+                ..bounds
+            },
+            rows,
+            scroll,
+            discarded,
+        )
+    }
+
+    pub(super) fn severity_box(&self) -> Option<Rect> {
+        let start = self.bounds.x + if self.status.is_some() { 125. } else { PAD };
+        let end = self.clear?.x - PAD;
+        (end - start >= 90.).then_some(rect(start, self.bounds.y + 5., 87., 24.))
+    }
+
+    pub(super) fn filter_box(&self) -> Option<Rect> {
+        let level = self.severity_box()?;
+        let start = level.x + level.width + 6.;
+        let width = (self.clear?.x - PAD - start).min(380.);
+        (width > 54.).then_some(rect(start, level.y, width, 24.))
+    }
+
+    pub(super) fn prompt(bounds: Rect) -> Rect {
+        let height = bounds.height.clamp(0., PROMPT_HEIGHT);
+        rect(
+            bounds.x,
+            bounds.y + bounds.height - height,
+            bounds.width,
+            height,
+        )
+    }
+
+    pub(super) fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.list.contains(x, y) {
+            return None;
+        }
+        let index = ((y - self.list.y + self.scroll) / ROW_HEIGHT) as usize;
+        (index < self.row_count).then_some(index)
+    }
+
+    pub(super) fn draw_controls(
+        &self,
+        canvas: &mut Canvas,
+        fonts: &mut Fonts,
+        bounds: Rect,
+        scale: f32,
+        controls: &super::console_interaction::ConsoleControls,
+        detail: Option<&super::console::ConsoleRow>,
+        focused: bool,
+    ) {
+        use super::console_interaction::Field;
+        let clip = device_rect(bounds, scale);
+        let mut p = Painter {
+            canvas,
+            fonts,
+            clip,
+            scale,
+        };
+        if let Some(box_) = self.severity_box() {
+            p.fill(box_, LINE);
+            p.label(
+                rect(box_.x + 7., box_.y, box_.width - 11., box_.height),
+                controls.level(),
+                TEXT,
+                false,
+            );
+            p.label(
+                rect(box_.x + box_.width - 14., box_.y, 12., box_.height),
+                "▾",
+                MUTED,
+                false,
+            );
+        }
+        if let Some(area) = self.filter_box() {
+            p.editor(
+                area,
+                &controls.filter,
+                "Filter messages",
+                "⌕",
+                focused && controls.field == Field::Filter,
+            );
+        }
+        let prompt = Self::prompt(bounds);
+        if controls.field == Field::Filter && self.filter_box().is_none() {
+            p.editor(prompt, &controls.filter, "Filter messages", "⌕", focused);
+        } else {
+            p.editor(
+                prompt,
+                &controls.command,
+                "JavaScript expression",
+                "›",
+                focused && controls.field == Field::Command,
+            );
+        }
+        if let Some(row) = detail {
+            let area = self.list;
+            p.fill(area, BG);
+            p.label(
+                line(area, PAD, 0., 23.),
+                if row.context.script_node.is_some() {
+                    "‹  All messages     ·     Ctrl+Enter: source"
+                } else {
+                    "‹  All messages"
+                },
+                Color(144, 199, 245, 255),
+                true,
+            );
+            let (lines, visible) = detail_rows(area, row);
+            let skip = controls
+                .detail_scroll
+                .min(lines.len().saturating_sub(visible));
+            for (i, text) in lines.iter().skip(skip).take(visible).enumerate() {
+                p.label(
+                    line(area, PAD, 23. + i as f32 * 19., 19.),
+                    &inert_line(text, usize::MAX),
+                    TEXT,
+                    false,
+                );
+            }
+        }
+        p.canvas.clip(clip);
+    }
+}
+
+pub(super) fn detail_rows(area: Rect, row: &super::console::ConsoleRow) -> (Vec<String>, usize) {
+    let mut content = format!("{:?}  ·  #{}", row.severity, row.sequence);
+    for value in [row.phase.as_deref(), row.source.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        content.push_str("  ·  ");
+        content.push_str(value);
+    }
+    content.push('\n');
+    content.push_str(&row.message);
+    if let Some(stack) = &row.context.calls {
+        content.push_str("\nSynchronous JavaScript calls");
+        for name in stack.iter() {
+            content.push_str("\n  at ");
+            content.push_str(name);
+        }
+    }
+    if row.capture_truncated {
+        content.push_str("\nPreview truncated");
+    }
+    let max_columns = ((area.width - 2. * PAD) / 8.).max(1.) as usize;
+    let mut lines = Vec::new();
+    for line_ in content.lines() {
+        let mut buf = String::new();
+        for (i, c) in line_.chars().enumerate() {
+            if i > 0 && i.is_multiple_of(max_columns) {
+                lines.push(std::mem::take(&mut buf));
+            }
+            buf.push(c);
+        }
+        lines.push(buf);
+    }
+    (lines, ((area.height - 23.) / 19.).floor().max(0.) as usize)
+}
+
+impl Painter<'_> {
+    fn editor(
+        &mut self,
+        box_: Rect,
+        editor: &crate::app::address_bar::AddressBar,
+        placeholder: &str,
+        mark: &str,
+        active: bool,
+    ) {
+        if !drawable(box_) {
+            return;
+        }
+        let accent = Color(143, 192, 232, 255);
+        self.fill(box_, Color(23, 23, 25, 255));
+        self.fill(
+            rect(box_.x, box_.y, box_.width, 1.),
+            if active { accent } else { LINE },
+        );
+        self.label(
+            rect(box_.x + 6., box_.y, 17., box_.height),
+            mark,
+            accent,
+            true,
+        );
+        let text_area = rect(
+            box_.x + 23.,
+            box_.y,
+            (box_.width - 29.).max(0.),
+            box_.height,
+        );
+        let old = self.clip;
+        self.clip = intersection(old, device_rect(text_area, self.scale));
+        let source = editor.text();
+        // Text and selection use exactly the same line projection, including pasted newlines.
+        let width = |text: &str| {
+            self.fonts
+                .shape(
+                    &inert_line(text, usize::MAX),
+                    13. * self.scale,
+                    false,
+                    false,
+                    false,
+                )
+                .advance
+                / self.scale
+        };
+        let caret = width(&source[..editor.caret()]);
+        let shift = if active {
+            (caret - text_area.width + 3.).max(0.)
+        } else {
+            0.
+        };
+        let x = text_area.x - shift;
+        let selection = editor.selection();
+        if active && !selection.is_empty() {
+            let start = width(&source[..selection.start]);
+            let end = width(&source[..selection.end]);
+            self.fill(
+                rect(x + start, box_.y + 4., end - start, box_.height - 8.),
+                Color(59, 83, 106, 255),
+            );
+        }
+        self.label(
+            rect(x, box_.y, text_area.width + shift, box_.height),
+            &inert_line(
+                if source.is_empty() {
+                    placeholder
+                } else {
+                    source
+                },
+                usize::MAX,
+            ),
+            if source.is_empty() { MUTED } else { TEXT },
+            false,
+        );
+        if active {
+            self.fill(rect(x + caret, box_.y + 5., 1., box_.height - 10.), TEXT);
+        }
+        self.clip = old;
+    }
+}
+
 struct Painter<'a> {
     canvas: &'a mut Canvas,
     fonts: &'a mut Fonts,

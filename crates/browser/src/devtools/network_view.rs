@@ -1,5 +1,21 @@
+mod inspector;
+pub(super) use inspector::Inspector;
+
+use super::{
+    network::{
+        NetworkLog, NetworkOutcome as Lifecycle, NetworkRow as Record, RequestKey, RequestKind,
+        TerminalOutcome,
+    },
+    panel,
+};
+use crate::app::DockFrame;
 use rust_browser_engine::{Fonts, Rect, css::Color, paint::Canvas};
-use std::{borrow::Cow, ops::Range, time::Duration};
+use std::{
+    borrow::Cow,
+    ops::Range,
+    time::{Duration, Instant},
+};
+use winit::keyboard::{Key, NamedKey};
 
 const TOOLBAR_H: f32 = 30.;
 const HEADER_H: f32 = 24.;
@@ -40,11 +56,19 @@ pub(super) struct NetworkRow<'a> {
     pub(super) outcome: Option<NetworkOutcome>,
     /// Measured time to the observed event, not an estimate of download duration.
     pub(super) elapsed: Option<Duration>,
+    pub(super) started_at: Option<Instant>,
+    pub(super) headers_elapsed: Option<Duration>,
 }
 
 pub(super) struct NetworkView<'a> {
     /// Bounded snapshot in display order; this view never retains request data.
     pub(super) rows: &'a [NetworkRow<'a>],
+    filter: Filter,
+    sort: Option<(usize, bool)>,
+    query: &'a str,
+    searching: bool,
+    selected: Option<usize>,
+    timeline: Option<(Instant, Duration)>,
     /// Snapshot's aggregate count of records discarded by capture or retention.
     pub(super) discarded: u64,
     /// Offset from the first retained row in logical pixels.
@@ -305,9 +329,57 @@ pub(super) fn draw_network(
         painter.fill(clear, if view.clear_hovered { HOVER } else { LINE });
         painter.label(clear, "Clear", TEXT, true);
     }
+    let (buttons, summary_rect) = filter_controls(layout, view.filter);
+    let cycle_filter = buttons.len() == 1;
+    for (filter, rect) in buttons {
+        painter.fill(
+            rect,
+            if filter == view.filter {
+                SELECTION
+            } else {
+                PANEL
+            },
+        );
+        painter.label(
+            rect,
+            &if cycle_filter {
+                format!("{}  ›", filter.label())
+            } else {
+                filter.label().to_owned()
+            },
+            if filter == view.filter { ACCENT } else { MUTED },
+            filter == view.filter,
+        );
+    }
+    let compact = summary_rect.width < 230.;
+    let search = search_rect(summary_rect);
+    if search.width > 0. {
+        painter.fill(search, if view.searching { SELECTION } else { PANEL });
+        let prompt = if view.query.is_empty() && !view.searching {
+            "Filter URL  /".to_owned()
+        } else {
+            format!("{}{}", view.query, if view.searching { "▏" } else { "" })
+        };
+        painter.label(
+            search,
+            &prompt,
+            if view.searching { TEXT } else { MUTED },
+            false,
+        );
+    }
+    let note = Rect {
+        x: search.x + search.width,
+        width: (summary_rect.width - search.width).max(0.),
+        ..summary_rect
+    };
+    let status_note = if compact && view.discarded == 0 {
+        view.coverage_note.unwrap_or("").to_owned()
+    } else {
+        summary(view.discarded, view.coverage_note)
+    };
     painter.label(
-        layout.summary,
-        &summary(view.discarded, view.coverage_note),
+        note,
+        &status_note,
         if view.discarded > 0 { ALERT } else { MUTED },
         false,
     );
@@ -320,8 +392,15 @@ pub(super) fn draw_network(
         },
         LINE,
     );
-    for column in &layout.columns {
-        painter.label(column.cell(layout.header), column.title, MUTED, true);
+    for (i, column) in layout.columns.iter().enumerate() {
+        if let Some((index, descending)) = view.sort
+            && index == i
+        {
+            let title = format!("{} {}", column.title, if descending { "↓" } else { "↑" });
+            painter.label(column.cell(layout.header), &title, ACCENT, true);
+        } else {
+            painter.label(column.cell(layout.header), column.title, MUTED, true);
+        }
     }
 
     painter.set_clip(layout.list);
@@ -331,7 +410,11 @@ pub(super) fn draw_network(
                 height: ROW_H,
                 ..layout.list
             },
-            empty_label(view.discarded),
+            if view.filter != Filter::All || !view.query.is_empty() {
+                "No requests match this filter."
+            } else {
+                empty_label(view.discarded)
+            },
             MUTED,
             false,
         );
@@ -345,7 +428,9 @@ pub(super) fn draw_network(
             height: ROW_H,
             ..layout.list
         };
-        if index % 2 == 1 {
+        if view.selected == Some(index) {
+            painter.fill(band, SELECTION);
+        } else if index % 2 == 1 {
             painter.fill(band, STRIPE);
         }
         let (status, tint) = status(row);
@@ -360,6 +445,32 @@ pub(super) fn draw_network(
         ];
         for (column, (label, color)) in layout.columns.iter().zip(labels) {
             painter.label(column.cell(band), label, color, false);
+        }
+        if let (Some((origin, span)), Some(started)) = (view.timeline, row.started_at) {
+            let cell = layout.columns[4].cell(band);
+            let width = (cell.width - PAD * 2.).max(0.);
+            let offset = started.saturating_duration_since(origin).as_secs_f64();
+            let pos = |seconds: f64| {
+                cell.x + PAD + (seconds / span.as_secs_f64()).clamp(0., 1.) as f32 * width
+            };
+            let x = pos(offset).min(cell.x + cell.width - PAD - 1.);
+            let end = pos(offset + row.elapsed.unwrap_or_default().as_secs_f64());
+            let bar = Rect {
+                x,
+                y: band.y + ROW_H - 4.,
+                width: (end - x).max(1.),
+                height: 2.,
+            };
+            painter.fill(bar, MUTED);
+            if let Some(headers) = row.headers_elapsed {
+                painter.fill(
+                    Rect {
+                        width: (pos(offset + headers.as_secs_f64()) - x).max(1.),
+                        ..bar
+                    },
+                    ACCENT,
+                );
+            }
         }
     }
     painter.set_clip(layout.list_rect());
@@ -572,6 +683,8 @@ mod tests {
             http_status: None,
             outcome: None,
             elapsed: None,
+            started_at: None,
+            headers_elapsed: None,
         };
         assert_eq!(status(&row).0, UNOBSERVED);
         row.http_status = Some(0);
@@ -617,5 +730,89 @@ mod tests {
         let label = fit_label(&long, 1_000., measure);
         assert_eq!(label.chars().count(), MAX_LABEL_CHARS + 1);
         assert!(label.ends_with('…'));
+    }
+}
+
+const ACCENT: Color = Color(199, 182, 255, 255);
+const SELECTION: Color = Color(65, 56, 83, 255);
+const DETAIL_LINE: f32 = 21.;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Filter {
+    #[default]
+    All,
+    Document,
+    Fetch,
+    Resource,
+    Errors,
+}
+
+impl Filter {
+    const ALL: [Self; 5] = [
+        Self::All,
+        Self::Document,
+        Self::Fetch,
+        Self::Resource,
+        Self::Errors,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Document => "Docs",
+            Self::Fetch => "Fetch/XHR",
+            Self::Resource => "Assets",
+            Self::Errors => "Errors",
+        }
+    }
+    fn matches(self, row: &Record) -> bool {
+        match self {
+            Self::All => true,
+            Self::Document => row.key.kind == RequestKind::Navigation,
+            Self::Fetch => row.key.kind == RequestKind::FetchOrXhr,
+            Self::Resource => row.key.kind == RequestKind::Resource,
+            Self::Errors => {
+                row.status().is_some_and(|s| s >= 400)
+                    || row.outcome() == Lifecycle::Terminal(TerminalOutcome::Failed)
+            }
+        }
+    }
+}
+
+fn filter_controls(layout: &NetworkLayout, active: Filter) -> (Vec<(Filter, Rect)>, Rect) {
+    let mut rest = layout.summary;
+    let mut buttons = Vec::new();
+    if rest.width < 48. || rest.height < 22. {
+        return (buttons, rest);
+    }
+    let compact = rest.width < 380.;
+    for (filter, width) in Filter::ALL.into_iter().zip([43., 60., 95., 72., 70.]) {
+        if compact && filter != active {
+            continue;
+        }
+        let w = if compact { rest.width.min(110.) } else { width };
+        let rect = Rect {
+            x: rest.x + 2.,
+            y: rest.y + 3.,
+            width: w - 3.,
+            height: rest.height - 6.,
+        };
+        buttons.push((filter, rect));
+        rest.x += w;
+        rest.width -= w;
+    }
+    (buttons, rest)
+}
+
+fn search_rect(summary: Rect) -> Rect {
+    let width = if summary.width >= 70. {
+        (summary.width * 0.45).clamp(70., 210.).min(summary.width)
+    } else {
+        0.
+    };
+    Rect {
+        width,
+        y: summary.y + 3.,
+        height: (summary.height - 6.).max(0.),
+        ..summary
     }
 }

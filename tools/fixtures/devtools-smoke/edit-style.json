@@ -1,0 +1,17 @@
+[
+  { "action": "wait_title", "value": "DevTools A ready", "timeout_ms": 10000 },
+  { "action": "key", "value": "F12" },
+  { "action": "key", "value": "3", "alt": true },
+  { "action": "key", "value": "f", "control": true },
+  { "action": "text", "value": "#burst" },
+  { "action": "key", "value": "Enter" },
+  { "action": "key", "value": "F2" },
+  { "action": "text", "value": "width" },
+  { "action": "key", "value": "Tab" },
+  { "action": "text", "value": "237px" },
+  { "action": "key", "value": "Enter" },
+  { "action": "key", "value": "1", "alt": true },
+  { "action": "text", "value": "document.title = document.getElementById('burst').style.width" },
+  { "action": "key", "value": "Enter" },
+  { "action": "title", "value": "237px" }
+]
