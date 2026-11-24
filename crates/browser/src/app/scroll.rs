@@ -75,6 +75,14 @@ impl WheelGesture {
         };
     }
 
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.last_input) > GESTURE_GAP
+    }
+
+    fn overdue_distance(&self, now: Instant) -> Option<ScrollOffset> {
+        (self.expired(now) && self.deadline().is_some()).then_some(self.remaining)
+    }
+
     fn deadline(&self) -> Option<Instant> {
         (self.remaining != ScrollOffset::default()).then_some(self.next_frame)
     }
@@ -197,11 +205,19 @@ impl App {
         let tab = &self.tabs[self.active];
         delta.x /= tab.zoom;
         delta.y /= tab.zoom;
-        let new_gesture = self.wheel.as_ref().is_none_or(|g| {
-            g.tab != tab.id
-                || g.document != tab.document_navigation
-                || now.duration_since(g.last_input) > GESTURE_GAP
-        });
+        let current = self
+            .wheel
+            .as_ref()
+            .filter(|g| g.tab == tab.id && g.document == tab.document_navigation);
+        let new_gesture = current.is_none_or(|g| g.expired(now));
+        // A long OS pause can deliver the next input before its overdue frame.
+        // Finish travel on the original target before starting a new gesture.
+        if let Some((target, outstanding)) =
+            current.and_then(|g| g.overdue_distance(now).map(|d| (g.target, d)))
+        {
+            self.ensure_layout();
+            self.apply_scroll(target, outstanding);
+        }
         let moved = self.wheel.as_ref().is_some_and(|g| {
             (g.pointer.0 - self.mouse.0).abs() > 3. || (g.pointer.1 - self.mouse.1).abs() > 3.
         });
@@ -417,6 +433,22 @@ mod tests {
             }
             assert_eq!(offset, expected);
         }
+    }
+
+    #[test]
+    fn a_late_input_preserves_the_previous_gestures_unpainted_distance() {
+        let start = Instant::now();
+        let mut g = gesture(start, true);
+        g.push(ScrollOffset { x: 0., y: 108. }, true, start);
+        let painted = g.sample(start).unwrap();
+        assert!(
+            g.overdue_distance(start + Duration::from_millis(15))
+                .is_none()
+        );
+        let outstanding = g
+            .overdue_distance(start + Duration::from_millis(250))
+            .unwrap();
+        assert_eq!(painted.y + outstanding.y, 108.);
     }
 
     #[test]
