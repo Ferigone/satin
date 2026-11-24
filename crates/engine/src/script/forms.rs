@@ -43,6 +43,7 @@ pub struct ControlSnapshot {
     pub selected: bool,
     pub disabled: bool,
     pub read_only: bool,
+    pub placeholder_shown: bool,
     pub focused: bool,
     pub selection_start: usize,
     pub selection_end: usize,
@@ -327,6 +328,25 @@ fn text_editable(doc: &Document, id: NodeId) -> bool {
                 input_type(doc, id).as_str(),
                 "text" | "search" | "tel" | "url" | "email" | "password" | "number"
             ))
+}
+fn placeholder_shown(doc: &Document, id: NodeId, control: Option<&Control>) -> bool {
+    if !attr(doc, id, "placeholder") || !text_editable(doc, id) {
+        return false;
+    }
+    if let Some(value) = control.and_then(|control| control.value.as_ref()) {
+        return value.is_empty();
+    }
+    if html(doc, id, "textarea") {
+        return !doc.nodes[id.0]
+            .children
+            .iter()
+            .any(|n| matches!(&doc.nodes[n.0].kind, NodeKind::Text(text) if !text.is_empty()));
+    }
+    doc.attr(id, "value")
+        .is_none_or(|value| value.is_empty() || sanitize(doc, id, value.into()).is_empty())
+}
+pub(crate) fn default_placeholder_shown(doc: &Document, id: NodeId) -> bool {
+    placeholder_shown(doc, id, None)
 }
 fn selection_supported(doc: &Document, id: NodeId) -> bool {
     html(doc, id, "textarea")
@@ -847,6 +867,9 @@ impl FormHost {
         self.mark();
         Ok(())
     }
+    pub(super) fn placeholder_shown(&self, doc: &Document, node: NodeId) -> bool {
+        placeholder_shown(doc, node, self.data.borrow().controls.get(&node))
+    }
     pub(super) fn focused(&self) -> Option<NodeId> {
         self.data
             .borrow()
@@ -1338,6 +1361,7 @@ fn snapshots(doc: &Document, data: &Data) -> HashMap<NodeId, ControlSnapshot> {
                 selected: false,
                 disabled: disabled(doc, id),
                 read_only: attr(doc, id, "readonly"),
+                placeholder_shown: placeholder_shown(doc, id, control),
                 focused: data.focused == Some(id),
                 selection_start: control.map_or(length, |c| c.start),
                 selection_end: control.map_or(length, |c| c.end),

@@ -77,6 +77,17 @@ pub enum DrawCommand {
         rect: Rect,
         color: Color,
     },
+    RoundedFill {
+        rect: Rect,
+        radii: [[f32; 2]; 4],
+        color: Color,
+    },
+    RoundedBorder {
+        rect: Rect,
+        radii: [[f32; 2]; 4],
+        widths: [f32; 4],
+        colors: [Color; 4],
+    },
     UniformBorder {
         rect: Rect,
         widths: [f32; 4],
@@ -105,6 +116,79 @@ pub enum DrawCommand {
         interactive: bool,
     },
 }
+/// CSS scales all corner radii by a single factor when adjacent curves overlap.
+fn used_radii(rect: Rect, style: &Style) -> [[f32; 2]; 4] {
+    let Some(corners) = &style.border_radii else {
+        return [[0.; 2]; 4];
+    };
+    let mut radii = corners.map(|[x, y]| {
+        [
+            x.resolve(rect.width, style.font_size).unwrap_or(0.).max(0.),
+            y.resolve(rect.height, style.font_size)
+                .unwrap_or(0.)
+                .max(0.),
+        ]
+    });
+    let mut scale = 1.0_f64;
+    for (side, a, b) in [
+        (rect.width, radii[0][0], radii[1][0]),
+        (rect.width, radii[3][0], radii[2][0]),
+        (rect.height, radii[0][1], radii[3][1]),
+        (rect.height, radii[1][1], radii[2][1]),
+    ] {
+        if a > 0. || b > 0. {
+            scale = scale.min(f64::from(side) / (f64::from(a) + f64::from(b)));
+        }
+    }
+    for radius in &mut radii {
+        if radius[0] == 0. || radius[1] == 0. {
+            *radius = [0.; 2];
+        } else {
+            *radius = radius.map(|v| (f64::from(v) * scale) as f32);
+        }
+    }
+    radii
+}
+
+fn fitted_object(area: Rect, (w, h): (f32, f32), style: &Style) -> Rect {
+    use css::ObjectFit;
+    if w <= 0. || h <= 0. || area.width <= 0. || area.height <= 0. {
+        return area;
+    }
+    let contain = (area.width / w).min(area.height / h);
+    let (width, height) = match style.object_fit {
+        ObjectFit::Fill => (area.width, area.height),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Contain => contain,
+                ObjectFit::Cover => (area.width / w).max(area.height / h),
+                ObjectFit::ScaleDown => contain.min(1.),
+                _ => 1.,
+            };
+            (w * scale, h * scale)
+        }
+    };
+    let [x, y] = style.object_position;
+    Rect {
+        x: area.x + x.resolve(area.width - width, style.font_size).unwrap_or(0.),
+        y: area.y
+            + y.resolve(area.height - height, style.font_size)
+                .unwrap_or(0.),
+        width,
+        height,
+    }
+}
+
+fn background_command(rect: Rect, style: &Style) -> DrawCommand {
+    let color = style.background.unwrap_or(Color(0, 0, 0, 0));
+    let radii = used_radii(rect, style);
+    if color.3 > 0 && radii.iter().any(|r| r[0] > 0.) {
+        DrawCommand::RoundedFill { rect, radii, color }
+    } else {
+        DrawCommand::Rect { rect, color }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LinkUrl(Arc<str>);
 impl LinkUrl {
@@ -344,8 +428,13 @@ impl Layout {
             let n = &page.document.nodes[id.0];
             let parent = n.parent.map_or(0, |p| styles.by_node[p.0]);
             styles.by_node[id.0] = if matches!(n.kind, NodeKind::Element { .. }) {
-                let style =
-                    stylesheet.compute(&page.document, id, &styles.entries[parent], root_font);
+                let style = stylesheet.compute_with_form_state(
+                    &page.document,
+                    id,
+                    &styles.entries[parent],
+                    root_font,
+                    &|node| page.placeholder_shown(node),
+                );
                 styles.entries.push(style);
                 styles.entries.len() - 1
             } else {
@@ -361,6 +450,9 @@ impl Layout {
             .document
             .elements("html")
             .chain(page.document.elements("body"))
+            // A transparent root hides the canvas background, including a background
+            // propagated from the body. Body opacity alone does not hide that background.
+            .take_while(|&id| page.document.tag(id) != "html" || styles[id.0].opacity > 0.)
             .find_map(|id| styles[id.0].background.filter(|c| c.3 > 0))
             .unwrap_or(Color::WHITE);
         let styles: Arc<ComputedStyles> = styles.into();
@@ -377,6 +469,7 @@ impl Layout {
             links: vec![],
             elements: vec![],
             anchors: HashMap::new(),
+            list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             grid_text: HashMap::new(),
             floats: floats::FloatContext::default(),
@@ -659,6 +752,7 @@ struct Builder<'a> {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
+    list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
     grid_text: HashMap<NodeId, GridText>,
     floats: floats::FloatContext,
@@ -2087,6 +2181,78 @@ impl Builder<'_> {
     }
 }
 impl Builder<'_> {
+    fn is_flex_item(&self, child: NodeId) -> bool {
+        match &self.page.document.nodes[child.0].kind {
+            NodeKind::Text(text) => !text.chars().all(is_css_space),
+            NodeKind::Element { .. } => {
+                let style = &self.styles[child.0];
+                style.display != Display::None && !style.position.out_of_flow()
+            }
+            _ => false,
+        }
+    }
+
+    /// The children's cached intrinsic sizes include their padding and borders.
+    /// A row places all preferred widths on one line. A wrapping row can break
+    /// between items when computing its minimum width.
+    fn intrinsic_flex_content(&self, id: NodeId) -> (f32, f32) {
+        let style = &self.styles[id.0];
+        let row = matches!(
+            style.flex_direction,
+            FlexDirection::Row | FlexDirection::RowReverse
+        );
+        let gap = style.gap[1]
+            .resolve_with_basis(None, style.font_size)
+            .unwrap_or(0.);
+        let mut min_width = 0.0_f32;
+        let mut max_width = 0.0_f32;
+        let mut first = true;
+        for &child in &self.page.document.nodes[id.0].children {
+            if !self.is_flex_item(child) {
+                continue;
+            }
+            let (mut child_min, mut child_max) = self.intrinsic[child.0].unwrap_or_default();
+            if !matches!(self.page.document.nodes[child.0].kind, NodeKind::Text(_)) {
+                let item = &self.styles[child.0];
+                let metrics = BoxMetrics::new(item, 0., Constraints::default());
+                let to_border = |value: f32| {
+                    if item.box_sizing == BoxSizing::BorderBox {
+                        value.max(metrics.extra_x())
+                    } else {
+                        value + metrics.extra_x()
+                    }
+                };
+                let min = item
+                    .min_width
+                    .resolve_with_basis(None, item.font_size)
+                    .map(to_border)
+                    .unwrap_or(0.);
+                let max = item
+                    .max_width
+                    .resolve_with_basis(None, item.font_size)
+                    .map(to_border)
+                    .unwrap_or(f32::INFINITY)
+                    .max(min);
+                let margin = metrics.margin[1] + metrics.margin[3];
+                child_min = child_min.clamp(min, max) + margin;
+                child_max = child_max.clamp(min, max) + margin;
+            }
+            let spacing = if first { 0. } else { gap };
+            if row {
+                max_width += spacing + child_max;
+            } else {
+                max_width = max_width.max(child_max);
+            }
+            if row && !style.flex_wrap {
+                min_width += spacing + child_min;
+            } else {
+                min_width = min_width.max(child_min);
+            }
+            first = false;
+        }
+        (min_width.max(0.), max_width.max(0.))
+    }
+
     /// Useful horizontal-writing Flexbox subset: row/column, reverse directions,
     /// row wrapping, order, gaps, constrained grow/shrink, auto margins and main/
     /// cross alignment. No baselines, column wrapping or full intrinsic sizing.
@@ -2123,14 +2289,7 @@ impl Builder<'_> {
             .children
             .iter()
             .copied()
-            .filter(|&child| match &self.page.document.nodes[child.0].kind {
-                NodeKind::Text(t) => !t.chars().all(is_css_space),
-                NodeKind::Element { .. } => {
-                    self.styles[child.0].display != Display::None
-                        && !self.styles[child.0].position.out_of_flow()
-                }
-                _ => false,
-            })
+            .filter(|&child| self.is_flex_item(child))
             .collect();
         nodes.sort_by_key(|node| {
             if matches!(self.page.document.nodes[node.0].kind, NodeKind::Text(_)) {
@@ -2608,7 +2767,10 @@ impl Builder<'_> {
             self.place_float(id, line, href);
             return;
         }
-        if matches!(s.display, Display::Block | Display::Flex | Display::Grid) {
+        if matches!(
+            s.display,
+            Display::Block | Display::ListItem | Display::Flex | Display::Grid
+        ) {
             self.flush(line, false);
             let top = s.margin[0].resolve(line.width, s.font_size).unwrap_or(0.);
             let hypothetical = line.y
@@ -2812,7 +2974,7 @@ impl Builder<'_> {
                 url: url.clone().into(),
             });
         }
-        if tag == "li" {
+        if s.display == Display::ListItem && s.marker != css::MarkerType::None {
             self.list_marker(id, cx, cy, s);
         }
         let natural = if self.is_replaced_control(id) {
@@ -2846,9 +3008,6 @@ impl Builder<'_> {
             };
             if self.is_svg_root(id) {
                 self.draw_svg(id, rect);
-            } else if self.is_canvas(id) || self.is_video(id) {
-                self.commands.owner = id;
-                self.commands.push(DrawCommand::Canvas { node: id, rect });
             } else {
                 self.draw_image(id, rect, href.clone());
             }
@@ -2938,10 +3097,7 @@ impl Builder<'_> {
             height,
         };
         self.elements[element].rect = rect;
-        self.commands[background] = DrawCommand::Rect {
-            rect,
-            color: s.background.unwrap_or(Color(0, 0, 0, 0)),
-        };
+        self.commands[background] = background_command(rect, s);
         if tag == "a" && href.is_some() {
             self.links[link_index].rect = rect;
         }
@@ -3013,6 +3169,8 @@ impl Builder<'_> {
                 }
                 DrawCommand::PopState => {}
                 DrawCommand::Rect { rect, .. }
+                | DrawCommand::RoundedFill { rect, .. }
+                | DrawCommand::RoundedBorder { rect, .. }
                 | DrawCommand::UniformBorder { rect, .. }
                 | DrawCommand::Image { rect, .. }
                 | DrawCommand::Canvas { rect, .. }
@@ -3064,24 +3222,55 @@ impl Builder<'_> {
         line.items.push(Item::Fragment(f));
         line.pending_space = false;
     }
+    fn list_ordinal(&mut self, id: NodeId) -> i64 {
+        if let Some(&n) = self.list_ordinals.get(&id) {
+            return n;
+        }
+        let doc = &self.page.document;
+        let Some(parent) = doc.nodes[id.0].parent else {
+            return 1;
+        };
+        let ordered = doc.tag(parent) == "ol";
+        let reversed = ordered && doc.attr(parent, "reversed").is_some();
+        let items = doc.nodes[parent.0]
+            .children
+            .iter()
+            .copied()
+            .filter(|&child| {
+                matches!(doc.nodes[child.0].kind, NodeKind::Element { .. })
+                    && self.styles[child.0].display == Display::ListItem
+            });
+        let mut n = ordered
+            .then(|| doc.attr(parent, "start"))
+            .flatten()
+            .and_then(|start| start.trim().parse().ok())
+            .unwrap_or_else(|| {
+                if reversed {
+                    items.clone().count() as i64
+                } else {
+                    1
+                }
+            });
+        for item in items {
+            if ordered
+                && doc.tag(item) == "li"
+                && let Some(value) = doc.attr(item, "value").and_then(|v| v.trim().parse().ok())
+            {
+                n = value;
+            }
+            self.list_ordinals.insert(item, n);
+            n = n.saturating_add(if reversed { -1 } else { 1 });
+        }
+        self.list_ordinals.get(&id).copied().unwrap_or(1)
+    }
     fn list_marker(&mut self, id: NodeId, x: f32, y: f32, s: &Style) {
         self.commands.owner = id;
-        let d = &self.page.document;
-        let p = d.nodes[id.0].parent;
-        let label = if p.is_some_and(|p| d.tag(p) == "ol") {
-            let p = p.unwrap();
-            let n = d.nodes[p.0]
-                .children
-                .iter()
-                .take_while(|&&n| n != id)
-                .filter(|&&n| d.tag(n) == "li")
-                .count() as i64
-                + d.attr(p, "start")
-                    .and_then(|v| v.parse::<i64>().ok())
-                    .unwrap_or(1);
-            format!("{n}.")
-        } else {
-            "•".into()
+        let label = match s.marker {
+            css::MarkerType::None => return,
+            css::MarkerType::Disc => "•".into(),
+            css::MarkerType::Circle => "◦".into(),
+            css::MarkerType::Square => "▪".into(),
+            css::MarkerType::Decimal => format!("{}.", self.list_ordinal(id)),
         };
         let run = self.shape(&label, s);
         self.commands.push(DrawCommand::Text {
@@ -3099,7 +3288,16 @@ impl Builder<'_> {
             .into_iter()
             .zip(b)
             .filter_map(|(color, width)| (width > 0.).then_some(color));
-        if (b[0] > 0. || b[2] > 0.)
+        let radii = used_radii(r, s);
+        let rounded = radii.iter().any(|corner| corner[0] > 0.);
+        if rounded && b.iter().any(|&w| w > 0.) {
+            self.commands.push(DrawCommand::RoundedBorder {
+                rect: r,
+                radii,
+                widths: b,
+                colors,
+            });
+        } else if (b[0] > 0. || b[2] > 0.)
             && (b[1] > 0. || b[3] > 0.)
             && let Some(color) = active.next()
             && (1..255).contains(&color.3)
@@ -3134,6 +3332,34 @@ impl Builder<'_> {
                         color: colors[i],
                     });
                 }
+            }
+        }
+        if s.outline_visible && s.outline_width > 0. {
+            let width = s.outline_width;
+            let offset = s.outline_offset.max(-r.width.min(r.height) / 2.);
+            let amount = offset + width;
+            let rect = Rect {
+                x: r.x - amount,
+                y: r.y - amount,
+                width: r.width + 2. * amount,
+                height: r.height + 2. * amount,
+            };
+            let color = s.outline_color.unwrap_or(s.color);
+            if rounded {
+                let radii = radii
+                    .map(|corner| corner.map(|v| if v > 0. { (v + amount).max(0.) } else { 0. }));
+                self.commands.push(DrawCommand::RoundedBorder {
+                    rect,
+                    radii,
+                    widths: [width; 4],
+                    colors: [color; 4],
+                });
+            } else {
+                self.commands.push(DrawCommand::UniformBorder {
+                    rect,
+                    widths: [width; 4],
+                    color,
+                });
             }
         }
         self.commands.background = false;
@@ -3194,38 +3420,59 @@ impl Builder<'_> {
         let document = &self.page.document;
         document.namespace(id) == crate::dom::Namespace::Html && document.tag(id) == "video"
     }
-    fn draw_image(&mut self, id: NodeId, rect: Rect, href: Option<Arc<str>>) {
-        self.commands.owner = id;
-        if let Some(scene) = self.svg_image(id, rect) {
-            self.commands.push(DrawCommand::Svg {
+    fn image_command(&mut self, id: NodeId, area: Rect) -> Option<(DrawCommand, Rect)> {
+        let style = &self.styles[id.0];
+        if self.is_canvas(id) || self.is_video(id) {
+            let intrinsic = if self.is_canvas(id) {
+                let [w, h] = crate::canvas::size(&self.page.document, id);
+                (w as f32, h as f32)
+            } else if let Some(crate::canvas::Frame::Bitmap(frame)) =
+                self.page.canvas_frames.get(id)
+            {
+                (frame.width() as f32, frame.height() as f32)
+            } else {
+                (300., 150.)
+            };
+            let rect = fitted_object(area, intrinsic, style);
+            return Some((DrawCommand::Canvas { node: id, rect }, rect));
+        }
+        let key = self.page.image_asset_key(id)?;
+        if let Some(image) = self.page.images.get(&key) {
+            let rect = fitted_object(area, (image.width() as f32, image.height() as f32), style);
+            return Some((
+                DrawCommand::Image {
+                    rect,
+                    image: image.clone(),
+                },
+                rect,
+            ));
+        }
+        let asset = self.page.svg_images.get(&key)?;
+        let rect = fitted_object(area, asset.intrinsic_size(), style);
+        let scene = self.svg_image(id, rect)?;
+        Some((
+            DrawCommand::Svg {
                 node: id,
                 rect,
                 scene,
                 interactive: false,
-            });
-            if let Some(url) = href {
-                self.links.push(Link {
-                    node: id,
-                    rect,
-                    url: url.into(),
-                });
-            }
-            return;
-        }
-        let d = &self.page.document;
-        let asset = self
-            .page
-            .image_asset_key(id)
-            .and_then(|u| self.page.images.get(&u))
-            .cloned();
-        if let Some(image) = asset {
-            self.commands.push(DrawCommand::Image { rect, image });
+            },
+            rect,
+        ))
+    }
+    fn draw_image(&mut self, id: NodeId, rect: Rect, href: Option<Arc<str>>) {
+        self.commands.owner = id;
+        if let Some((command, object)) = self.image_command(id, rect) {
+            self.commands.push_object(command, rect, object);
         } else {
             self.commands.push(DrawCommand::Rect {
                 rect,
                 color: Color(238, 240, 244, 255),
             });
-            let run = self.shape(d.attr(id, "alt").unwrap_or("obraz"), &self.styles[id.0]);
+            let run = self.shape(
+                self.page.document.attr(id, "alt").unwrap_or("obraz"),
+                &self.styles[id.0],
+            );
             self.commands.push(DrawCommand::Text {
                 x: rect.x + 4.,
                 baseline: rect.y + 18.,
@@ -3281,9 +3528,8 @@ impl Builder<'_> {
                         height: (line.y - y).max(0.),
                     };
                     self.elements[element].rect = rect;
-                    if let DrawCommand::Rect { rect: target, .. } = &mut self.commands[background] {
-                        *target = rect;
-                    }
+                    let style = &self.styles[self.elements[element].node.0];
+                    self.commands[background] = background_command(rect, style);
                     if let Some(link) = link {
                         self.links[link].rect = rect;
                     }
@@ -3341,10 +3587,7 @@ impl Builder<'_> {
                             height: content_height + metrics.extra_y(),
                         };
                         self.elements.push(ElementBox { node, rect: outer });
-                        self.commands.push(DrawCommand::Rect {
-                            rect: outer,
-                            color: s.background.unwrap_or(Color(0, 0, 0, 0)),
-                        });
+                        self.commands.push(background_command(outer, s));
                         self.control_command(
                             node,
                             Rect {
@@ -3383,21 +3626,16 @@ impl Builder<'_> {
                             width,
                             height,
                         };
-                        let asset = self
-                            .page
-                            .image_asset_key(node)
-                            .and_then(|u| self.page.images.get(&u))
-                            .cloned();
-                        let command = if self.is_canvas(node) || self.is_video(node) {
-                            DrawCommand::Canvas { node, rect }
-                        } else if let Some(image) = asset {
-                            DrawCommand::Image { rect, image }
+                        let mut commands = TrackedCommands::default();
+                        commands.owner = node;
+                        if let Some((command, object)) = self.image_command(node, rect) {
+                            commands.push_object(command, rect, object);
                         } else {
-                            DrawCommand::Rect {
+                            commands.push(DrawCommand::Rect {
                                 rect,
                                 color: Color(238, 240, 244, 255),
-                            }
-                        };
+                            });
+                        }
                         let links = href
                             .map(|url| {
                                 vec![Link {
@@ -3408,7 +3646,7 @@ impl Builder<'_> {
                             })
                             .unwrap_or_default();
                         let f = Fragment {
-                            commands: TrackedCommands::single(node, command),
+                            commands,
                             links,
                             elements: vec![ElementBox { node, rect }],
                             width,
@@ -3421,6 +3659,7 @@ impl Builder<'_> {
                     if matches!(
                         s.display,
                         Display::Block
+                            | Display::ListItem
                             | Display::Flex
                             | Display::Grid
                             | Display::InlineBlock
@@ -3854,6 +4093,9 @@ impl Builder<'_> {
                     width + extra
                 };
                 (width, width)
+            } else if matches!(s.display, Display::Flex | Display::InlineFlex) {
+                let (min, max) = self.intrinsic_flex_content(id);
+                (min + extra, max + extra)
             } else {
                 let (mut min, mut max, mut current) = (0f32, 0f32, 0f32);
                 for &child in &d.nodes[id.0].children {
@@ -3864,8 +4106,10 @@ impl Builder<'_> {
                     }
                     let (a, b) = self.intrinsic[child.0].unwrap_or((0., 0.));
                     let cs = &self.styles[child.0];
-                    if matches!(cs.display, Display::Block | Display::Flex | Display::Grid)
-                        && !matches!(d.nodes[child.0].kind, NodeKind::Text(_))
+                    if matches!(
+                        cs.display,
+                        Display::Block | Display::ListItem | Display::Flex | Display::Grid
+                    ) && !matches!(d.nodes[child.0].kind, NodeKind::Text(_))
                     {
                         max = max.max(current).max(b);
                         current = 0.;

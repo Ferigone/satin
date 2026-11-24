@@ -58,7 +58,7 @@ impl Rules {
                 }
             }
         }
-        let (matched, partial) = self.index.matching(&page.document, id);
+        let (matched, partial) = self.index.matching_page(page, id);
         self.lines.push(Line::heading(format!(
             "Direct author matches ({}) · source order",
             matched.len()

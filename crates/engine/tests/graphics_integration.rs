@@ -121,3 +121,88 @@ fn svg_scene_and_hit_geometry_share_css_affine_and_overflow_clips() {
     assert_eq!(canvas.pixels[32 * 100 + 5], 0xffffff);
     assert!(!canvas.limited);
 }
+
+#[test]
+fn svg_images_without_viewbox_scale_root_coordinates_to_the_image_box() {
+    let mut page = LoadedPage::from_html(
+        "https://example.test/",
+        "<!doctype html><style>body{margin:0}img{display:block;width:40px;height:40px}</style>         <img src='/wide.svg'><img src='/relative.svg'><img src='/unsized.svg'>",
+    );
+    for (name, dimensions) in [
+        (
+            "wide",
+            r#"width="100" height="40" preserveAspectRatio="xMinYMin meet""#,
+        ),
+        ("relative", r#"width="200%" height="100%""#),
+        ("unsized", ""),
+    ] {
+        let source = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" {dimensions}>
+            <rect width="100" height="40" fill="red"/><rect x="50" width="50" height="40" fill="blue"/></svg>"#
+        );
+        page.svg_images.insert(
+            format!("https://example.test/{name}.svg"),
+            Arc::new(SvgImage::from_source(&source).unwrap()),
+        );
+    }
+    let mut fonts = Fonts::new().unwrap();
+    let layout = Layout::build(&page, &fonts, 120.);
+    let mut canvas = Canvas::new(120, 120, Color::WHITE);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    assert!(!canvas.limited);
+    for (x, y, rgb) in [
+        (0, 0, 0xff0000),
+        (19, 39, 0xff0000),
+        (20, 0, 0x0000ff),
+        (39, 39, 0x0000ff),
+        (24, 60, 0xff0000),
+        (25, 60, 0x0000ff),
+        (39, 100, 0xff0000),
+        (40, 100, 0xffffff),
+    ] {
+        assert_eq!(canvas.pixels[y * 120 + x], rgb, "pixel ({x},{y})");
+    }
+}
+
+#[test]
+fn object_fit_preserves_image_proportions_and_crops_within_the_element() {
+    use image::{Rgba, RgbaImage};
+    let mut page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"
+    <!doctype html><style>body{margin:0}img{width:40px;height:40px;display:block;background:lime}</style>
+    <img id=a src='/colors.png' style='object-fit:contain'>
+    <img id=b src='/colors.png' style='object-fit:cover;object-position:right top'>
+    <img id=c src='/colors.png' style='object-fit:scale-down'>"#,
+    );
+    let image = RgbaImage::from_fn(8, 2, |x, _| {
+        if x < 4 {
+            Rgba([255, 0, 0, 255])
+        } else {
+            Rgba([0, 0, 255, 255])
+        }
+    });
+    page.images
+        .insert("https://example.test/colors.png".into(), Arc::new(image));
+    let mut fonts = Fonts::new().unwrap();
+    let layout = Layout::build(&page, &fonts, 100.);
+    assert_eq!(layout.rect_for(id(&page, "a")).unwrap().height, 40.);
+    let mut canvas = Canvas::new(100, 120, Color::WHITE);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    assert!(!canvas.limited);
+    for (x, y, rgb) in [
+        (1, 1, 0x00ff00),
+        (1, 15, 0xff0000),
+        (38, 24, 0x0000ff),
+        (38, 25, 0x00ff00),
+        (0, 40, 0x0000ff),
+        (39, 79, 0x0000ff),
+        (41, 60, 0xffffff),
+        (15, 99, 0x00ff00),
+        (16, 99, 0xff0000),
+        (23, 100, 0x0000ff),
+        (24, 100, 0x00ff00),
+    ] {
+        assert_eq!(canvas.pixels[y * 100 + x], rgb, "pixel ({x},{y})");
+    }
+}

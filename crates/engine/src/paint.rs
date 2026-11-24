@@ -277,6 +277,25 @@ impl Canvas {
                     ..
                 } => self.form_control(*rect, control, style, fonts, 1.),
                 DrawCommand::Rect { rect, color } => self.fill_rect(*rect, *color),
+                DrawCommand::RoundedFill { rect, radii, color } => {
+                    if color.3 != 0 {
+                        self.raster_rect(*rect, |x, y| {
+                            let alpha = box_border::coverage(*rect, radii, x, y);
+                            Some(Color(
+                                color.0,
+                                color.1,
+                                color.2,
+                                (f32::from(color.3) * alpha).round() as u8,
+                            ))
+                        });
+                    }
+                }
+                DrawCommand::RoundedBorder {
+                    rect,
+                    radii,
+                    widths,
+                    colors,
+                } => self.rounded_border(*rect, radii, *widths, colors),
                 DrawCommand::UniformBorder {
                     rect,
                     widths,

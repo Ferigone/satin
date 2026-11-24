@@ -73,6 +73,19 @@ impl InspectorStylesheets {
 
     /// Direct author matches in source order. The boolean reports a truncated search.
     pub fn matching(&self, doc: &Document, id: NodeId) -> (Vec<(usize, &Rule)>, bool) {
+        self.matching_with_form_state(doc, id, &|node| {
+            crate::script::default_placeholder_shown(doc, node)
+        })
+    }
+    pub fn matching_page(&self, page: &LoadedPage, id: NodeId) -> (Vec<(usize, &Rule)>, bool) {
+        self.matching_with_form_state(&page.document, id, &|node| page.placeholder_shown(node))
+    }
+    fn matching_with_form_state(
+        &self,
+        doc: &Document,
+        id: NodeId,
+        placeholder: &dyn Fn(NodeId) -> bool,
+    ) -> (Vec<(usize, &Rule)>, bool) {
         let mut found = Vec::new();
         if !doc
             .nodes
@@ -88,7 +101,8 @@ impl InspectorStylesheets {
                 return (found, true);
             }
             let mut fuel = 16_384;
-            let matches = selector.matches_part(doc, id, selector.parts.len() - 1, &mut fuel);
+            let matches =
+                selector.matches_part(doc, id, selector.parts.len() - 1, &mut fuel, placeholder);
             remaining -= 16_384 - fuel;
             if matches {
                 if found.len() == 64 {

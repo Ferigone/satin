@@ -109,3 +109,41 @@ fn stylesheet(url: &str, cors: Option<CredentialsMode>) -> ResourceRequest {
         deadline: Instant::now() + Duration::from_secs(3),
     }
 }
+
+#[test]
+fn linked_style_bundles_use_the_resource_budget_after_decompression() {
+    use flate2::{Compression, write::GzEncoder};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let rule = "main { display: grid }";
+    let fixture = std::thread::spawn(move || {
+        for size in [RESOURCE_LIMIT, RESOURCE_LIMIT + 1] {
+            let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+            gzip.write_all(&vec![b' '; size - rule.len()]).unwrap();
+            gzip.write_all(rule.as_bytes()).unwrap();
+            let body = gzip.finish().unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
+            for line in BufReader::new(&socket).lines() {
+                if line.unwrap().is_empty() {
+                    break;
+                }
+            }
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            socket.write_all(&body).unwrap();
+        }
+    });
+
+    let loader = Loader::new().unwrap();
+    let fetch = |path| {
+        loader.load_document_resource(
+            &stylesheet(&format!("{base}/{path}"), None),
+            &AtomicBool::new(false),
+        )
+    };
+    let response = fetch("bundle.css").unwrap();
+    assert_eq!(response.transferred, RESOURCE_LIMIT);
+    assert!(matches!(response.body, ResourceBody::Text(source) if source.ends_with(rule)));
+    assert!(fetch("oversize.css").is_err());
+    fixture.join().unwrap();
+}

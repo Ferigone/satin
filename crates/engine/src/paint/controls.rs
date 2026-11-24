@@ -233,7 +233,11 @@ impl Canvas {
                     0.
                 };
                 let x = rect.x + scale - shift;
-                let y = rect.y + (index - first_line) as f32 * line;
+                let y = if multiline {
+                    rect.y + (index - first_line) as f32 * line
+                } else {
+                    rect.y + (rect.height - line) / 2.
+                };
                 if control.focused && !placeholder && end_in > start_in {
                     self.fill_rect(
                         Rect {
@@ -245,7 +249,12 @@ impl Canvas {
                         Color(172, 211, 244, 255),
                     );
                 }
-                self.text(x, y + run.ascent, &run, text_color, fonts);
+                let leading = if multiline {
+                    0.
+                } else {
+                    (line - run.ascent - run.descent) / 2.
+                };
+                self.text(x, y + leading + run.ascent, &run, text_color, fonts);
                 if control.focused
                     && editable
                     && !control.read_only

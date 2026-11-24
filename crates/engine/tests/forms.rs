@@ -496,3 +496,62 @@ fn focused_html_link_enter_honors_cancellation_and_uses_the_live_href() {
     assert!(runtime.take_navigation_request().is_none());
     js(&mut runtime, "clicks", 2.0);
 }
+
+#[test]
+fn placeholder_shown_tracks_default_dirty_and_user_edited_values() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"<!doctype html>
+        <style>#action {display:none} #search:not(:placeholder-shown) ~ #action {display:flex}</style>
+        <form><input id=search type=search placeholder=""><button id=action>X</button>
+        <textarea id=area placeholder="type">seed</textarea>
+        <input id=without><input id=num type=number value=invalid placeholder="0">
+        <input id=check type=checkbox placeholder=x></form>"#,
+    );
+    let search = page.document.html_elements("input").next().unwrap();
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval("var search=document.getElementById('search'), area=document.getElementById('area'), action=document.getElementById('action'); function clearVisible(){return getComputedStyle(action).display==='flex'}").unwrap();
+    let check =
+        |r: &mut ScriptRuntime, s: &str| assert_eq!(r.eval(s).unwrap(), Value::Bool(true), "{s}");
+    check(
+        &mut runtime,
+        "search.matches(':placeholder-shown') && !clearVisible() && document.querySelector(':placeholder-shown')===search && !area.matches(':placeholder-shown')",
+    );
+    check(
+        &mut runtime,
+        "!document.getElementById('without').matches(':placeholder-shown') && document.getElementById('num').matches(':placeholder-shown') && !document.getElementById('check').matches(':placeholder-shown')",
+    );
+    runtime.focus_control(Some(search)).unwrap();
+    runtime.insert_form_text("q").unwrap();
+    check(
+        &mut runtime,
+        "clearVisible() && !search.matches(':placeholder-shown')",
+    );
+    runtime
+        .form_keydown(FormKey::Backspace, false, false)
+        .unwrap();
+    check(
+        &mut runtime,
+        "search.matches(':placeholder-shown') && !clearVisible()",
+    );
+    check(
+        &mut runtime,
+        "search.value='test'; area.value=''; area.matches(':placeholder-shown') && clearVisible()",
+    );
+    check(
+        &mut runtime,
+        "search.setAttribute('value',''); clearVisible() && search.getAttribute('value')===''",
+    );
+    check(
+        &mut runtime,
+        "search.form.reset(); !clearVisible() && !area.matches(':placeholder-shown')",
+    );
+    check(
+        &mut runtime,
+        "area.textContent=''; area.matches(':placeholder-shown')",
+    );
+    check(
+        &mut runtime,
+        "area.removeAttribute('placeholder'); !area.matches(':placeholder-shown')",
+    );
+}

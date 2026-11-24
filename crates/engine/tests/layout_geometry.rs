@@ -35,6 +35,36 @@ fn close(actual: f32, expected: f32) {
 }
 
 #[test]
+fn noscript_only_renders_fallback_when_scripting_is_disabled() {
+    use rust_browser_engine::css::{self, Display, Style};
+
+    let source = "<body><noscript id=fallback style='display:block!important'>\
+        <style>#results{display:none!important}</style><b>Fallback</b>\
+        </noscript><div id=results>Results</div>";
+    let (page, rendered) = layout(source, 500.);
+    let fallback = id(&page, "fallback");
+    assert!(page.document.text(fallback).contains("<style>"));
+    assert_eq!(
+        rendered.computed_styles.get(fallback.0).unwrap().display,
+        Display::None
+    );
+    assert!(rendered.rect_for(fallback).is_none());
+    let (reference, expected) = layout("<div id=results>Results</div>", 500.);
+    close(
+        rect(&page, &rendered, "results").y,
+        rect(&reference, &expected, "results").y,
+    );
+
+    let disabled = rust_browser_engine::html::parse_with_scripting(source, false);
+    let fallback = disabled.html_elements("noscript").next().unwrap();
+    assert_eq!(disabled.html_elements("b").count(), 1);
+    assert_eq!(
+        css::compute(&disabled, fallback, &Style::default(), &[]).display,
+        Display::Block
+    );
+}
+
+#[test]
 fn border_box_min_max_and_percentage_padding() {
     let (p, l) = layout(
         "<div id='a' style='box-sizing:border-box;width:200px;padding:10%;border:5px solid red;height:100px'></div><div id='b' style='box-sizing:border-box;width:500px;max-width:150px;min-width:180px;padding:10px'></div>",
@@ -71,6 +101,20 @@ fn adjacent_vertical_margins_collapse_with_negative_values() {
     close(rect(&p, &l, "b").y, 40.);
     close(rect(&p, &l, "c").y, 53.);
 }
+#[test]
+fn nested_flex_rows_measure_all_visible_items_and_gaps() {
+    let (p, l) = layout(
+        "<nav style='display:flex;width:500px'><div id='tabs' style='display:flex;gap:8px;overflow:auto'>
+        <div style='width:50px'></div><div hidden></div><div style='position:absolute;width:200px'></div>
+        <div style='width:60px;margin:0 2px'></div><div id='last' style='width:70px'></div>
+        </div><button id='next' style='padding:0;border:0;width:20px'>+</button></nav>",
+        500.,
+    );
+    close(rect(&p, &l, "tabs").width, 200.);
+    close(rect(&p, &l, "last").x, 130.);
+    close(rect(&p, &l, "next").x, 200.);
+}
+
 #[test]
 fn row_flex_distributes_growth_and_respects_constraints() {
     let (p, l) = layout(
@@ -354,4 +398,48 @@ fn pinned_chrome_157_box_and_flex_reference() {
     println!(
         "11 boxes / 44 coordinates versus Chrome 157; max absolute difference = {maximum_error:.6} CSS px"
     );
+}
+
+#[test]
+fn list_markers_follow_inherited_type_and_computed_display() {
+    use rust_browser_engine::{
+        css::{Display, MarkerType},
+        layout::DrawCommand,
+    };
+    let (page, rendered) = layout(
+        r#"
+        <style>
+          .tabs { display: flex; list-style: none }
+          .box { display: block } .flex { display: flex }
+          .number { display: list-item; list-style: outside decimal }
+        </style>
+        <ul class=tabs><li id=tab></li><li></li></ul>
+        <ul><li></li><li class=box></li><li class=flex></li>
+          <li style='list-style: square'></li><li style='list-style-type:circle'></li></ul>
+        <ol start=9><li></li><li class=box></li><li value=15></li><li></li></ol>
+        <ol reversed><li></li><li></li></ol>
+        <section><div class=number></div><div class=number></div></section>
+    "#,
+        800.,
+    );
+    let tab = &rendered.computed_styles[id(&page, "tab").0];
+    assert_eq!(tab.display, Display::ListItem);
+    assert_eq!(tab.marker, MarkerType::None);
+    let (_, expected) = layout(
+        "<div>•</div><div>▪</div><div>◦</div><div>9.</div><div>15.</div><div>16.</div><div>2.</div><div>1.</div><div>1.</div><div>2.</div>",
+        800.,
+    );
+    let glyphs = |layout: &Layout| {
+        layout
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCommand::Text { run, .. } => {
+                    Some(run.glyphs.iter().map(|g| g.id).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(glyphs(&rendered), glyphs(&expected));
 }

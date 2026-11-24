@@ -1,6 +1,118 @@
 use super::*;
 
+/// Pixel coverage of the active elliptical corner. Straight edges use the
+/// renderer's usual pixel-center convention.
+pub(super) fn coverage(r: Rect, radii: &[[f32; 2]; 4], x: f32, y: f32) -> f32 {
+    if r.width <= 0. || r.height <= 0. || !r.contains(x, y) {
+        return 0.;
+    }
+    let left = x - r.x;
+    let top = y - r.y;
+    let right = r.width - left;
+    let bottom = r.height - top;
+    for ([dx, dy], [rx, ry]) in [[left, top], [right, top], [right, bottom], [left, bottom]]
+        .into_iter()
+        .zip(*radii)
+    {
+        if dx >= rx || dy >= ry || rx <= 0. || ry <= 0. {
+            continue;
+        }
+        let ax = (rx - dx) / rx;
+        let ay = (ry - dy) / ry;
+        let f = ax * ax + ay * ay - 1.;
+        // Signed distance to the tangent approximates subpixel edge coverage.
+        let gradient = 2. * (ax / rx).hypot(ay / ry);
+        return if gradient > 0. {
+            (0.5 - f / gradient).clamp(0., 1.)
+        } else {
+            1.
+        };
+    }
+    1.
+}
+
 impl Canvas {
+    pub(super) fn rounded_border(
+        &mut self,
+        rect: Rect,
+        radii: &[[f32; 2]; 4],
+        widths: [f32; 4],
+        colors: &[Color; 4],
+    ) {
+        if !valid_rect(rect) || colors.iter().all(|c| c.3 == 0) {
+            return;
+        }
+        let [t, r, b, l] = widths;
+        let inner = Rect {
+            x: rect.x + l,
+            y: rect.y + t,
+            width: rect.width - l - r,
+            height: rect.height - t - b,
+        };
+        let mut inner_radii = *radii;
+        for (corner, sides) in inner_radii.iter_mut().zip([[l, t], [r, t], [r, b], [l, b]]) {
+            for i in 0..2 {
+                corner[i] = (corner[i] - sides[i]).max(0.);
+            }
+        }
+        // Outside these four strips the inner and outer box cover every
+        // pixel equally. Avoid charging a large, empty outline interior.
+        let top = t.max(radii[0][1]).max(radii[1][1]).min(rect.height);
+        let bottom = b.max(radii[2][1]).max(radii[3][1]).min(rect.height - top);
+        let left = l.min(rect.width);
+        let right = r.min(rect.width - left);
+        let middle = rect.height - top - bottom;
+        for strip in [
+            Rect {
+                height: top,
+                ..rect
+            },
+            Rect {
+                y: rect.y + top,
+                height: middle,
+                width: left,
+                ..rect
+            },
+            Rect {
+                x: rect.x + rect.width - right,
+                y: rect.y + top,
+                height: middle,
+                width: right,
+            },
+            Rect {
+                y: rect.y + rect.height - bottom,
+                height: bottom,
+                ..rect
+            },
+        ] {
+            self.raster_rect(strip, |x, y| {
+                // Half-open edges avoid double blending at fractional strip joins.
+                if x >= strip.x + strip.width || y >= strip.y + strip.height {
+                    return None;
+                }
+                let opacity = coverage(rect, radii, x, y) - coverage(inner, &inner_radii, x, y);
+                if opacity <= 0. {
+                    return None;
+                }
+                let edges = [
+                    y - rect.y,
+                    rect.x + rect.width - x,
+                    rect.y + rect.height - y,
+                    x - rect.x,
+                ];
+                let mut side = 0;
+                let mut best = f32::INFINITY;
+                for (i, w) in widths.iter().enumerate() {
+                    if *w > 0. && edges[i] / w < best {
+                        best = edges[i] / w;
+                        side = i;
+                    }
+                }
+                let Color(r, g, b, a) = colors[side];
+                Some(Color(r, g, b, (f32::from(a) * opacity).round() as u8))
+            });
+        }
+    }
     pub(super) fn uniform_border(&mut self, rect: Rect, widths: [f32; 4], color: Color) {
         if !valid_rect(rect) || color.3 == 0 {
             return;

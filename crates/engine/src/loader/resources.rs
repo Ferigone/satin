@@ -159,7 +159,7 @@ impl Loader {
             });
         }
         let limit = match request.kind {
-            ClassicScript | ModuleScript | Stylesheet => 1024 * 1024,
+            ClassicScript | ModuleScript => 1024 * 1024,
             Media => 16 * 1024 * 1024,
             _ => RESOURCE_LIMIT,
         };

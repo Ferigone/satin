@@ -39,17 +39,25 @@ impl TrackedCommands {
         });
         self.items.push(command);
     }
+    pub fn push_object(&mut self, command: DrawCommand, area: Rect, object: Rect) {
+        let clip = object.x < area.x
+            || object.y < area.y
+            || object.x + object.width > area.x + area.width
+            || object.y + object.height > area.y + area.height;
+        if clip {
+            self.push(DrawCommand::PushState {
+                transform: Affine2D::IDENTITY,
+                clip: Some(area),
+            });
+        }
+        self.push(command);
+        if clip {
+            self.push(DrawCommand::PopState);
+        }
+    }
     pub fn extend(&mut self, other: Self) {
         self.items.extend(other.items);
         self.meta.extend(other.meta);
-    }
-    pub fn single(owner: NodeId, command: DrawCommand) -> Self {
-        let mut v = Self {
-            owner,
-            ..Self::default()
-        };
-        v.push(command);
-        v
     }
 }
 impl Deref for TrackedCommands {
@@ -1044,11 +1052,13 @@ impl Builder<'_> {
         };
         let mut groups = vec![PaintGroup::default()];
         let mut context_for = vec![0usize; count];
+        let mut transparent = vec![false; count];
         let mut float_contexts = HashSet::new();
         let mut pseudo = vec![None; count];
         for (index, &id) in order.iter().enumerate() {
             let style = &self.styles[id.0];
             let parent = doc.nodes[id.0].parent;
+            transparent[id.0] = style.opacity == 0. || parent.is_some_and(|p| transparent[p.0]);
             let ctx = parent.map_or(0, |p| context_for[p.0]);
             context_for[id.0] = ctx;
             if !matches!(doc.nodes[id.0].kind, NodeKind::Element { .. }) {
@@ -1061,12 +1071,17 @@ impl Builder<'_> {
                 continue;
             }
             let flex_item = flex_or_grid_item(parent);
-            let creates = matches!(style.position, Position::Fixed | Position::Sticky)
+            let creates = style.opacity < 1.
+                || matches!(style.position, Position::Fixed | Position::Sticky)
                 || !style.transform.is_empty()
                     && (style.display != Display::Inline || self.is_replaced_image(id))
                 || style.z_index.is_some() && (style.position != Position::Static || flex_item);
             if creates {
-                let z = style.z_index.unwrap_or(0);
+                let z = if style.position != Position::Static || flex_item {
+                    style.z_index.unwrap_or(0)
+                } else {
+                    0
+                };
                 let phase = if z < 0 {
                     PaintPhase::Negative
                 } else if z > 0 {
@@ -1146,7 +1161,7 @@ impl Builder<'_> {
                 && meta.background
                 && matches!(
                     self.styles[meta.node.0].display,
-                    Display::Block | Display::Flex | Display::Grid
+                    Display::Block | Display::ListItem | Display::Flex | Display::Grid
                 );
             groups[group].entries.push(PaintEntry {
                 phase: if own_background {
@@ -1336,7 +1351,12 @@ impl Builder<'_> {
                     command: command.clone(),
                 });
             }
-            commands.push(command);
+            // A fully transparent stacking context has no visual output. Keep
+            // geometry, paint order and input regions. Intermediate HTML opacity
+            // needs group compositing, not per-command alpha multiplication.
+            if !transparent[meta.node.0] {
+                commands.push(command);
+            }
             last_emitted = Some(rank);
             if scoped {
                 commands.push(DrawCommand::PopState);

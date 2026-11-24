@@ -72,18 +72,26 @@ impl Data {
         let document = &self.page.document;
         let fonts = self.fonts.as_ref().expect("layout fonts");
         if let Some(vm) = vm {
-            let source_work = self
+            let stylesheet_bytes = self
                 .page
                 .stylesheets
                 .iter()
-                .map(|sheet| sheet.len())
-                .sum::<usize>()
-                + self
-                    .page
-                    .svg_images
-                    .values()
-                    .map(|image| image.retained_bytes())
-                    .sum::<usize>();
+                .enumerate()
+                .filter(|(index, _)| self.page.stylesheet_applies(*index, self.viewport.width))
+                .map(|(_, sheet)| sheet.len())
+                .sum::<usize>();
+            // Charge the first 64 KiB byte-for-byte on every actual reflow.
+            // Rule expansion is bounded; charge the rest of a large bundle
+            // in 16-byte units. An 8 MiB bundle fits one ordinary task, while
+            // alternating invalidations still debit that task each time.
+            let full_cost = stylesheet_bytes.min(64 * 1024);
+            vm.charge_work(full_cost + (stylesheet_bytes - full_cost).div_ceil(16))?;
+            let svg_work = self
+                .page
+                .svg_images
+                .values()
+                .map(|image| image.retained_bytes())
+                .sum::<usize>();
             // Layout initializes small slot-indexed arrays. Only connected
             // elements enter the cascade and expose attributes to selectors.
             // Slot indices are contiguous machine words initialized in bulk.
@@ -112,7 +120,7 @@ impl Data {
                     }
                 }
             }
-            vm.charge_work(tree_work.saturating_add(source_work))?;
+            vm.charge_work(tree_work.saturating_add(svg_work))?;
             return Layout::build_checked_for_viewport(
                 &self.page,
                 fonts,
@@ -912,6 +920,8 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 
 const PROPERTIES: &[(&str, &str)] = &[
     ("display", "display"),
+    ("listStyleType", "list-style-type"),
+    ("opacity", "opacity"),
     ("cssFloat", "float"),
     ("clear", "clear"),
     ("position", "position"),
@@ -958,6 +968,9 @@ fn logical_computed_style_prototype(vm: &mut Vm, host: &LayoutHost) -> Result<Va
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
+        .chain(css::BOX_PAINT_LONGHANDS)
+        .chain(css::CORNER_OUTLINE_SHORTHANDS)
+        .chain(&[("listStyle", "list-style")])
     {
         for name in [property, css_name] {
             let host = host.clone();
@@ -1035,7 +1048,8 @@ fn computed_style(
     vm.define_data_property(
         object.clone(),
         "length",
-        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len()).into(),
+        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len() + css::BOX_PAINT_LONGHANDS.len())
+            .into(),
         false,
         false,
         true,
@@ -1043,6 +1057,7 @@ fn computed_style(
     for (i, (_, name)) in PROPERTIES
         .iter()
         .chain(css::LOGICAL_BOX_LONGHANDS)
+        .chain(css::BOX_PAINT_LONGHANDS)
         .enumerate()
     {
         vm.define_data_property(
@@ -1078,6 +1093,45 @@ fn unresolved_percentage(v: Length) -> Option<String> {
     match v {
         Length::Percent(n) => Some(format!("{n}%")),
         _ => unresolved_calculation(v),
+    }
+}
+fn computed_radius(style: &Style, name: &str) -> String {
+    let radii = style
+        .border_radii
+        .as_deref()
+        .copied()
+        .unwrap_or([[Length::Px(0.); 2]; 4]);
+    let values = radii.map(|corner| {
+        corner.map(|v| unresolved_percentage(v).unwrap_or_else(|| length(v, 0., style.font_size)))
+    });
+    if name == "border-radius" {
+        let axis = |i: usize| {
+            let [a, b, c, d] = values.each_ref().map(|v| &v[i]);
+            if d != b {
+                format!("{a} {b} {c} {d}")
+            } else if c != a {
+                format!("{a} {b} {c}")
+            } else if b != a {
+                format!("{a} {b}")
+            } else {
+                a.to_string()
+            }
+        };
+        let x = axis(0);
+        let y = axis(1);
+        return if x == y { x } else { format!("{x} / {y}") };
+    }
+    let i = match name {
+        "border-top-left-radius" => 0,
+        "border-top-right-radius" => 1,
+        "border-bottom-right-radius" => 2,
+        _ => 3,
+    };
+    let [x, y] = &values[i];
+    if x == y {
+        x.clone()
+    } else {
+        format!("{x} {y}")
     }
 }
 fn unresolved_calculation(v: Length) -> Option<String> {
@@ -1215,6 +1269,7 @@ impl Layout {
         PROPERTIES
             .iter()
             .chain(css::LOGICAL_BOX_LONGHANDS)
+            .chain(css::BOX_PAINT_LONGHANDS)
             .map(|&(_, name)| (name, resolve(name)))
             .collect()
     }
@@ -1251,7 +1306,11 @@ fn resolved_values<'a>(
                 .to_ascii_lowercase()
                 .replace("inlineblock", "inline-block")
                 .replace("inlineflex", "inline-flex")
-                .replace("inlinegrid", "inline-grid"),
+                .replace("inlinegrid", "inline-grid")
+                .replace("listitem", "list-item"),
+            "list-style-type" => style.marker.as_css().to_owned(),
+            "opacity" => style.opacity.to_string(),
+            "list-style" => format!("outside none {}", style.marker.as_css()),
             "float" => style.float.as_css().to_owned(),
             "clear" => style.clear.as_css().to_owned(),
             "position" => format!("{:?}", style.position).to_ascii_lowercase(),
@@ -1267,6 +1326,37 @@ fn resolved_values<'a>(
                 .z_index
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "auto".into()),
+            "border-radius"
+            | "border-top-left-radius"
+            | "border-top-right-radius"
+            | "border-bottom-right-radius"
+            | "border-bottom-left-radius" => computed_radius(style, name),
+            "object-fit" => style.object_fit.as_css().into(),
+            "object-position" => {
+                let [x, y] = style.object_position.map(|v| {
+                    unresolved_percentage(v).unwrap_or_else(|| length(v, 0., style.font_size))
+                });
+                format!("{x} {y}")
+            }
+            "outline-color" => color(style.outline_color.unwrap_or(style.color)),
+            "outline-style" => if style.outline_visible {
+                "solid"
+            } else {
+                "none"
+            }
+            .into(),
+            "outline-width" => px(style.outline_width),
+            "outline-offset" => px(style.outline_offset),
+            "outline" => format!(
+                "{} {} {}",
+                color(style.outline_color.unwrap_or(style.color)),
+                if style.outline_visible {
+                    "solid"
+                } else {
+                    "none"
+                },
+                px(style.outline_width)
+            ),
             "overflow-x" => overflow(style.overflow[0]).into(),
             "overflow-y" => overflow(style.overflow[1]).into(),
             "box-sizing" => if style.box_sizing == BoxSizing::BorderBox {

@@ -422,3 +422,34 @@ fn zoomed_and_scrolled_control_pixels_stay_within_the_active_viewport() {
         );
     }
 }
+
+#[test]
+fn single_line_text_centers_vertically_and_textarea_stays_top_aligned() {
+    let mut fonts = fonts();
+    let mut ink_rows = |tag: &str, height: u32| {
+        let style = format!(
+            "display:block;margin:0;padding:0;border:none;color:black;\
+                             background:white;width:100px;height:{height}px;line-height:24px"
+        );
+        let sample = if tag == "input" {
+            page(&format!("<input value=test style='{style}'>"))
+        } else {
+            page(&format!("<textarea style='{style}'>test</textarea>"))
+        };
+        let layout = Layout::build(&sample, &fonts, 160.);
+        let mut canvas = Canvas::new(160, 100, Color::WHITE);
+        canvas.document(&layout, &mut fonts, 0., 0.);
+        let rows: Vec<_> = canvas
+            .pixels
+            .chunks_exact(160)
+            .take(height as usize)
+            .enumerate()
+            .filter(|(_, row)| row[..100].iter().any(|&px| px < 0x707070))
+            .map(|(y, _)| y)
+            .collect();
+        (*rows.first().unwrap(), *rows.last().unwrap())
+    };
+    let (top, bottom) = ink_rows("input", 24);
+    assert_eq!(ink_rows("input", 64), (top + 20, bottom + 20));
+    assert_eq!(ink_rows("textarea", 64), ink_rows("textarea", 24));
+}
