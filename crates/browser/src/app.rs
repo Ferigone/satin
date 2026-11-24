@@ -38,7 +38,7 @@ use winit::{
     window::{CursorIcon, Icon, ResizeDirection, Theme, Window, WindowId},
 };
 
-mod address_bar;
+pub(crate) mod address_bar;
 mod bookmark_menu;
 mod bookmarks;
 mod chrome_menu;
@@ -80,13 +80,25 @@ struct WindowRegions {
 }
 
 impl WindowRegions {
+    #[cfg(test)]
     fn new(width: f32, height: f32, footer: f32, dock_open: bool) -> Self {
+        Self::with_dock_height(width, height, footer, dock_open, None)
+    }
+    fn with_dock_height(
+        width: f32,
+        height: f32,
+        footer: f32,
+        dock_open: bool,
+        preferred: Option<f32>,
+    ) -> Self {
         // A mounted dock sits above a stable footer, including on the home page
         // where the status footer would otherwise overlay the dock.
         let dock_space = (height - TOP - footer.max(FOOT)).max(0.);
         let dock =
             (dock_open && width > 0. && dock_space >= DOCK_MIN + PAGE_MIN_WITH_DOCK).then(|| {
-                let height = (dock_space * 0.4).clamp(DOCK_MIN, DOCK_MAX);
+                let height = preferred
+                    .unwrap_or((dock_space * 0.4).min(DOCK_MAX))
+                    .clamp(DOCK_MIN, dock_space - PAGE_MIN_WITH_DOCK);
                 Rect {
                     x: 0.,
                     y: TOP + dock_space - height,
@@ -341,6 +353,8 @@ pub(crate) fn run(
         pointer_inside: false,
         devtools,
         devtools_open: false,
+        dock_height: None,
+        resizing_dock: false,
         devtools_focused: false,
         modifiers: ModifiersState::empty(),
         address: AddressBar::default(),
@@ -438,6 +452,8 @@ struct App {
     pointer_inside: bool,
     devtools: Option<crate::devtools::DevTools>,
     devtools_open: bool,
+    dock_height: Option<f32>,
+    resizing_dock: bool,
     devtools_focused: bool,
     modifiers: ModifiersState,
     address: AddressBar,
@@ -465,11 +481,12 @@ impl App {
                 size.height as f32 / self.scale,
             )
         });
-        WindowRegions::new(
+        WindowRegions::with_dock_height(
             width,
             height,
             self.tabs[index].footer_height(),
             self.devtools_open,
+            self.dock_height,
         )
     }
 
@@ -503,10 +520,162 @@ impl App {
         // Clear must not leave queued observations that immediately refill the view.
         self.sync_console(self.active);
         self.drain_network_observations();
+        self.sync_inspector(frame);
         if let Some(dock) = &mut self.devtools {
             dock.input(frame, input);
+            self.run_inspector_action(frame);
             self.redraw();
         }
+    }
+
+    fn sync_inspector(&mut self, frame: DockFrame) {
+        let tab = &self.tabs[self.active];
+        if let Some(dock) = &mut self.devtools {
+            dock.sync_inspector(
+                frame,
+                tab.page.as_deref(),
+                tab.layout.as_ref(),
+                tab.runtime.as_ref(),
+                tab.document_session.as_ref(),
+                &tab.storage,
+            );
+        }
+    }
+
+    fn run_inspector_action(&mut self, frame: DockFrame) {
+        let edit = self
+            .devtools
+            .as_mut()
+            .and_then(|d| d.take_style_edit(frame));
+        if edit.is_none()
+            && !self
+                .devtools
+                .as_ref()
+                .is_some_and(|d| d.console_has_command(frame))
+        {
+            return;
+        }
+        let index = self.active;
+        let viewport = self.tab_viewport(index);
+        let tab = &mut self.tabs[index];
+        if tab.runtime.is_none()
+            && let (Some(page), Some(session)) = (&tab.page, &mut tab.document_session)
+        {
+            if let Err(error) = session.ensure_realm(page, &mut tab.runtime, viewport) {
+                self.status = error;
+            }
+            if let Some(runtime) = &mut tab.runtime {
+                runtime.set_worker_wake(self.worker_wake.clone());
+            }
+        }
+        let Some(dock) = self.devtools.as_mut() else {
+            return;
+        };
+        let updated = if let Some((node, key, value, important)) = edit {
+            let result = tab
+                .runtime
+                .as_mut()
+                .ok_or_else(|| String::from("Document is unavailable"))
+                .and_then(|r| r.set_inspected_style(node, &key, &value, important));
+            let ok = result.is_ok();
+            dock.style_edit_result(frame, result);
+            ok
+        } else {
+            dock.run_console_command(frame, tab.runtime.as_mut())
+        };
+        if updated {
+            self.sync_runtime(index);
+            self.dispatch_fetches(index);
+            self.dispatch_forms(index);
+            self.ensure_layout();
+            self.set_title();
+        }
+    }
+
+    fn dock_text(&mut self, frame: DockFrame, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(dock) = &mut self.devtools {
+            if dock.is_console() {
+                dock.console_text(frame, text);
+            } else {
+                dock.input(
+                    frame,
+                    DockInput::Key {
+                        key: Key::Character(text.into()),
+                        modifiers: ModifiersState::empty(),
+                        repeat: false,
+                    },
+                );
+            }
+        }
+        self.redraw();
+    }
+
+    fn dock_key(&mut self, frame: DockFrame, key: Key, text: Option<&str>, repeat: bool) {
+        let ctrl = self.modifiers == ModifiersState::CONTROL;
+        if ctrl && key == Key::Named(NamedKey::Enter) {
+            let tab = &self.tabs[self.active];
+            if self.devtools.as_mut().is_some_and(|d| {
+                d.reveal_console_source(
+                    frame,
+                    tab.page.as_deref(),
+                    tab.runtime.as_ref(),
+                    tab.document_session.as_ref(),
+                )
+            }) {
+                self.redraw();
+                return;
+            }
+        }
+        if ctrl && let Key::Character(c) = &key {
+            if c.eq_ignore_ascii_case("v") {
+                if let Some(value) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                    self.dock_text(frame, &value);
+                }
+                return;
+            }
+            if (c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x"))
+                && let (Some(dock), Some(cb)) = (&mut self.devtools, &mut self.clipboard)
+                && let Some(value) = dock.clipboard_selection(frame, c.eq_ignore_ascii_case("x"))
+            {
+                let _ = cb.set_text(value);
+                self.redraw();
+                return;
+            }
+        }
+        let printable = matches!(key, Key::Character(_) | Key::Named(NamedKey::Space))
+            && !self.modifiers.super_key()
+            && (!self.modifiers.control_key() && !self.modifiers.alt_key()
+                || self.modifiers.control_key() && self.modifiers.alt_key());
+        if self.devtools.as_ref().is_some_and(|d| d.is_console()) && printable {
+            if !self.preedit
+                && let Some(value) = text
+            {
+                self.dock_text(frame, value);
+            }
+            return;
+        }
+        self.send_dock_input(
+            frame,
+            DockInput::Key {
+                key,
+                modifiers: self.modifiers,
+                repeat,
+            },
+        );
+    }
+
+    fn page_node_under_pointer(&self) -> Option<rust_browser_engine::dom::NodeId> {
+        let tab = &self.tabs[self.active];
+        if !self.pointer_in(self.window_regions(self.active).page) {
+            return None;
+        }
+        tab.layout.as_ref()?.element_at(
+            self.mouse.0 / tab.zoom + tab.scroll_x,
+            (self.mouse.1 - TOP) / tab.zoom + tab.scroll,
+        )
     }
 
     fn sync_console(&mut self, index: usize) -> bool {
@@ -540,7 +709,7 @@ impl App {
             self.devtools_focused = focused;
             self.preedit = false;
             if let Some(window) = &self.window {
-                window.set_ime_allowed(!focused && self.settings_panel.is_none());
+                window.set_ime_allowed(self.settings_panel.is_none());
             }
             self.redraw();
         }
@@ -551,6 +720,12 @@ impl App {
             return;
         }
         self.devtools_open = !self.devtools_open;
+        self.resizing_dock = false;
+        if !self.devtools_open
+            && let Some(dock) = &mut self.devtools
+        {
+            dock.picking = false;
+        }
         self.dismiss_history_menu();
         self.chrome_menu = None;
         self.select_popup = None;
@@ -1100,6 +1275,11 @@ impl App {
         }
     }
     fn activate(&mut self, index: usize) {
+        if index != self.active
+            && let Some(dock) = &mut self.devtools
+        {
+            dock.picking = false;
+        }
         if index >= self.tabs.len() {
             return;
         }
@@ -1306,6 +1486,13 @@ impl App {
         self.redraw();
     }
     fn insert(&mut self, text: &str) {
+        if self.devtools_focused
+            && self.settings_panel.is_none()
+            && let Some(bounds) = self.window_regions(self.active).dock
+        {
+            self.dock_text(self.dock_frame(bounds), text);
+            return;
+        }
         if self.settings_panel.is_some()
             || self.devtools_focused
             || self.history_menu.is_some()
@@ -1343,6 +1530,16 @@ impl App {
             Command::Menu => self.action(Action::Menu, event_loop),
             Command::BookmarkPage => self.save_current_bookmark(),
             Command::ToggleDevtools => self.toggle_devtools(),
+            Command::InspectElement => {
+                if !self.devtools_open {
+                    self.toggle_devtools();
+                }
+                if let Some(d) = &mut self.devtools {
+                    d.toggle_picker();
+                }
+                self.set_dock_focus(true);
+                self.redraw();
+            }
             Command::ZoomIn | Command::ZoomOut | Command::ResetZoom => {
                 self.select_popup = None;
                 let tab = &mut self.tabs[self.active];
@@ -1411,6 +1608,24 @@ impl App {
                 return;
             }
         }
+        if let Some(command @ (Command::InspectElement | Command::ToggleDevtools)) =
+            shortcuts::command(&key, self.modifiers)
+        {
+            if !repeat {
+                self.run_shortcut(command, event_loop);
+            }
+            return;
+        }
+        if self.devtools_focused
+            && let Some(bounds) = self.window_regions(self.active).dock
+            && (shortcuts::command(&key, self.modifiers).is_none()
+                || self.devtools.as_ref().is_some_and(|d| d.is_console())
+                    && self.modifiers == ModifiersState::CONTROL
+                    && matches!(&key,Key::Character(c) if c.eq_ignore_ascii_case("l")))
+        {
+            self.dock_key(self.dock_frame(bounds), key, text, repeat);
+            return;
+        }
         if let Some(command) = shortcuts::command(&key, self.modifiers) {
             self.run_shortcut(command, event_loop);
             return;
@@ -1418,20 +1633,6 @@ impl App {
         if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
             if let Some(window) = &self.window {
                 window.show_window_menu(LogicalPosition::new(0., TAB_H));
-            }
-            return;
-        }
-        if self.devtools_focused {
-            if let Some(bounds) = self.window_regions(self.active).dock {
-                let frame = self.dock_frame(bounds);
-                self.send_dock_input(
-                    frame,
-                    DockInput::Key {
-                        key,
-                        modifiers: self.modifiers,
-                        repeat,
-                    },
-                );
             }
             return;
         }
@@ -1614,7 +1815,11 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        let monitoring =
+            self.devtools_open && self.devtools.as_ref().is_some_and(|d| d.monitoring());
+        let layout_started = monitoring.then(Instant::now);
         self.ensure_layout();
+        let layout_time = layout_started.map(|t| t.elapsed());
         let mut canvas = self
             .canvas
             .take()
@@ -1622,6 +1827,14 @@ impl App {
             .unwrap_or_else(|| Canvas::new(size.width, size.height, Color::WHITE));
         let regions = self.window_regions(self.active);
         let dock_frame = regions.dock.map(|bounds| self.dock_frame(bounds));
+        if let Some(frame) = dock_frame {
+            self.sync_inspector(frame);
+        }
+        let picked_node = if self.devtools.as_ref().is_some_and(|d| d.picking) {
+            self.page_node_under_pointer()
+        } else {
+            None
+        };
         let tab = &self.tabs[self.active];
         if let Some(runtime) = &tab.runtime {
             runtime.publish_canvas_frames();
@@ -1632,12 +1845,60 @@ impl App {
         let height = size.height as f32 / u;
         let content_clip = physical_rect(u, regions.page);
         canvas.clip(content_clip);
+        let paint_started = monitoring.then(Instant::now);
         if regions.page.height > 0.
             && let Some(layout) = &tab.layout
         {
             canvas.document_scaled(layout, &mut self.fonts, TOP * u, tab.scroll, u * tab.zoom);
         }
         if let (Some(frame), Some(dock)) = (dock_frame, &mut self.devtools) {
+            if let (Some(start), Some(layout_time)) = (paint_started, layout_time) {
+                dock.sample(
+                    tab.id,
+                    layout_time,
+                    start.elapsed(),
+                    tab.page.as_deref(),
+                    tab.layout.as_deref(),
+                    tab.runtime.as_ref(),
+                );
+            }
+            let highlight = if dock.picking {
+                picked_node.and_then(|n| tab.layout.as_ref()?.rect_for(n))
+            } else {
+                dock.selected_rect(tab.id)
+            };
+            if let Some(r) = highlight {
+                let scale = u * tab.zoom;
+                let rect = Rect {
+                    x: (r.x - tab.scroll_x) * scale,
+                    y: TOP * u + (r.y - tab.scroll) * scale,
+                    width: r.width * scale,
+                    height: r.height * scale,
+                };
+                canvas.fill_rect(rect, Color(111, 169, 252, 48));
+                for line in [
+                    Rect {
+                        height: 2. * u,
+                        ..rect
+                    },
+                    Rect {
+                        width: 2. * u,
+                        ..rect
+                    },
+                    Rect {
+                        y: rect.y + rect.height - 2. * u,
+                        height: 2. * u,
+                        ..rect
+                    },
+                    Rect {
+                        x: rect.x + rect.width - 2. * u,
+                        width: 2. * u,
+                        ..rect
+                    },
+                ] {
+                    canvas.fill_rect(line, Color(126, 178, 253, 230));
+                }
+            }
             canvas.clip(physical_rect(u, frame.bounds));
             dock.draw(&mut canvas, &mut self.fonts, frame);
         }
@@ -2645,6 +2906,10 @@ impl App {
             self.last_title_press = None;
             self.caption_pressed = None;
             self.set_dock_focus(true);
+            if self.mouse.1 - bounds.y < 5. {
+                self.resizing_dock = true;
+                return;
+            }
             let frame = self.dock_frame(bounds);
             self.send_dock_input(frame, DockInput::Click);
             return;
@@ -2674,6 +2939,20 @@ impl App {
         } else {
             self.last_title_press = None;
             if self.pointer_in(regions.page) {
+                if self.devtools.as_ref().is_some_and(|d| d.picking)
+                    && let Some(bounds) = regions.dock
+                {
+                    let frame = self.dock_frame(bounds);
+                    self.sync_inspector(frame);
+                    if let Some(n) = self.page_node_under_pointer()
+                        && let Some(dock) = &mut self.devtools
+                    {
+                        dock.inspect(frame, n);
+                    }
+                    self.set_dock_focus(true);
+                    self.redraw();
+                    return;
+                }
                 self.set_dock_focus(false);
                 self.address_focus = false;
                 self.content_click();
@@ -2684,6 +2963,11 @@ impl App {
     }
 
     fn left_release(&mut self, event_loop: &ActiveEventLoop) {
+        if self.resizing_dock {
+            self.resizing_dock = false;
+            self.update_pointer(true);
+            return;
+        }
         if self.settings_panel.is_some() {
             self.settings_release();
             return;
@@ -2718,6 +3002,26 @@ impl App {
             return;
         }
         if self.update_history_pointer() {
+            return;
+        }
+        let regions = self.window_regions(self.active);
+        let divider = regions
+            .dock
+            .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
+        let inspecting = regions.dock.is_some()
+            && self.devtools.as_ref().is_some_and(|d| d.picking)
+            && self.pointer_in(regions.page);
+        if self.resizing_dock || divider || inspecting {
+            self.hover = None;
+            self.chrome_hover = None;
+            if let Some(window) = &self.window {
+                window.set_cursor(if inspecting {
+                    CursorIcon::Crosshair
+                } else {
+                    CursorIcon::RowResize
+                });
+            }
+            self.redraw();
             return;
         }
         let chrome = self.chrome_action_at_pointer();
@@ -2835,6 +3139,7 @@ impl App {
                     "Home" => NamedKey::Home,
                     "End" => NamedKey::End,
                     "F12" => NamedKey::F12,
+                    "F2" => NamedKey::F2,
                     _ => {
                         let prior = self.modifiers;
                         self.modifiers = ModifiersState::empty();
@@ -3408,6 +3713,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Focused(false) => {
+                self.resizing_dock = false;
                 self.preedit = false;
                 self.dismiss_history_menu();
             }
@@ -3444,8 +3750,7 @@ impl ApplicationHandler<()> for App {
                 self.insert(&text);
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
-                self.preedit =
-                    !self.devtools_focused && self.settings_panel.is_none() && !text.is_empty();
+                self.preedit = self.settings_panel.is_none() && !text.is_empty();
             }
             WindowEvent::Ime(Ime::Disabled) => self.preedit = false,
             WindowEvent::CursorMoved { position, .. } => {
@@ -3456,6 +3761,13 @@ impl ApplicationHandler<()> for App {
                     position.y as f32 / self.scale,
                 );
                 self.pointer_inside = true;
+                if self.resizing_dock
+                    && let Some(rect) = dock
+                {
+                    self.dock_height = Some((rect.y + rect.height - self.mouse.1).max(DOCK_MIN));
+                    self.ensure_layout();
+                    self.redraw();
+                }
                 let in_dock = dock.is_some_and(|bounds| self.pointer_in(bounds));
                 self.update_pointer(was_in_dock || in_dock);
             }

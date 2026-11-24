@@ -514,6 +514,7 @@ impl AbortHost {
                         line: None,
                         column: None,
                         thrown: Some(value),
+                        inspected_calls: None,
                     });
                 }
                 Ok(Value::Undefined)
@@ -587,5 +588,6 @@ pub(super) fn dom_exception_error(
         line: None,
         column: None,
         thrown: Some(value),
+        inspected_calls: None,
     })
 }

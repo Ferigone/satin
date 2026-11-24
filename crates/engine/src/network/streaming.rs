@@ -89,7 +89,17 @@ pub struct FetchTransfer {
 }
 
 impl FetchTransfer {
-    pub async fn run<F: Future<Output = ()>>(mut self, mut notify: impl FnMut() -> F) {
+    pub async fn run<F: Future<Output = ()>>(self, notify: impl FnMut() -> F) {
+        self.run_observed(notify, |_| {}).await
+    }
+
+    /// Called once at body EOF (with decoded bytes), consumer closure (None),
+    /// or transfer error. Progress notifications alone do not imply EOF.
+    pub async fn run_observed<F: Future<Output = ()>>(
+        mut self,
+        mut notify: impl FnMut() -> F,
+        observe: impl FnOnce(Result<Option<u64>, super::FetchErrorKind>),
+    ) {
         let generation = self.generation.clone();
         let request = self.request.clone();
         let progress = self.progress.clone();
@@ -100,7 +110,13 @@ impl FetchTransfer {
         let result = self.receive(&control, &mut progress_event).await;
         // Release the socket before publishing any terminal event to a busy UI.
         drop(self.response);
-        *progress.terminal.lock().unwrap() = Some(result);
+        observe(
+            result
+                .as_ref()
+                .map(|count| *count)
+                .map_err(|error| error.kind),
+        );
+        *progress.terminal.lock().unwrap() = Some(result.map(|_| ()));
         if !self.chunks.is_closed() && !generation.is_cancelled() {
             notify().await;
         }
@@ -110,25 +126,27 @@ impl FetchTransfer {
         &mut self,
         control: &RequestControl<'_>,
         notify: &mut impl FnMut() -> Option<F>,
-    ) -> Result<(), FetchError> {
+    ) -> Result<Option<u64>, FetchError> {
+        let mut received = 0u64;
         loop {
             let Ok(permit) = control
                 .wait(self.chunks.reserve())
                 .await
                 .map_err(interrupted_fetch)?
             else {
-                return Ok(());
+                return Ok(None);
             };
             let chunk = tokio::select! {
                 biased;
-                () = self.chunks.closed() => return Ok(()),
+                () = self.chunks.closed() => return Ok(None),
                 result = control.wait(self.response.chunk()) => {
                     result.map_err(interrupted_fetch)?.map_err(net_error)?
                 }
             };
             let Some(chunk) = chunk else {
-                return Ok(());
+                return Ok(Some(received));
             };
+            received = received.saturating_add(chunk.len() as u64);
             let mut first = Some(permit);
             for piece in chunk.chunks(FETCH_CHUNK_BYTES) {
                 let slot = match first.take() {
@@ -139,14 +157,14 @@ impl FetchTransfer {
                         .map_err(interrupted_fetch)?
                     {
                         Ok(permit) => permit,
-                        Err(_) => return Ok(()),
+                        Err(_) => return Ok(None),
                     },
                 };
                 slot.send(piece.to_vec());
                 if let Some(signal) = notify() {
                     tokio::select! {
                         biased;
-                        () = self.chunks.closed() => return Ok(()),
+                        () = self.chunks.closed() => return Ok(None),
                         sent = control.wait(signal) => sent.map_err(interrupted_fetch)?,
                     }
                 }

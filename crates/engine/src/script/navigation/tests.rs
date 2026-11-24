@@ -144,6 +144,7 @@ fn parser_script_sees_navigation_and_response_timing() {
         started,
         response_start: started + Duration::from_millis(25),
         http_status: None,
+        http_content: Default::default(),
     })
     .unwrap();
     let mut runtime = None;
@@ -211,6 +212,7 @@ fn start(source: &str) -> (LoadedPage, DocumentSession, Option<ScriptRuntime>) {
         started,
         response_start: started,
         http_status: None,
+        http_content: Default::default(),
     })
     .unwrap();
     let mut runtime = None;

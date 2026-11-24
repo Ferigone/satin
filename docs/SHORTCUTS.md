@@ -4,6 +4,10 @@ Open **Satin menu → Keyboard shortcuts**, or enter `about:shortcuts` in the
 desktop app. The help page is generated from the same bindings that handle
 browser commands. Text editing, page focus, and Windows shortcuts are separate.
 
+## Developer tools
+
+**F12** or **Ctrl+Shift+I** toggles the dock. **Ctrl+Shift+C** picks an element on the page. With the dock focused, **Alt+1** through **Alt+6** switch panels. [Panel controls and editing shortcuts](DEVTOOLS.md)
+
 ## Current gaps
 
 - `Ctrl+F` and `F3` do not implement find-in-page. `Alt+F` opens the Satin menu.

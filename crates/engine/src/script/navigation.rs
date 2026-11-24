@@ -404,7 +404,12 @@ impl DocumentSession {
         Ok(())
     }
 
-    fn ensure_realm(
+    pub fn inspected_modules(&self) -> (&[super::InspectedSource], usize) {
+        self.modules.sources.view()
+    }
+
+    /// Lazily create this navigation's own realm, also for a Console command on a script-free page.
+    pub fn ensure_realm(
         &mut self,
         page: &LoadedPage,
         runtime: &mut Option<ScriptRuntime>,

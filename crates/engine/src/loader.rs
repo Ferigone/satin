@@ -335,12 +335,56 @@ pub struct Loader {
 /// Navigation metadata and decoded input, before any author script executes.
 /// For standalone SVG or raster images the document is already available
 /// and has no HTML tokenizer input.
+/// Displayable representation metadata. MIME parameters and all other
+/// headers stay on the transport side of the observation boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HttpContentMetadata {
+    pub mime: Option<String>,
+    pub declared_bytes: Option<u64>,
+}
+
+impl HttpContentMetadata {
+    pub fn from_fields(content_type: Option<&str>, length: Option<&str>) -> Self {
+        let mime = content_type
+            .and_then(|v| v.split(';').next())
+            .filter(|v| v.len() <= 127)
+            .and_then(crate::mime::MimeType::parse)
+            .map(|v| v.essence);
+        let declared_bytes = length
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|v| v.parse().ok());
+        Self {
+            mime,
+            declared_bytes,
+        }
+    }
+
+    fn headers(headers: &reqwest::header::HeaderMap) -> Self {
+        Self::from_fields(
+            headers.get("content-type").and_then(|v| v.to_str().ok()),
+            headers.get("content-length").and_then(|v| v.to_str().ok()),
+        )
+    }
+
+    pub fn from_exposed_headers(headers: &[(String, String)]) -> Self {
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        Self::from_fields(header("content-type"), header("content-length"))
+    }
+}
+
 pub struct OpenedPage {
     pub(crate) page: LoadedPage,
     pub(crate) input: DocumentInput,
     pub(crate) started: Instant,
     pub(crate) response_start: Instant,
     pub(crate) http_status: Option<u16>,
+    pub http_content: HttpContentMetadata,
 }
 pub(crate) enum DocumentInput {
     Html(String),
@@ -509,6 +553,7 @@ impl Loader {
             input,
             started,
             response_start: main.response_start,
+            http_content: main.http_content,
             http_status,
         })
     }
@@ -578,6 +623,7 @@ impl Loader {
         {
             return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
         }
+        let http_content = HttpContentMetadata::headers(response.headers());
         let content_type = response_content_type(response.headers(), true);
         let document_policy = DocumentPolicy::from_headers(response.headers());
         let connect_policy = ConnectPolicy::from_headers(response.headers());
@@ -592,6 +638,7 @@ impl Loader {
                 .prepare_response(
                     Response {
                         url: url.into(),
+                        http_content,
                         content_type,
                         bytes,
                         status,
@@ -622,6 +669,7 @@ impl Loader {
             started,
             response_start,
             http_status: Some(response.status().as_u16()),
+            http_content,
         };
         control
             .wait(send(NavigationPart::Open(Box::new(opened))))
@@ -1125,6 +1173,7 @@ impl Loader {
                     .map_err(|error| error.to_string())?;
                 Response {
                     url: request.url.to_string(),
+                    http_content: Default::default(),
                     content_type: data.mime_type.serialize(),
                     bytes: data.body,
                     status: 200,
@@ -1142,6 +1191,7 @@ impl Loader {
                 if response.content_length().is_some_and(|n| n > limit as u64) {
                     return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
                 }
+                let http_content = HttpContentMetadata::headers(response.headers());
                 let content_type =
                     response_content_type(response.headers(), request.context.top_level_navigation);
                 let connect_policy = if request.context.top_level_navigation {
@@ -1165,6 +1215,7 @@ impl Loader {
                     .await
                     .map_err(navigation_body_error)?;
                 Response {
+                    http_content,
                     url: final_url.into(),
                     content_type,
                     status,
@@ -1201,6 +1252,7 @@ impl Loader {
                     .map_err(|error| error.to_string())??;
                 Response {
                     url: request.url.to_string(),
+                    http_content: Default::default(),
                     content_type: kind.into(),
                     status: 200,
                     nosniff: false,
@@ -1287,6 +1339,7 @@ fn navigation_body_error(error: BodyError) -> String {
     }
 }
 struct Response {
+    http_content: HttpContentMetadata,
     url: String,
     content_type: String,
     bytes: Vec<u8>,
@@ -1553,6 +1606,19 @@ fn builtin_images(page: &mut LoadedPage, name: &str, home: bool) {
 }
 
 impl OpenedPage {
+    /// Bytes already buffered at Open, before subsequent streamed text parts.
+    pub fn buffered_body_bytes(&self) -> usize {
+        self.page.stats.bytes
+    }
+
+    pub fn response_started_at(&self) -> Instant {
+        self.response_start
+    }
+
+    pub fn response_url(&self) -> &str {
+        &self.page.url
+    }
+
     /// Final HTTP response accepted for this navigation, not a body-completion signal.
     pub fn http_response(&self) -> Option<(u16, Duration)> {
         self.http_status.map(|status| {
@@ -1579,6 +1645,7 @@ impl OpenedPage {
             started,
             response_start: started,
             http_status: None,
+            http_content: Default::default(),
         }
     }
 }

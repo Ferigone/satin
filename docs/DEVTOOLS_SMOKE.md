@@ -1,5 +1,8 @@
 # DevTools smoke: Console and Network
 
+For the current six-panel dock and its controls, see the [DevTools guide](DEVTOOLS.md). The Console and Network baseline below also covers capture boundaries and navigation isolation. For an editing check, open a local HTML page, press Ctrl+Shift+C, select an element and change its width using F2. Read the new inline width from the same element in Console. Repeat a Console evaluation after navigating to a page with no scripts to exercise lazy realm creation.
+
+
 This checks a **separately verified Windows developer candidate**, not the
 installed browser or Satin Preview. Do not launch a browser as part of lane
 work. On the integration checkout, record the source commit and the candidate
@@ -22,6 +25,16 @@ addresses. No account, proxy, external resource, or real credential is needed.
 The server only serves fixed routes and responses. Ctrl+C prints bounded
 per-route response counters and counts of matched synthetic inputs, not raw
 traffic. A counter confirms what the server handled, not what DevTools saw.
+
+## Verify a live CSS edit through the Console
+
+Start the fixture server above and replace `PORT` with the port it printed. Use a fresh profile. This action sequence selects the fixture’s button in Elements, changes its inline width, evaluates the page’s actual CSSOM value in Console, and checks that the page title became `237px`.
+
+```powershell
+$out = Join-Path $PWD ('target/devtools-edit-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $out | Out-Null
+& .\target\debug\rust-browser.exe --url 'http://127.0.0.1:PORT/devtools-a' --profile "$out/profile" --width 1280 --height 900 --smoke-window "$out/edit.png" --smoke-actions tools/fixtures/devtools-smoke/edit-style.json
+```
 
 ## Physical F12 and panel review
 
@@ -46,7 +59,7 @@ $env:LOCALAPPDATA = (New-Item -ItemType Directory -Path (Join-Path $run.FullName
 ```
 
 1. **Toggle.** Wait for **DevTools A ready**. Press physical **F12**: a dock
-   with **Console** and **Network** opens and the document still renders.
+   with **Console**, **Network**, **Elements**, **Sources**, **Performance** and **Application** opens and the document still renders.
    Press F12 again: it closes and gives the document its space back. Reopen
    with page focus and repeat with the address bar focused. Hold F12 briefly:
    autorepeat should not flap the dock. Resize to a small supported window;

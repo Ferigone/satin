@@ -6,6 +6,8 @@ mod blobs;
 mod canvas;
 mod collections;
 mod devtools_console;
+mod inspection_sources;
+pub use inspection_sources::InspectedSource;
 mod dom_api;
 mod element_interface;
 mod error_event;
@@ -112,6 +114,7 @@ struct State {
     executed: usize,
     diagnostics: Vec<String>,
     devtools_console: devtools_console::ConsoleBuffer,
+    sources: inspection_sources::SourceArchive,
     scheduler: scheduler::Scheduler,
     dom_bytes: usize,
     form_attribute_hook: Option<FormAttributeHook>,
@@ -653,6 +656,7 @@ impl ScriptRuntime {
             executed: 0,
             diagnostics: vec![],
             devtools_console: Default::default(),
+            sources: Default::default(),
             scheduler: scheduler::Scheduler::new(started),
             dom_bytes,
             form_attribute_hook: None,
@@ -891,14 +895,11 @@ impl ScriptRuntime {
         page: &mut LoadedPage,
         viewport: crate::layout::Viewport,
     ) -> Result<Option<Self>, JsError> {
-        let handlers =
-            page.document
-                .connected_nodes()
-                .any(|id| {
-                    media::has_controls(&page.document, id)
-                        || matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
+        let handlers = page.document.connected_nodes().any(|id| {
+            media::has_controls(&page.document, id)
+                || matches!(&page.document.nodes[id.0].kind, NodeKind::Element { attrs, .. }
                             if attrs.keys().any(|name| name.starts_with("on")))
-                });
+        });
         if page.scripts.is_empty() && !handlers && page.form_controls.is_empty() {
             return Ok(None);
         }
@@ -927,7 +928,11 @@ impl ScriptRuntime {
                         script.node,
                         source,
                         &script.name,
-                        if external { &script.name } else { page.base.as_str() },
+                        if external {
+                            &script.name
+                        } else {
+                            page.base.as_str()
+                        },
                         external,
                     );
                 }
@@ -969,14 +974,9 @@ impl ScriptRuntime {
             }
             // The VM referrer can be a base URL rather than the script's
             // location. Use the known script node, not a guessed URL.
-            let source = format!("script #{}", node.0);
-            report_error(
-                &self.state,
-                ConsolePhase::ClassicScript,
-                Some(&source),
-                &error,
-                || format!("{name}: {error}"),
-            );
+            devtools_console::report_classic_error(&self.state, node, &error, || {
+                format!("{name}: {error}")
+            });
         }
         report_unhandled(&mut self.vm, &self.state);
         self.vm.collect_garbage();
@@ -991,7 +991,9 @@ impl ScriptRuntime {
             .vm
             .with_task(|vm| {
                 let allowed = forms.activate(vm, node)?;
-                if allowed { media::default_click(vm, &state, node)?; }
+                if allowed {
+                    media::default_click(vm, &state, node)?;
+                }
                 drain_microtask_queue(vm, &state)?;
                 Ok(allowed)
             })
@@ -1082,6 +1084,15 @@ impl ScriptRuntime {
     /// touch `diagnostics()` or the VM. A fresh document runtime starts empty.
     pub fn take_console_snapshot(&self) -> ConsoleSnapshot {
         self.state.borrow_mut().devtools_console.take_snapshot()
+    }
+    /// Read the captured classic script previews without cloning their source bytes.
+    pub fn with_inspected_scripts<T>(
+        &self,
+        read: impl FnOnce(&[InspectedSource], usize) -> T,
+    ) -> T {
+        let state = self.state.borrow();
+        let (entries, omitted) = state.sources.view();
+        read(entries, omitted)
     }
     pub fn executed_scripts(&self) -> usize {
         self.state.borrow().executed
@@ -1566,6 +1577,12 @@ fn run_classic(
 ) -> Result<(), JsError> {
     let old = {
         let mut state = state.borrow_mut();
+        state.sources.capture(
+            Some(node),
+            external.then_some(identifier),
+            || format!("Script #{}", node.0),
+            source,
+        );
         state.ignore_destructive_writes += usize::from(external);
         state.current_script.replace(node)
     };
@@ -2094,31 +2111,8 @@ fn update_style(
     value: &str,
     important: bool,
 ) -> Result<(), JsError> {
-    if !key
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        || key.is_empty()
-    {
+    let Ok(replacement) = inline_replacement(key, value, important) else {
         return Ok(());
-    }
-    let replacement = if value.is_empty() {
-        None
-    } else {
-        let mut declarations = css::declarations(&format!("{key}:{value};"));
-        if declarations.len() != 1 || declarations[0].name != key || declarations[0].important {
-            return Ok(());
-        }
-        let mut declaration = declarations.pop().unwrap();
-        if let Some(property) = css::inline_style::ReflectedLonghand::named(key) {
-            let Some(value) = property.serialize(value) else {
-                return Ok(());
-            };
-            declaration.value = value;
-        } else if !css::supports_declaration(key, value) {
-            return Ok(());
-        }
-        declaration.important = important;
-        Some(declaration)
     };
     write_inline_style(
         vm,
@@ -2128,6 +2122,87 @@ fn update_style(
         inline_declarations(state, id),
         replacement,
     )
+}
+
+impl ScriptRuntime {
+    /// Edit the live author style through the same native declaration and DOM
+    /// mutation paths as CSSStyleDeclaration, without evaluating page code.
+    pub fn set_inspected_style(
+        &mut self,
+        id: NodeId,
+        name: &str,
+        value: &str,
+        important: bool,
+    ) -> Result<(), String> {
+        if name.len() > 256 || value.len() > 16_384 {
+            return Err("Property or value exceeds the editing limit".into());
+        }
+        {
+            let state = self.state.borrow();
+            let doc = &state.document;
+            if !doc
+                .nodes
+                .get(id.0)
+                .is_some_and(|node| matches!(node.kind, NodeKind::Element { .. }))
+            {
+                return Err("Select an element in the current document".into());
+            }
+            let mut root = id;
+            while let Some(parent) = doc.nodes[root.0].parent {
+                root = parent;
+            }
+            if root != doc.root {
+                return Err("The selected element was removed".into());
+            }
+        }
+        let mut key = name.trim().to_owned();
+        if !key.starts_with("--") {
+            key.make_ascii_lowercase();
+        }
+        let replacement = inline_replacement(&key, value.trim(), important)?;
+        write_inline_style(
+            &mut self.vm,
+            &self.state,
+            id,
+            &key,
+            inline_declarations(&self.state, id),
+            replacement,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn inline_replacement(
+    key: &str,
+    value: &str,
+    important: bool,
+) -> Result<Option<css::Declaration>, &'static str> {
+    if !key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        || key.is_empty()
+    {
+        return Err("Invalid CSS property name");
+    }
+    Ok(if value.is_empty() {
+        None
+    } else {
+        let mut declarations = css::declarations(&format!("{key}:{value};"));
+        if declarations.len() != 1 || declarations[0].name != key || declarations[0].important {
+            return Err("Enter one CSS value; use the Important control for priority");
+        }
+        let mut declaration = declarations.pop().unwrap();
+        if let Some(property) = css::inline_style::ReflectedLonghand::named(key) {
+            let Some(value) = property.serialize(value) else {
+                return Err("Unsupported CSS property or invalid value");
+            };
+            declaration.value = value;
+        } else if !css::supports_declaration(key, value) {
+            return Err("Unsupported CSS property or invalid value");
+        }
+        declaration.important = important;
+        Some(declaration)
+    })
 }
 
 fn write_inline_style(

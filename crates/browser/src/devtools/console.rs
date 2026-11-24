@@ -34,6 +34,8 @@ impl ConsoleSeverity {
 pub(crate) enum ConsoleOrigin {
     ConsoleApi,
     BrowserReported,
+    Command,
+    Evaluation,
 }
 
 /// Already formatted plain text; no script values or formatting callbacks.
@@ -57,6 +59,14 @@ pub(crate) struct ConsoleRow {
     pub(crate) source: Option<Box<str>>,
     pub(crate) phase: Option<Box<str>>,
     pub(crate) capture_truncated: bool,
+    pub(super) context: ConsoleContext,
+}
+
+#[derive(Default, Debug)]
+pub(super) struct ConsoleContext {
+    pub(super) script_node: Option<usize>,
+    pub(super) line: Option<usize>,
+    pub(super) calls: Option<std::rc::Rc<Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +115,15 @@ impl Console {
     /// add the producer's cumulative eviction count. Replay or stale records
     /// return `false`, but identical messages at different sequences are kept.
     pub(crate) fn record(&mut self, sequence: u64, input: ConsoleInput<'_>) -> bool {
+        self.record_with_context(sequence, input, ConsoleContext::default())
+    }
+
+    pub(super) fn record_with_context(
+        &mut self,
+        sequence: u64,
+        input: ConsoleInput<'_>,
+        context: ConsoleContext,
+    ) -> bool {
         if sequence <= self.last_sequence {
             return false;
         }
@@ -117,6 +136,7 @@ impl Console {
         }
         self.rows.push_back(ConsoleRow {
             sequence,
+            context,
             severity: input.severity,
             origin: input.origin,
             message: bounded(input.message, MAX_MESSAGE_BYTES),

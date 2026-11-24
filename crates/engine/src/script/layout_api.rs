@@ -72,16 +72,36 @@ impl Data {
         let document = &self.page.document;
         let fonts = self.fonts.as_ref().expect("layout fonts");
         if let Some(vm) = vm {
-            let source_work = self.page.stylesheets.iter().map(|sheet| sheet.len()).sum::<usize>()
-                + self.page.svg_images.values().map(|image| image.retained_bytes()).sum::<usize>();
-            let attributes = document.nodes.iter().filter_map(|node| match &node.kind {
-                NodeKind::Element { attrs, .. } => Some(attrs),
-                _ => None,
-            }).flat_map(|attrs| attrs.iter())
-              .map(|(name, value)| name.len() + value.len()).sum::<usize>();
-            vm.charge_work(document.nodes.len().saturating_mul(32)
-                .saturating_add(source_work)
-                .saturating_add(attributes))?;
+            let source_work = self
+                .page
+                .stylesheets
+                .iter()
+                .map(|sheet| sheet.len())
+                .sum::<usize>()
+                + self
+                    .page
+                    .svg_images
+                    .values()
+                    .map(|image| image.retained_bytes())
+                    .sum::<usize>();
+            let attributes = document
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.kind {
+                    NodeKind::Element { attrs, .. } => Some(attrs),
+                    _ => None,
+                })
+                .flat_map(|attrs| attrs.iter())
+                .map(|(name, value)| name.len() + value.len())
+                .sum::<usize>();
+            vm.charge_work(
+                document
+                    .nodes
+                    .len()
+                    .saturating_mul(32)
+                    .saturating_add(source_work)
+                    .saturating_add(attributes),
+            )?;
             return Layout::build_checked_for_viewport(
                 &self.page,
                 fonts,
@@ -997,6 +1017,7 @@ fn computed_style(
                 line: None,
                 column: None,
                 thrown: Some(value),
+                inspected_calls: None,
             })
         })?;
     }
@@ -1008,7 +1029,11 @@ fn computed_style(
         false,
         true,
     )?;
-    for (i, (_, name)) in PROPERTIES.iter().chain(css::LOGICAL_BOX_LONGHANDS).enumerate() {
+    for (i, (_, name)) in PROPERTIES
+        .iter()
+        .chain(css::LOGICAL_BOX_LONGHANDS)
+        .enumerate()
+    {
         vm.define_data_property(
             object.clone(),
             &i.to_string(),
@@ -1158,19 +1183,49 @@ fn computed_value(
     name: &str,
 ) -> Result<Value, JsError> {
     let layout = host.layout(Some(vm))?;
-    let d = host.0.borrow();
-    let doc = &d.page.document;
+    let host_data = host.0.borrow();
+    Ok(resolved_values(&host_data.page.document, &layout, id)
+        .map(|resolve| resolve(name))
+        .unwrap_or_default()
+        .into())
+}
+
+impl Layout {
+    /// Native inspector and script CSSOM use the same resolved values. Geometry
+    /// is prepared once per selected element; this never invokes page script.
+    pub fn inspect_computed_style(
+        &self,
+        doc: &Document,
+        id: NodeId,
+    ) -> Vec<(&'static str, String)> {
+        let Some(resolve) = resolved_values(doc, self, id) else {
+            return Vec::new();
+        };
+        PROPERTIES
+            .iter()
+            .chain(css::LOGICAL_BOX_LONGHANDS)
+            .map(|&(_, name)| (name, resolve(name)))
+            .collect()
+    }
+}
+
+fn resolved_values<'a>(
+    doc: &Document,
+    layout: &'a Layout,
+    id: NodeId,
+) -> Option<impl Fn(&str) -> String + 'a> {
+    let style = layout.computed_styles.get(id.0)?;
     let mut root = id;
-    while let Some(parent) = doc.nodes[root.0].parent {
+    while let Some(parent) = doc.nodes.get(root.0)?.parent {
+        // A caller may have a newer DOM while a layout is being replaced.
+        layout.computed_styles.get(parent.0)?;
         root = parent;
     }
     if root != doc.root {
-        return Ok("".into());
+        return None;
     }
-    let style = &layout.computed_styles[id.0];
-    let name = physical_css_name(name, style.rtl);
     let rect = layout.flow_rect_for(id);
-    let containing = containing_box(doc, &layout, id, d.viewport);
+    let containing = containing_box(doc, layout, id, layout.viewport);
     let parent_width = containing.width;
     let border = style.borders();
     let padding = style.padding.map(|l| {
@@ -1178,148 +1233,150 @@ fn computed_value(
             .unwrap_or(0.)
             .max(0.)
     });
-    let value = match name {
-        "display" => format!("{:?}", style.display)
-            .to_ascii_lowercase()
-            .replace("inlineblock", "inline-block")
-            .replace("inlineflex", "inline-flex")
-            .replace("inlinegrid", "inline-grid"),
-        "float" => style.float.as_css().to_owned(),
-        "clear" => style.clear.as_css().to_owned(),
-        "position" => format!("{:?}", style.position).to_ascii_lowercase(),
-        "direction" => if style.rtl { "rtl" } else { "ltr" }.into(),
-        "color" => color(style.color),
-        "background-color" => color(style.background.unwrap_or(css::Color(0, 0, 0, 0))),
-        "font-size" => px(style.font_size),
-        "font-weight" => style.font_weight.to_string(),
-        "font-style" => style.font_style.as_css().to_owned(),
-        "font-family" => style.font_family_css(),
-        "line-height" => px(style.line_height_px()),
-        "z-index" => style
-            .z_index
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "auto".into()),
-        "overflow-x" => overflow(style.overflow[0]).into(),
-        "overflow-y" => overflow(style.overflow[1]).into(),
-        "box-sizing" => if style.box_sizing == BoxSizing::BorderBox {
-            "border-box"
-        } else {
-            "content-box"
-        }
-        .into(),
-        "width" | "height" => {
-            if let Some(rect) = rect {
-                let value = if name == "width" {
-                    rect.width
-                } else {
-                    rect.height
-                };
-                let subtract = if style.box_sizing == BoxSizing::ContentBox {
-                    if name == "width" {
-                        border[1] + border[3] + padding[1] + padding[3]
+    Some(move |name: &str| {
+        let name = physical_css_name(name, style.rtl);
+        match name {
+            "display" => format!("{:?}", style.display)
+                .to_ascii_lowercase()
+                .replace("inlineblock", "inline-block")
+                .replace("inlineflex", "inline-flex")
+                .replace("inlinegrid", "inline-grid"),
+            "float" => style.float.as_css().to_owned(),
+            "clear" => style.clear.as_css().to_owned(),
+            "position" => format!("{:?}", style.position).to_ascii_lowercase(),
+            "direction" => if style.rtl { "rtl" } else { "ltr" }.into(),
+            "color" => color(style.color),
+            "background-color" => color(style.background.unwrap_or(css::Color(0, 0, 0, 0))),
+            "font-size" => px(style.font_size),
+            "font-weight" => style.font_weight.to_string(),
+            "font-style" => style.font_style.as_css().to_owned(),
+            "font-family" => style.font_family_css(),
+            "line-height" => px(style.line_height_px()),
+            "z-index" => style
+                .z_index
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "auto".into()),
+            "overflow-x" => overflow(style.overflow[0]).into(),
+            "overflow-y" => overflow(style.overflow[1]).into(),
+            "box-sizing" => if style.box_sizing == BoxSizing::BorderBox {
+                "border-box"
+            } else {
+                "content-box"
+            }
+            .into(),
+            "width" | "height" => {
+                if let Some(rect) = rect {
+                    let value = if name == "width" {
+                        rect.width
                     } else {
-                        border[0] + border[2] + padding[0] + padding[2]
-                    }
+                        rect.height
+                    };
+                    let subtract = if style.box_sizing == BoxSizing::ContentBox {
+                        if name == "width" {
+                            border[1] + border[3] + padding[1] + padding[3]
+                        } else {
+                            border[0] + border[2] + padding[0] + padding[2]
+                        }
+                    } else {
+                        0.
+                    };
+                    px((value - subtract).max(0.))
                 } else {
-                    0.
-                };
-                px((value - subtract).max(0.))
-            } else {
-                let size = if name == "width" {
-                    style.width
-                } else {
-                    style.height
-                };
-                unresolved_percentage(size)
-                    .unwrap_or_else(|| length(size, parent_width, style.font_size))
-            }
-        }
-        "min-width" | "max-width" | "min-height" | "max-height" => {
-            let (size, base) = match name {
-                "min-width" => (style.min_width, parent_width),
-                "max-width" => (style.max_width, parent_width),
-                "min-height" => (style.min_height, d.viewport.height),
-                _ => (style.max_height, d.viewport.height),
-            };
-            if size == Length::Auto && name.starts_with("max") {
-                "none".into()
-            } else if let Some(value) = unresolved_calculation(size) {
-                value
-            } else {
-                length(size, base, style.font_size)
-            }
-        }
-        "top" => computed_inset(style, &layout, id, containing, 0),
-        "right" => computed_inset(style, &layout, id, containing, 1),
-        "bottom" => computed_inset(style, &layout, id, containing, 2),
-        "left" => computed_inset(style, &layout, id, containing, 3),
-        "margin-block" | "margin-inline" | "padding-block" | "padding-inline" | "inset-block"
-        | "inset-inline" => {
-            let sides = if name.ends_with("-block") {
-                [0, 2]
-            } else if style.rtl {
-                [1, 3]
-            } else {
-                [3, 1]
-            };
-            let [start, end] = sides.map(|side| {
-                if name.starts_with("margin-") {
-                    length(style.margin[side], parent_width, style.font_size)
-                } else if name.starts_with("padding-") {
-                    px(padding[side])
-                } else {
-                    computed_inset(style, &layout, id, containing, side)
+                    let size = if name == "width" {
+                        style.width
+                    } else {
+                        style.height
+                    };
+                    unresolved_percentage(size)
+                        .unwrap_or_else(|| length(size, parent_width, style.font_size))
                 }
-            });
-            if start == end {
-                start
-            } else {
-                format!("{start} {end}")
             }
-        }
-        "transform" => {
-            if style.transform.is_empty() {
-                "none".into()
-            } else {
-                let m = transform(style, rect.unwrap_or_default());
+            "min-width" | "max-width" | "min-height" | "max-height" => {
+                let (size, base) = match name {
+                    "min-width" => (style.min_width, parent_width),
+                    "max-width" => (style.max_width, parent_width),
+                    "min-height" => (style.min_height, layout.viewport.height),
+                    _ => (style.max_height, layout.viewport.height),
+                };
+                if size == Length::Auto && name.starts_with("max") {
+                    "none".into()
+                } else if let Some(value) = unresolved_calculation(size) {
+                    value
+                } else {
+                    length(size, base, style.font_size)
+                }
+            }
+            "top" => computed_inset(style, layout, id, containing, 0),
+            "right" => computed_inset(style, layout, id, containing, 1),
+            "bottom" => computed_inset(style, layout, id, containing, 2),
+            "left" => computed_inset(style, layout, id, containing, 3),
+            "margin-block" | "margin-inline" | "padding-block" | "padding-inline"
+            | "inset-block" | "inset-inline" => {
+                let sides = if name.ends_with("-block") {
+                    [0, 2]
+                } else if style.rtl {
+                    [1, 3]
+                } else {
+                    [3, 1]
+                };
+                let [start, end] = sides.map(|side| {
+                    if name.starts_with("margin-") {
+                        length(style.margin[side], parent_width, style.font_size)
+                    } else if name.starts_with("padding-") {
+                        px(padding[side])
+                    } else {
+                        computed_inset(style, layout, id, containing, side)
+                    }
+                });
+                if start == end {
+                    start
+                } else {
+                    format!("{start} {end}")
+                }
+            }
+            "transform" => {
+                if style.transform.is_empty() {
+                    "none".into()
+                } else {
+                    let m = transform(style, rect.unwrap_or_default());
+                    format!(
+                        "matrix({}, {}, {}, {}, {}, {})",
+                        m.a, m.b, m.c, m.d, m.e, m.f
+                    )
+                }
+            }
+            "transform-origin" => {
+                let r = rect.unwrap_or_default();
                 format!(
-                    "matrix({}, {}, {}, {}, {}, {})",
-                    m.a, m.b, m.c, m.d, m.e, m.f
+                    "{} {}",
+                    length(style.transform_origin[0], r.width, style.font_size),
+                    length(style.transform_origin[1], r.height, style.font_size)
                 )
             }
-        }
-        "transform-origin" => {
-            let r = rect.unwrap_or_default();
-            format!(
-                "{} {}",
-                length(style.transform_origin[0], r.width, style.font_size),
-                length(style.transform_origin[1], r.height, style.font_size)
-            )
-        }
-        _ => {
-            if let Some(i) = ["top", "right", "bottom", "left"]
-                .iter()
-                .position(|side| name == format!("margin-{side}"))
-            {
-                length(style.margin[i], parent_width, style.font_size)
-            } else if let Some(i) = ["top", "right", "bottom", "left"]
-                .iter()
-                .position(|side| name == format!("padding-{side}"))
-            {
-                px(padding[i])
-            } else if let Some(i) = ["top", "right", "bottom", "left"]
-                .iter()
-                .position(|side| name == format!("border-{side}-width"))
-            {
-                px(border[i])
-            } else if name.starts_with("--") {
-                style.custom_property(name).unwrap_or("").to_owned()
-            } else {
-                String::new()
+            _ => {
+                if let Some(i) = ["top", "right", "bottom", "left"]
+                    .iter()
+                    .position(|side| name == format!("margin-{side}"))
+                {
+                    length(style.margin[i], parent_width, style.font_size)
+                } else if let Some(i) = ["top", "right", "bottom", "left"]
+                    .iter()
+                    .position(|side| name == format!("padding-{side}"))
+                {
+                    px(padding[i])
+                } else if let Some(i) = ["top", "right", "bottom", "left"]
+                    .iter()
+                    .position(|side| name == format!("border-{side}-width"))
+                {
+                    px(border[i])
+                } else if name.starts_with("--") {
+                    style.custom_property(name).unwrap_or("").to_owned()
+                } else {
+                    String::new()
+                }
             }
         }
-    };
-    Ok(value.into())
+    })
 }
 
 impl ScriptRuntime {

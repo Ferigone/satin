@@ -44,6 +44,10 @@ pub struct ConsoleRecord {
     pub text: String,
     /// A known runtime label (e.g. an event name or script node), not a stack frame.
     pub source: Option<String>,
+    /// The actual main-document classic script node active at the host boundary.
+    pub script_node: Option<crate::dom::NodeId>,
+    /// Synchronous interpreted functions (innermost first) when observed.
+    pub calls: Option<std::rc::Rc<Vec<String>>>,
     /// Present when the reporting boundary had a typed VM error.
     pub error_kind: Option<ErrorKind>,
     /// VM-provided coordinates, when available.
@@ -90,6 +94,8 @@ impl ConsoleRecord {
             origin,
             text: text.into(),
             source: None,
+            script_node: None,
+            calls: None,
             error_kind: None,
             line: None,
             column: None,
@@ -145,6 +151,16 @@ fn preview_args(args: &[Value]) -> (String, bool) {
 }
 
 fn record_args(state: &Shared, level: ConsoleLevel, origin: ConsoleOrigin, args: &[Value]) {
+    record_call(state, level, origin, args, None);
+}
+
+fn record_call(
+    state: &Shared,
+    level: ConsoleLevel,
+    origin: ConsoleOrigin,
+    args: &[Value],
+    vm: Option<&Vm>,
+) {
     let mut state = state.borrow_mut();
     let legacy_preview = if state.diagnostics.len() < DIAGNOSTIC_LIMIT {
         let preview = preview_args(args);
@@ -155,9 +171,15 @@ fn record_args(state: &Shared, level: ConsoleLevel, origin: ConsoleOrigin, args:
     } else {
         None
     };
+    let active_node = state.current_script;
     state.devtools_console.push(|| {
         let (text, truncated) = legacy_preview.unwrap_or_else(|| preview_args(args));
         let mut record = ConsoleRecord::new(level, origin, &text);
+        if let Some(node) = active_node {
+            record.script_node = Some(node);
+            record.source = Some(format!("script #{}", node.0));
+        }
+        record.calls = vm.and_then(Vm::inspect_call_stack);
         record.truncated |= truncated;
         record
     });
@@ -172,13 +194,128 @@ fn install_method(
     origin: ConsoleOrigin,
 ) -> Result<(), JsError> {
     let state = state.clone();
-    method(vm, console, name, move |_, _, args| {
-        record_args(&state, level, origin, args);
+    method(vm, console, name, move |vm, _, args| {
+        record_call(&state, level, origin, args, Some(vm));
         Ok(Value::Undefined)
     })
 }
 
+const LABEL_LIMIT: usize = 256;
+const TABLE_LIMIT: usize = 128;
+
+#[derive(Default)]
+struct ToolsState {
+    counters: std::collections::HashMap<String, u64>,
+    timers: std::collections::HashMap<String, std::time::Instant>,
+}
+
+fn install_utilities(vm: &mut Vm, state: &Shared, console: &Value) -> Result<(), JsError> {
+    let shared = state.clone();
+    method(vm, console.clone(), "assert", move |_, _, args| {
+        if !args.first().is_some_and(Value::is_truthy) {
+            let mut data = vec![Value::from("Assertion failed:")];
+            data.extend(args.iter().skip(1).take(ARG_LIMIT).cloned());
+            record_args(
+                &shared,
+                ConsoleLevel::Error,
+                ConsoleOrigin::ConsoleApi,
+                &data,
+            );
+        }
+        Ok(Value::Undefined)
+    })?;
+    let shared = state.clone();
+    method(vm, console.clone(), "dir", move |vm, _, args| {
+        let preview = vm.inspect_value(args.first().unwrap_or(&Value::Undefined));
+        record_args(
+            &shared,
+            ConsoleLevel::Log,
+            ConsoleOrigin::ConsoleApi,
+            &[Value::from(preview.as_str())],
+        );
+        Ok(Value::Undefined)
+    })?;
+    let storage = std::rc::Rc::new(std::cell::RefCell::new(ToolsState::default()));
+    for name in ["count", "countReset", "time", "timeLog", "timeEnd"] {
+        let shared = state.clone();
+        let storage = storage.clone();
+        method(vm, console.clone(), name, move |vm, _, args| {
+            let label = match args.first() {
+                None | Some(Value::Undefined) => "default".to_owned(),
+                Some(value) => {
+                    let text = vm.to_string(value)?;
+                    if text.len() > LABEL_LIMIT {
+                        record_args(
+                            &shared,
+                            ConsoleLevel::Warn,
+                            ConsoleOrigin::ConsoleApi,
+                            &[Value::from("Console label is too long")],
+                        );
+                        return Ok(Value::Undefined);
+                    }
+                    text.to_string_lossy()
+                }
+            };
+            let mut tools = storage.borrow_mut();
+            let mut level = ConsoleLevel::Log;
+            let message = match name {
+                "count" => {
+                    if tools.counters.len() == TABLE_LIMIT && !tools.counters.contains_key(&label) {
+                        level = ConsoleLevel::Warn;
+                        "Console counter limit reached".to_owned()
+                    } else {
+                        let count = tools.counters.entry(label.clone()).or_default();
+                        *count = count.saturating_add(1);
+                        format!("{label}: {count}")
+                    }
+                }
+                "countReset" => {
+                    if tools.counters.remove(&label).is_some() {
+                        return Ok(Value::Undefined);
+                    }
+                    level = ConsoleLevel::Warn;
+                    format!("Unknown counter: {label}")
+                }
+                "time" => {
+                    if tools.timers.contains_key(&label) {
+                        level = ConsoleLevel::Warn;
+                        format!("Timer already running: {label}")
+                    } else if tools.timers.len() == TABLE_LIMIT {
+                        level = ConsoleLevel::Warn;
+                        "Console timer limit reached".to_owned()
+                    } else {
+                        tools.timers.insert(label, std::time::Instant::now());
+                        return Ok(Value::Undefined);
+                    }
+                }
+                _ => {
+                    let start = if name == "timeEnd" {
+                        tools.timers.remove(&label)
+                    } else {
+                        tools.timers.get(&label).copied()
+                    };
+                    if let Some(start) = start {
+                        format!("{label}: {:.3} ms", start.elapsed().as_secs_f64() * 1000.)
+                    } else {
+                        level = ConsoleLevel::Warn;
+                        format!("Unknown timer: {label}")
+                    }
+                }
+            };
+            drop(tools);
+            let mut data = vec![Value::from(message.as_str())];
+            if name == "timeLog" && level == ConsoleLevel::Log {
+                data.extend(args.iter().skip(1).take(ARG_LIMIT).cloned());
+            }
+            record_args(&shared, level, ConsoleOrigin::ConsoleApi, &data);
+            Ok(Value::Undefined)
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
+    vm.enable_inspection();
     let console = vm.new_object();
     for (name, level) in [
         ("log", ConsoleLevel::Log),
@@ -186,6 +323,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
         ("warn", ConsoleLevel::Warn),
         ("error", ConsoleLevel::Error),
         ("debug", ConsoleLevel::Debug),
+        ("trace", ConsoleLevel::Debug),
     ] {
         let origin = if name == "error" {
             // EventTarget bootstrap roots this callback as its legacy reporter.
@@ -195,6 +333,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
         };
         install_method(vm, state, console.clone(), name, level, origin)?;
     }
+    install_utilities(vm, state, &console)?;
     vm.set_global("console", console.clone())?;
     Ok(console)
 }
@@ -235,6 +374,34 @@ pub(super) fn record_error(
     source: Option<&str>,
     error: &JsError,
 ) {
+    record_error_at_node(state, phase, source, error, None)
+}
+
+pub(super) fn report_classic_error(
+    state: &Shared,
+    node: crate::dom::NodeId,
+    error: &JsError,
+    legacy: impl FnOnce() -> String,
+) {
+    record_error_at_node(
+        state,
+        ConsolePhase::ClassicScript,
+        Some(&format!("script #{}", node.0)),
+        error,
+        Some(node),
+    );
+    if state.borrow().diagnostics.len() < DIAGNOSTIC_LIMIT {
+        diagnostic(state, legacy());
+    }
+}
+
+fn record_error_at_node(
+    state: &Shared,
+    phase: ConsolePhase,
+    source: Option<&str>,
+    error: &JsError,
+    script_node: Option<crate::dom::NodeId>,
+) {
     state.borrow_mut().devtools_console.push(|| {
         // JsError already contains a VM-produced message. Never inspect `thrown`.
         let mut record = ConsoleRecord::new(
@@ -247,6 +414,8 @@ pub(super) fn record_error(
             record.source = Some(source.into());
             record.truncated |= truncated;
         }
+        record.script_node = script_node;
+        record.calls = error.inspected_calls.clone();
         record.error_kind = Some(error.kind);
         record.line = error.line;
         record.column = error.column;
@@ -279,4 +448,35 @@ pub(super) fn report_rejection(state: &Shared, value: &Value) {
         record.truncated |= truncated;
         record
     });
+}
+
+// Run in the actual document realm. Format the completion before draining jobs:
+// the checkpoint may release JS values, and must also deliver mutations/logs.
+impl super::ScriptRuntime {
+    pub fn evaluate_console(&mut self, source: &str) -> Result<String, String> {
+        let result = match self.vm.eval(source) {
+            Ok(value) => Ok(self.vm.inspect_value(&value)),
+            Err(error) => {
+                let mut label = error.kind.name().to_owned();
+                if let Some(line) = error.line {
+                    label.push_str(&format!(" at {line}"));
+                    if let Some(column) = error.column {
+                        label.push_str(&format!(":{column}"));
+                    }
+                }
+                let (message, trimmed) = clipped(&error.message);
+                let mut diagnostic =
+                    format!("{label}: {message}{}", if trimmed { "…" } else { "" });
+                if let Some(calls) = &error.inspected_calls {
+                    for name in calls.iter() {
+                        diagnostic.push_str("\n  at ");
+                        diagnostic.push_str(name);
+                    }
+                }
+                Err(diagnostic)
+            }
+        };
+        self.drain_microtasks();
+        result
+    }
 }

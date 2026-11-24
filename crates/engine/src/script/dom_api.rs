@@ -185,6 +185,7 @@ impl Errors {
                     line: None,
                     column: None,
                     thrown: Some(value),
+                    inspected_calls: None,
                 },
                 Err(error) => error,
             },

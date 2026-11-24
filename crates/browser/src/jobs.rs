@@ -20,7 +20,7 @@ use tokio::{
     sync::{Mutex, Semaphore, mpsc},
 };
 
-use self::devtools::{Key, Observer, Phase, Request};
+use self::devtools::{Key, Observer, Phase, Request, ResponseDetails};
 
 const FETCH_TRANSFERS: usize = 64;
 
@@ -230,20 +230,31 @@ async fn run_job(
         Task::Navigate(request) => {
             let deadline = queued.queued + NAVIGATION_TIMEOUT;
             let trace = observer.and_then(|observer| {
-                observer.begin(key(Request::Navigate), &request.method, &request.url)
+                observer.begin(key(Request::Navigate), &request.method, &request.url, None)
             });
             if trace.is_some() {
                 wake();
             }
+            let mut body_bytes = None;
             let result = loader
                 .stream_navigation_cancellable(&request, &cancel, deadline, |part| {
-                    if let (Some(trace), NavigationPart::Open(opened)) = (trace, &part)
-                        && let Some((status, response_time)) = opened.http_response()
+                    if let (Some(trace), NavigationPart::Open(opened)) = (trace.as_ref(), &part)
+                        && let Some((status, _)) = opened.http_response()
                     {
-                        trace.record(Phase::NavigationOpened {
-                            status,
-                            response_time,
+                        body_bytes = Some(opened.buffered_body_bytes() as u64);
+                        let mut details = ResponseDetails::from_url(opened.response_url());
+                        details.mime = opened.http_content.mime.clone();
+                        details.declared_bytes = opened.http_content.declared_bytes;
+                        trace.record(Phase::Response {
+                            status: Some(status),
+                            headers_at: Some(opened.response_started_at()),
+                            details,
                         });
+                    }
+                    if let (Some(total), NavigationPart::Text(_, received)) =
+                        (&mut body_bytes, &part)
+                    {
+                        *total = total.saturating_add(*received as u64);
                     }
                     async move {
                         results
@@ -257,7 +268,7 @@ async fn run_job(
                 .await;
             if let Some(trace) = trace {
                 trace.record(match &result {
-                    Ok(()) => Phase::NavigationFinished,
+                    Ok(()) => Phase::Finished { body_bytes },
                     Err(_) if cancel.is_cancelled() => Phase::Cancelled,
                     Err(_) => Phase::Failed,
                 });
@@ -278,7 +289,7 @@ async fn run_job(
                 upload,
             } = *job;
             let trace = observer.and_then(|observer| {
-                observer.begin(key(Request::Fetch(id)), &request.method, &request.url)
+                observer.begin(key(Request::Fetch(id)), &request.method, &request.url, None)
             });
             if trace.is_some() {
                 wake();
@@ -307,10 +318,12 @@ async fn run_job(
             } else {
                 response.await
             };
-            if let (Some(trace), Ok((head, _))) = (trace, &result) {
+            if let (Some(trace), Ok((head, _))) = (trace.as_ref(), &result) {
                 let status = head.metadata.status;
-                trace.record(Phase::FetchResponse {
+                trace.record(Phase::Response {
                     status: (status != 0).then_some(status),
+                    headers_at: Some(Instant::now()),
+                    details: ResponseDetails::from_fetch(&head.metadata),
                 });
             }
             let result = match result {
@@ -325,17 +338,29 @@ async fn run_job(
                         let results = results.clone();
                         let wake = wake.clone();
                         let shutdown = shutdown.clone();
+                        let trace = trace.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
                             tokio::select! {
                                 biased;
-                                () = shutdown.cancelled() => {}
-                                () = body.run(|| async {
+                                () = shutdown.cancelled() => {
+                                    if let Some(trace) = &trace { trace.record(Phase::Cancelled); }
+                                }
+                                () = body.run_observed(|| async {
                                     if results.send(Message {
                                         tab,
                                         navigation,
                                         payload: Payload::FetchBodyProgress(id),
                                     }).await.is_ok() {
+                                        wake();
+                                    }
+                                }, |outcome| {
+                                    if let Some(trace) = &trace {
+                                        trace.record(match outcome {
+                                            Ok(Some(bytes)) => Phase::Finished { body_bytes: Some(bytes) },
+                                            Ok(None) | Err(FetchErrorKind::Aborted) => Phase::Cancelled,
+                                            Err(_) => Phase::Failed,
+                                        });
                                         wake();
                                     }
                                 }) => {}
@@ -355,10 +380,24 @@ async fn run_job(
                         "Too many open Fetch response bodies",
                     )),
                 },
-                Ok((head, None)) => Ok(head),
+                Ok((head, None)) => {
+                    if let Some(trace) = &trace {
+                        // Opaque Fetch can finish without exposing the transfer.
+                        if head.metadata.status != 0 {
+                            trace.record(Phase::Finished {
+                                body_bytes: head
+                                    .metadata
+                                    .body
+                                    .as_ref()
+                                    .map(|body| body.len() as u64),
+                            });
+                        }
+                    }
+                    Ok(head)
+                }
                 Err(error) => Err(error),
             };
-            if let (Some(trace), Err(error)) = (trace, &result) {
+            if let (Some(trace), Err(error)) = (trace.as_ref(), &result) {
                 trace.record(if error.kind == FetchErrorKind::Aborted {
                     Phase::Cancelled
                 } else {
@@ -371,13 +410,46 @@ async fn run_job(
             Payload::Fetch { id, result }
         }
         Task::Resource(load) => {
-            let started = observer.map(|_| Instant::now());
-            let result = loader
-                .load_document_resource_cancellable(&load.request, &cancel)
-                .await;
-            if let (Some(observer), Some(started), Ok(resource)) = (observer, started, &result) {
-                observer.resource_loaded(key(Request::Resource(load.id)), started, &resource.url);
-            }
+            let trace = observer.and_then(|observer| {
+                observer.begin(
+                    key(Request::Resource(load.id)),
+                    "GET",
+                    load.request.url(),
+                    Some(devtools::resource_label(load.request.kind())),
+                )
+            });
+            let result = if let Some(trace) = trace {
+                wake();
+                let (result, observation) = loader
+                    .load_document_resource_observed_cancellable(&load.request, &cancel)
+                    .await;
+                if let Some(http) = observation {
+                    let mut details = ResponseDetails::from_url(&http.url);
+                    details.body_bytes = http.body_bytes.map(|n| n as u64);
+                    details.mime = http.content.mime;
+                    details.declared_bytes = http.content.declared_bytes;
+                    trace.record(Phase::Response {
+                        status: Some(http.status),
+                        headers_at: http.headers_at,
+                        details,
+                    });
+                }
+                trace.record(match &result {
+                    Ok(resource) => Phase::Finished {
+                        body_bytes: Some(resource.transferred as u64),
+                    },
+                    Err(_) if cancel.is_cancelled() => Phase::Cancelled,
+                    Err(_) => Phase::Failed,
+                });
+                if cancel.is_cancelled() {
+                    wake();
+                }
+                result
+            } else {
+                loader
+                    .load_document_resource_cancellable(&load.request, &cancel)
+                    .await
+            };
             Payload::Resource {
                 id: load.id,
                 result,

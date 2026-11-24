@@ -21,11 +21,13 @@ pub enum Command {
     Menu,
     BookmarkPage,
     ToggleDevtools,
+    InspectElement,
 }
 
 enum Chord {
     CtrlChar(&'static str),
     CtrlPlainChar(&'static str),
+    CtrlShiftChar(&'static str),
     CtrlTab { shift: bool },
     AltChar(&'static str),
     AltNamed(NamedKey),
@@ -42,6 +44,10 @@ impl Chord {
 
         let ctrl = modifiers.control_key() && !modifiers.alt_key();
         match *self {
+            Self::CtrlShiftChar(chars) => {
+                modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+                    && character(key, chars)
+            }
             Self::CtrlChar(chars) => ctrl && character(key, chars),
             Self::CtrlPlainChar(chars) => {
                 ctrl && !modifiers.shift_key() && !modifiers.super_key() && character(key, chars)
@@ -159,9 +165,15 @@ const BINDINGS: &[Binding] = &[
     ),
     binding(
         Command::ToggleDevtools,
-        &[Chord::PlainNamed(NamedKey::F12)],
-        "F12",
+        &[Chord::PlainNamed(NamedKey::F12), Chord::CtrlShiftChar("i")],
+        "F12 / Ctrl+Shift+I",
         "Toggle Developer Tools",
+    ),
+    binding(
+        Command::InspectElement,
+        &[Chord::CtrlShiftChar("c")],
+        "Ctrl+Shift+C",
+        "Pick an element on the page",
     ),
 ];
 

@@ -665,6 +665,7 @@ impl FormHost {
                 line: None,
                 column: None,
                 thrown: Some(thrown),
+                inspected_calls: None,
             },
             Err(error) => error,
         }
