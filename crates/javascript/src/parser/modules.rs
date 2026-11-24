@@ -311,7 +311,7 @@ impl Parser {
                     module.body.push(Stmt::Class(name.clone(), class));
                     name
                 } else {
-                    module.body.push(Stmt::DefaultExport(Expr::Class(class)));
+                    module.body.push(Stmt::DefaultExport(Expr::Class(Box::new(class))));
                     "*default*".into()
                 }
             } else {

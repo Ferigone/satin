@@ -203,7 +203,7 @@ pub(crate) enum Op {
     Break(Option<LabelId>),
     Continue(Option<LabelId>),
     Throw(Rc<Chunk>),
-    Switch(Rc<Chunk>, Vec<(Option<Rc<Chunk>>, Rc<Chunk>)>, ScopePlan),
+    Switch(Rc<Chunk>, Vec<(Option<Rc<Chunk>>, Rc<Chunk>)>, Box<ScopePlan>),
     Try(
         Rc<Chunk>,
         Option<(Option<Rc<PatternCode>>, Rc<Chunk>)>,
@@ -592,29 +592,32 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
                 "a destructuring default",
             )?,
         },
-        Pattern::Array(items, rest) => PatternCode::Array(
-            items
-                .iter()
-                .map(|p| p.as_ref().map(|p| compile_pattern(p, strict)).transpose())
-                .collect::<Result<_, _>>()?,
-            rest.as_ref()
-                .map(|p| compile_pattern(p, strict))
-                .transpose()?,
-        ),
-        Pattern::Object(properties, rest) => PatternCode::Object(
-            properties
-                .iter()
-                .map(|(key, p, _)| {
-                    Ok((
-                        require_non_suspending(expression(key, strict)?, "a destructuring key")?,
-                        compile_pattern(p, strict)?,
-                    ))
-                })
-                .collect::<Result<_, JsError>>()?,
-            rest.as_ref()
-                .map(|p| compile_pattern(p, strict))
-                .transpose()?,
-        ),
+        Pattern::Array(items, rest) => {
+            let mut elements = Vec::with_capacity(items.len());
+            for item in items {
+                elements.push(match item {
+                    Some(item) => Some(compile_pattern(item, strict)?),
+                    None => None,
+                });
+            }
+            let rest = match rest {
+                Some(rest) => Some(compile_pattern(rest, strict)?),
+                None => None,
+            };
+            PatternCode::Array(elements, rest)
+        }
+        Pattern::Object(properties, rest) => {
+            let mut entries = Vec::with_capacity(properties.len());
+            for (key, pattern, _) in properties {
+                let key = require_non_suspending(expression(key, strict)?, "a destructuring key")?;
+                entries.push((key, compile_pattern(pattern, strict)?));
+            }
+            let rest = match rest {
+                Some(rest) => Some(compile_pattern(rest, strict)?),
+                None => None,
+            };
+            PatternCode::Object(entries, rest)
+        }
     }))
 }
 fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>) -> usize {
@@ -662,9 +665,23 @@ fn block_scope(
     module_scope: bool,
 ) -> Result<Rc<Chunk>, JsError> {
     let mut chunk = Chunk {
+        scope: scope_plan(stmts, function_scope, strict, module_scope)?,
         strict,
         ..Chunk::default()
     };
+    for stmt in stmts {
+        statement(stmt, &mut chunk.ops, strict)?;
+    }
+    Ok(chunk.finish())
+}
+
+fn scope_plan(
+    stmts: &[Stmt],
+    function_scope: bool,
+    strict: bool,
+    module_scope: bool,
+) -> Result<ScopePlan, JsError> {
+    let mut scope = ScopePlan::default();
     let mut lexical = BTreeSet::new();
     let mut ordinary_block_functions = BTreeSet::new();
     let mut vars = BTreeSet::new();
@@ -680,32 +697,28 @@ fn block_scope(
                     if !lexical.insert(name.clone()) {
                         return Err(syntax(format!("Duplicate lexical binding '{name}'")));
                     }
-                    chunk
-                        .scope
-                        .lexical
-                        .push((name.clone(), *kind != VarKind::Const));
+                    scope.lexical.push((name.clone(), *kind != VarKind::Const));
                 }
             }
             Stmt::Class(name, _) => {
                 if !lexical.insert(name.clone()) {
                     return Err(syntax("Duplicate class binding"));
                 }
-                chunk.scope.lexical.push((name.clone(), true));
+                scope.lexical.push((name.clone(), true));
             }
             Stmt::DefaultExport(_) => {
                 if !lexical.insert("*default*".into()) {
                     return Err(syntax("Duplicate default export"));
                 }
-                chunk.scope.lexical.push(("*default*".into(), false));
+                scope.lexical.push(("*default*".into(), false));
             }
             Stmt::DefaultFunction(f) => {
                 let name: JsString = "*default*".into();
                 if !lexical.insert(name.clone()) {
                     return Err(syntax("Duplicate default export"));
                 }
-                chunk.scope.lexical.push((name.clone(), true));
-                chunk
-                    .scope
+                scope.lexical.push((name.clone(), true));
+                scope
                     .functions
                     .push((name, compile_function(f, true)?, false));
             }
@@ -718,12 +731,13 @@ fn block_scope(
                     if !strict && f.kind == FunctionKind::Ordinary {
                         ordinary_block_functions.insert(name.clone());
                     }
-                    chunk.scope.lexical.push((name.clone(), true));
-                } else if f.kind != FunctionKind::Ordinary || !ordinary_block_functions.contains(&name) {
+                    scope.lexical.push((name.clone(), true));
+                } else if f.kind != FunctionKind::Ordinary
+                    || !ordinary_block_functions.contains(&name)
+                {
                     return Err(syntax(format!("Duplicate lexical binding '{name}'")));
                 }
-                chunk
-                    .scope
+                scope
                     .functions
                     .push((name, compile_function(f, strict)?, variable_function));
             }
@@ -741,14 +755,11 @@ fn block_scope(
         if !strict {
             let mut names = BTreeSet::new();
             collect_declarations(stmts, &mut names, true);
-            chunk.scope.annex_vars = names.into_iter().collect();
+            scope.annex_vars = names.into_iter().collect();
         }
-        chunk.scope.vars = vars.into_iter().collect();
+        scope.vars = vars.into_iter().collect();
     }
-    for stmt in stmts {
-        statement(stmt, &mut chunk.ops, strict)?;
-    }
-    Ok(chunk.finish())
+    Ok(scope)
 }
 fn parameter_expressions(pattern: &Pattern) -> bool {
     let mut pending = vec![pattern];
@@ -959,7 +970,10 @@ fn compile_statement(
             out.push(Op::CopyAnnexFunction(f.name.clone().unwrap()));
         }
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
-        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(&Expr::Literal(Value::String(value.clone())), strict)?)),
+        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(
+            &Expr::Literal(Value::String(value.clone())),
+            strict,
+        )?)),
         Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
         Stmt::Class(name, class) => {
             let chunk = Chunk {
@@ -982,47 +996,8 @@ fn compile_statement(
             ));
         }
         Stmt::Block(body) => out.push(Op::Block(block(body, false, strict)?)),
-        Stmt::Label(id, names, item) => {
-            for name in names {
-                check_identifier(name, strict)?;
-            }
-            match item.as_ref() {
-                Stmt::While(..)
-                | Stmt::DoWhile(..)
-                | Stmt::For(..)
-                | Stmt::ForIn(..)
-                | Stmt::ForOf(..) => compile_statement(item, out, strict, Some(*id))?,
-                Stmt::Function(_) if strict => {
-                    return Err(syntax("Labelled function in strict mode"));
-                }
-                Stmt::Function(_) => {}
-                _ => out.push(Op::Label(*id, stmt_chunk(item, strict)?)),
-            }
-        }
-        Stmt::Variable(kind, decls) => {
-            for (pattern, init) in decls {
-                if strict
-                    && bound_names(pattern)
-                        .iter()
-                        .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
-                {
-                    return Err(syntax("Invalid strict-mode binding"));
-                }
-                out.push(Op::Initialize(
-                    *kind,
-                    compile_pattern(pattern, strict)?,
-                    init.as_ref()
-                        .map(|expr| {
-                            if let Pattern::Name(name) = pattern {
-                                named_expression(expr, strict, name)
-                            } else {
-                                expression(expr, strict)
-                            }
-                        })
-                        .transpose()?,
-                ));
-            }
-        }
+        Stmt::Label(id, names, item) => compile_label(*id, names, item, out, strict)?,
+        Stmt::Variable(kind, decls) => compile_variables(*kind, decls, out, strict)?,
         Stmt::If(test, yes, no) => out.push(Op::Branch(
             expression(test, strict)?,
             if_clause(yes, strict)?,
@@ -1047,90 +1022,36 @@ fn compile_statement(
             expression(test, strict)?,
             label,
         )),
-        Stmt::For(initial, test, update, body) => {
-            let lexical: Vec<(JsString, bool)> = match initial.as_deref() {
-                Some(Stmt::Variable(k, d)) if *k != VarKind::Var => d
-                    .iter()
-                    .flat_map(|(p, _)| {
-                        bound_names(p)
-                            .into_iter()
-                            .map(|name| (name, *k != VarKind::Const))
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
-            out.push(Op::For {
-                initial: initial
-                    .as_ref()
-                    .map(|s| stmt_chunk(s, strict))
-                    .transpose()?,
-                test: test.as_ref().map(|e| expression(e, strict)).transpose()?,
-                update: update.as_ref().map(|e| expression(e, strict)).transpose()?,
-                body: stmt_chunk(body, strict)?,
-                lexical,
-                label,
-            });
-        }
-        Stmt::ForIn(kind, name, object, body, initializer) => {
-            if let Some(initializer) = initializer {
-                if strict { return Err(syntax("A strict for-in declaration cannot have an initializer")); }
-                let Pattern::Name(binding) = name else { unreachable!() };
-                out.push(Op::Initialize(VarKind::Var, compile_pattern(name, strict)?, Some(named_expression(initializer, strict, binding)?)));
-            }
-            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
-                check_loop_lexical(bound_names(name), body)?;
-            }
-            out.push(Op::ForIn(
-                *kind,
-                compile_pattern(name, strict)?,
-                expression(object, strict)?,
-                stmt_chunk(body, strict)?,
-                label,
-            ));
-        }
-        Stmt::ForOf(kind, name, iterable, body, asynchronous) => {
-            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
-                check_loop_lexical(bound_names(name), body)?;
-            }
-            if strict
-                && bound_names(name)
-                    .iter()
-                    .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
-            {
-                return Err(syntax("Invalid strict-mode binding"));
-            }
-            out.push(Op::ForOf(
-                *kind,
-                compile_pattern(name, strict)?,
-                expression(iterable, strict)?,
-                stmt_chunk(body, strict)?,
-                *asynchronous,
-                label,
-            ));
-        }
-        Stmt::Switch(test, cases) => {
-            let all: Vec<_> = cases
-                .iter()
-                .flat_map(|(_, body)| body.iter().cloned())
-                .collect();
-            let plan = block(&all, false, strict)?.scope.clone();
-            let mut compiled = Vec::new();
-            for (test, body) in cases {
-                let mut chunk = Chunk {
-                    strict,
-                    ..Chunk::default()
-                };
-                for stmt in body {
-                    statement(stmt, &mut chunk.ops, strict)?;
-                }
-                compiled.push((
-                    test.as_ref().map(|e| expression(e, strict)).transpose()?,
-                    chunk.finish(),
-                ));
-            }
-            out.push(Op::Switch(expression(test, strict)?, compiled, plan));
-        }
+        Stmt::For(initial, test, update, body) => compile_for(
+            initial.as_deref(),
+            test.as_ref(),
+            update.as_ref(),
+            body,
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::ForIn(kind, name, object, body, initializer) => compile_for_in(
+            *kind,
+            name,
+            object,
+            body,
+            initializer.as_deref(),
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::ForOf(kind, name, iterable, body, asynchronous) => compile_for_of(
+            *kind,
+            name,
+            iterable,
+            body,
+            *asynchronous,
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::Switch(test, cases) => compile_switch(test, cases, out, strict)?,
         Stmt::Return(e) => out.push(Op::Return(
             e.as_ref().map(|e| expression(e, strict)).transpose()?,
         )),
@@ -1145,7 +1066,7 @@ fn compile_statement(
                     if let Some(pattern) = n {
                         unique_pattern(pattern)?;
                         if let Stmt::Block(statements) = s.as_ref() {
-                            let scope = block(statements, false, strict)?.scope.clone();
+                            let scope = scope_plan(statements, false, strict, false)?;
                             let names = bound_names(pattern);
                             if scope.lexical.iter().any(|(name, _)| names.contains(name)) {
                                 return Err(syntax(
@@ -1177,6 +1098,195 @@ fn compile_statement(
     }
     Ok(())
 }
+
+fn compile_label(
+    id: LabelId,
+    names: &[JsString],
+    item: &Stmt,
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    for name in names {
+        check_identifier(name, strict)?;
+    }
+    match item {
+        Stmt::While(..) | Stmt::DoWhile(..) | Stmt::For(..) | Stmt::ForIn(..) | Stmt::ForOf(..) => {
+            compile_statement(item, out, strict, Some(id))?
+        }
+        Stmt::Function(_) if strict => {
+            return Err(syntax("Labelled function in strict mode"));
+        }
+        Stmt::Function(_) => {}
+        _ => out.push(Op::Label(id, stmt_chunk(item, strict)?)),
+    }
+    Ok(())
+}
+
+fn compile_variables(
+    kind: VarKind,
+    decls: &[(Pattern, Option<Expr>)],
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    for (pattern, init) in decls {
+        if strict
+            && bound_names(pattern)
+                .iter()
+                .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
+        {
+            return Err(syntax("Invalid strict-mode binding"));
+        }
+        out.push(Op::Initialize(
+            kind,
+            compile_pattern(pattern, strict)?,
+            init.as_ref()
+                .map(|expr| {
+                    if let Pattern::Name(name) = pattern {
+                        named_expression(expr, strict, name)
+                    } else {
+                        expression(expr, strict)
+                    }
+                })
+                .transpose()?,
+        ));
+    }
+    Ok(())
+}
+
+fn compile_for(
+    initial: Option<&Stmt>,
+    test: Option<&Expr>,
+    update: Option<&Expr>,
+    body: &Stmt,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    let lexical: Vec<(JsString, bool)> = match initial {
+        Some(Stmt::Variable(k, d)) if *k != VarKind::Var => d
+            .iter()
+            .flat_map(|(p, _)| {
+                bound_names(p)
+                    .into_iter()
+                    .map(|name| (name, *k != VarKind::Const))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
+    out.push(Op::For {
+        initial: initial.map(|s| stmt_chunk(s, strict)).transpose()?,
+        test: test.map(|e| expression(e, strict)).transpose()?,
+        update: update.map(|e| expression(e, strict)).transpose()?,
+        body: stmt_chunk(body, strict)?,
+        lexical,
+        label,
+    });
+    Ok(())
+}
+
+fn compile_for_in(
+    kind: Option<VarKind>,
+    name: &Pattern,
+    object: &Expr,
+    body: &Stmt,
+    initializer: Option<&Expr>,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    if let Some(initializer) = initializer {
+        if strict {
+            return Err(syntax(
+                "A strict for-in declaration cannot have an initializer",
+            ));
+        }
+        let Pattern::Name(binding) = name else {
+            unreachable!()
+        };
+        out.push(Op::Initialize(
+            VarKind::Var,
+            compile_pattern(name, strict)?,
+            Some(named_expression(initializer, strict, binding)?),
+        ));
+    }
+    if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
+        check_loop_lexical(bound_names(name), body)?;
+    }
+    out.push(Op::ForIn(
+        kind,
+        compile_pattern(name, strict)?,
+        expression(object, strict)?,
+        stmt_chunk(body, strict)?,
+        label,
+    ));
+    Ok(())
+}
+
+fn compile_for_of(
+    kind: Option<VarKind>,
+    name: &Pattern,
+    iterable: &Expr,
+    body: &Stmt,
+    asynchronous: bool,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
+        check_loop_lexical(bound_names(name), body)?;
+    }
+    if strict
+        && bound_names(name)
+            .iter()
+            .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
+    {
+        return Err(syntax("Invalid strict-mode binding"));
+    }
+    out.push(Op::ForOf(
+        kind,
+        compile_pattern(name, strict)?,
+        expression(iterable, strict)?,
+        stmt_chunk(body, strict)?,
+        asynchronous,
+        label,
+    ));
+    Ok(())
+}
+
+fn compile_switch(
+    test: &Expr,
+    cases: &[(Option<Expr>, Vec<Stmt>)],
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    let all: Vec<_> = cases
+        .iter()
+        .flat_map(|(_, body)| body.iter().cloned())
+        .collect();
+    let plan = scope_plan(&all, false, strict, false)?;
+    let mut compiled = Vec::new();
+    for (test, body) in cases {
+        let mut chunk = Chunk {
+            strict,
+            ..Chunk::default()
+        };
+        for stmt in body {
+            statement(stmt, &mut chunk.ops, strict)?;
+        }
+        compiled.push((
+            test.as_ref().map(|e| expression(e, strict)).transpose()?,
+            chunk.finish(),
+        ));
+    }
+    out.push(Op::Switch(
+        expression(test, strict)?,
+        compiled,
+        Box::new(plan),
+    ));
+    Ok(())
+}
+
 enum Emit<'a> {
     Expression(&'a Expr),
     Named(&'a Expr, &'a JsString),

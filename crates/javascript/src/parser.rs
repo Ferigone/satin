@@ -183,7 +183,7 @@ pub(crate) enum Expr {
         delegate: bool,
         asynchronous: bool,
     },
-    Class(Class),
+    Class(Box<Class>),
     Array(Vec<Option<Expr>>, bool),
     Object(Vec<ObjectEntry>, bool),
     Destructure(Pattern, Box<Expr>),
@@ -191,7 +191,7 @@ pub(crate) enum Expr {
     Chain(Box<Expr>, Vec<ChainLink>),
     Group(Box<Expr>),
     Spread(Box<Expr>),
-    Function(Function),
+    Function(Box<Function>),
     Member(Box<Expr>, Box<Expr>),
     PrivateMember(Box<Expr>, JsString),
     PrivateIn(JsString, Box<Expr>),
@@ -222,7 +222,7 @@ pub(crate) enum Stmt {
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>, Option<Expr>),
+    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>, Option<Box<Expr>>),
     ForOf(Option<VarKind>, Pattern, Expr, Box<Stmt>, bool),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Label(LabelId, Vec<JsString>, Box<Stmt>),
@@ -552,60 +552,19 @@ impl Parser {
             return self.function(start, false, true).map(Stmt::Function);
         }
         if self.eat("if") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            let yes = Box::new(self.if_clause()?);
-            let no = if self.eat("else") {
-                Some(Box::new(self.if_clause()?))
-            } else {
-                None
-            };
-            return Ok(Stmt::If(test, yes, no));
+            return self.if_statement();
         }
         if self.eat("while") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.loop_depth += 1;
-            let body = self.controlled_statement();
-            self.loop_depth -= 1;
-            return Ok(Stmt::While(test, Box::new(body?)));
+            return self.while_statement();
         }
         if self.eat("do") {
-            self.loop_depth += 1;
-            let body = self.controlled_statement();
-            self.loop_depth -= 1;
-            let body = Box::new(body?);
-            self.expect("while")?;
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.eat(";");
-            return Ok(Stmt::DoWhile(body, test));
+            return self.do_statement();
         }
         if self.eat("for") {
             return self.for_statement();
         }
         if self.eat("return") {
-            if self.function_depth == 0 {
-                return Err(self.error("Return outside a function"));
-            }
-            let expr = if self.at(";") || self.at("}") || self.is_eof() || self.current().newline {
-                None
-            } else {
-                let value = self.expression(1)?;
-                let value = if self.yield_context == KeywordContext::Body
-                    && self.await_context == KeywordContext::Body
-                {
-                    self.checked_expression(Expr::Await(Box::new(value)))?
-                } else {
-                    value
-                };
-                Some(value)
-            };
-            self.semi()?;
-            return Ok(Stmt::Return(expr));
+            return self.return_statement();
         }
         if self.eat("break") {
             let target = self.jump_target(false)?;
@@ -626,61 +585,10 @@ impl Parser {
             return Ok(Stmt::Throw(expr));
         }
         if self.eat("try") {
-            self.expect("{")?;
-            let body = Box::new(Stmt::Block(self.block_contents()?));
-            let catch = if self.eat("catch") {
-                let binding = if self.eat("(") {
-                    let name = self.binding_pattern()?;
-                    self.expect(")")?;
-                    Some(name)
-                } else {
-                    None
-                };
-                self.expect("{")?;
-                Some((binding, Box::new(Stmt::Block(self.block_contents()?))))
-            } else {
-                None
-            };
-            let finally = if self.eat("finally") {
-                self.expect("{")?;
-                Some(Box::new(Stmt::Block(self.block_contents()?)))
-            } else {
-                None
-            };
-            if catch.is_none() && finally.is_none() {
-                return Err(self.error("Try requires catch or finally"));
-            }
-            return Ok(Stmt::Try(body, catch, finally));
+            return self.try_statement();
         }
         if self.eat("switch") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.expect("{")?;
-            let mut cases = Vec::new();
-            let mut default = false;
-            self.switch_depth += 1;
-            while !self.eat("}") {
-                let test = if self.eat("case") {
-                    Some(self.expression(1)?)
-                } else if self.eat("default") {
-                    if default {
-                        return Err(self.error("Duplicate default clause"));
-                    }
-                    default = true;
-                    None
-                } else {
-                    return Err(self.error("Expected switch case or default"));
-                };
-                self.expect(":")?;
-                let mut body = Vec::new();
-                while !self.at("case") && !self.at("default") && !self.at("}") {
-                    body.push(self.statement()?);
-                }
-                cases.push((test, body));
-            }
-            self.switch_depth -= 1;
-            return Ok(Stmt::Switch(test, cases));
+            return self.switch_statement();
         }
         if self.eat("debugger") {
             self.semi()?;
@@ -716,6 +624,116 @@ impl Parser {
         Ok(Stmt::Expression(e))
     }
 
+    fn if_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        let yes = Box::new(self.if_clause()?);
+        let no = if self.eat("else") {
+            Some(Box::new(self.if_clause()?))
+        } else {
+            None
+        };
+        Ok(Stmt::If(test, yes, no))
+    }
+    fn while_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.loop_depth += 1;
+        let body = self.controlled_statement();
+        self.loop_depth -= 1;
+        Ok(Stmt::While(test, Box::new(body?)))
+    }
+    fn do_statement(&mut self) -> Result<Stmt, JsError> {
+        self.loop_depth += 1;
+        let body = self.controlled_statement();
+        self.loop_depth -= 1;
+        let body = Box::new(body?);
+        self.expect("while")?;
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.eat(";");
+        Ok(Stmt::DoWhile(body, test))
+    }
+    fn return_statement(&mut self) -> Result<Stmt, JsError> {
+        if self.function_depth == 0 {
+            return Err(self.error("Return outside a function"));
+        }
+        let expr = if self.at(";") || self.at("}") || self.is_eof() || self.current().newline {
+            None
+        } else {
+            let value = self.expression(1)?;
+            let value = if self.yield_context == KeywordContext::Body
+                && self.await_context == KeywordContext::Body
+            {
+                self.checked_expression(Expr::Await(Box::new(value)))?
+            } else {
+                value
+            };
+            Some(value)
+        };
+        self.semi()?;
+        Ok(Stmt::Return(expr))
+    }
+    fn try_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("{")?;
+        let body = Box::new(Stmt::Block(self.block_contents()?));
+        let catch = if self.eat("catch") {
+            let binding = if self.eat("(") {
+                let name = self.binding_pattern()?;
+                self.expect(")")?;
+                Some(name)
+            } else {
+                None
+            };
+            self.expect("{")?;
+            Some((binding, Box::new(Stmt::Block(self.block_contents()?))))
+        } else {
+            None
+        };
+        let finally = if self.eat("finally") {
+            self.expect("{")?;
+            Some(Box::new(Stmt::Block(self.block_contents()?)))
+        } else {
+            None
+        };
+        if catch.is_none() && finally.is_none() {
+            return Err(self.error("Try requires catch or finally"));
+        }
+        Ok(Stmt::Try(body, catch, finally))
+    }
+    fn switch_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.expect("{")?;
+        let mut cases = Vec::new();
+        let mut default = false;
+        self.switch_depth += 1;
+        while !self.eat("}") {
+            let test = if self.eat("case") {
+                Some(self.expression(1)?)
+            } else if self.eat("default") {
+                if default {
+                    return Err(self.error("Duplicate default clause"));
+                }
+                default = true;
+                None
+            } else {
+                return Err(self.error("Expected switch case or default"));
+            };
+            self.expect(":")?;
+            let mut body = Vec::new();
+            while !self.at("case") && !self.at("default") && !self.at("}") {
+                body.push(self.statement()?);
+            }
+            cases.push((test, body));
+        }
+        self.switch_depth -= 1;
+        Ok(Stmt::Switch(test, cases))
+    }
     fn label_ahead(&self) -> bool {
         matches!(
             self.current().kind,
@@ -929,7 +947,7 @@ impl Parser {
                         (enumerate && kind == VarKind::Var && matches!(declarations[0].0, Pattern::Name(_)))) =>
                 {
                     let (target, value) = declarations.remove(0);
-                    initializer = value;
+                    initializer = value.map(Box::new);
                     (Some(kind), target)
                 }
                 Some(Stmt::Expression(target))
@@ -1207,7 +1225,7 @@ impl Parser {
             FunctionKind::Ordinary
         };
         let function = self.function_body(start, None, params, true, kind)?;
-        let arrow = self.checked_expression(Expr::Function(function))?;
+        let arrow = self.checked_expression(Expr::Function(Box::new(function)))?;
         // An arrow is an AssignmentExpression, so a bare arrow can start
         // a comma expression but cannot take a binary or postfix operator.
         if allow_comma && self.at(",") {
@@ -1865,7 +1883,7 @@ impl Parser {
             return Err(self.error("Unexpected '...' in an expression"));
         }
         if self.eat("class") {
-            return self.class(start, false).map(Expr::Class);
+            return self.class(start, false).map(|class| Expr::Class(Box::new(class)));
         }
         if self.eat("super") {
             if !self.super_property && !self.super_call {
@@ -1924,11 +1942,11 @@ impl Parser {
         if self.async_function_ahead() {
             self.advance(2);
             let function = self.function(start, true, false)?;
-            return self.checked_expression(Expr::Function(function));
+            return self.checked_expression(Expr::Function(Box::new(function)));
         }
         if self.eat("function") {
             let function = self.function(start, false, false)?;
-            return self.checked_expression(Expr::Function(function));
+            return self.checked_expression(Expr::Function(Box::new(function)));
         }
         if self.eat("this") {
             return Ok(Expr::This);

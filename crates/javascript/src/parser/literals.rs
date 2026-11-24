@@ -225,7 +225,7 @@ impl Parser {
                 function_kind,
                 method,
             )?;
-            let value = self.checked_expression(Expr::Function(function))?;
+            let value = self.checked_expression(Expr::Function(Box::new(function)))?;
             return Ok(Entry::Ready(property.with_value(
                 value,
                 false,
