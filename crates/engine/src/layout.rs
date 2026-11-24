@@ -13,12 +13,14 @@ mod floats;
 mod grid_template;
 mod intersections;
 mod positioning;
+mod scroll_flow;
 mod svg_content;
 use grid_template::{Axis, AxisSize, Tracks};
 use intersections::ObservationBox;
 pub(crate) use intersections::ObserverRoot;
 use positioning::TrackedCommands;
 pub use positioning::{Affine2D, ScrollOffset, ScrollRegion, Viewport};
+pub(crate) use scroll_flow::ScrollFlow;
 
 #[derive(Clone, Debug)]
 pub struct ControlPaintStyle {
@@ -277,6 +279,7 @@ pub struct Layout {
     pub viewport: Viewport,
     pub viewport_overflow: [Overflow; 2],
     pub depends_on_viewport_scroll: bool,
+    scroll_flow: Option<Arc<ScrollFlow>>,
     pub computed_styles: Arc<ComputedStyles>,
     pub scroll_regions: Vec<ScrollRegion>,
     flow_elements: Vec<ElementBox>,
@@ -374,6 +377,7 @@ impl Layout {
             viewport,
             scroll,
             observe_intersections,
+            false,
             |_| Ok::<_, std::convert::Infallible>(()),
         )
         .unwrap()
@@ -384,6 +388,7 @@ impl Layout {
         mut viewport: Viewport,
         scroll: &HashMap<NodeId, ScrollOffset>,
         observe_intersections: bool,
+        retain_flow: bool,
         check_text: impl FnOnce(&ComputedStyles) -> Result<(), E>,
     ) -> Result<Self, E> {
         let width = viewport.width;
@@ -456,40 +461,7 @@ impl Layout {
             .find_map(|id| styles[id.0].background.filter(|c| c.3 > 0))
             .unwrap_or(Color::WHITE);
         let styles: Arc<ComputedStyles> = styles.into();
-        let mut b = Builder {
-            page,
-            fonts,
-            styles: &styles,
-            commands: TrackedCommands::default(),
-            positioned: vec![],
-            viewport,
-            link_cache: std::cell::RefCell::new(positioning::LinkCache::default()),
-            svg_work_left: crate::svg::MAX_SVG_WORK,
-            svg_images: HashMap::new(),
-            links: vec![],
-            elements: vec![],
-            anchors: HashMap::new(),
-            list_ordinals: HashMap::new(),
-            intrinsic: vec![None; page.document.nodes.len()],
-            grid_text: HashMap::new(),
-            floats: floats::FloatContext::default(),
-            float_work_remaining: page
-                .document
-                .nodes
-                .len()
-                .saturating_mul(64)
-                .saturating_add(512)
-                .min(1_000_000),
-            recursion: 0,
-            work_remaining: page
-                .document
-                .nodes
-                .len()
-                .saturating_mul(8)
-                .saturating_add(512)
-                .min(1_000_000),
-            limited: false,
-        };
+        let mut b = Builder::new(page, fonts, &styles, viewport);
         // The root box resolves percentages against the initial containing
         // block. Descendants still receive their containing box's own height.
         let mut line = Line::new(
@@ -503,17 +475,78 @@ impl Layout {
             b.child(child, &mut line, None);
         }
         b.flush(&mut line, false);
-        b.layout_positioned();
-        let height = b
-            .elements
-            .iter()
-            .fold(line.y, |h, e| h.max(e.rect.y + e.rect.height));
-        let mut layout = b.finish_visual(height.max(1.), background, scroll, observe_intersections);
-        if let Some(json) = &page.raw_json {
-            json.lock().unwrap().paint_rows(&mut layout, fonts);
+        // A fixed box can use the viewport as its containing block. Preserve
+        // flow before resolving positioned descendants in that case; otherwise
+        // their final fragments are independent of the scroll offset as well.
+        let viewport_fixed = !b.positioned.is_empty()
+            && styles
+                .entries
+                .iter()
+                .any(|s| s.position == css::Position::Fixed);
+        if !viewport_fixed {
+            b.layout_positioned();
+        }
+        let candidate = (retain_flow
+            && (viewport_fixed
+                || page.raw_json.is_some()
+                || styles.entries.iter().any(|s| {
+                    s.position == css::Position::Sticky
+                        || s.overflow.iter().any(|axis| axis.scrollable())
+                })))
+        .then(|| Arc::new(ScrollFlow::capture(&b, background)));
+        let mut layout = b.finish_frame(background, scroll, observe_intersections);
+        if layout.depends_on_viewport_scroll
+            || layout
+                .scroll_regions
+                .iter()
+                .any(|r| r.max_x > 0. || r.max_y > 0.)
+        {
+            layout.scroll_flow = candidate;
         }
         Ok(layout)
     }
+    /// Update only scroll-dependent geometry for an unchanged page. Callers
+    /// discard the prior layout on DOM, resource or form changes. A resize
+    /// (including a change in viewport height) always needs new formatting.
+    pub fn for_scrolling(
+        page: &LoadedPage,
+        fonts: &Fonts,
+        viewport: Viewport,
+        scroll: &HashMap<NodeId, ScrollOffset>,
+        previous: Option<&Layout>,
+    ) -> Self {
+        if let Some(layout) =
+            previous.and_then(|l| l.at_scroll(page, fonts, viewport, scroll, false))
+        {
+            return layout;
+        }
+        Self::build_checked_for_viewport(page, fonts, viewport, scroll, false, true, |_| {
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap()
+    }
+
+    pub(crate) fn at_scroll(
+        &self,
+        page: &LoadedPage,
+        fonts: &Fonts,
+        viewport: Viewport,
+        scroll: &HashMap<NodeId, ScrollOffset>,
+        observe: bool,
+    ) -> Option<Self> {
+        let flow = self.scroll_flow.as_ref()?;
+        if self.viewport.width != viewport.width || self.viewport.height != viewport.height {
+            return None;
+        }
+        let mut layout = flow.at_scroll(page, fonts, viewport, scroll, observe);
+        layout.scroll_flow = Some(flow.clone());
+        Some(layout)
+    }
+
+    pub(crate) fn scroll_work(&self) -> Option<usize> {
+        self.scroll_flow.as_ref().map(|flow| flow.replay_work)
+    }
+
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
         let node = self.element_at(x, y)?;
         self.node_links[node.0].as_deref()
@@ -773,6 +806,64 @@ struct Builder<'a> {
     work_remaining: usize,
     limited: bool,
 }
+impl<'a> Builder<'a> {
+    fn new(
+        page: &'a LoadedPage,
+        fonts: &'a Fonts,
+        styles: &'a Arc<ComputedStyles>,
+        viewport: Viewport,
+    ) -> Self {
+        Self {
+            page,
+            fonts,
+            styles,
+            commands: TrackedCommands::default(),
+            positioned: vec![],
+            viewport,
+            link_cache: std::cell::RefCell::new(positioning::LinkCache::default()),
+            svg_work_left: crate::svg::MAX_SVG_WORK,
+            svg_images: HashMap::new(),
+            links: vec![],
+            elements: vec![],
+            anchors: HashMap::new(),
+            list_ordinals: HashMap::new(),
+            intrinsic: vec![None; page.document.nodes.len()],
+            grid_text: HashMap::new(),
+            floats: floats::FloatContext::default(),
+            float_work_remaining: page
+                .document
+                .nodes
+                .len()
+                .saturating_mul(64)
+                .saturating_add(512)
+                .min(1_000_000),
+            recursion: 0,
+            work_remaining: page
+                .document
+                .nodes
+                .len()
+                .saturating_mul(8)
+                .saturating_add(512)
+                .min(1_000_000),
+            limited: false,
+        }
+    }
+
+    fn finish_frame(
+        mut self,
+        background: Color,
+        scroll: &HashMap<NodeId, ScrollOffset>,
+        observe_intersections: bool,
+    ) -> Layout {
+        self.layout_positioned();
+        let (page, fonts) = (self.page, self.fonts);
+        let mut layout = self.finish_visual(background, scroll, observe_intersections);
+        if let Some(json) = &page.raw_json {
+            json.lock().unwrap().paint_rows(&mut layout, fonts);
+        }
+        layout
+    }
+}
 const MAX_LAYOUT_RECURSION: usize = 48;
 struct FlexItem {
     node: NodeId,
@@ -901,6 +992,7 @@ struct GridPlacement {
     column_origin: i32,
     row_origin: i32,
 }
+#[derive(Clone)]
 struct GridText {
     merged: Option<Arc<str>>,
     visible: bool,

@@ -42,6 +42,61 @@ fn wait_for(runtime: &mut ScriptRuntime, expression: &str) {
 }
 
 #[test]
+fn horizontal_viewport_scroll_reuses_the_scene_for_paint_hits_and_observers() {
+    use rust_browser_engine::{Fonts, layout::ScrollOffset, paint::Canvas};
+    use std::sync::Arc;
+    let (page, mut runtime) = runtime(
+        "<!doctype html><style>body{margin:0;width:600px}
+        a{display:block;margin-left:250px;width:40px;height:40px;background:#ff0000}
+        </style><a id=target href=destination></a>",
+    );
+    check(
+        &mut runtime,
+        "var target = document.getElementById('target'), entries = [];
+        new IntersectionObserver(e => entries.push(e[0])).observe(target); true",
+    );
+    wait_for(
+        &mut runtime,
+        "entries.length === 1 && !entries[0].isIntersecting",
+    );
+    let viewport = runtime.viewport();
+    let first = runtime.layout_for_paint(viewport).unwrap();
+    let current = Viewport {
+        scroll_x: 220.,
+        ..viewport
+    };
+    let scene = runtime.layout_for_paint(current).unwrap();
+    assert!(Arc::ptr_eq(&scene, &first));
+    check(
+        &mut runtime,
+        "window.scrollX === 220 && target.getBoundingClientRect().left === 30",
+    );
+    wait_for(
+        &mut runtime,
+        "entries.length === 2 && entries[1].isIntersecting",
+    );
+    check(
+        &mut runtime,
+        "entries[1].boundingClientRect.left === 30 && entries[1].intersectionRatio === 1",
+    );
+    let target = page.document.html_elements("a").next().unwrap();
+    assert_eq!(scene.element_at(35. + current.scroll_x, 10.), Some(target));
+    let mut fonts = Fonts::new().unwrap();
+    let mut frame = Canvas::new(200, 160, scene.background);
+    frame.document_at(&scene, &mut fonts, 0., ScrollOffset { x: 220., y: 0. }, 1.);
+    assert_eq!(frame.pixels[10 * 200 + 35], 0x00ff0000);
+    assert_eq!(frame.pixels[10 * 200 + 5], 0x00ffffff);
+    // Existing snapshot consumers use the two-argument camera (Y supplied
+    // on paint, X in the snapshot), even after a compositor reused a scene.
+    let snapshot = runtime.layout_for_viewport(current).unwrap();
+    assert_eq!(snapshot.viewport.scroll_x, 220.);
+    assert_eq!(first.viewport.scroll_x, 0.);
+    let mut legacy = Canvas::new(200, 160, scene.background);
+    legacy.document(&snapshot, &mut fonts, 0., 0.);
+    assert_eq!(frame.pixels, legacy.pixels);
+}
+
+#[test]
 fn take_records_drains_another_observers_snapshot_before_its_callback() {
     let (_, mut runtime) = runtime(
         r#"<!doctype html>

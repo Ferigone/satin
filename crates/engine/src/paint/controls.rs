@@ -10,6 +10,12 @@ impl Canvas {
         scale: f32,
     ) {
         self.push_state(Affine2D::IDENTITY, Some(rect));
+        // Scrolling long forms should not shape text or enumerate options that
+        // are entirely outside the viewport or their overflow container.
+        if !valid_rect(self.clip) {
+            self.pop_state();
+            return;
+        }
         let ink = if control.disabled {
             Color(120, 124, 128, 255)
         } else {

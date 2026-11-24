@@ -149,6 +149,90 @@ fn viewport_sticky_moves_its_paint_and_hit_area_without_moving_flow_siblings() {
 }
 
 #[test]
+fn scroll_updates_match_fresh_layout_and_reuse_formatted_styles() {
+    let page = LoadedPage::from_html(
+        "https://position.test/",
+        "<!doctype html>
+        <style>body{margin:0} aside{position:fixed;right:2px;top:3px}
+        header{position:sticky;top:4px;height:20px}
+        section{overflow:auto;width:160px;height:80px}
+        a{display:block;margin-top:80px;width:300px;height:180px;background:lime}
+        main{position:relative;height:350px} footer{height:600px}</style>
+        <main><header id=sticky>Menu</header><section id=scroller>
+        <a href=target id=link>Link</a></section></main><footer></footer>
+        <aside id=fixed><span id=label>Label</span></aside>",
+    );
+    let fonts = Fonts::new().unwrap();
+    let initial = Viewport {
+        width: 320.,
+        height: 180.,
+        ..Viewport::default()
+    };
+    let mut layout = Layout::for_scrolling(&page, &fonts, initial, &HashMap::new(), None);
+    let styles = layout.computed_styles.clone();
+    let scroller = node(&page, "scroller");
+    for (y, nested_x, nested_y) in [(110., 17., 65.), (340., 99., 130.), (0., 0., 0.)] {
+        let view = Viewport {
+            scroll_y: y,
+            ..initial
+        };
+        let offsets = HashMap::from([(
+            scroller,
+            ScrollOffset {
+                x: nested_x,
+                y: nested_y,
+            },
+        )]);
+        layout = Layout::for_scrolling(&page, &fonts, view, &offsets, Some(&layout));
+        let fresh = Layout::build_with_scroll(&page, &fonts, view, &offsets);
+        assert!(std::sync::Arc::ptr_eq(&styles, &layout.computed_styles));
+        assert_eq!(layout.scroll_regions, fresh.scroll_regions);
+        for id in page.document.connected_nodes() {
+            assert_eq!(layout.rect_for(id), fresh.rect_for(id));
+            assert_eq!(layout.flow_rect_for(id), fresh.flow_rect_for(id));
+        }
+        for (x, y) in [(1., 26.), (1., 98.), (315., y + 10.)] {
+            assert_eq!(layout.element_at(x, y), fresh.element_at(x, y));
+            assert_eq!(layout.link_at(x, y), fresh.link_at(x, y));
+        }
+    }
+    let resized = Layout::for_scrolling(
+        &page,
+        &fonts,
+        Viewport {
+            width: 350.,
+            ..initial
+        },
+        &HashMap::new(),
+        Some(&layout),
+    );
+    assert!(!std::sync::Arc::ptr_eq(&styles, &resized.computed_styles));
+    close(
+        r(&page, &resized, "fixed").x - r(&page, &layout, "fixed").x,
+        30.,
+    );
+}
+
+#[test]
+fn an_unpainted_fixed_descendant_does_not_invalidate_a_plain_scroll() {
+    let page = LoadedPage::from_html(
+        "https://position.test/",
+        "<main style='height:900px'><div style='display:none'>
+        <span style='position:fixed'>Hidden</span></div></main>",
+    );
+    let runtime = rust_browser_engine::script::ScriptRuntime::new(&page).unwrap();
+    let initial = runtime.layout_for_viewport(Viewport::default()).unwrap();
+    assert!(!initial.depends_on_viewport_scroll);
+    let scrolled = runtime
+        .layout_for_viewport(Viewport {
+            scroll_y: 60.,
+            ..Viewport::default()
+        })
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(&initial, &scrolled));
+}
+
+#[test]
 fn single_axis_scrollers_keep_separate_sticky_scrollports() {
     let source = "</style><div id=outer style='width:160px;height:120px;overflow:auto'>\
         <div id=inner style='margin-left:30px;width:210px;height:130px;overflow:clip auto'>\

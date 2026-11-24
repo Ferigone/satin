@@ -1,4 +1,4 @@
-# CSSOM measurements, scrolling, and shared layout in alpha.5
+# CSSOM measurements, scrolling, and shared layout
 
 The JavaScript host and renderer share the layout, computed styles, and DOM snapshot. A DOM or form control state change advances the revision. The first layout-dependent read builds layout synchronously. Subsequent reads at that revision reuse the cached `Arc`. The window receives the snapshot by reference. Font faces share immutable data, with bounded shaping and glyph caches per instance. The host creates `Fonts` on the first layout request.
 
@@ -10,7 +10,22 @@ The JavaScript host and renderer share the layout, computed styles, and DOM snap
 - `scrollTop`, `scrollLeft`, `scroll`, `scrollTo`, `scrollBy`, `window.scrollX`, `window.scrollY`, `pageXOffset`, and `pageYOffset` support instant scrolling. The new position is clamped to the content bounds and saved. Later content growth starts from that clamped position. When a document shrinks, viewport scrolling is clamped and fixed layout is recalculated as needed.
 - `scroll` events are coalesced by target and scheduled as tasks. A document scroll bubbles to the window, and an element scroll stays at the element. Viewport changes schedule `resize`. `onscroll`, `onresize`, and `addEventListener` are supported. Native wheel input starts at the hit element and passes any unused delta up the ancestor chain.
 
-Coverage is partial for the DOMRect and CSSStyleProperties interfaces and prototypes, CSS properties and shorthands, and CSSOM serialization. The used line height approximates `line-height: normal`. Some `auto` insets and percentages with indefinite sizes remain incomplete. Pseudo-elements, `scrollIntoView`, smooth scrolling, right-to-left and vertical directions, and viewport scrolling behavior need further work. SVG geometry uses limited bounds maps, and other DOM collections in this stage use snapshots. [SVG](SVG.md)
+Coverage is partial for the DOMRect and CSSStyleProperties interfaces and prototypes, CSS properties and shorthands, and CSSOM serialization. The used line height approximates `line-height: normal`. Some `auto` insets and percentages with indefinite sizes remain incomplete. Pseudo-elements, `scrollIntoView`, programmatic smooth scrolling (`behavior: "smooth"`), right-to-left and vertical directions, and viewport scrolling behavior need further work. SVG geometry uses limited bounds maps, and other DOM collections in this stage use snapshots. [SVG](SVG.md)
+
+## Native wheel and trackpad scrolling
+
+Satin samples pending wheel input at the monitor's refresh interval. A discrete
+wheel detent starts moving the page on the first sample and settles within
+roughly 100 ms. Reversing direction interrupts the previous tail. Pixel deltas
+and fractional line deltas retain their native distance on both axes and gain
+no additional animation. On Windows, disabling client-area animations also
+makes whole wheel detents immediate.
+
+The gesture follows the scrollable element under the pointer. When an inner
+panel reaches an edge, its parent receives the remainder on that axis. Pages
+with scroll-dependent geometry can reuse their formatted content between
+frames. Sticky and fixed boxes, hit targets and observer geometry are updated
+at the new offset. Resizing or editing the document triggers fresh layout.
 
 ## Work budgets and painting
 

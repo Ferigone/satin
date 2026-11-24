@@ -567,8 +567,10 @@ fn a_full_metadata_queue_does_not_delay_the_page_fetch_result() {
         .unwrap();
     let (path, mut stream) = accept(&server, Instant::now() + WAIT);
     assert_eq!(path, "/missing");
+    // Hold the last byte until we have counted the start and header events.
+    // An empty body can report its completion concurrently with this assertion.
     stream
-        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 1\r\nConnection: close\r\n\r\n")
         .unwrap();
     stream.flush().unwrap();
     let result = workers
@@ -585,6 +587,7 @@ fn a_full_metadata_queue_does_not_delay_the_page_fetch_result() {
     assert_eq!(id, fetch_id);
     assert_eq!(head.metadata.status, 404);
     assert_eq!(events.take_dropped(), 2);
+    stream.write_all(b"x").unwrap();
 }
 
 #[test]

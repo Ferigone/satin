@@ -32,6 +32,90 @@ pub(super) fn coverage(r: Rect, radii: &[[f32; 2]; 4], x: f32, y: f32) -> f32 {
 }
 
 impl Canvas {
+    pub(super) fn rounded_fill(&mut self, rect: Rect, radii: &[[f32; 2]; 4], color: Color) {
+        if color.3 == 0 {
+            return;
+        }
+        let sample = |x, y| {
+            let alpha = coverage(rect, radii, x, y) * f32::from(color.3);
+            Color(color.0, color.1, color.2, alpha.round() as u8)
+        };
+        let transform = self.transform;
+        if transform.b != 0.
+            || transform.c != 0.
+            || transform.a <= 0.
+            || transform.d <= 0.
+            || !self.clips.is_empty()
+        {
+            self.raster_rect(rect, |x, y| Some(sample(x, y)));
+            return;
+        }
+        let Some(inverse) = transform.inverse() else {
+            return;
+        };
+        let Some([mut left, top, mut right, bottom]) = self.raster_bounds(rect) else {
+            return;
+        };
+        if !self.charge_pixels((right - left) * (bottom - top)) {
+            return;
+        }
+        let local_x = |x: usize| inverse.a * (x as f32 + 0.5) + inverse.e;
+        // Match the pixel-center test of the transformed rasterizer at fractional edges.
+        while left < right && ((left as f32 + 0.5) < self.clip.x || local_x(left) < rect.x) {
+            left += 1;
+        }
+        while right > left
+            && ((right as f32 - 0.5) >= self.clip.x + self.clip.width
+                || local_x(right - 1) >= rect.x + rect.width)
+        {
+            right -= 1;
+        }
+        let packed = u32::from(color.0) << 16 | u32::from(color.1) << 8 | u32::from(color.2);
+        let stride = self.width as usize;
+        for y in top..bottom {
+            let device_y = y as f32 + 0.5;
+            let ly = inverse.d * device_y + inverse.f;
+            if device_y < self.clip.y
+                || device_y >= self.clip.y + self.clip.height
+                || ly < rect.y
+                || ly >= rect.y + rect.height
+            {
+                continue;
+            }
+            let dy = ly - rect.y;
+            let from_bottom = rect.height - dy;
+            let radius = |top: [f32; 2], bottom: [f32; 2]| {
+                let upper = if dy < top[1] { top[0] } else { 0. };
+                let lower = if from_bottom < bottom[1] {
+                    bottom[0]
+                } else {
+                    0.
+                };
+                upper.max(lower)
+            };
+            let left_radius = radius(radii[0], radii[3]);
+            let right_radius = radius(radii[1], radii[2]);
+            let row = &mut self.pixels[y * stride..(y + 1) * stride];
+            // Only corner pixels can have partial coverage. The rest are one solid span.
+            let (mut x0, mut x1) = (left, right);
+            while x0 < x1 && local_x(x0) - rect.x < left_radius {
+                row[x0] = blend(row[x0], sample(local_x(x0), ly));
+                x0 += 1;
+            }
+            while x1 > x0 && rect.width - (local_x(x1 - 1) - rect.x) < right_radius {
+                x1 -= 1;
+                row[x1] = blend(row[x1], sample(local_x(x1), ly));
+            }
+            if color.3 == 255 {
+                row[x0..x1].fill(packed);
+            } else {
+                for pixel in &mut row[x0..x1] {
+                    *pixel = blend(*pixel, color);
+                }
+            }
+        }
+    }
+
     pub(super) fn rounded_border(
         &mut self,
         rect: Rect,
@@ -155,6 +239,54 @@ mod tests {
     const RED: Color = Color(255, 0, 0, 128);
     const PINK: u32 = 0xff7f7f;
     const WHITE: u32 = 0xffffff;
+
+    #[test]
+    fn rounded_fill_scanlines_match_transformed_sampling() {
+        let rect = Rect {
+            x: -4.5,
+            y: -3.25,
+            width: 56.75,
+            height: 43.5,
+        };
+        for radii in [
+            [[0., 0.]; 4],
+            [[27., 17.], [0., 0.], [26., 26.], [1., 2.]],
+            [[1., 30.], [50., 10.], [2., 28.], [54., 4.]],
+        ] {
+            for color in [Color(170, 18, 120, 255), Color(100, 51, 220, 96)] {
+                for (scale, dy) in [(1., 0.), (1.25, -2.75), (0.65, 3.25), (2.5, -18.5)] {
+                    let mut fast = Canvas::new(60, 52, Color::WHITE);
+                    let mut reference = Canvas::new(60, 52, Color::WHITE);
+                    for canvas in [&mut fast, &mut reference] {
+                        canvas.clip(Rect {
+                            x: 1.25,
+                            y: 2.75,
+                            width: 54.5,
+                            height: 39.75,
+                        });
+                        canvas.push_state(
+                            Affine2D {
+                                a: scale,
+                                d: scale * 1.2,
+                                e: 2.125,
+                                f: dy,
+                                ..Affine2D::IDENTITY
+                            },
+                            None,
+                        );
+                    }
+                    fast.rounded_fill(rect, &radii, color);
+                    reference.raster_rect(rect, |x, y| {
+                        let alpha =
+                            (coverage(rect, &radii, x, y) * f32::from(color.3)).round() as u8;
+                        Some(Color(color.0, color.1, color.2, alpha))
+                    });
+                    assert_eq!(fast.pixels, reference.pixels);
+                    assert_eq!(fast.work_left, reference.work_left);
+                }
+            }
+        }
+    }
 
     #[test]
     fn uniform_border_fractional_join_blends_once() {

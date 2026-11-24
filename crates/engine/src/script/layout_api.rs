@@ -17,6 +17,7 @@ struct Data {
     page: LoadedPage,
     page_revision: u64,
     layout_revision: Option<u64>,
+    scroll_dirty: bool,
     fonts: Option<Fonts>,
     layout: Option<Arc<Layout>>,
     viewport: Viewport,
@@ -30,7 +31,9 @@ struct Data {
 impl Data {
     fn layout_is_valid(&self) -> bool {
         let dom = self.dom.borrow();
-        self.layout_revision == Some(dom.revision) && self.page.url == dom.url.as_str()
+        !self.scroll_dirty
+            && self.layout_revision == Some(dom.revision)
+            && self.page.url == dom.url.as_str()
     }
 
     fn sync_page(&mut self) {
@@ -68,9 +71,27 @@ impl Data {
         }
     }
 
-    fn build_layout(&self, vm: Option<&mut Vm>) -> Result<Layout, JsError> {
+    fn build_layout(&self, mut vm: Option<&mut Vm>) -> Result<Layout, JsError> {
         let document = &self.page.document;
         let fonts = self.fonts.as_ref().expect("layout fonts");
+        if self.scroll_dirty
+            && self.layout_revision == Some(self.dom.borrow().revision)
+            && let Some(old) = &self.layout
+            && let Some(work) = old.scroll_work()
+        {
+            if let Some(vm) = vm.as_deref_mut() {
+                vm.charge_work(work)?;
+            }
+            if let Some(frame) = old.at_scroll(
+                &self.page,
+                fonts,
+                self.viewport,
+                &self.offsets,
+                self.observe_intersections,
+            ) {
+                return Ok(frame);
+            }
+        }
         if let Some(vm) = vm {
             let stylesheet_bytes = self
                 .page
@@ -127,6 +148,7 @@ impl Data {
                 self.viewport,
                 &self.offsets,
                 self.observe_intersections,
+                true,
                 |styles| {
                     // Style resolution determines whether an element's text
                     // enters the formatter. Even script text may be visible
@@ -147,13 +169,15 @@ impl Data {
                 },
             );
         }
-        Ok(Layout::build_for_viewport(
+        Layout::build_checked_for_viewport(
             &self.page,
             fonts,
             self.viewport,
             &self.offsets,
             self.observe_intersections,
-        ))
+            true,
+            |_| Ok::<_, JsError>(()),
+        )
     }
 }
 impl LayoutHost {
@@ -240,15 +264,29 @@ impl LayoutHost {
         {
             d.resize_pending = true;
         }
-        if viewport.width != old.width
-            || viewport.height != old.height
-            || viewport.scroll_x != old.scroll_x
-            || (viewport.scroll_y != old.scroll_y
-                && d.layout
-                    .as_ref()
-                    .is_some_and(|l| l.depends_on_viewport_scroll))
-        {
+        if viewport.width != old.width || viewport.height != old.height {
             d.invalidate();
+        } else if viewport.scroll_x != old.scroll_x || viewport.scroll_y != old.scroll_y {
+            if d.layout
+                .as_ref()
+                .is_some_and(|l| l.depends_on_viewport_scroll)
+            {
+                d.scroll_dirty = true;
+            } else if d.layout_is_valid()
+                && let Some(layout) = &d.layout
+            {
+                let x = viewport
+                    .scroll_x
+                    .min((layout.content_width - viewport.width).max(0.));
+                let y = viewport
+                    .scroll_y
+                    .min((layout.height - viewport.height).max(0.));
+                if x != viewport.scroll_x || y != viewport.scroll_y {
+                    d.root_request = Some(ScrollOffset { x, y });
+                    viewport.scroll_x = x;
+                    viewport.scroll_y = y;
+                }
+            }
         }
         if viewport.scroll_x != old.scroll_x || viewport.scroll_y != old.scroll_y {
             d.event(None);
@@ -290,7 +328,7 @@ impl LayoutHost {
             .scroll_y
             .clamp(0., (layout.height - d.viewport.height).max(0.));
         if x != d.viewport.scroll_x || y != d.viewport.scroll_y {
-            let rebuild = layout.depends_on_viewport_scroll || x != d.viewport.scroll_x;
+            let rebuild = layout.depends_on_viewport_scroll;
             d.viewport.scroll_x = x;
             d.viewport.scroll_y = y;
             d.root_request = Some(ScrollOffset { x, y });
@@ -317,6 +355,7 @@ impl LayoutHost {
             vm.charge_work(native_svg_work)?;
         }
         d.layout_revision = Some(revision);
+        d.scroll_dirty = false;
         d.builds += 1;
         d.layout = Some(layout.clone());
         Ok(layout)
@@ -366,7 +405,7 @@ impl LayoutHost {
             };
             if next != old {
                 d.offsets.insert(node, next);
-                d.invalidate();
+                d.scroll_dirty = true;
                 d.event(Some(node));
             }
         } else {
@@ -385,8 +424,8 @@ impl LayoutHost {
             if next.x != old.scroll_x || next.y != old.scroll_y {
                 d.viewport.scroll_x = next.x;
                 d.viewport.scroll_y = next.y;
-                if layout.depends_on_viewport_scroll || next.x != old.scroll_x {
-                    d.invalidate();
+                if layout.depends_on_viewport_scroll {
+                    d.scroll_dirty = true;
                 }
                 d.root_request = Some(next);
                 d.event(None);
@@ -422,6 +461,7 @@ impl LayoutHost {
             },
             page_revision: 0,
             layout_revision: None,
+            scroll_dirty: false,
             fonts: None,
             layout: None,
             viewport: Viewport::default(),
@@ -1493,6 +1533,22 @@ impl ScriptRuntime {
         self.layout.viewport()
     }
     pub fn layout_for_viewport(&self, viewport: Viewport) -> Result<Arc<Layout>, JsError> {
+        let snapshot = self.layout_for_paint(viewport)?;
+        let viewport = self.viewport();
+        if snapshot.viewport.scroll_x == viewport.scroll_x {
+            return Ok(snapshot);
+        }
+        // Legacy painters read X from the snapshot and receive Y separately.
+        // A caller holding the old scene must keep its original camera.
+        drop(snapshot);
+        let mut data = self.layout.0.borrow_mut();
+        let scene = data.layout.as_mut().expect("snapshot just built");
+        Arc::make_mut(scene).viewport = viewport;
+        Ok(scene.clone())
+    }
+    /// For painters that supply both scroll offsets separately, ordinary page
+    /// movement can reuse the same immutable scene on either axis.
+    pub fn layout_for_paint(&self, viewport: Viewport) -> Result<Arc<Layout>, JsError> {
         self.publish_canvas_frames();
         self.layout.set_viewport(viewport);
         self.layout.layout(None)
