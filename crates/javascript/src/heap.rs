@@ -205,6 +205,8 @@ pub(crate) enum EnvKind {
     Global { binding_object: ObjectId },
     Function,
     Block,
+    // A Console command resolves helper names here and declares script bindings in its parent.
+    Inspector,
     Module,
 }
 struct RealmIntrinsics {

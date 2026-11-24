@@ -354,7 +354,7 @@ impl ConsoleLayout {
             p.editor(
                 prompt,
                 &controls.command,
-                "JavaScript expression",
+                "JavaScript expression · $0 = selected node",
                 "›",
                 focused && controls.field == Field::Command,
             );

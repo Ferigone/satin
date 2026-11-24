@@ -415,6 +415,10 @@ impl Elements {
         }
     }
 
+    pub(super) fn selected_node(&self) -> Option<NodeId> {
+        self.selected
+    }
+
     pub(super) fn selected_rect(&self) -> Option<Rect> {
         self.bounds
     }

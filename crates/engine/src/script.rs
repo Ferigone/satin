@@ -2147,11 +2147,7 @@ impl ScriptRuntime {
             {
                 return Err("Select an element in the current document".into());
             }
-            let mut root = id;
-            while let Some(parent) = doc.nodes[root.0].parent {
-                root = parent;
-            }
-            if root != doc.root {
+            if !doc.is_connected(id) {
                 return Err("The selected element was removed".into());
             }
         }

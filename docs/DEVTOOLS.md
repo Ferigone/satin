@@ -1,12 +1,14 @@
 # Satin DevTools
 
-Press **F12** or **Ctrl+Shift+I** to open the dock. Drag its top edge to give it more room. Click a tab or, while the dock has focus, press **Alt+1** through **Alt+6**. The panels follow the active browser tab. A new top-level navigation starts a new inspection session.
+Press **F12** or **Ctrl+Shift+I** to open the dock. Drag its top edge to give it more room. Click a tab or, while the dock has focus, press **Alt+1** through **Alt+6**. The panels follow the active browser tab. A new top-level navigation starts a new inspection session. While the next document loads, the inspector waits for it even if Satin still shows the previous page.
 
 ## Inspect a page and change its CSS
 
 1. Press **Ctrl+Shift+C** or click **Pick element**. Move the pointer over the page to highlight a box. Click it to select its DOM node without activating the link, button or control. Press **Escape** to cancel.
 2. In **Elements**, expand the tree, or press **Ctrl+F** to find a tag, ID, class or text. The **Node** pane shows the element's ancestors, attributes, text and box geometry. **Rules** shows directly matching author rules, declarations, specificity, source order and inline styles. **Computed** reads the selected node's resolved properties from Satin's layout engine.
 3. Press **F2** to edit an inline declaration, or click a property in **Computed** to start from that property. Enter a property name and value, then choose **Apply**. **Remove** deletes the inline declaration. The page’s own CSSOM and mutation observers see the change. Reloading the page restores the authored document.
+
+In **Console**, `$0` refers to the node selected in **Elements**. After editing a width, run `$0.style.width` to read the inline declaration and `getComputedStyle($0).width` to see the resolved value.
 
 ### Console
 

@@ -11,7 +11,7 @@
   { "action": "text", "value": "237px" },
   { "action": "key", "value": "Enter" },
   { "action": "key", "value": "1", "alt": true },
-  { "action": "text", "value": "document.title = document.getElementById('burst').style.width" },
+  { "action": "text", "value": "document.title = $0.style.width" },
   { "action": "key", "value": "Enter" },
   { "action": "title", "value": "237px" }
 ]

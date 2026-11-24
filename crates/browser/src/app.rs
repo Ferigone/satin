@@ -227,6 +227,8 @@ struct Tab {
     recovery: Recovery,
     navigation: u64,
     document_navigation: u64,
+    // The viewport can still paint the previous page until the next response opens.
+    displayed_navigation: u64,
     cancel: CancelSignal,
 }
 impl Tab {
@@ -256,7 +258,34 @@ impl Tab {
             recovery: Recovery::default(),
             navigation: 0,
             document_navigation: 0,
+            displayed_navigation: 0,
             cancel: CancelSignal::new(),
+        }
+    }
+
+    fn install_page(&mut self, page: LoadedPage) {
+        self.title = page.title();
+        self.page = Some(Arc::new(page));
+        self.layout = None;
+        self.displayed_navigation = self.document_navigation;
+    }
+
+    fn inspected_page(&self) -> Option<&LoadedPage> {
+        self.page
+            .as_deref()
+            .filter(|_| self.displayed_navigation == self.document_navigation)
+    }
+
+    fn sync_inspector(&self, dock: &mut crate::devtools::DevTools, frame: DockFrame) {
+        if let Some(page) = self.inspected_page() {
+            dock.sync_inspector(
+                frame,
+                Some(page),
+                self.layout.as_ref(),
+                self.runtime.as_ref(),
+                self.document_session.as_ref(),
+                &self.storage,
+            );
         }
     }
 
@@ -529,16 +558,8 @@ impl App {
     }
 
     fn sync_inspector(&mut self, frame: DockFrame) {
-        let tab = &self.tabs[self.active];
         if let Some(dock) = &mut self.devtools {
-            dock.sync_inspector(
-                frame,
-                tab.page.as_deref(),
-                tab.layout.as_ref(),
-                tab.runtime.as_ref(),
-                tab.document_session.as_ref(),
-                &tab.storage,
-            );
+            self.tabs[self.active].sync_inspector(dock, frame);
         }
     }
 
@@ -558,7 +579,9 @@ impl App {
         let index = self.active;
         let viewport = self.tab_viewport(index);
         let tab = &mut self.tabs[index];
-        if tab.runtime.is_none()
+        let has_page = tab.inspected_page().is_some();
+        if has_page
+            && tab.runtime.is_none()
             && let (Some(page), Some(session)) = (&tab.page, &mut tab.document_session)
         {
             if let Err(error) = session.ensure_realm(page, &mut tab.runtime, viewport) {
@@ -571,17 +594,16 @@ impl App {
         let Some(dock) = self.devtools.as_mut() else {
             return;
         };
+        let runtime = tab.runtime.as_mut().filter(|_| has_page);
         let updated = if let Some((node, key, value, important)) = edit {
-            let result = tab
-                .runtime
-                .as_mut()
+            let result = runtime
                 .ok_or_else(|| String::from("Document is unavailable"))
                 .and_then(|r| r.set_inspected_style(node, &key, &value, important));
             let ok = result.is_ok();
             dock.style_edit_result(frame, result);
             ok
         } else {
-            dock.run_console_command(frame, tab.runtime.as_mut())
+            dock.run_console_command(frame, runtime)
         };
         if updated {
             self.sync_runtime(index);
@@ -617,14 +639,16 @@ impl App {
         let ctrl = self.modifiers == ModifiersState::CONTROL;
         if ctrl && key == Key::Named(NamedKey::Enter) {
             let tab = &self.tabs[self.active];
-            if self.devtools.as_mut().is_some_and(|d| {
-                d.reveal_console_source(
-                    frame,
-                    tab.page.as_deref(),
-                    tab.runtime.as_ref(),
-                    tab.document_session.as_ref(),
-                )
-            }) {
+            if let Some(page) = tab.inspected_page()
+                && self.devtools.as_mut().is_some_and(|d| {
+                    d.reveal_console_source(
+                        frame,
+                        Some(page),
+                        tab.runtime.as_ref(),
+                        tab.document_session.as_ref(),
+                    )
+                })
+            {
                 self.redraw();
                 return;
             }
@@ -669,6 +693,7 @@ impl App {
 
     fn page_node_under_pointer(&self) -> Option<rust_browser_engine::dom::NodeId> {
         let tab = &self.tabs[self.active];
+        tab.inspected_page()?;
         if !self.pointer_in(self.window_regions(self.active).page) {
             return None;
         }
@@ -760,11 +785,9 @@ impl App {
             Ok((page, session)) => {
                 let tab = &mut self.tabs[index];
                 tab.url = page.url.clone();
-                tab.title = page.title();
-                tab.page = Some(Arc::new(page));
+                tab.install_page(page);
                 tab.runtime = None;
                 tab.document_session = Some(session);
-                tab.layout = None;
                 tab.loading = true;
             }
             Err(error) => self.fail_page(index, &error),
@@ -784,9 +807,7 @@ impl App {
         tab.document_navigation = tab.navigation;
         tab.recovery = tab.recovery.failed();
         let page = tab.recovery.page(&tab.url, error);
-        tab.title = page.title();
-        tab.page = Some(Arc::new(page));
-        tab.layout = None;
+        tab.install_page(page);
         tab.runtime = None;
         tab.document_session = None;
         tab.loading = false;
@@ -1183,9 +1204,7 @@ impl App {
         }
         if let Some(page) = shortcuts::help_page(&parsed) {
             // Browser-owned help is static: do not create a script realm for it.
-            tab.title = page.title();
-            tab.page = Some(Arc::new(page));
-            tab.layout = None;
+            tab.install_page(page);
             tab.loading = false;
         } else if url.starts_with("about:") {
             self.start_page(index, OpenedPage::internal(&parsed, self.profile.cookies()));
@@ -1852,17 +1871,21 @@ impl App {
             canvas.document_scaled(layout, &mut self.fonts, TOP * u, tab.scroll, u * tab.zoom);
         }
         if let (Some(frame), Some(dock)) = (dock_frame, &mut self.devtools) {
-            if let (Some(start), Some(layout_time)) = (paint_started, layout_time) {
+            let page = tab.inspected_page();
+            if let (Some(page), Some(start), Some(layout_time)) = (page, paint_started, layout_time)
+            {
                 dock.sample(
                     tab.id,
                     layout_time,
                     start.elapsed(),
-                    tab.page.as_deref(),
+                    Some(page),
                     tab.layout.as_deref(),
                     tab.runtime.as_ref(),
                 );
             }
-            let highlight = if dock.picking {
+            let highlight = if page.is_none() {
+                None
+            } else if dock.picking {
                 picked_node.and_then(|n| tab.layout.as_ref()?.rect_for(n))
             } else {
                 dock.selected_rect(tab.id)
@@ -4138,6 +4161,68 @@ fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {
 #[cfg(test)]
 mod dock_tests {
     use super::*;
+
+    #[test]
+    fn sources_wait_for_the_new_document_even_when_reloading_the_same_url() {
+        let url = "https://example.test/";
+        let page = |css: &str| {
+            let mut page = LoadedPage::from_html(url, "<main></main>");
+            page.stylesheets = Arc::new(vec![Arc::from(css)]);
+            page
+        };
+        let mut tab = Tab::new(1, url.into(), Default::default());
+        let mut dock = crate::devtools::DevTools::default();
+        let mut frame = DockFrame {
+            bounds: WindowRegions::new(800., 600., FOOT, true).dock.unwrap(),
+            scale: 1.,
+            focused: true,
+            pointer: None,
+            tab: tab.id,
+            document_navigation: tab.document_navigation,
+        };
+        dock.begin_navigation(tab.id, tab.document_navigation);
+        tab.install_page(page(".previous {}"));
+        dock.input(
+            frame,
+            DockInput::Key {
+                key: Key::Character("4".into()),
+                modifiers: ModifiersState::ALT,
+                repeat: false,
+            },
+        );
+        tab.sync_inspector(&mut dock, frame);
+        assert_eq!(
+            dock.clipboard_selection(frame, false).as_deref(),
+            Some(".previous {}")
+        );
+
+        tab.navigation += 1;
+        tab.document_navigation = tab.navigation;
+        frame.document_navigation = tab.document_navigation;
+        dock.begin_navigation(tab.id, tab.document_navigation);
+        tab.loading = true;
+        assert_eq!(
+            tab.page.as_ref().unwrap().stylesheets[0].as_ref(),
+            ".previous {}"
+        );
+        tab.sync_inspector(&mut dock, frame);
+        assert!(dock.clipboard_selection(frame, false).is_none());
+        assert!(tab.inspected_page().is_none());
+
+        // A stopped or rejected download can leave the previous page painted indefinitely.
+        tab.loading = false;
+        tab.sync_inspector(&mut dock, frame);
+        assert!(dock.clipboard_selection(frame, false).is_none());
+
+        // A newly opened document is inspectable while its body is still loading.
+        tab.loading = true;
+        tab.install_page(page(".current {}"));
+        tab.sync_inspector(&mut dock, frame);
+        assert_eq!(
+            dock.clipboard_selection(frame, false).as_deref(),
+            Some(".current {}")
+        );
+    }
 
     #[test]
     fn page_and_dock_share_a_half_open_boundary_above_the_footer() {

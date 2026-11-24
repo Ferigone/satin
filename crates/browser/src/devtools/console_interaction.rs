@@ -402,7 +402,8 @@ impl DevTools {
         };
         doc.record_evaluation(ConsoleOrigin::Command, ConsoleSeverity::Log, &command);
         let result = if let Some(runtime) = runtime {
-            let result = runtime.evaluate_console(&command);
+            let result =
+                runtime.evaluate_console_with_selection(&command, doc.elements.selected_node());
             doc.ingest_console(runtime.take_console_snapshot());
             result
         } else {
@@ -445,6 +446,66 @@ mod tests {
         assert_eq!(c.command.text(), "saved 🦊");
         c.key(&Key::Named(NamedKey::Enter), ModifiersState::empty(), true);
         assert!(c.pending.is_none());
+    }
+
+    #[test]
+    fn selection_reaches_console_only_in_the_document_that_was_inspected() {
+        let page = rust_browser_engine::LoadedPage::from_html(
+            "https://console.test/",
+            "<button data-selected='yes'>Press</button>",
+        );
+        let node = page.document.elements("button").next().unwrap();
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let mut dock = DevTools::default();
+        let frame = DockFrame {
+            bounds: Rect {
+                x: 0.,
+                y: 0.,
+                width: 640.,
+                height: 240.,
+            },
+            focused: true,
+            pointer: None,
+            scale: 1.,
+            tab: 5,
+            document_navigation: 19,
+        };
+        dock.begin_navigation(5, 19);
+        let old = dock.documents.get_mut(&5).unwrap();
+        old.elements.sync_page(Some(&page), None);
+        old.elements.inspect(node, frame.bounds);
+        old.console_controls.pending = Some("$0.getAttribute('data-selected')".into());
+        assert!(dock.run_console_command(frame, Some(&mut runtime)));
+        assert_eq!(
+            dock.documents[&5]
+                .console
+                .rows(ConsoleFilter::ALL)
+                .last()
+                .unwrap()
+                .message
+                .as_ref(),
+            "\"yes\""
+        );
+        dock.begin_navigation(5, 20);
+        let new_frame = DockFrame {
+            document_navigation: 20,
+            ..frame
+        };
+        let page = rust_browser_engine::LoadedPage::from_html("https://next.test/", "<p>next</p>");
+        let mut next_runtime = ScriptRuntime::new(&page).unwrap();
+        dock.documents.get_mut(&5).unwrap().console_controls.pending = Some("$0".into());
+        assert!(!dock.run_console_command(frame, Some(&mut next_runtime)));
+        assert!(dock.run_console_command(new_frame, Some(&mut next_runtime)));
+        assert_eq!(
+            dock.documents[&5]
+                .console
+                .rows(ConsoleFilter::ALL)
+                .last()
+                .unwrap()
+                .message
+                .as_ref(),
+            "undefined"
+        );
     }
 
     #[test]

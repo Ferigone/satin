@@ -292,7 +292,7 @@ impl Vm {
         Ok(())
     }
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
-        self.eval_with_referrer(source, None)
+        self.eval_with_referrer(source, None, None)
     }
 
     /// Execute a classic script whose dynamic imports and functions use the given
@@ -307,13 +307,14 @@ impl Vm {
         let Value::String(identifier) = identifier else {
             unreachable!()
         };
-        self.eval_with_referrer(source, Some(SourceReferrer::Script(identifier)))
+        self.eval_with_referrer(source, Some(SourceReferrer::Script(identifier)), None)
     }
 
     fn eval_with_referrer(
         &mut self,
         source: &str,
         referrer: Option<SourceReferrer>,
+        inspected_node: Option<Value>,
     ) -> Result<Value, JsError> {
         self.check_interrupt()?;
         let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
@@ -323,7 +324,10 @@ impl Vm {
         }
         self.active += 1;
         let result = self
-            .with_referrer(referrer, |vm| vm.run_chunk(&chunk, vm.realm.global_env))
+            .with_referrer(referrer, |vm| match inspected_node {
+                Some(node) => vm.run_inspected_command(&chunk, node),
+                None => vm.run_chunk(&chunk, vm.realm.global_env),
+            })
             .and_then(|c| match c {
                 Completion::Normal(v) => Ok(v.unwrap_or_default()),
                 _ => Err(JsError::new(
@@ -2060,14 +2064,20 @@ impl Vm {
         }
     }
     pub(crate) fn prepare(&mut self, scope: &ScopePlan, env: EnvId) -> Result<(), JsError> {
+        let declarations = self.declaration_environment(env);
         for (name, _) in &scope.lexical {
-            if self.heap.environment(env).bindings.contains_key(name) {
+            if self
+                .heap
+                .environment(declarations)
+                .bindings
+                .contains_key(name)
+            {
                 return Err(JsError::new(
                     ErrorKind::SyntaxError,
                     format!("Identifier '{name}' has already been declared"),
                 ));
             }
-            if env == self.realm.global_env
+            if declarations == self.realm.global_env
                 && self
                     .own_descriptor(self.realm.global_object, name)?
                     .is_some_and(|p| !p.configurable)
@@ -2080,10 +2090,10 @@ impl Vm {
         }
         for name in &scope.vars {
             self.ensure_allocation(256 + name.len() * 2)?;
-            let mut target = env;
+            let mut target = declarations;
             loop {
                 let e = self.heap.environment(target);
-                if e.kind != EnvKind::Block {
+                if !matches!(e.kind, EnvKind::Block | EnvKind::Inspector) {
                     break;
                 }
                 if e.bindings.contains_key(name) {
@@ -2141,7 +2151,7 @@ impl Vm {
         }
         for (name, mutable) in &scope.lexical {
             self.reserve_binding(name)?;
-            self.heap.environment_mut(env).bindings.insert(
+            self.heap.environment_mut(declarations).bindings.insert(
                 name.clone(),
                 Binding {
                     value: Value::Undefined,
@@ -2160,7 +2170,7 @@ impl Vm {
             } else {
                 let binding = self
                     .heap
-                    .environment_mut(env)
+                    .environment_mut(declarations)
                     .bindings
                     .get_mut(name)
                     .unwrap();
@@ -2186,9 +2196,10 @@ impl Vm {
             }
             Ok(())
         } else {
+            let declarations = self.declaration_environment(env);
             let binding = self
                 .heap
-                .environment_mut(env)
+                .environment_mut(declarations)
                 .bindings
                 .get_mut(key)
                 .ok_or_else(|| JsError::new(ErrorKind::InternalError, "Missing lexical binding"))?;

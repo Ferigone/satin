@@ -331,3 +331,96 @@ fn real_interpreted_calls_and_active_script_node_are_recorded_without_made_up_li
         Some(page.document.elements("script").next().unwrap())
     );
 }
+
+#[test]
+fn console_selection_is_the_live_node_without_modifying_page_bindings() {
+    let page = LoadedPage::from_html(
+        "https://console.test/",
+        "<main><button>Press</button><i></i></main>",
+    );
+    let button = page.document.elements("button").next().unwrap();
+    let other = page.document.elements("i").next().unwrap();
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval("let $0 = 'page scope'; window.$0 = 'page property'; function pageValue() { return $0; }").unwrap();
+    let source = "const chosen = $0; $0.setAttribute('title', 'inspected'); chosen === document.querySelector('button') && window.$0 === 'page property' && pageValue() === 'page scope'";
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection(source, Some(button))
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection(
+                "chosen !== $0 && $0 === document.querySelector('i')",
+                Some(other)
+            )
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection(
+                "eval(String.fromCharCode(36, 48)) === chosen",
+                Some(button)
+            )
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection(
+                "var callback = () => $0; callback() === chosen",
+                Some(button)
+            )
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(
+        runtime.eval("callback()").unwrap(),
+        Value::from("page scope")
+    );
+    assert_eq!(
+        runtime.eval("chosen.getAttribute('title')").unwrap(),
+        Value::from("inspected")
+    );
+    assert_eq!(runtime.eval("$0").unwrap(), Value::from("page scope"));
+    assert_eq!(
+        runtime.eval("window.$0").unwrap(),
+        Value::from("page property")
+    );
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection("'literal $0'", Some(button))
+            .unwrap(),
+        "\"literal $0\""
+    );
+    assert!(
+        runtime
+            .evaluate_console_with_selection("$0 = null", Some(button))
+            .is_err()
+    );
+    runtime
+        .eval("chosen.parentNode.removeChild(chosen)")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection("$0", Some(button))
+            .unwrap(),
+        "undefined"
+    );
+    assert_eq!(
+        runtime
+            .evaluate_console_with_selection(
+                "$0",
+                Some(rust_browser_engine::dom::NodeId(usize::MAX))
+            )
+            .unwrap(),
+        "undefined"
+    );
+    assert_eq!(
+        runtime.evaluate_console_with_selection("$0", None).unwrap(),
+        "undefined"
+    );
+    assert_eq!(runtime.eval("$0").unwrap(), Value::from("page scope"));
+}

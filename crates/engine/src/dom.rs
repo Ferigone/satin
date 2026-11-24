@@ -120,6 +120,17 @@ impl Document {
             Some(id)
         })
     }
+    pub fn is_connected(&self, mut node: NodeId) -> bool {
+        while let Some(entry) = self.nodes.get(node.0) {
+            if node == self.root {
+                return true;
+            }
+            let Some(parent) = entry.parent else { break };
+            node = parent;
+        }
+        false
+    }
+
     pub fn append(&mut self, parent: NodeId, kind: NodeKind) -> NodeId {
         let id = NodeId(self.nodes.len());
         self.nodes.push(Node {

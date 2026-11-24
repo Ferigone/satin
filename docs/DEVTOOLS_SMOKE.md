@@ -28,7 +28,7 @@ traffic. A counter confirms what the server handled, not what DevTools saw.
 
 ## Verify a live CSS edit through the Console
 
-Start the fixture server above and replace `PORT` with the port it printed. Use a fresh profile. This action sequence selects the fixture’s button in Elements, changes its inline width, evaluates the page’s actual CSSOM value in Console, and checks that the page title became `237px`.
+Start the fixture server above and replace `PORT` with the port it printed. Use a fresh profile. This action sequence selects the fixture’s button in Elements, changes its inline width, reads the selected element back through `$0.style.width` in Console, and checks that the page title became `237px`.
 
 ```powershell
 $out = Join-Path $PWD ('target/devtools-edit-' + [Guid]::NewGuid().ToString('N'))

@@ -1,6 +1,9 @@
 //! Bounded, inert previews for a developer inspecting the result of a script.
 //! Read Rust-owned descriptors directly so inspection cannot run page getters.
-use super::{ObjectKind, PropertyKind, Value, Vm};
+use super::{
+    Binding, Chunk, Completion, EnvId, EnvKind, Environment, JsError, ObjectKind, PropertyKind,
+    Value, Vm,
+};
 use crate::JsString;
 
 fn string(value: &JsString, limit: usize) -> String {
@@ -35,6 +38,57 @@ impl Vm {
             })
             .collect();
         Some(std::rc::Rc::new(names))
+    }
+
+    /// Evaluate a developer command with a read-only, command-local DOM selection.
+    pub fn eval_with_inspected_node(
+        &mut self,
+        source: &str,
+        node: Value,
+    ) -> Result<Value, JsError> {
+        self.eval_with_referrer(source, None, Some(node))
+    }
+
+    pub(super) fn declaration_environment(&self, env: EnvId) -> EnvId {
+        let environment = self.heap.environment(env);
+        if environment.kind == EnvKind::Inspector {
+            environment
+                .parent
+                .expect("Inspector environment has a page realm")
+        } else {
+            env
+        }
+    }
+
+    pub(super) fn run_inspected_command(
+        &mut self,
+        chunk: &Chunk,
+        node: Value,
+    ) -> Result<Completion, JsError> {
+        let key = JsString::from("$0");
+        let global = self.realm.global_env;
+        if chunk.scope.lexical.iter().any(|(name, _)| name == &key)
+            || chunk.scope.vars.contains(&key)
+        {
+            return self.run_chunk(chunk, global);
+        }
+        self.reserve_binding(&key)?;
+        let mut scope = Environment::new(Some(global), EnvKind::Inspector, None);
+        scope.bindings.insert(
+            key.clone(),
+            Binding {
+                value: node,
+                mutable: false,
+                initialized: true,
+                lexical: true,
+                strict_immutable: true,
+            },
+        );
+        let env = self.heap.allocate_env(scope);
+        let result = self.run_chunk(chunk, env);
+        // Escaping callbacks retain their own locals, but not the temporary selection.
+        self.heap.environment_mut(env).bindings.remove(&key);
+        result
     }
 
     pub fn inspect_value(&self, value: &Value) -> String {

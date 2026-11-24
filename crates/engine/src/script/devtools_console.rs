@@ -454,7 +454,22 @@ pub(super) fn report_rejection(state: &Shared, value: &Value) {
 // the checkpoint may release JS values, and must also deliver mutations/logs.
 impl super::ScriptRuntime {
     pub fn evaluate_console(&mut self, source: &str) -> Result<String, String> {
-        let result = match self.vm.eval(source) {
+        self.evaluate_console_with_selection(source, None)
+    }
+
+    /// The dock supplies a selection only from this navigation's Elements tree.
+    pub fn evaluate_console_with_selection(
+        &mut self,
+        source: &str,
+        selection: Option<crate::dom::NodeId>,
+    ) -> Result<String, String> {
+        let selection = selection.filter(|id| self.state.borrow().document.is_connected(*id));
+        let value = match selection {
+            Some(node) => super::wrap(&mut self.vm, &self.state, Some(node)),
+            None => Ok(Value::Undefined),
+        };
+        let completion = value.and_then(|node| self.vm.eval_with_inspected_node(source, node));
+        let result = match completion {
             Ok(value) => Ok(self.vm.inspect_value(&value)),
             Err(error) => {
                 let mut label = error.kind.name().to_owned();
