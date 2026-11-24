@@ -84,7 +84,9 @@ impl ModuleTasks {
                 .unwrap_or(CredentialsMode::SameOrigin);
             let result = graph
                 .resolve_specifier(&request.specifier, &request.base)
-                .and_then(|url| graph.external_typed(url, client, credentials, None, resources, request.kind));
+                .and_then(|url| {
+                    graph.external_typed(url, client, credentials, None, resources, request.kind)
+                });
             self.waiting.push(Queued {
                 request,
                 graph: result,
@@ -231,7 +233,9 @@ fn start_import(
 ) {
     let state = realm.state.clone();
     let registered = module_context(realm, |vm| {
-        if request.phase != rust_browser_javascript::ImportPhase::Source { graph.link(vm, module)?; }
+        if request.phase != rust_browser_javascript::ImportPhase::Source {
+            graph.link(vm, module)?;
+        }
         vm.settle_source_text_import(module, request.phase, request.capability.clone())
     });
     if let Err(error) = registered {

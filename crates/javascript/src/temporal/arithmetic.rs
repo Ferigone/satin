@@ -61,6 +61,9 @@ pub(super) fn ratio(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsEr
     };
     let numerator = integer(0)?;
     let denominator = integer(1)?;
+    if denominator.is_zero() {
+        return Err(invalid_number());
+    }
     vm.charge_work(
         (numerator.bit_length().div_ceil(32) as usize)
             .saturating_mul(denominator.bit_length().div_ceil(32) as usize)

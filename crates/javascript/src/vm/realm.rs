@@ -70,6 +70,7 @@ pub(crate) struct RealmState {
     pub(crate) promise_constructor: Option<ObjectId>,
     pub(crate) symbol_prototype: Option<ObjectId>,
     pub(crate) iterator_prototype: Option<ObjectId>,
+    pub(crate) array_values: Option<ObjectId>,
     pub(crate) array_iterator_prototype: Option<ObjectId>,
     pub(crate) string_iterator_prototype: Option<ObjectId>,
     pub(crate) module_realm: u64,
@@ -129,6 +130,7 @@ impl RealmState {
             symbol_prototype: None,
             iterator_prototype: None,
             array_iterator_prototype: None,
+            array_values: None,
             string_iterator_prototype: None,
             module_realm: crate::modules::module_realm_id(),
             active_referrer: None,
@@ -394,6 +396,7 @@ impl Vm {
                     "WeakSet",
                     "WeakRef",
                     "FinalizationRegistry",
+                    "ShadowRealm",
                     "Iterator",
                     "ArrayBuffer",
                     "SharedArrayBuffer",
@@ -487,6 +490,7 @@ impl Vm {
                 realm.symbol_prototype,
                 realm.iterator_prototype,
                 realm.array_iterator_prototype,
+                realm.array_values,
                 realm.string_iterator_prototype,
             ]
             .into_iter()

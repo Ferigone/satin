@@ -126,7 +126,7 @@ impl JsString {
             _ => 0,
         }
     }
-    fn copy_units(&self, out: &mut Vec<u16>) {
+    pub(crate) fn copy_units(&self, out: &mut Vec<u16>) {
         if let StringStorage::Appended {
             prefix,
             suffix,

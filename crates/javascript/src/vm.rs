@@ -1018,6 +1018,9 @@ impl Vm {
         for cell in self.heap.live_cells() {
             match cell {
                 Cell::Environment(env) => {
+                    if let Some(args) = &env.pending_arguments {
+                        for arg in args.iter() { value(arg, &mut strings); }
+                    }
                     strings.extend(env.private_names.keys().cloned());
                     for (key, (_, target)) in &env.aliases {
                         strings.push(key.clone());
@@ -1074,6 +1077,7 @@ impl Vm {
                                 value(v, &mut strings);
                             }
                         }
+                        ObjectKind::Arguments { mapped, .. } => strings.extend(mapped.values().cloned()),
                         ObjectKind::Boxed(v) => value(v, &mut strings),
                         ObjectKind::Error(_, trace) => strings.push(trace.clone()),
                         ObjectKind::Promise(data) => data.strings(&mut strings),
@@ -1336,7 +1340,7 @@ impl Vm {
             {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
-            let property = object.properties.get(key).cloned();
+            let property = self.stored_argument_property(object, key);
             current = object.prototype;
             let indexed = object.indexed_properties.is_some();
             let named = object.named_properties.is_some();
@@ -1456,7 +1460,7 @@ impl Vm {
                 configurable: false,
             }));
         }
-        Ok(o.properties.get(key).cloned())
+        Ok(self.stored_argument_property(o, key))
     }
     fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
         matches!(receiver, Value::String(s) if
@@ -1760,6 +1764,7 @@ impl Vm {
                 *length = index + 1;
             }
         }
+        let property = self.update_argument_mapping(id, &key, property)?;
         self.heap.object_mut(id)?.insert(key, property);
         Ok(())
     }
@@ -1857,7 +1862,13 @@ impl Vm {
             self.consume_work(work)?;
             self.heap.object_mut(id)?.order.retain(|old| old != key);
         }
-        self.heap.object_mut(id)?.properties.remove(key);
+        let object = self.heap.object_mut(id)?;
+        if let ObjectKind::Arguments { mapped, environment } = &mut object.kind
+            && let Some(index) = array_index(key) {
+            mapped.remove(&index);
+            if mapped.is_empty() { *environment = None; }
+        }
+        object.properties.remove(key);
         Ok(true)
     }
     pub(crate) fn set_prototype(
@@ -2167,14 +2178,12 @@ impl Vm {
     pub(crate) fn read_reference(&mut self, reference: Reference) -> Result<Value, JsError> {
         match reference {
             Reference::Binding(env, key) => {
-                let b = &self.heap.environment(env).bindings[&key];
-                if !b.initialized {
-                    return Err(JsError::new(
-                        ErrorKind::ReferenceError,
-                        format!("Cannot access '{key}' before initialization"),
-                    ));
+                if self.heap.environment(env).has_lazy_arguments(&key) {
+                    self.materialize_arguments(env)?;
                 }
-                Ok(b.value.clone())
+                self.heap.environment(env).bindings.get(&key)
+                    .ok_or_else(|| JsError::new(ErrorKind::ReferenceError, format!("Binding '{key}' was deleted")))?
+                    .read(&key)
             }
             Reference::Import(env, key) => self.read_import(env, &key),
             Reference::Super(base, receiver, key) => {
@@ -2213,12 +2222,20 @@ impl Vm {
         let value = self.account_value(value)?;
         match reference {
             Reference::Binding(env, key) => {
-                let b = self
-                    .heap
-                    .environment_mut(env)
-                    .bindings
-                    .get_mut(&key)
-                    .unwrap();
+                // The right-hand side or eval can delete a configurable binding after
+                // resolving the left-hand side. Declarative SetMutableBinding
+                // recreates that binding for a non-strict reference.
+                if !self.heap.environment(env).bindings.contains_key(&key) {
+                    if strict {
+                        return Err(JsError::new(ErrorKind::ReferenceError, format!("Binding '{key}' was deleted")));
+                    }
+                    self.reserve_binding(&key)?;
+                    self.heap.environment_mut(env).bindings.insert(key, Binding {
+                        value, mutable: true, initialized: true, lexical: false, strict_immutable: true, deletable: true,
+                    });
+                    return Ok(());
+                }
+                let b = self.heap.environment_mut(env).bindings.get_mut(&key).expect("existing binding");
                 if !b.initialized {
                     return Err(JsError::new(
                         ErrorKind::ReferenceError,
@@ -2232,6 +2249,9 @@ impl Vm {
                     return Ok(());
                 }
                 b.value = value;
+                if self.heap.environment(env).has_lazy_arguments(&key) {
+                    self.heap.environment_mut(env).pending_arguments = None;
+                }
                 Ok(())
             }
             Reference::Import(..) => Err(JsError::type_error("Assignment to an import binding")),
@@ -3176,6 +3196,20 @@ impl Vm {
             Op::Name(name) => {
                 self.consume_work(name.len())?;
                 stack.push(Item::Reference(self.resolve(env, name)?));
+            }
+            Op::LoadName(name) => {
+                self.consume_work(name.len())?;
+                let scope = self.heap.environment(env);
+                let value = if scope.aliases.is_empty()
+                    && !scope.has_lazy_arguments(name)
+                    && let Some(binding) = scope.bindings.get(name)
+                {
+                    binding.read(name)?
+                } else {
+                    let reference = self.resolve(env, name)?;
+                    self.read_reference(reference)?
+                };
+                stack.push(Item::Value(value));
             }
             Op::This => stack.push(Item::Value(self.get_this(env)?)),
             op @ (Op::NewTarget

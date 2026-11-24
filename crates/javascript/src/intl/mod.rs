@@ -69,41 +69,84 @@ fn prototype(vm: &Vm, name: &str) -> ObjectId {
     vm.realm.intl_prototypes.iter().find(|(n,_)| *n==name).unwrap().1
 }
 fn fallback_key(vm: &Vm) -> crate::PropertyKey {
-    crate::PropertyKey::Symbol(vm.realm.intl_fallback_symbol.clone().expect("Intl installed"))
+    crate::PropertyKey::Symbol(
+        vm.realm
+            .intl_fallback_symbol
+            .clone()
+            .expect("Intl installed"),
+    )
 }
 
 fn unwrap_formatter<T: 'static>(vm: &mut Vm, this: Value, class: &str) -> ResultValue {
-    if vm.host_data::<T>(&this).is_some() { return Ok(this) }
+    if vm.host_data::<T>(&this).is_some() {
+        return Ok(this);
+    }
     if vm.has_prototype(&this, &Value::Object(prototype(vm, class)))? {
         return vm.get_property_key(this, fallback_key(vm));
     }
     Err(JsError::type_error("Incompatible Intl receiver"))
 }
-fn class(vm: &mut Vm, intl: Value, name: &'static str, length: usize, callable: bool, init: Initializer) -> (Value, Value) {
-    let proto=vm.new_object();
-    vm.realm.intl_prototypes.push((name,proto.as_object().unwrap()));
-    let ctor=vm.native(name,length,true,Rc::new(move |vm,this,args| {
-        if !callable {return Err(JsError::type_error("Intl constructor requires new"))}
-        let proto = prototype(vm, name);
-        let formatter = init(vm, args, proto)?;
-        if matches!(name, "NumberFormat" | "DateTimeFormat")
-            && vm.has_prototype(&this, &Value::Object(proto))?
-        {
-            vm.define_data_property_key(this.clone(), fallback_key(vm), formatter, false, false, false)?;
-            return Ok(this);
-        }
-        Ok(formatter)
-    }));
-    replace_construct(vm,ctor.clone(),move |vm,_,args,target| {
-        let proto = vm.get_property(target.clone(),"prototype")?.as_object();
-        let proto=match proto {Some(p)=>p,None=>vm.with_function_realm(target.as_object().unwrap(),|vm|Ok(prototype(vm,name)))?};
-        init(vm,args,proto)
+fn class(
+    vm: &mut Vm,
+    intl: Value,
+    name: &'static str,
+    length: usize,
+    callable: bool,
+    init: Initializer,
+) -> (Value, Value) {
+    let proto = vm.new_object();
+    vm.realm
+        .intl_prototypes
+        .push((name, proto.as_object().unwrap()));
+    let ctor = vm.native(
+        name,
+        length,
+        true,
+        Rc::new(move |vm, this, args| {
+            if !callable {
+                return Err(JsError::type_error("Intl constructor requires new"));
+            }
+            let proto = prototype(vm, name);
+            let formatter = init(vm, args, proto)?;
+            if matches!(name, "NumberFormat" | "DateTimeFormat")
+                && vm.has_prototype(&this, &Value::Object(proto))?
+            {
+                vm.define_data_property_key(
+                    this.clone(),
+                    fallback_key(vm),
+                    formatter,
+                    false,
+                    false,
+                    false,
+                )?;
+                return Ok(this);
+            }
+            Ok(formatter)
+        }),
+    );
+    replace_construct(vm, ctor.clone(), move |vm, _, args, target| {
+        let proto = vm.get_property(target.clone(), "prototype")?.as_object();
+        let proto = match proto {
+            Some(p) => p,
+            None => {
+                vm.with_function_realm(target.as_object().unwrap(), |vm| Ok(prototype(vm, name)))?
+            }
+        };
+        init(vm, args, proto)
     });
-    vm.define_data_property(ctor.clone(),"prototype",proto.clone(),false,false,false).unwrap();
-    prop(vm,proto.clone(),"constructor",ctor.clone());
-    tag(vm, proto.clone(),&format!("Intl.{name}"));
-    prop(vm,intl,name,ctor.clone());
-    (ctor,proto)
+    vm.define_data_property(
+        ctor.clone(),
+        "prototype",
+        proto.clone(),
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    prop(vm, proto.clone(), "constructor", ctor.clone());
+    tag(vm, proto.clone(), &format!("Intl.{name}"));
+    prop(vm, intl, name, ctor.clone());
+    (ctor, proto)
 }
 fn accessor<F>(vm: &mut Vm, obj: &Value, name: &str, callback: F)
 where F: Fn(&mut Vm, Value, &[Value])->ResultValue+'static {

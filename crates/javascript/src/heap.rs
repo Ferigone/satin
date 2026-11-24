@@ -44,6 +44,10 @@ pub(crate) enum ObjectKind {
     DeferredTemporal,
     InitializingTemporal,
     Ordinary,
+    Arguments {
+        environment: Option<EnvId>,
+        mapped: BTreeMap<u32, JsString>,
+    },
     RawJson(JsString),
     Proxy(crate::proxy::Proxy),
     Intl,
@@ -213,6 +217,19 @@ pub(crate) struct Binding {
     pub strict_immutable: bool,
     pub deletable: bool,
 }
+impl Binding {
+    pub(crate) fn read(&self, key: &JsString) -> Result<Value, JsError> {
+        if self.initialized {
+            Ok(self.value.clone())
+        } else {
+            Err(JsError::new(
+                ErrorKind::ReferenceError,
+                format!("Cannot access '{key}' before initialization"),
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum EnvKind {
     Global { binding_object: ObjectId },
@@ -236,6 +253,7 @@ pub(crate) struct Environment {
     // Only bootstrapped global environments own intrinsic roots.
     realm_intrinsics: Option<Box<RealmIntrinsics>>,
     pub bindings: BTreeMap<JsString, Binding>,
+    pub pending_arguments: Option<Box<[Value]>>,
     pub this: Option<Value>,
     pub this_initialized: bool,
     pub function: Option<Value>,
@@ -247,6 +265,11 @@ pub(crate) struct Environment {
     pub private_names: BTreeMap<JsString, crate::private::PrivateId>,
 }
 impl Environment {
+    pub(crate) fn has_lazy_arguments(&self, key: &JsString) -> bool {
+        self.pending_arguments.is_some()
+            && key.as_utf16().iter().copied().eq("arguments".encode_utf16())
+    }
+
     pub fn new_global(binding_object: ObjectId, global_this: ObjectId) -> Self {
         Self::new(
             None,
@@ -261,6 +284,7 @@ impl Environment {
             kind,
             realm_intrinsics: None,
             bindings: BTreeMap::new(),
+            pending_arguments: None,
             this,
             this_initialized: true,
             function: None,
@@ -358,7 +382,9 @@ impl Default for Heap {
     fn default() -> Self {
         static NEXT_HEAP: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_HEAP
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| (id < ObjectId::HTML_DDA).then(|| id + 1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                (id < ObjectId::HTML_DDA).then(|| id + 1)
+            })
             .expect("heap identifier space exhausted");
         Self {
             id,
@@ -654,6 +680,9 @@ impl Heap {
                 pending.extend(env.home_object);
                 pending.extend(env.module);
                 pending.extend(env.aliases.values().map(|(env, _)| env.0));
+                if let Some(args) = &env.pending_arguments {
+                    for value in args.iter() { pending.value(value); }
+                }
                 for b in env.bindings.values() {
                     pending.value(&b.value);
                 }
@@ -695,6 +724,7 @@ impl Heap {
                             pending.value(v);
                         }
                     }
+                    ObjectKind::Arguments { environment, .. } => pending.extend(environment.map(|env| env.0)),
                     ObjectKind::Boxed(v) => pending.value(v),
                     ObjectKind::SharedArrayBuffer(backing) => pending.push(*backing),
                     ObjectKind::TypedArray(array) => pending.push(array.view.buffer),
@@ -756,6 +786,7 @@ fn cell_bytes(cell: &Cell) -> usize {
             .sum::<usize>()
             .saturating_add(object.order.capacity() * std::mem::size_of::<JsString>())
             .saturating_add(match &object.kind {
+                ObjectKind::Arguments { mapped, .. } => mapped.len() * 96,
                 ObjectKind::ArrayBuffer(buffer) => buffer.retained_bytes(),
                 ObjectKind::RegExp(program, _) => program.retained_bytes(),
                 ObjectKind::Module(data) => data.extra_bytes(),
@@ -791,7 +822,7 @@ fn cell_bytes(cell: &Cell) -> usize {
             .saturating_add(object.symbol_order.capacity() * std::mem::size_of::<SymbolId>())
             .saturating_add(object.symbols.len() * 256),
         Cell::Environment(env) => {
-            env.bindings
+            env.pending_arguments.as_deref().map_or(0, std::mem::size_of_val) + env.bindings
                 .keys()
                 .map(|key| 192 + key.len() * 2)
                 .sum::<usize>()

@@ -40,11 +40,21 @@ pub enum ModuleType {
 
 impl ModuleRequest {
     pub fn module_type(&self) -> Result<ModuleType, JsError> {
-        if self.attributes.is_empty() { return Ok(ModuleType::JavaScript); }
-        if self.attributes.len() == 1 && let Some(value) = self.attributes.get(&JsString::from("type")) {
-            if value == &JsString::from("json") { return Ok(ModuleType::Json); }
-            if value == &JsString::from("text") { return Ok(ModuleType::Text); }
-            if value == &JsString::from("bytes") { return Ok(ModuleType::Bytes); }
+        if self.attributes.is_empty() {
+            return Ok(ModuleType::JavaScript);
+        }
+        if self.attributes.len() == 1
+            && let Some(value) = self.attributes.get(&JsString::from("type"))
+        {
+            if value == &JsString::from("json") {
+                return Ok(ModuleType::Json);
+            }
+            if value == &JsString::from("text") {
+                return Ok(ModuleType::Text);
+            }
+            if value == &JsString::from("bytes") {
+                return Ok(ModuleType::Bytes);
+            }
         }
         Err(JsError::type_error("Unsupported import attribute"))
     }
@@ -90,7 +100,9 @@ pub(crate) struct ModuleNamespace {
 }
 impl ModuleData {
     pub fn trace(&self, p: &mut TraceEdges) {
-        if let Some(default) = &self.synthetic_default { p.value(default); }
+        if let Some(default) = &self.synthetic_default {
+            p.value(default);
+        }
         p.extend(self.environment.map(|e| e.0));
         p.extend(self.dependencies.iter().map(|m| m.0));
         p.extend(self.cycle_root.map(|m| m.0));
@@ -112,7 +124,9 @@ impl ModuleData {
         {
             s.push(reason.clone());
         }
-        if let Some(Value::String(value)) = &self.synthetic_default { s.push(value.clone()); }
+        if let Some(Value::String(value)) = &self.synthetic_default {
+            s.push(value.clone());
+        }
         for request in &self.code.requests {
             s.push(request.specifier.clone());
             for (key, value) in &request.attributes {
@@ -125,15 +139,23 @@ impl ModuleData {
         }
         for export in &self.code.exports {
             match export {
-                ExportEntry::Local { exported, local } => s.extend([exported.clone(), local.clone()]),
-                ExportEntry::Indirect { exported, imported, .. } => s.extend([exported.clone(), imported.clone()]),
+                ExportEntry::Local { exported, local } => {
+                    s.extend([exported.clone(), local.clone()])
+                }
+                ExportEntry::Indirect {
+                    exported, imported, ..
+                } => s.extend([exported.clone(), imported.clone()]),
                 ExportEntry::Namespace { exported, .. } => s.push(exported.clone()),
                 ExportEntry::Star { .. } => {}
             }
         }
     }
     pub fn extra_bytes(&self) -> usize {
-        self.code.requests.iter().map(|request| 256 + 128 * request.attributes.len()).sum::<usize>()
+        self.code
+            .requests
+            .iter()
+            .map(|request| 256 + 128 * request.attributes.len())
+            .sum::<usize>()
             + self.code.imports.len() * 384
             + self.code.exports.len() * 384
             + self.dependencies.capacity() * 128
@@ -195,9 +217,17 @@ impl Vm {
 
     /// Parse a fetched module according to its host-validated type. Binary imports
     /// retain their exact octets, including a possible UTF-8 byte-order mark.
-    pub fn parse_module_bytes(&mut self, source: &[u8], identifier: &str, kind: ModuleType) -> Result<ModuleId, JsError> {
+    pub fn parse_module_bytes(
+        &mut self,
+        source: &[u8],
+        identifier: &str,
+        kind: ModuleType,
+    ) -> Result<ModuleId, JsError> {
         if source.len() > self.limits.max_source_bytes {
-            return Err(JsError::new(ErrorKind::ExecutionLimit, "Module source exceeds configured byte limit"));
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Module source exceeds configured byte limit",
+            ));
         }
         let value = if kind == ModuleType::Bytes {
             self.new_immutable_uint8_array(source)?
@@ -205,31 +235,54 @@ impl Vm {
             let bytes = source.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(source);
             self.ensure_allocation(bytes.len().saturating_mul(3))?;
             let source = String::from_utf8_lossy(bytes);
-            if kind == ModuleType::JavaScript { return self.parse_module(&source, identifier); }
+            if kind == ModuleType::JavaScript {
+                return self.parse_module(&source, identifier);
+            }
             self.ensure_string_allocation(source.encode_utf16().count())?;
             let text = JsString::from(source.as_ref());
-            if kind == ModuleType::Json { self.parse_json(&text)? } else { self.account_value(Value::String(text))? }
+            if kind == ModuleType::Json {
+                self.parse_json(&text)?
+            } else {
+                self.account_value(Value::String(text))?
+            }
         };
         let local = JsString::from("*default*");
         let name = JsString::from("default");
-        let mut body = Chunk { strict: true, ..Chunk::default() };
+        let mut body = Chunk {
+            strict: true,
+            ..Chunk::default()
+        };
         body.scope.lexical.push((local.clone(), false));
         let code = ModuleCode {
             body: Rc::new(body),
-            exports: vec![ExportEntry::Local { local, exported: name.clone() }],
+            exports: vec![ExportEntry::Local {
+                local,
+                exported: name.clone(),
+            }],
             export_indices: BTreeMap::from([(name, 0)]),
             ..ModuleCode::default()
         };
         self.new_module_record(identifier, Rc::new(code), Some(value))
     }
 
-    fn new_module_record(&mut self, identifier: &str, code: Rc<ModuleCode>, synthetic_default: Option<Value>) -> Result<ModuleId, JsError> {
+    fn new_module_record(
+        &mut self,
+        identifier: &str,
+        code: Rc<ModuleCode>,
+        synthetic_default: Option<Value>,
+    ) -> Result<ModuleId, JsError> {
         self.ensure_string_allocation(identifier.encode_utf16().count())?;
         self.retain_compiled_chunk(&code.body)?;
         let identifier = JsString::from(identifier);
         self.account_value(Value::String(identifier.clone()))?;
         self.ensure_allocation(
-            512 + code.requests.iter().map(|request| 256 + 128 * request.attributes.len()).sum::<usize>() + code.imports.len() * 384 + code.exports.len() * 384,
+            512 + code
+                .requests
+                .iter()
+                .map(|request| 256 + 128 * request.attributes.len())
+                .sum::<usize>()
+                + code.imports.len() * 384
+                + code.exports.len() * 384,
         )?;
         if self.heap.live >= self.limits.max_heap_objects {
             return Err(JsError::new(
@@ -313,7 +366,10 @@ impl Vm {
     }
     fn dependency(&mut self, id: ModuleId, index: &usize) -> Result<ModuleId, JsError> {
         self.tick()?;
-        self.module_data(id)?.dependencies.get(*index).copied()
+        self.module_data(id)?
+            .dependencies
+            .get(*index)
+            .copied()
             .ok_or_else(|| JsError::new(ErrorKind::SyntaxError, "Unresolved module dependency"))
     }
     pub fn link_module<F>(&mut self, root: ModuleId, mut resolver: F) -> Result<(), JsError>
@@ -322,14 +378,21 @@ impl Vm {
     {
         self.link_module_with_requests(root, |vm, importer, request| {
             if request.module_type()? != ModuleType::JavaScript {
-                return Err(JsError::type_error("Module loader requires a typed resolver for this import"));
+                return Err(JsError::type_error(
+                    "Module loader requires a typed resolver for this import",
+                ));
             }
             resolver(vm, importer, &request.specifier)
         })
     }
 
-    pub fn link_module_with_requests<F>(&mut self, root: ModuleId, mut resolver: F) -> Result<(), JsError>
-    where F: FnMut(&mut Vm, ModuleId, &ModuleRequest) -> Result<ModuleId, JsError>,
+    pub fn link_module_with_requests<F>(
+        &mut self,
+        root: ModuleId,
+        mut resolver: F,
+    ) -> Result<(), JsError>
+    where
+        F: FnMut(&mut Vm, ModuleId, &ModuleRequest) -> Result<ModuleId, JsError>,
     {
         self.with_task(|vm| {
             if vm.module_data(root)?.status != ModuleStatus::Unlinked {

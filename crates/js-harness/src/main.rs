@@ -622,7 +622,14 @@ mod tests {
     #[test]
     fn idle_worker_resumes_finite_atomic_waits() {
         let result = request(
-            "const a = new Int32Array(new SharedArrayBuffer(4));              const start = $262.agent.monotonicNow();              Atomics.waitAsync(a, 0, 0, 3).value.then(v => {                  if (v === 'timed-out' && $262.agent.monotonicNow() >= start)                      print('Test262:AsyncTestComplete');              });",
+            r#"
+                const a = new Int32Array(new SharedArrayBuffer(4));
+                const start = $262.agent.monotonicNow();
+                Atomics.waitAsync(a, 0, 0, 3).value.then(v => {
+                    if (v === "timed-out" && $262.agent.monotonicNow() >= start)
+                        print("Test262:AsyncTestComplete");
+                });
+            "#,
             true,
         );
         assert_eq!(result["outcome"], "ok", "{result}");

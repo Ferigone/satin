@@ -382,6 +382,7 @@ pub(crate) fn install(vm: &mut Vm) {
             move |vm, this, _| vm.array_iterator(this, kind),
         );
         if name == "values" {
+            vm.realm.array_values = function.as_object();
             vm.define_data_property_key(
                 Value::Object(vm.realm.array_prototype),
                 vm.well_known_key("iterator"),

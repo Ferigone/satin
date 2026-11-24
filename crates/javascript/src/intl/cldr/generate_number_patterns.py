@@ -26,7 +26,7 @@ def records(numbers):
     base = {}
     for system in sorted((s[21:] for s in numbers if s.startswith("symbols-numberSystem-")), key=lambda s:(s != "latn",s)):
         values = numbers["symbols-numberSystem-"+system]
-        fields = {k:values[k] for k in ("nan","infinity","exponential","minusSign") if k in values}
+        fields = {k:values[k] for k in ("nan","infinity","exponential","minusSign","plusSign") if k in values}
         formats = numbers.get("decimalFormats-numberSystem-"+system, {})
         for width in ("long", "short"):
             for key, pattern in formats.get(width,{}).get("decimalFormat",{}).items():

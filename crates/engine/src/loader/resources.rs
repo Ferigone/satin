@@ -42,7 +42,7 @@ pub struct DocumentResource {
 
 #[derive(Debug)]
 pub enum ResourceBody {
-    Module(Vec<u8>),
+    ModuleBytes(Vec<u8>),
     Text(String),
     Image(Arc<image::RgbaImage>),
     Media(Arc<[u8]>),
@@ -329,7 +329,11 @@ fn decode_resource(
                     "Module must have a JavaScript MIME type (received {essence:?})"
                 ));
             }
-            ResourceBody::Module(bytes.to_vec())
+            if kind == ModuleScript {
+                ResourceBody::Text(encoding_rs::UTF_8.decode_with_bom_removal(bytes).0.into_owned())
+            } else {
+                ResourceBody::ModuleBytes(bytes.to_vec())
+            }
         }
         ClassicScript => {
             if ["audio/", "image/", "video/"]

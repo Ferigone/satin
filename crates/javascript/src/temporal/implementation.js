@@ -1,4 +1,4 @@
-(function(Object, Array, Date, Math, Number, BigInt, String, Symbol, RegExp, RangeError, TypeError, Error, Map, WeakMap, Set, Reflect, Intl, RawDateTimeFormat, calendarFields, calendarYear, resolveNamedTimeZone, openTimeZone, readSlots, writeSlots, makeFieldGetter, isoEpochDays, isoFromEpochDays, exactRatio, calendarAdd, calendarDiff, durationArgs, durationBag, durationRecord, pluckProps, refineBagRecord, constrainTimeFields, epochNanoToIsoDateTime, calendarFromFields, civilToEpoch, uniformDifference, uniformAdd, refineDiffOptions) {
+(function(Object, Array, Date, Math, Number, BigInt, String, Symbol, RegExp, RangeError, TypeError, Error, Map, WeakMap, Set, Reflect, Intl, RawDateTimeFormat, calendarFields, calendarYear, resolveNamedTimeZone, openTimeZone, readSlots, writeSlots, makeFieldGetter, isoEpochDays, isoFromEpochDays, exactRatio, calendarAdd, calendarDiff, durationArgs, durationBag, durationRecord, pluckProps, refineBagRecord, constrainTimeFields, epochNanoToIsoDateTime, calendarFromFields, civilToEpoch, uniformDifference, uniformAdd, refineDiffOptions, parseZonedString) {
   "use strict";
   function normalizeOptions(options) {
     return void 0 === options ? Object.create(null) : requireObjectLike(options);
@@ -1248,15 +1248,19 @@
     return checkIsoDateTimeInBounds(isoDateTime), createDateTimeSlots(isoDateTime, calendar);
   }
   function createDateFromRefinedFields(fields, calendar, year, monthCodeParts, overflow) {
-    const direct = calendarFromFields(getCalendarSlotId(calendar), fields, year, calendar);
+    const direct = calendarFromFields(getCalendarSlotId(calendar), fields, year, calendar, 0, overflow);
     if (direct !== void 0) return direct;
     const month = resolveCalendarMonth(fields, calendar, year, monthCodeParts, overflow);
     return createDateSlots(checkIsoDateInBounds(computeCalendarIsoFieldsFromParts(calendar, year, month, resolveCalendarDay(fields, calendar, year, month, overflow))), calendar);
   }
   function createYearMonthFromRefinedFields(fields, calendar, year, monthCodeParts, overflow) {
+    const direct = calendarFromFields(getCalendarSlotId(calendar), fields, year, calendar, 1, overflow);
+    if (direct !== void 0) return direct;
     return ((calendar, year, month) => createDateSlots(checkIsoYearMonthInBounds(computeCalendarIsoFieldsFromParts(calendar, year, month, 1)), calendar))(calendar, year, resolveCalendarMonth(fields, calendar, year, monthCodeParts, overflow));
   }
   function createMonthDayFromRefinedFields(fields, calendar, year, monthCodeParts, overflow) {
+    const direct = calendarFromFields(getCalendarSlotId(calendar), fields, year, calendar, 2, overflow);
+    if (direct !== void 0) return direct;
     const isIso = calendar === isoCalendarImpl;
     let yearMaybe = year;
     let day;
@@ -1660,6 +1664,9 @@
     return (new RawDateTimeFormat).resolvedOptions().timeZone || "UTC";
   }
   function defineTemporalClass(branding, cls, getSlots, ...getterMaps) {
+    if (branding === "ZonedDateTime") {
+      Object.defineProperty(cls.prototype, "timeZoneId", {get: makeFieldGetter(branding, "timeZoneId", getSlots, void 0), configurable: true});
+    }
     if (Object.getOwnPropertyDescriptor(cls.prototype, "calendarId")) {
       Object.defineProperty(cls.prototype, "calendarId", {get: makeFieldGetter(branding, "calendarId", getSlots, void 0), configurable: true});
     }
@@ -2293,6 +2300,10 @@
     return readSlots(obj, "ZonedDateTime", adoptSlots);
   }
   function toZonedDateTimeSlots(arg, options) {
+    if (typeof arg === "string" && options === void 0) {
+      const parsed = parseZonedString(arg);
+      if (parsed !== void 0) return createZonedEpochNanoSlots(parsed[0], queryTimeZone(parsed[1]), isoCalendarImpl);
+    }
     if (isObjectLike(arg)) {
       const ownSlots = getZonedDateTimeSlotsIfPresent(arg);
       return ownSlots ? (refineZonedFieldOptions(options), ownSlots) : ((refineTimeZoneString, calendar, bag, options) => {
@@ -3344,7 +3355,7 @@
   });
   const ZonedDateTime = defineTemporalClass("ZonedDateTime", class {
     constructor(epochNanoseconds, timeZoneId, calendar = void 0) {
-      initZonedDateTime(this, createZonedEpochNanoSlots(checkEpochNanoInBounds(toBigInt(epochNanoseconds)), queryTimeZone(resolveTimeZoneId(requireString(timeZoneId))), resolveAnyCalendarArg(calendar)));
+      initZonedDateTime(this, createZonedEpochNanoSlots(checkEpochNanoInBounds(toBigInt(epochNanoseconds)), queryTimeZone(requireString(timeZoneId)), resolveAnyCalendarArg(calendar)));
     }
     static from(arg, options = void 0) {
       return createZonedDateTime(toZonedDateTimeSlots(arg, options));

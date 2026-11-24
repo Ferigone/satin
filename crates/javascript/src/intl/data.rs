@@ -942,7 +942,6 @@ pub(super) const CALENDARS: &[&str] = &[
     "gregory",
     "hebrew",
     "indian",
-    "islamic",
     "islamic-civil",
     "islamic-tbla",
     "islamic-umalqura",

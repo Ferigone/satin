@@ -364,6 +364,7 @@ impl Vm {
                 param_names: Vec::new(),
                 parameter_expressions: false,
                 mapped_arguments: false,
+                mapped_indices: Vec::new(),
                 length: 0,
                 body: Rc::new(Chunk {
                     strict: true,

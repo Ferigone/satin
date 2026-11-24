@@ -94,6 +94,10 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
                 return Err(JsError::type_error("Invalid Temporal receiver"));
             }
             let slots = vm.host_slot(&receiver, 0).expect("branded Temporal slots");
+            if field == "timeZoneId" {
+                let zone = vm.get_property(slots, "timeZone")?;
+                return vm.get_property(zone, "id");
+            }
             if field == "calendarId" {
                 return match vm.get_property(slots, "calendar")? {
                     Value::Undefined => Ok("iso8601".into()),

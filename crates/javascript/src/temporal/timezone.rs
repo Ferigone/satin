@@ -66,3 +66,70 @@ pub(super) fn open(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsErr
         Ok(Value::Undefined)
     }))
 }
+
+/// Parse the common extended RFC 9557 form directly into an instant.
+/// Unusual calendar annotations, explicit offsets and ambiguous wall times
+/// take the complete disambiguation and annotation path in the private realm.
+pub(super) fn zoned_string(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsError> {
+    let text = args[0]
+        .as_string()
+        .ok_or_else(|| JsError::type_error("Invalid Temporal string"))?;
+    vm.charge_work(text.len())?;
+    let text = text.to_string_lossy();
+    let Some((civil, annotation)) = text.split_once('[') else {
+        return Ok(Value::Undefined);
+    };
+    let Some(zone_id) = annotation.strip_suffix(']') else {
+        return Ok(Value::Undefined);
+    };
+    if zone_id.is_empty()
+        || !zone_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b'-' | b'+'))
+    {
+        return Ok(Value::Undefined);
+    }
+    let b = civil.as_bytes();
+    if b.len() < 10
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !b[..4]
+            .iter()
+            .chain(&b[5..7])
+            .chain(&b[8..10])
+            .all(u8::is_ascii_digit)
+    {
+        return Ok(Value::Undefined);
+    }
+    let dt = if b.len() == 10 {
+        let Ok(date) = civil.parse::<jiff::civil::Date>() else {
+            return Ok(Value::Undefined);
+        };
+        date.at(0, 0, 0, 0)
+    } else {
+        if !matches!(b[10], b'T' | b't' | b' ')
+            || !b[11..]
+                .iter()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, b':' | b'.' | b','))
+        {
+            return Ok(Value::Undefined);
+        }
+        let Ok(dt) = civil.parse::<jiff::civil::DateTime>() else {
+            return Ok(Value::Undefined);
+        };
+        dt
+    };
+    let Some((id, primary)) = crate::intl::named_time_zone(zone_id) else {
+        return Ok(Value::Undefined);
+    };
+    let Ok(zone) = TimeZone::get(primary) else {
+        return Ok(Value::Undefined);
+    };
+    let Ok(ts) = zone.to_ambiguous_timestamp(dt).unambiguous() else {
+        return Ok(Value::Undefined);
+    };
+    let n = vm.account_value(Value::BigInt(crate::JsBigInt::from_integer(
+        ts.as_nanosecond().into(),
+    )?))?;
+    vm.try_new_array(&[n, id.into()])
+}

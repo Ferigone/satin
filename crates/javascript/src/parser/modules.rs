@@ -93,7 +93,9 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
             module.body.push(p.statement()?);
         }
     }
-    if p.legacy_literals != 0 { return Err(p.error("Legacy literal in module code")); }
+    if p.legacy_literals != 0 {
+        return Err(p.error("Legacy literal in module code"));
+    }
     let mut exports = std::collections::BTreeSet::new();
     for export in &module.exports {
         if let Some(name) = export.exported()
@@ -150,12 +152,19 @@ impl Parser {
                 if attributes.insert(key, value).is_some() {
                     return Err(self.error("Duplicate import attribute"));
                 }
-                if self.eat("}") { break; }
+                if self.eat("}") {
+                    break;
+                }
                 self.expect(",")?;
             }
         }
-        let request = ModuleRequest { specifier, attributes };
-        if let Some(index) = module.requested.get(&request) { return Ok(*index); }
+        let request = ModuleRequest {
+            specifier,
+            attributes,
+        };
+        if let Some(index) = module.requested.get(&request) {
+            return Ok(*index);
+        }
         let index = module.requests.len();
         module.requested.insert(request.clone(), index);
         module.requests.push(request);

@@ -2,6 +2,7 @@
 //!
 //! This is an explicitly incomplete ECMAScript implementation. See
 //! `docs/JAVASCRIPT.md` for the supported language and embedding contract.
+mod arguments;
 mod async_iterator;
 mod bigint;
 mod binary;

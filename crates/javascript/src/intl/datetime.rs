@@ -2,6 +2,8 @@
 use super::*;
 use crate::temporal::slots::{Kind, intl_fields};
 use std::cell::RefCell;
+use icu_datetime::pattern::{DateTimePattern,FixedCalendarDateTimeNames};
+use writeable::TryWriteable;
 use icu_calendar::{Date, Iso, types::RataDie};
 use icu_datetime::{DateTimeFormatter, fieldsets::{builder::{DateFields, FieldSetBuilder, ZoneStyle},enums::CompositeFieldSet}, input::{Time,ZonedDateTime}, options::{Length,YearStyle,TimePrecision,SubsecondDigits}};
 use jiff::tz::{Offset,TimeZone};
@@ -36,6 +38,9 @@ struct DateFormat {
     locale:String,calendar:String,numbering:String,zone:TimeZone,zone_name:String,hour_cycle:String,
     locale_preferences: Locale,
     use_defaults: bool,
+    component_names: Option<FixedCalendarDateTimeNames<icu_calendar::Gregorian>>,
+    day_period_pattern: Option<DateTimePattern>,
+    weekday_pattern: Option<DateTimePattern>,
     temporal_formats: RefCell<BTreeMap<Kind, (DateTimeFormatter<CompositeFieldSet>, Fields)>>,
     fields:Fields,date_style:Option<String>,time_style:Option<String>,formatter:DateTimeFormatter<CompositeFieldSet>,
 }
@@ -128,12 +133,13 @@ fn build_with(vm:&mut Vm,args:&[Value],proto:ObjectId,method:&str)->ResultValue 
     if ds.is_some()||ts.is_some(){
         if !fields.is_empty(){return Err(JsError::type_error("Date and time styles cannot be combined with components"))}
         if let Some(s)=&ds {
-            fields.insert("year","numeric".into());fields.insert("day","numeric".into());fields.insert("month",match s.as_str(){"full"|"long"=>"long","medium"=>"short",_=>"numeric"}.into());
+            fields.insert("year",if s=="short" {"2-digit"}else{"numeric"}.into());fields.insert("day","numeric".into());fields.insert("month",match s.as_str(){"full"|"long"=>"long","medium"=>"short",_=>"numeric"}.into());
             if s=="full"{fields.insert("weekday","long".into());}
         }
         if let Some(s)=&ts{
             fields.insert("hour","numeric".into());fields.insert("minute","2-digit".into());
             if s!="short"{fields.insert("second","2-digit".into());}
+            if s=="full" || s=="long" { fields.insert("timeZoneName",if s=="full" {"long"}else{"short"}.into()); }
         }
     }else if needs_defaults{
         if method!="toLocaleTimeString" {for key in ["year","month","day"]{fields.insert(key,"numeric".into());}}
@@ -146,8 +152,23 @@ fn build_with(vm:&mut Vm,args:&[Value],proto:ObjectId,method:&str)->ResultValue 
     if locs.first().and_then(|l|locale::key(l,"ca")).as_deref()==Some(&calendar){locale::set_key(&mut resolved,"ca",&calendar)?;}
     if locs.first().and_then(|l|locale::key(l,"nu")).as_deref()==Some(&numbering){locale::set_key(&mut resolved,"nu",&numbering)?;}
     if locs.first().and_then(|l|locale::key(l,"hc")).as_deref()==Some(&hc)&&matches!(hour12,Value::Undefined){locale::set_key(&mut resolved,"hc",&hc)?}
+    let pattern_for = |key:&str, patterns:[&str;3]|->Result<Option<DateTimePattern>,JsError>{
+        fields.get(key).map(|width|{
+            let idx=match width.as_str() {"short"=>0,"long"=>1,_=>2};
+            patterns[idx].parse().map_err(|_|range("Invalid localized field pattern"))
+        }).transpose()
+    };
+    let day_period_pattern=pattern_for("dayPeriod",["B","BBBB","BBBBB"])?;
+    let weekday_pattern=pattern_for("weekday",["EEE","EEEE","EEEEE"])?;
+    let component_names=if day_period_pattern.is_some()||weekday_pattern.is_some(){
+        let mut names=FixedCalendarDateTimeNames::<icu_calendar::Gregorian>::try_new(l.clone().into()).map_err(|_|range("Cannot format localized fields"))?;
+        for pattern in day_period_pattern.iter().chain(weekday_pattern.iter()){
+            names.include_for_pattern(pattern).map_err(|_|range("Cannot load localized field names"))?;
+        }
+        Some(names)
+    }else{None};
     vm.reserve_allocation(std::mem::size_of::<DateFormat>()+fields.len()*64)?;
-    create(vm,proto,DateFormat{locale:resolved.to_string(),calendar,numbering,zone,zone_name,hour_cycle:hc,locale_preferences:l,use_defaults,temporal_formats:RefCell::new(BTreeMap::new()),fields,date_style:ds,time_style:ts,formatter})
+    create(vm,proto,DateFormat{locale:resolved.to_string(),calendar,numbering,zone,zone_name,hour_cycle:hc,locale_preferences:l,use_defaults,component_names,day_period_pattern,weekday_pattern,temporal_formats:RefCell::new(BTreeMap::new()),fields,date_style:ds,time_style:ts,formatter})
 }
 fn make_formatter(l: &Locale, fields: &Fields) -> Result<DateTimeFormatter<CompositeFieldSet>, JsError> {
     let mut b=FieldSetBuilder::new();
@@ -234,7 +255,8 @@ impl DateFormat{
         let date = Date::from_rata_die(RataDie::new(local.div_euclid(86_400_000)+719163),Iso);
         let time_fields = Time::try_new((time/3600000) as u8,(time/60000%60) as u8,(time/1000%60) as u8,(time%1000) as u32*1_000_000).unwrap();
         let name_stamp = ZoneNameTimestamp::from_zoned_date_time(ZonedDateTime { date, time:time_fields, zone:offset });
-        let zone = IanaParser::new().parse(&self.zone_name).with_offset(Some(offset))
+        let zone_id=if self.zone_name=="+00:00" {"Etc/GMT"}else{&self.zone_name};
+        let zone = IanaParser::new().parse(zone_id).with_offset(Some(offset))
             .with_zone_name_timestamp(name_stamp);
         let datetime = ZonedDateTime {date,time:time_fields,zone};
         let mut parts=Parts::default();
@@ -242,6 +264,36 @@ impl DateFormat{
         // CLDR short patterns may pad numeric month/day even when ECMA-402 requests
         // a single digit. Remove padding only from numeric representations.
         let zero = data::DIGIT_ZERO.iter().find(|(_, name)| *name == self.numbering).map(|(s,_)|*s).unwrap_or("0");
+        if let Some(names)=&self.component_names {
+            for (key,pattern) in [("dayPeriod",&self.day_period_pattern),("weekday",&self.weekday_pattern)]{
+                if let Some(pattern)=pattern && fields.contains_key(key) {
+                    let gregorian=ZonedDateTime{date:datetime.date.to_calendar(icu_calendar::Gregorian),time:datetime.time,zone:datetime.zone};
+                    let label=names.with_pattern_unchecked(pattern).format(&gregorian).try_write_to_string()
+                        .map_err(|_|range("Cannot format localized field"))?.into_owned();
+                    if fields.len()==1 { return Ok(vec![(key,label)]); }
+                    for (i,(part,value)) in parts.spans.iter_mut().enumerate() {
+                        if *part==key {
+                            *value=label.clone();
+                            if key=="dayPeriod" && i>0 {
+                                let prev=&mut parts.spans[i-1];
+                                if prev.0=="literal" && prev.1.chars().all(char::is_whitespace) {prev.1=" ".to_owned();}
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(precision)=fields.get("fractionalSecondDigits").and_then(|s|s.parse::<usize>().ok())
+            && let Some(i)=parts.spans.iter().position(|&(key,_)|key=="second") {
+            let text=&parts.spans[i].1;
+            let mut chars=text.char_indices().rev().skip(precision-1);
+            if let Some((frac,_))=chars.next() && let Some((decimal,_))=chars.next() {
+                let split=vec![("second",text[..decimal].to_owned()),("literal",text[decimal..frac].to_owned()),
+                    ("fractionalSecond",text[frac..].to_owned())];
+                parts.spans.splice(i..=i,split);
+            }
+        }
         for (key, text) in &mut parts.spans {
             if *key == "hour" {
                 let hour = time / 3_600_000;
@@ -251,13 +303,46 @@ impl DateFormat{
                 if let Some(n) = replacement {
                     let zero_digit = zero.chars().next().unwrap_or('0') as u32;
                     let digits = if fields.get("hour").is_some_and(|s| s == "2-digit") {format!("{n:02}")} else {n.to_string()};
-                    *text = digits.bytes().filter_map(|d| char::from_u32(zero_digit + u32::from(d-b'0'))).collect();
+                    *text = if self.numbering=="hanidec" {
+                        const HAN:[char;10]=['〇','一','二','三','四','五','六','七','八','九'];
+                        digits.bytes().map(|d|HAN[usize::from(d-b'0')]).collect()
+                    } else {
+                        digits.bytes().filter_map(|d| char::from_u32(zero_digit + u32::from(d-b'0'))).collect()
+                    };
                 }
+            }
+            if *key=="year" && fields.get("year").is_some_and(|v|v=="2-digit") {
+                let digits:Vec<_>=text.chars().collect();
+                if digits.len()>2 {*text=digits[digits.len()-2..].iter().collect();}
+            }
+            if matches!(*key,"hour"|"minute"|"second"|"day"|"month"|"year") &&
+                fields.get(key).is_some_and(|s|s=="2-digit") && text.chars().count()==1 {
+                text.insert_str(0,zero);
+            }
+            if matches!(*key,"minute"|"second") && fields.len()==1 &&
+                fields.get(key).is_some_and(|v|v=="numeric") && text.starts_with(zero)&&text.len()>zero.len() {
+                text.drain(..zero.len());
             }
             if matches!(*key, "month" | "day") && fields.get(key).is_some_and(|s|s=="numeric")
                 && text.starts_with(zero) && text.len()>zero.len() {
                 text.drain(..zero.len());
             }
+        }
+        // ICU skeletons include all larger clock units. Keep only requested
+        // time components and their separators for sparse time formats.
+        let wanted=|k:&str|match k {
+            "hour"|"minute"|"second"=>fields.contains_key(k),
+            "dayPeriod"=>fields.contains_key("hour")||fields.contains_key(k),
+            _=>true,
+        };
+        if parts.spans.iter().any(|(k,_)|!wanted(k)) {
+            let mut out=Vec::new();let mut separator=None;let mut keep_previous=false;
+            for (k,v) in parts.spans {
+                if k=="literal" {if keep_previous{separator=Some(v);}continue;}
+                if wanted(k){ if let Some(s)=separator.take(){out.push(("literal",s));}out.push((k,v));keep_previous=true; }
+                else {separator=None;keep_previous=false;}
+            }
+            return Ok(out);
         }
         Ok(parts.spans)
     }

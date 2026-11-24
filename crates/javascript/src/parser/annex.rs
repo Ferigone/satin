@@ -34,20 +34,30 @@ fn mark_declaration(statement: &mut Stmt, blocked: &BTreeSet<JsString>) {
 }
 
 fn within(
-    names: Vec<JsString>, blocked: &mut BTreeSet<JsString>,
+    names: Vec<JsString>,
+    blocked: &mut BTreeSet<JsString>,
     visit: impl FnOnce(&mut BTreeSet<JsString>),
 ) {
-    let added: Vec<_> = names.into_iter().filter(|name| blocked.insert(name.clone())).collect();
+    let added: Vec<_> = names
+        .into_iter()
+        .filter(|name| blocked.insert(name.clone()))
+        .collect();
     visit(blocked);
-    for name in added { blocked.remove(&name); }
+    for name in added {
+        blocked.remove(&name);
+    }
 }
 
 fn descend(statement: &mut Stmt, blocked: &mut BTreeSet<JsString>) {
     match statement {
         Stmt::Block(body) => {
-            for child in &mut *body { mark_declaration(child, blocked); }
+            for child in &mut *body {
+                mark_declaration(child, blocked);
+            }
             within(lexical_names(body.iter(), true), blocked, |blocked| {
-                for child in body { descend(child, blocked); }
+                for child in body {
+                    descend(child, blocked);
+                }
             });
         }
         Stmt::Switch(_, cases) => {
@@ -74,7 +84,9 @@ fn descend(statement: &mut Stmt, blocked: &mut BTreeSet<JsString>) {
         Stmt::ForIn(kind, pattern, _, body, _) | Stmt::ForOf(kind, pattern, _, body, _) => {
             if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
                 within(bound_names(pattern), blocked, |b| descend(body, b));
-            } else { descend(body, blocked); }
+            } else {
+                descend(body, blocked);
+            }
         }
         Stmt::Try(body, catch, finally) => {
             descend(body, blocked);
@@ -85,9 +97,14 @@ fn descend(statement: &mut Stmt, blocked: &mut BTreeSet<JsString>) {
                 };
                 within(names, blocked, |b| descend(handler, b));
             }
-            if let Some(body) = finally { descend(body, blocked); }
+            if let Some(body) = finally {
+                descend(body, blocked);
+            }
         }
-        Stmt::While(_, body) | Stmt::DoWhile(body, _) | Stmt::With(_, body) | Stmt::Label(_, _, body) => {
+        Stmt::While(_, body)
+        | Stmt::DoWhile(body, _)
+        | Stmt::With(_, body)
+        | Stmt::Label(_, _, body) => {
             descend(body, blocked);
         }
         _ => {}

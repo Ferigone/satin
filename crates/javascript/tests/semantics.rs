@@ -893,3 +893,27 @@ fn callable_source_preserves_comments_and_ignores_overridden_names() {
     "#).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
+
+#[test]
+fn mapped_arguments_survive_collection_and_disconnect_on_redefinition() {
+    let mut vm = Vm::new();
+    vm.eval("function capture(x, x) { x = 3; return [() => arguments, () => x, v => x = v]; } var api = capture(1, 2);").unwrap();
+    vm.collect_garbage();
+    assert_eq!(vm.eval(r#"
+        const args = api[0]();
+        if (Object.getPrototypeOf(args) !== Object.prototype || Array.isArray(args)) throw 1;
+        if (args[0] !== 1 || args[1] !== 3) throw 2;
+        args[1] = 4;
+        if (api[1]() !== 4) throw 3;
+        api[2](5);
+        Object.defineProperty(args, "1", {writable:false});
+        api[2](6);
+        args[1] === 5 && Object.getOwnPropertyDescriptor(args, "1").value === 5
+    "#).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn deleted_eval_binding_is_recreated_by_an_already_resolved_sloppy_assignment() {
+    number("function f(){eval('var q'); q = (delete q, 42); return q;} f()", 42.0);
+    string("function f(){eval('var q'); return (()=>{'use strict'; try {q = evalSloppy();} catch(e){return e.name;}})(); function evalSloppy(){eval('delete q');return 42;}} f()", "ReferenceError");
+}

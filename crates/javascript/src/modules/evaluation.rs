@@ -260,7 +260,13 @@ impl Vm {
         let body = data.code.body.clone();
         let env = data.environment.unwrap();
         if let Some(value) = data.synthetic_default.clone() {
-            return self.initialize(env, crate::parser::VarKind::Const, &crate::JsString::from("*default*"), value, true);
+            return self.initialize(
+                env,
+                crate::parser::VarKind::Const,
+                &crate::JsString::from("*default*"),
+                value,
+                true,
+            );
         }
         let result = self.with_referrer(Some(SourceReferrer::Module(module)), |vm| {
             vm.run_prepared_chunk(&body, env)

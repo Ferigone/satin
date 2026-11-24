@@ -158,6 +158,7 @@ fn install_object(vm: &mut Vm) {
                 ObjectKind::Proxy(_) if vm.is_array_exotic(&this)? => "Array",
                 ObjectKind::Proxy(p) if p.callable => "Function",
                 ObjectKind::Array { .. } => "Array",
+                ObjectKind::Arguments { .. } => "Arguments",
                 ObjectKind::Function { .. }
                 | ObjectKind::Native { .. }
                 | ObjectKind::Bound { .. }
@@ -807,12 +808,18 @@ fn install_function(vm: &mut Vm) {
             Value::String(name) => name,
             _ => JsString::default(),
         };
-        vm.ensure_string_allocation(name.len().saturating_add(6))?;
-        vm.consume_work(name.len().saturating_mul(4))?;
+        let prefix = "bound ";
+        let length = name.len().saturating_add(prefix.len());
+        vm.ensure_string_allocation(length)?;
+        vm.consume_work(length)?;
+        let mut units = Vec::with_capacity(length);
+        units.extend(prefix.encode_utf16());
+        name.copy_units(&mut units);
+        let bound_name = vm.finish_written_string(units)?;
         vm.define_data_property(
             bound.clone(),
             "name",
-            Value::String(JsString::from("bound ").concat(&name)),
+            bound_name,
             false,
             false,
             true,

@@ -258,31 +258,42 @@ pub(super) fn from_fields(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value
         .as_string()
         .ok_or_else(invalid_date)?
         .to_string_lossy();
-    let mut year = args[2].as_number().ok_or_else(invalid_date)?;
-    if !(-7000.0..=7000.0).contains(&year)
-        || (name == "islamic-umalqura" && !(1300.0..=1500.0).contains(&year))
-    {
-        return Ok(Value::Undefined);
-    }
-    // Calendar arithmetic above shares ISO for five Gregorian-aligned
-    // calendars. Here translate their extended years into ISO years.
-    match name.as_str() {
-        "buddhist" => year -= 543.0,
-        "roc" => year += 1911.0,
-        "ethioaa" => year -= 5500.0,
-        _ => {}
-    }
+    use icu_calendar::options::{DateFromFieldsOptions, MissingFieldsStrategy, Overflow};
+    let mode = args.get(4).and_then(Value::as_number).unwrap_or_default() as u8;
     let mut fields = DateFields::default();
-    fields.extended_year = Some(year as i32);
+    if let Some(mut year) = args[2].as_number() {
+        if !(-7000.0..=7000.0).contains(&year)
+            || (name == "islamic-umalqura" && !(1300.0..=1500.0).contains(&year))
+            || (name == "persian" && !(1250.0..=1480.0).contains(&year))
+        {
+            return Ok(Value::Undefined);
+        }
+        match name.as_str() {
+            "buddhist" => year -= 543.0,
+            "roc" => year += 1911.0,
+            "ethioaa" => year -= 5500.0,
+            _ => {}
+        }
+        fields.extended_year = Some(year as i32);
+    }
+    let mut options = DateFromFieldsOptions::default();
+    if mode != 0 {
+        options.missing_fields_strategy = Some(MissingFieldsStrategy::Ecma);
+    }
+    options.overflow = Some(if args.get(5).and_then(Value::as_number) == Some(1.0) {
+        Overflow::Reject
+    } else {
+        Overflow::Constrain
+    });
     let bag = args[1].clone();
     let day = vm
         .get_property(bag.clone(), "day")?
         .as_number()
         .unwrap_or_default();
-    if !(1.0..=31.0).contains(&day) {
+    if mode != 1 && !(1.0..=31.0).contains(&day) {
         return Ok(Value::Undefined);
     }
-    fields.day = Some(day as u8);
+    fields.day = Some(if mode == 1 { 1 } else { day as u8 });
     if let Some(month) = vm.get_property(bag.clone(), "month")?.as_number() {
         if !(1.0..=13.0).contains(&month) {
             return Ok(Value::Undefined);
@@ -295,9 +306,23 @@ pub(super) fn from_fields(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value
         };
         fields.month = Some(month);
     }
-    let Ok(date) = Date::try_from_fields(fields, Default::default(), calendar(args)?) else {
+    let cal = calendar(args)?;
+    let explicit_year = fields.extended_year.is_some();
+    let Ok(mut date) = Date::try_from_fields(fields, options, icu_calendar::Ref(&cal)) else {
         return Ok(Value::Undefined);
     };
+    if mode == 2 && explicit_year {
+        // A MonthDay always stores the canonical ISO reference year, even
+        // when an input year determined the ordinal and length of the month.
+        let mut reference = DateFields::default();
+        reference.month = Some(date.month().to_input());
+        reference.day = Some(date.day_of_month().0);
+        let Ok(converted) = Date::try_from_fields(reference, options, icu_calendar::Ref(&cal))
+        else {
+            return Ok(Value::Undefined);
+        };
+        date = converted;
+    }
     let result = iso_record(vm, date.to_rata_die().to_i64_date())?;
     vm.define_data_property(
         result.clone(),

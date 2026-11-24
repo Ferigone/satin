@@ -14,9 +14,14 @@ pub(super) struct ModuleFile {
 }
 
 impl ModuleFile {
-    pub(super) fn byte_len(&self) -> usize { self.bytes.as_ref().map_or(self.source.len(), Vec::len) }
+    pub(super) fn byte_len(&self) -> usize {
+        self.bytes.as_ref().map_or(self.source.len(), Vec::len)
+    }
     pub(super) fn into_parts(self) -> (String, Vec<u8>) {
-        (self.identifier, self.bytes.unwrap_or_else(|| self.source.into_bytes()))
+        (
+            self.identifier,
+            self.bytes.unwrap_or_else(|| self.source.into_bytes()),
+        )
     }
 }
 
@@ -78,7 +83,9 @@ pub(super) fn link(
     let mut modules = BTreeMap::from([((identifier.to_owned(), ModuleType::JavaScript), root)]);
     let mut phase = "resolution";
     let result = vm.link_module_with_requests(root, |vm, referrer, request| {
-        let module_type = request.module_type().map_err(|e| JsError::new(ErrorKind::SyntaxError, e.message))?;
+        let module_type = request
+            .module_type()
+            .map_err(|e| JsError::new(ErrorKind::SyntaxError, e.message))?;
         let referrer = vm.module_identifier(referrer)?;
         let target = resolutions
             .get(&(referrer, request.specifier.clone()))
@@ -93,7 +100,12 @@ pub(super) fn link(
         if let Some(module) = modules.get(&cache_key) {
             return Ok(*module);
         }
-        let source = if target == identifier { Some(root_source.as_bytes()) } else { sources.get(target).map(Vec::as_slice) }.ok_or_else(|| {
+        let source = if target == identifier {
+            Some(root_source.as_bytes())
+        } else {
+            sources.get(target).map(Vec::as_slice)
+        }
+        .ok_or_else(|| {
             phase = "host";
             JsError::new(
                 ErrorKind::InternalError,
@@ -109,10 +121,19 @@ pub(super) fn link(
         .map_err(|error| LinkFailure { phase, error })
 }
 
-pub(super) fn parse_fixture(vm: &mut Vm, source: &[u8], name: &str, kind: ModuleType) -> Result<ModuleId, JsError> {
+pub(super) fn parse_fixture(
+    vm: &mut Vm,
+    source: &[u8],
+    name: &str,
+    kind: ModuleType,
+) -> Result<ModuleId, JsError> {
     let path = name.rsplit_once('#').map_or(name, |(path, _)| path);
-    if (kind == ModuleType::Json && !path.ends_with(".json")) || (kind == ModuleType::JavaScript && path.ends_with(".json")) {
-        return Err(JsError::type_error("Fixture MIME type does not match the requested module type"));
+    if (kind == ModuleType::Json && !path.ends_with(".json"))
+        || (kind == ModuleType::JavaScript && path.ends_with(".json"))
+    {
+        return Err(JsError::type_error(
+            "Fixture MIME type does not match the requested module type",
+        ));
     }
     vm.parse_module_bytes(source, name, kind)
 }

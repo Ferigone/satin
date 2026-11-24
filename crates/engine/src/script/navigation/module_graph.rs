@@ -5,7 +5,7 @@ use crate::{
     loader::{ResourceKind, ResourceRequest},
     network::CredentialsMode,
 };
-use rust_browser_javascript::{JsError, ModuleRequest, ModuleType, ModuleId, Vm};
+use rust_browser_javascript::{JsError, ModuleId, ModuleRequest, ModuleType, Vm};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -20,6 +20,11 @@ const MAX_MODULE_URL: usize = 128 * 1024;
 
 #[derive(Clone, Copy)]
 pub(super) struct ModuleKey(usize, ModuleType);
+
+pub(super) enum ModuleSource {
+    JavaScript(String),
+    Typed(Vec<u8>),
+}
 
 enum Record {
     Loading,
@@ -98,7 +103,14 @@ impl ModuleGraph {
         integrity: Option<Arc<str>>,
         resources: &mut ResourceQueue,
     ) -> Result<ModuleKey, String> {
-        self.external_typed(url, client, credentials, integrity, resources, ModuleType::JavaScript)
+        self.external_typed(
+            url,
+            client,
+            credentials,
+            integrity,
+            resources,
+            ModuleType::JavaScript,
+        )
     }
 
     pub(super) fn external_typed(
@@ -149,7 +161,15 @@ impl ModuleGraph {
         resources: &mut ResourceQueue,
     ) -> Result<ModuleKey, String> {
         let key = self.allocate(ModuleType::JavaScript)?;
-        self.parsed_response(key, source.into_bytes(), base, client, credentials, vm, resources);
+        self.parsed_response(
+            key,
+            ModuleSource::JavaScript(source),
+            base,
+            client,
+            credentials,
+            vm,
+            resources,
+        );
         Ok(key)
     }
 
@@ -157,7 +177,7 @@ impl ModuleGraph {
     pub(super) fn parsed_response(
         &mut self,
         key: ModuleKey,
-        source: Vec<u8>,
+        source: ModuleSource,
         base: Arc<Url>,
         client: &Arc<Url>,
         credentials: CredentialsMode,
@@ -166,22 +186,23 @@ impl ModuleGraph {
     ) {
         let result = (|| -> Result<_, String> {
             self.charge_url(&base)?;
-            if source.len() > 1024 * 1024
-                || self.source_bytes + source.len() > MAX_MODULE_SOURCE_BYTES
-            {
+            let len = match &source {
+                ModuleSource::JavaScript(text) => text.len(),
+                ModuleSource::Typed(bytes) => bytes.len(),
+            };
+            if len > 1024 * 1024 || self.source_bytes + len > MAX_MODULE_SOURCE_BYTES {
                 return Err("Module source byte budget exceeded".into());
             }
-            self.source_bytes += source.len();
-            if key.1 == ModuleType::JavaScript {
-                let external = self.requests.values().any(|entry| entry.0 == key.0);
-                self.sources.capture(
-                    None,
-                    external.then_some(base.as_str()),
-                    || format!("Module #{}", key.0 + 1),
-                    &String::from_utf8_lossy(source.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&source)),
-                );
-            }
-            let id = vm.parse_module_bytes(&source, base.as_str(), key.1).map_err(|e| e.to_string())?;
+            self.source_bytes += len;
+            let id = match source {
+                ModuleSource::JavaScript(text) if key.1 == ModuleType::JavaScript => {
+                    let external = self.requests.values().any(|entry| entry.0 == key.0);
+                    self.sources.capture(None, external.then_some(base.as_str()), || format!("Module #{}", key.0 + 1), &text);
+                    vm.parse_module(&text, base.as_str())
+                }
+                ModuleSource::Typed(bytes) if key.1 != ModuleType::JavaScript => vm.parse_module_bytes(&bytes, base.as_str(), key.1),
+                _ => return Err("Module payload does not match the requested type".into()),
+            }.map_err(|error| error.to_string())?;
             let requests = vm.module_requests(id).map_err(|e| e.to_string())?;
             if self.edges + requests.len() > MAX_MODULE_EDGES {
                 return Err("Module graph dependency budget exceeded".into());
@@ -191,7 +212,14 @@ impl ModuleGraph {
             for request in requests {
                 let specifier = request.specifier.to_string_lossy();
                 let url = self.resolve_specifier(&specifier, &base)?;
-                let dep = self.external_typed(url, client, credentials, None, resources, request.module_type().map_err(|e| e.to_string())?)?;
+                let dep = self.external_typed(
+                    url,
+                    client,
+                    credentials,
+                    None,
+                    resources,
+                    request.module_type().map_err(|e| e.to_string())?,
+                )?;
                 edges.push((request, dep));
             }
             vm.root_module(id).map_err(|e| e.to_string())?;

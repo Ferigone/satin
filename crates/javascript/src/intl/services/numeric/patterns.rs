@@ -186,3 +186,54 @@ pub(super) fn affixes(
     }
     (before, found, after)
 }
+
+pub(super) type Fields = Vec<(&'static str, String)>;
+
+/// ICU's currency and percent formatters can emit an entire affix as a
+/// literal. Preserve its internal spacing (e.g. a spelled-out currency name)
+/// while exposing accounting parentheses, sign and outer separators as parts.
+pub(super) fn monetary_affix(
+    input: &str,
+    kind: &'static str,
+    patterns: &Patterns,
+    parts: &mut Fields,
+) {
+    fn separator(c: char) -> bool {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '(' | ')' | '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{2066}'..='\u{2069}'
+            )
+    }
+    let mut remaining = input;
+    while !remaining.is_empty() {
+        if let Some(sign) = ["minusSign", "plusSign"].into_iter().find_map(|k| {
+            let s = patterns.symbol(k, if k == "minusSign" { "-" } else { "+" });
+            remaining.starts_with(s).then_some((k, s.len()))
+        }) {
+            parts.push((sign.0, remaining[..sign.1].into()));
+            remaining = &remaining[sign.1..];
+            continue;
+        }
+        let leading = remaining.len() - remaining.trim_start_matches(separator).len();
+        if leading > 0 {
+            parts.push(("literal", remaining[..leading].into()));
+            remaining = &remaining[leading..];
+            continue;
+        }
+        let mut end = remaining.trim_end_matches(separator).len();
+        for s in [
+            patterns.symbol("minusSign", "-"),
+            patterns.symbol("plusSign", "+"),
+        ] {
+            if let Some(idx) = remaining.find(s) {
+                end = end.min(idx)
+            }
+        }
+        if end == 0 {
+            break;
+        }
+        parts.push((kind, remaining[..end].into()));
+        remaining = &remaining[end..];
+    }
+}

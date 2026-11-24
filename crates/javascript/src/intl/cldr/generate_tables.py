@@ -27,7 +27,7 @@ def bcp(n,k):return {a:v for a,v in read(f'cldr-bcp47/bcp47/{n}.json')['keyword'
 def array(name,z):out.append(f'pub(super) const {name}: &[&str] = &[\n'+''.join('    '+json.dumps(t)+',\n' for t in sorted(set(z)))+'];\n')
 def table(name,d):out.append(f'pub(super) const {name}: &[(&str,&str)] = &[\n'+''.join(f'    ({json.dumps(k,ensure_ascii=False)},{json.dumps(v,ensure_ascii=False)}),\n' for k,v in sorted(d.items()))+'];\n')
 array('LOCALES',read('cldr-core/availableLocales.json')['availableLocales']['full']+read('cldr-core/defaultContent.json')['defaultContent'])
-array('CALENDARS',[k for k in bcp('calendar','ca') if k not in ('islamic-rgsa',)])
+array('CALENDARS',[k for k in bcp('calendar','ca') if k not in ('islamic', 'islamic-rgsa')])
 array('COLLATIONS',[k for k in bcp('collation','co') if k not in ('standard','search','ducet')])
 curr=supp('currencyData')['region']
 array('CURRENCIES',[k for rows in curr.values() for item in rows for k,val in item.items() if '_to' not in val and val.get('_tender')!='false'])

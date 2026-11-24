@@ -149,7 +149,7 @@ fn spread_uses_iterators_in_arrays_calls_and_construction() {
 #[test]
 fn calls_snapshot_callee_before_argument_effects_and_spreads_preserve_order() {
     yes(
-        "var log=[],o={};Object.defineProperty(o,'f',{get(){log.push('get');return function(){log.push('call');};}});function arg(){log.push('arg');return 1;}o.f(arg());var s={[Symbol.iterator](){log.push('iter');return [2,3].values();}};function f(){log.push(arguments.join(','));}f(arg(),...s,arg());log.join('|')==='get|arg|call|arg|iter|arg|1,2,3,1'",
+        "var log=[],o={};Object.defineProperty(o,'f',{get(){log.push('get');return function(){log.push('call');};}});function arg(){log.push('arg');return 1;}o.f(arg());var s={[Symbol.iterator](){log.push('iter');return [2,3].values();}};function f(){log.push(Array.prototype.join.call(arguments,','));}f(arg(),...s,arg());log.join('|')==='get|arg|call|arg|iter|arg|1,2,3,1'",
     );
 }
 #[test]

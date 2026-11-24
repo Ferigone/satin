@@ -184,56 +184,170 @@ fn part_objects(vm:&mut Vm,seq:Vec<(&'static str,String)>,parts:bool)->ResultVal
     }vm.try_new_array(&arr)
 }
 impl NumberFormat {
-    fn parts(&self,n:Numeric)->Result<Vec<(&'static str,String)>,JsError>{
+    fn parts(&self, n: Numeric) -> Result<Vec<(&'static str, String)>, JsError> {
         let (mut d, special) = match n {
             Numeric::Finite(d) => (d, None),
             Numeric::Special(kind, raw) => {
-                let sign_sample = if kind == "nan" { 0 } else if raw.starts_with('-') { -1 } else { 1 };
-                (Decimal::from(sign_sample), Some((kind, self.patterns.symbol(kind, raw.trim_start_matches('-')))))
+                let sign_sample = if kind == "nan" {
+                    0
+                } else if raw.starts_with('-') {
+                    -1
+                } else {
+                    1
+                };
+                (
+                    Decimal::from(sign_sample),
+                    Some((
+                        kind,
+                        self.patterns.symbol(kind, raw.trim_start_matches('-')),
+                    )),
+                )
             }
         };
-        if self.style=="percent"{d.multiply_pow10(2)}
-        let scientific=matches!(self.notation.as_str(),"engineering"|"scientific") && special.is_none();
-        let mut exponent=0;
-        let mut compact_pattern=None;
-        if let Some(rules)=&self.compact_rules && special.is_none(){
-            compact_pattern=self.patterns.compact(&self.compact,&mut d,&self.digits,rules);
+        if self.style == "percent" {
+            d.multiply_pow10(2)
+        }
+        let scientific =
+            matches!(self.notation.as_str(), "engineering" | "scientific") && special.is_none();
+        let mut exponent = 0;
+        let mut compact_pattern = None;
+        if let Some(rules) = &self.compact_rules
+            && special.is_none()
+        {
+            compact_pattern = self
+                .patterns
+                .compact(&self.compact, &mut d, &self.digits, rules);
         } else {
-            if scientific && !d.is_zero(){
-                exponent=d.nonzero_magnitude_start();
-                if self.notation=="engineering"{exponent=exponent.div_euclid(3)*3}
-                d.multiply_pow10(-exponent);
+            if scientific && !d.is_zero() {
+                exponent = d.nonzero_magnitude_start();
+                if self.notation == "engineering" {
+                    exponent = exponent.div_euclid(3).saturating_mul(3)
+                }
+                d.multiply_pow10(exponent.saturating_neg());
             }
             self.digits.round(&mut d);
         }
-        let sign=match self.sign.as_str(){"always"=>SignDisplay::Always,"never"=>SignDisplay::Never,"exceptZero"=>SignDisplay::ExceptZero,"negative"=>SignDisplay::Negative,_=>SignDisplay::Auto};
-        let d=d.with_sign_display(sign);
-        let mut parts=Parts::default();
-        if let Some(c)=&self.currency_fmt{c.format_fixed_decimal(&d).write_to_parts(&mut parts).unwrap()}
-        else if let Some(p)=&self.percent{p.format(&d).write_to_parts(&mut parts).unwrap()}
-        else {self.number.format(&d).write_to_parts(&mut parts).unwrap()}
-        let is_number_part=|(k,_):&(&str,String)|matches!(*k,"integer"|"group"|"fraction"|"decimal");
-        if let Some(first)=parts.fields.iter().position(is_number_part){
-            let end=parts.fields.iter().rposition(is_number_part).unwrap()+1;
-            if let Some((kind,symbol))=special{
-                parts.fields.splice(first..end,[(kind,symbol.to_owned())]);
-            }else if let Some(pattern)=compact_pattern{
-                let (before,show_value,after)=patterns::affixes(pattern);
-                parts.fields.splice(end..end,after);
-                parts.fields.splice(first..if show_value{first}else{end},before);
+        let sign = match self.sign.as_str() {
+            "always" => SignDisplay::Always,
+            "never" => SignDisplay::Never,
+            "exceptZero" => SignDisplay::ExceptZero,
+            "negative" => SignDisplay::Negative,
+            _ => SignDisplay::Auto,
+        };
+        let d = d.with_sign_display(sign);
+        let mut parts = Parts::default();
+        let is_numeric = |k: &str| matches!(k, "integer" | "group" | "fraction" | "decimal");
+        if self.currency_fmt.is_some() || self.percent.is_some() {
+            let mut number_parts = Parts::default();
+            let unsigned = d.clone().with_sign_display(SignDisplay::Never);
+            self.number
+                .format(&unsigned)
+                .write_to_parts(&mut number_parts)
+                .unwrap();
+            if let Some(currency) = &self.currency_fmt {
+                let mut raw = Parts::default();
+                currency
+                    .format_fixed_decimal(&d)
+                    .write_to_parts(&mut raw)
+                    .unwrap();
+                let mut seen_number = false;
+                for (k, text) in raw.fields {
+                    if is_numeric(k) {
+                        if !seen_number {
+                            parts.fields.append(&mut number_parts.fields);
+                            seen_number = true;
+                        }
+                    } else if k == "literal" {
+                        patterns::monetary_affix(
+                            &text,
+                            "currency",
+                            &self.patterns,
+                            &mut parts.fields,
+                        );
+                    } else {
+                        parts.fields.push((k, text))
+                    }
+                }
+            } else if let Some(percent) = &self.percent {
+                let raw = percent.format(&d).write_to_string().into_owned();
+                let numeric = number_parts
+                    .fields
+                    .iter()
+                    .map(|(_, s)| s.as_str())
+                    .collect::<String>();
+                if let Some((prefix, suffix)) = raw.split_once(&numeric) {
+                    patterns::monetary_affix(
+                        prefix,
+                        "percentSign",
+                        &self.patterns,
+                        &mut parts.fields,
+                    );
+                    parts.fields.append(&mut number_parts.fields);
+                    patterns::monetary_affix(
+                        suffix,
+                        "percentSign",
+                        &self.patterns,
+                        &mut parts.fields,
+                    );
+                } else {
+                    parts.fields.push(("literal", raw))
+                }
+            }
+        } else {
+            self.number.format(&d).write_to_parts(&mut parts).unwrap()
+        }
+        if let Some(first) = parts.fields.iter().position(|(k, _)| is_numeric(k)) {
+            let end = parts
+                .fields
+                .iter()
+                .rposition(|(k, _)| is_numeric(k))
+                .unwrap()
+                + 1;
+            if let Some((kind, symbol)) = special {
+                parts.fields.splice(first..end, [(kind, symbol.to_owned())]);
+            } else if let Some(pattern) = compact_pattern {
+                let (before, show_value, after) = patterns::affixes(pattern);
+                parts.fields.splice(end..end, after);
+                parts
+                    .fields
+                    .splice(first..if show_value { first } else { end }, before);
             }
         }
         if scientific {
-            parts.fields.push(("exponentSeparator",self.patterns.symbol("exponential","E").to_owned()));
-            if exponent<0{parts.fields.push(("exponentMinusSign",self.patterns.symbol("minusSign","-").to_owned()))}
-            parts.fields.push(("exponentInteger",exponent.unsigned_abs().to_string()));
+            parts.fields.push((
+                "exponentSeparator",
+                self.patterns.symbol("exponential", "E").to_owned(),
+            ));
+            if exponent < 0 {
+                parts.fields.push((
+                    "exponentMinusSign",
+                    self.patterns.symbol("minusSign", "-").to_owned(),
+                ))
+            }
+            parts
+                .fields
+                .push(("exponentInteger", exponent.unsigned_abs().to_string()));
         }
-        for (kind,text) in &mut parts.fields{
-            if matches!(*kind,"integer"|"fraction"|"exponentInteger"){self.patterns.shape_digits(text)}
+        for (kind, text) in &mut parts.fields {
+            if matches!(*kind, "integer" | "fraction" | "exponentInteger") {
+                self.patterns.shape_digits(text)
+            }
         }
-        if self.style=="unit"&&let Some(unit)=&self.unit{
-            let sym=match(unit.as_str(),self.unit_display.as_str()){("percent",_)=>"%",("meter","short"|"narrow")=>"m",("kilometer","short"|"narrow")=>"km",("second","short"|"narrow")=>"s",("hour","short"|"narrow")=>"hr",_=>unit};
-            if self.unit_display!="narrow"{parts.fields.push(("literal"," ".into()))}parts.fields.push(("unit",sym.into()))
+        if self.style == "unit"
+            && let Some(unit) = &self.unit
+        {
+            let sym = match (unit.as_str(), self.unit_display.as_str()) {
+                ("percent", _) => "%",
+                ("meter", "short" | "narrow") => "m",
+                ("kilometer", "short" | "narrow") => "km",
+                ("second", "short" | "narrow") => "s",
+                ("hour", "short" | "narrow") => "hr",
+                _ => unit,
+            };
+            if self.unit_display != "narrow" {
+                parts.fields.push(("literal", " ".into()))
+            }
+            parts.fields.push(("unit", sym.into()))
         }
         Ok(parts.fields)
     }

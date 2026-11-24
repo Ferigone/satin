@@ -84,6 +84,7 @@ pub(crate) struct Code {
     pub param_names: Vec<JsString>,
     pub parameter_expressions: bool,
     pub mapped_arguments: bool,
+    pub mapped_indices: Vec<usize>,
     pub length: usize,
     pub body: Rc<Chunk>,
     pub strict: bool,
@@ -108,6 +109,7 @@ pub(crate) enum Op {
     Push(Value),
     RegExp(Rc<crate::regexp::Program>),
     Name(JsString),
+    LoadName(JsString),
     This,
     NewTarget,
     CopyAnnexFunction(JsString),
@@ -340,6 +342,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     .iter()
                     .map(|p| 64 + p.len() * 2)
                     .sum::<usize>()
+                    + code.mapped_indices.capacity() * std::mem::size_of::<usize>()
                     + code.name.as_ref().map_or(0, |s| s.len() * 2),
             );
             chunks.push(code.body.clone());
@@ -375,6 +378,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 Op::Push(Value::String(s))
                 | Op::CopyAnnexFunction(s)
                 | Op::Name(s)
+                | Op::LoadName(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
                 | Op::InferName(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
@@ -796,7 +800,15 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
             return Err(syntax("Invalid strict-mode binding"));
         }
     }
+    let mut mapped_indices = Vec::new();
+    if !strict && simple {
+        let mut seen = BTreeSet::new();
+        for (index, name) in names.iter().enumerate().rev() {
+            if seen.insert(name) { mapped_indices.push(index); }
+        }
+    }
     Ok(Rc::new(Code {
+        mapped_indices,
         source: f.source.clone(),
         name: f.name.clone(),
         params: f
@@ -1370,8 +1382,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::RegExp(program) => out.push(Op::RegExp(program.clone())),
                 Expr::Identifier(name) => {
                     check_identifier(name, strict)?;
-                    out.push(Op::Name(name.clone()));
-                    out.push(Op::Get);
+                    out.push(Op::LoadName(name.clone()));
                 }
                 Expr::This => out.push(Op::This),
                 Expr::NewTarget => out.push(Op::NewTarget),

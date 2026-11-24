@@ -1,7 +1,8 @@
 //! Runtime loader for source-text fixtures from pinned Test262 blobs.
 use crate::module_host::ModuleFile;
 use rust_browser_javascript::{
-    DynamicImportRequest, ErrorKind, JsError, JsString, ModuleId, ModuleType, RealmId, RootId, Value, Vm,
+    DynamicImportRequest, ErrorKind, JsError, JsString, ModuleId, ModuleType, RealmId, RootId,
+    Value, Vm,
 };
 use std::{
     cell::RefCell,
@@ -66,12 +67,25 @@ impl DynamicHost {
                 vm.root(cap.resolve.clone()),
                 vm.root(cap.reject.clone()),
             ];
-            queue.push_back(Queued { realm: vm.current_realm(), request, roots });
+            queue.push_back(Queued {
+                realm: vm.current_realm(),
+                request,
+                roots,
+            });
             Ok(())
         });
         let modules = modules
             .into_iter()
-            .map(|((identifier, kind), module)| ((vm.current_realm(), fixture_identifier(&identifier).to_owned(), kind), module))
+            .map(|((identifier, kind), module)| {
+                (
+                    (
+                        vm.current_realm(),
+                        fixture_identifier(&identifier).to_owned(),
+                        kind,
+                    ),
+                    module,
+                )
+            })
             .collect();
         Ok(Self {
             source_name,
@@ -92,7 +106,11 @@ impl DynamicHost {
 
     fn process(&mut self, vm: &mut Vm, queued: Queued) -> Result<(), JsError> {
         let result = self.load(vm, &queued.request).and_then(|module| {
-            vm.settle_source_text_import(module, queued.request.phase, queued.request.capability.clone())
+            vm.settle_source_text_import(
+                module,
+                queued.request.phase,
+                queued.request.capability.clone(),
+            )
         });
         if let Err(error) = result {
             return reject(vm, queued, error);
@@ -110,10 +128,16 @@ impl DynamicHost {
             &request.specifier,
         )?;
         let module = self.module(vm, name, request.module_type)?;
-        if request.phase == rust_browser_javascript::ImportPhase::Source { return Ok(module); }
+        if request.phase == rust_browser_javascript::ImportPhase::Source {
+            return Ok(module);
+        }
         vm.link_module_with_requests(module, |vm, importer, request| {
             let referrer = vm.module_identifier(importer)?.to_string_lossy();
-            self.module(vm, fixture_path(&referrer, &request.specifier)?, request.module_type()?)
+            self.module(
+                vm,
+                fixture_path(&referrer, &request.specifier)?,
+                request.module_type()?,
+            )
         })?;
         Ok(module)
     }
@@ -130,8 +154,15 @@ impl DynamicHost {
             ));
         }
         let source = self.sources.get(&name).ok_or_else(|| {
-            if name.rsplit('/').next().is_some_and(|name| name.contains("_FIXTURE")) {
-                JsError::new(ErrorKind::UnsupportedFeature, "Module fixture is outside the supplied bundle")
+            if name
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.contains("_FIXTURE"))
+            {
+                JsError::new(
+                    ErrorKind::UnsupportedFeature,
+                    "Module fixture is outside the supplied bundle",
+                )
             } else {
                 JsError::type_error(format!("Cannot load module {name}"))
             }
