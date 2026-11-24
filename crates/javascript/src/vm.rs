@@ -31,7 +31,7 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
-const MAX_CALL_DEPTH: usize = if cfg!(windows) {
+const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
     DEFAULT_CALL_DEPTH
@@ -53,7 +53,36 @@ fn native_stack_headroom() -> bool {
         let current = std::ptr::addr_of!(low).addr();
         (low..high).contains(&current) && current - low >= 256 * 1024
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Thread stacks have different reservations, including test and worker threads.
+        // Cache only the bounds. Depth checks sample the current frame on every call.
+        thread_local! {
+            static STACK: Option<(usize, usize)> = {
+                let mut attr = std::mem::MaybeUninit::uninit();
+                let mut base = std::ptr::null_mut();
+                let mut size = 0;
+                // SAFETY: pthread initializes attr on success. The two output pointers
+                // are valid and the attributes are destroyed once, on the same thread.
+                unsafe {
+                    if libc::pthread_getattr_np(libc::pthread_self(), attr.as_mut_ptr()) != 0 {
+                        None
+                    } else {
+                        let result = libc::pthread_attr_getstack(attr.as_ptr(), &mut base, &mut size);
+                        libc::pthread_attr_destroy(attr.as_mut_ptr());
+                        let low = base.addr();
+                        low.checked_add(size).filter(|_| result == 0).map(|high| (low, high))
+                    }
+                }
+            };
+        }
+        let marker = 0u8;
+        let current = std::ptr::addr_of!(marker).addr();
+        STACK.with(|bounds| bounds.is_some_and(|(low, high)| {
+            (low..high).contains(&current) && current - low >= 256 * 1024
+        }))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -67,6 +96,9 @@ pub(crate) fn permits_bytecode_depth(depth: usize) -> bool {
 #[derive(Clone, Debug)]
 pub struct VmLimits {
     pub max_instructions: u64,
+    /// Linear, bounded native buffer work per instruction. Bytecode, callbacks
+    /// and backtracking still pay their normal instruction costs.
+    pub buffer_units_per_instruction: usize,
     pub max_call_depth: usize,
     pub max_heap_objects: usize,
     /// Conservative aggregate allocation allowance, reset to traced live usage by GC.
@@ -80,6 +112,7 @@ impl Default for VmLimits {
     fn default() -> Self {
         Self {
             max_instructions: 1_000_000,
+            buffer_units_per_instruction: 1,
             max_call_depth: MAX_CALL_DEPTH,
             max_heap_objects: 100_000,
             max_heap_bytes: 64 * 1024 * 1024,
@@ -210,6 +243,7 @@ impl Vm {
         Self::with_limits(VmLimits::default())
     }
     pub fn with_limits(mut limits: VmLimits) -> Self {
+        limits.buffer_units_per_instruction = limits.buffer_units_per_instruction.clamp(1, 1024);
         // This first interpreter still uses bounded Rust calls for nested chunks.
         // Keep the host stack safe even when an embedder requests a larger limit.
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
@@ -613,13 +647,17 @@ impl Vm {
         }
         Ok(value)
     }
-    pub fn ensure_string_allocation(&self, units: usize) -> Result<(), JsError> {
+    pub(crate) fn check_string_length(&self, units: usize) -> Result<(), JsError> {
         if units > self.limits.max_string_units {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "String code-unit budget exhausted",
             ));
         }
+        Ok(())
+    }
+    pub fn ensure_string_allocation(&self, units: usize) -> Result<(), JsError> {
+        self.check_string_length(units)?;
         // Include both a growing UTF-16 Vec and conversion into Rc storage.
         self.ensure_allocation(units.saturating_mul(6).saturating_add(128))
     }
@@ -1075,6 +1113,11 @@ impl Vm {
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
+    /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
+    /// One nonempty operation always costs at least one instruction.
+    pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
+        self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
+    }
     fn compare_strings(&mut self, a: &JsString, b: &JsString) -> Result<(), JsError> {
         if a.storage_id() != b.storage_id() {
             self.consume_work(a.len().min(b.len()))?;
@@ -1095,6 +1138,15 @@ impl Vm {
     pub fn finish_string(&mut self, units: Vec<u16>) -> Result<Value, JsError> {
         self.ensure_string_allocation(units.len())?;
         self.consume_work(units.len())?;
+        self.checked_string(JsString::from_utf16(units))
+    }
+    /// Transfer a native, bounded data buffer into a JS string. Script
+    /// string builders retain their per-unit costs through `finish_string`.
+    pub fn finish_buffer_string(&mut self, units: Vec<u16>) -> Result<Value, JsError> {
+        self.check_string_length(units.len())?;
+        let peak = units.capacity().saturating_add(units.len()).saturating_mul(2);
+        self.ensure_allocation(peak.saturating_add(128))?;
+        self.charge_buffer_work(units.len())?;
         self.checked_string(JsString::from_utf16(units))
     }
     /// A borrowed slice needs both a Vec copy and the final Rc-storage copy.

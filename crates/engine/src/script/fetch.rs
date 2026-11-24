@@ -10,12 +10,12 @@ use super::{
 use crate::{
     loader::LoadedPage,
     network::{
-        self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT, FetchBody,
-        FetchError, FetchErrorKind, FetchJob, HeaderList, RedirectMode, RequestMode, ResponseType,
-        StreamingResponse, WebRequest, WebResponse,
+        self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT,
+        FETCH_RESPONSE_BODY_LIMIT, FetchBody, FetchError, FetchErrorKind, FetchJob, HeaderList,
+        RedirectMode, RequestMode, ResponseType, StreamingResponse, WebRequest, WebResponse,
     },
 };
-use rust_browser_javascript::{ErrorKind, JsError, JsString, RootId, Value, Vm};
+use rust_browser_javascript::{ErrorKind, JsError, RootId, Value, Vm};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -26,7 +26,7 @@ use std::{
 };
 use url::Url;
 
-const LIVE_BYTES: usize = 16 * 1024 * 1024;
+const LIVE_BYTES: usize = 2 * FETCH_RESPONSE_BODY_LIMIT;
 const PENDING: usize = 16;
 const HEADERS_SLOT: u32 = 0;
 const SIGNAL_SLOT: u32 = 1;
@@ -159,7 +159,7 @@ fn budget(vm: &mut Vm, state: &Shared, extra: usize) -> Result<(), JsError> {
     total += state
         .pending_xhr
         .values()
-        .map(xhr::Pending::size)
+        .map(|pending| pending.request_size)
         .sum::<usize>();
     let mut seen = BTreeSet::new();
     for body in &state.bodies {
@@ -196,7 +196,7 @@ fn budget(vm: &mut Vm, state: &Shared, extra: usize) -> Result<(), JsError> {
     if total.saturating_add(extra) > state.byte_limit {
         return Err(JsError::new(
             ErrorKind::HeapLimit,
-            "Fetch live request/response data exceeds 16 MiB",
+            "Fetch live request/response budget exceeded",
         ));
     }
     Ok(())
@@ -219,7 +219,7 @@ fn byte_string(vm: &mut Vm, value: Value) -> Result<String, JsError> {
 }
 fn usv(vm: &mut Vm, value: Value, limit: usize) -> Result<String, JsError> {
     let s = vm.to_string(&value)?;
-    vm.charge_work(s.len())?;
+    vm.charge_buffer_work(s.len())?;
     let size = char::decode_utf16(s.as_utf16().iter().copied())
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8())
         .sum::<usize>();
@@ -436,7 +436,12 @@ struct BodyInput {
     bytes: Option<Arc<Vec<u8>>>,
     content_type: Option<String>,
 }
-fn body_input(vm: &mut Vm, state: &Shared, value: Value) -> Result<BodyInput, JsError> {
+fn body_input(
+    vm: &mut Vm,
+    state: &Shared,
+    value: Value,
+    limit: usize,
+) -> Result<BodyInput, JsError> {
     if value.is_nullish() {
         return Ok(BodyInput {
             bytes: None,
@@ -445,10 +450,10 @@ fn body_input(vm: &mut Vm, state: &Shared, value: Value) -> Result<BodyInput, Js
     }
     let (bytes, content_type) = if vm.is_buffer_source(&value) {
         let len = vm.fixed_buffer_source_bytes(&value)?.len();
-        if len > FETCH_BODY_LIMIT {
-            return Err(JsError::type_error("Fetch body exceeds 4 MiB"));
+        if len > limit {
+            return Err(JsError::type_error("Fetch body exceeds byte limit"));
         }
-        vm.charge_work(len)?;
+        vm.charge_buffer_work(len)?;
         (vm.fixed_buffer_source_bytes(&value)?.to_vec(), None)
     } else if let Some(body) = form_data::body_init(vm, &value)? {
         body
@@ -459,14 +464,14 @@ fn body_input(vm: &mut Vm, state: &Shared, value: Value) -> Result<BodyInput, Js
         )
     } else {
         (
-            usv(vm, value, FETCH_BODY_LIMIT)?.into_bytes(),
+            usv(vm, value, limit)?.into_bytes(),
             Some("text/plain;charset=UTF-8".into()),
         )
     };
-    if bytes.len() > FETCH_BODY_LIMIT {
+    if bytes.len() > limit {
         return Err(JsError::new(
             ErrorKind::ExecutionLimit,
-            "Fetch body exceeds 4 MiB",
+            "Fetch body exceeds byte limit",
         ));
     }
     budget(vm, state, bytes.capacity() + 64)?;
@@ -616,7 +621,7 @@ fn request_init(
             inherited: false,
         }
     } else if !body.is_nullish() {
-        let body = body_input(vm, state, body)?;
+        let body = body_input(vm, state, body, FETCH_BODY_LIMIT)?;
         request.body = body.bytes;
         add_content_type(&mut request.headers, body.content_type.as_deref())?;
         RequestBody::Buffered(None)
@@ -731,7 +736,7 @@ fn response_init(
         }
         (body, None)
     } else {
-        let body = body_input(vm, state, body)?;
+        let body = body_input(vm, state, body, FETCH_RESPONSE_BODY_LIMIT)?;
         (memory_stream(vm, &streams, body.bytes)?, body.content_type)
     };
     let headers = field(vm, &init, "headers")?;
@@ -1095,9 +1100,9 @@ impl FetchHost {
                         // Local Blob backings are bounded by the Blob and
                         // ReadableStream stores and need no buffered copy.
                         if let ResponseBody::Buffered(Some(body)) = &body {
-                            if body.len() > FETCH_BODY_LIMIT {
+                            if body.len() > FETCH_RESPONSE_BODY_LIMIT {
                                 return Err(JsError::type_error(
-                                    "Fetch response body exceeds 4 MiB",
+                                    "Fetch response body exceeds 64 MiB",
                                 ));
                             }
                             let known = self
@@ -1464,6 +1469,11 @@ fn body_methods(
             streams.collect_bytes(
                 vm,
                 body,
+                if request {
+                    FETCH_BODY_LIMIT
+                } else {
+                    FETCH_RESPONSE_BODY_LIMIT
+                },
                 Box::new(move |vm, bytes, resolve, reject| {
                     let value = match name {
                         "arrayBuffer" => vm.new_array_buffer(bytes)?,
@@ -1473,14 +1483,18 @@ fn body_methods(
                             .ok_or_else(|| JsError::type_error("FormData is unavailable"))?
                             .from_body(vm, &mime, &bytes)?,
                         "text" | "json" => {
-                            vm.charge_work(bytes.len())?;
+                            vm.charge_buffer_work(bytes.len())?;
                             vm.ensure_string_allocation(bytes.len())?;
                             let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-                            let text = JsString::from(String::from_utf8_lossy(bytes).as_ref());
+                            let units = String::from_utf8_lossy(bytes).encode_utf16().collect();
+                            let text = vm.finish_buffer_string(units)?;
                             if name == "json" {
-                                return vm.enqueue_json_parse(resolve, reject, text);
+                                let Value::String(json) = text else {
+                                    unreachable!()
+                                };
+                                return vm.enqueue_json_parse(resolve, reject, json);
                             }
-                            Value::String(text)
+                            text
                         }
                         _ => unreachable!(),
                     };

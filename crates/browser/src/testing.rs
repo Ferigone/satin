@@ -21,6 +21,7 @@ pub enum SmokeAction {
     Click {
         id: String,
     },
+    ClickInRow(RowControl),
     ClickAt {
         x: f32,
         y: f32,
@@ -49,11 +50,85 @@ pub enum SmokeAction {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RowControl {
+    within_id: String,
+    label_class: String,
+    label_prefix: String,
+    control_alt: String,
+    pub timeout_ms: u64,
+}
+
+impl RowControl {
+    fn validate(&self) -> Result<(), String> {
+        if [
+            &self.within_id,
+            &self.label_class,
+            &self.label_prefix,
+            &self.control_alt,
+        ]
+        .into_iter()
+        .any(|s| s.is_empty() || s.len() > 256)
+            || !(1..=1_800_000).contains(&self.timeout_ms)
+        {
+            return Err("Invalid smoke row target".into());
+        }
+        Ok(())
+    }
+
+    pub fn find(&self, document: &Document) -> Result<Option<NodeId>, String> {
+        let mut roots = document
+            .connected_nodes()
+            .filter(|&n| document.attr(n, "id") == Some(&self.within_id));
+        let Some(root) = roots.next() else {
+            return Ok(None);
+        };
+        if roots.next().is_some() {
+            return Err("Ambiguous smoke row container".into());
+        }
+        let ancestor = |id: NodeId, test: &dyn Fn(NodeId) -> bool| {
+            std::iter::successors(Some(id), |n| document.nodes[n.0].parent).find(|n| test(*n))
+        };
+        let mut rows = Vec::new();
+        for node in document.connected_nodes() {
+            if document
+                .attr(node, "class")
+                .is_some_and(|c| c.split_ascii_whitespace().any(|t| t == self.label_class))
+                && ancestor(node, &|n| n == root).is_some()
+                && document.text(node).trim().starts_with(&self.label_prefix)
+                && let Some(row) = ancestor(node, &|n| document.tag(n) == "tr")
+                && ancestor(row, &|n| n == root).is_some()
+            {
+                rows.push(row);
+            }
+        }
+        let row = match rows.as_slice() {
+            [] => return Ok(None),
+            [row] => *row,
+            _ => return Err("Ambiguous smoke row label".into()),
+        };
+        let mut controls = document.html_elements("img").filter(|&n| {
+            document.attr(n, "alt") == Some(&self.control_alt)
+                && ancestor(n, &|n| document.tag(n) == "tr") == Some(row)
+        });
+        let control = controls.next();
+        if controls.next().is_some() {
+            return Err("Ambiguous control in smoke row".into());
+        }
+        Ok(control)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Checkpoint {
     name: String,
     within_id: String,
-    descendant_class: String,
-    text: String,
+    #[serde(default)]
+    descendant_class: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    positive: bool,
     pub timeout_ms: u64,
     #[serde(default)]
     diagnose_timeout: bool,
@@ -273,15 +348,17 @@ impl Checkpoint {
                 .name
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'-' | b'_'))
-            || [&self.within_id, &self.descendant_class]
-                .into_iter()
+            || std::iter::once(&self.within_id)
+                .chain(self.descendant_class.as_ref())
                 .any(|value| {
                     value.is_empty() || value.len() > 256 || value.chars().any(char::is_whitespace)
                 })
-            || self.text.is_empty()
-            || self.text.len() > 1024
-            || self.text.trim() != self.text
-            || !(1..=30_000).contains(&self.timeout_ms)
+            || self.positive == self.text.is_some()
+            || self
+                .text
+                .as_ref()
+                .is_some_and(|text| text.is_empty() || text.len() > 1024 || text.trim() != text)
+            || !(1..=1_800_000).contains(&self.timeout_ms)
         {
             return Err("Invalid smoke checkpoint parameters".into());
         }
@@ -356,6 +433,23 @@ impl Checkpoint {
             return Err(self.error("ambiguous root id"));
         }
 
+        let text_matches = |node| {
+            let contents = document.text(node);
+            let value = contents.trim();
+            if self.positive {
+                value.bytes().all(|c| c.is_ascii_digit())
+                    && value.parse::<u64>().is_ok_and(|n| n > 0)
+            } else {
+                self.text.as_deref() == Some(value)
+            }
+        };
+        let Some(class) = &self.descendant_class else {
+            return Ok(if text_matches(root) {
+                layout_observation(document, layout, viewport, root)
+            } else {
+                CheckpointObservation::TextMismatch
+            });
+        };
         let mut pending = document.nodes[root.0].children.clone();
         let mut matched = None;
         let mut found_descendant = false;
@@ -364,10 +458,10 @@ impl Checkpoint {
             if document.attr(node, "class").is_some_and(|value| {
                 value
                     .split_ascii_whitespace()
-                    .any(|token| token == self.descendant_class.as_str())
+                    .any(|token| token == class.as_str())
             }) {
                 found_descendant = true;
-                if document.text(node).trim() == self.text && matched.replace(node).is_some() {
+                if text_matches(node) && matched.replace(node).is_some() {
                     return Err(self.error("ambiguous matching descendants"));
                 }
             }
@@ -513,6 +607,9 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
     let mut follows_click = false;
     let mut names = HashSet::new();
     for action in &actions {
+        if let SmokeAction::ClickInRow(row) = action {
+            row.validate()?;
+        }
         if let SmokeAction::Checkpoint(checkpoint) = action {
             checkpoint.validate()?;
             if !follows_click {
@@ -524,7 +621,7 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
         }
         follows_click = matches!(
             action,
-            SmokeAction::Click { .. } | SmokeAction::ClickAt { .. }
+            SmokeAction::Click { .. } | SmokeAction::ClickAt { .. } | SmokeAction::ClickInRow(_)
         );
     }
     Ok(actions)
@@ -535,12 +632,75 @@ mod tests {
     use super::*;
     use rust_browser_engine::{Fonts, LoadedPage};
 
+    #[test]
+    fn row_control_selects_its_own_row_and_rejects_ambiguity() {
+        let row = |label: &str| {
+            format!(
+                "<tr><td class='label'>{label}</td><td><img alt='Select'><img alt='Run'></td></tr>"
+            )
+        };
+        let page = |rows: String| {
+            LoadedPage::from_html(
+                "https://example.test/",
+                &format!("<table id='outer'>{rows}</table>"),
+            )
+        };
+        let target: RowControl = serde_json::from_str(r#"{"within_id":"outer","label_class":"label","label_prefix":"Chapter - language (","control_alt":"Run","timeout_ms":30000}"#).unwrap();
+        let original = page(row("Chapter - language-extra (4)") + &row("Chapter - language (8)"));
+        let button = target.find(&original.document).unwrap().unwrap();
+        assert_eq!(original.document.html_elements("img").last(), Some(button));
+        assert!(
+            target
+                .find(&page(row("Loading")).document)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            target
+                .find(
+                    &page(row("Chapter - language (8)") + &row("Chapter - language (9)")).document
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn positive_root_checkpoint_requires_a_visible_positive_integer() {
+        let probe: Checkpoint = serde_json::from_str(
+            r#"{"name":"sample","within_id":"counter","positive":true,"timeout_ms":90000}"#,
+        )
+        .unwrap();
+        probe.validate().unwrap();
+        for (value, matched) in [
+            ("0", false),
+            ("-1", false),
+            ("19 tests", false),
+            ("19", true),
+        ] {
+            let page = LoadedPage::from_html(
+                "https://example.test/",
+                &format!("<span id='counter'>{value}</span>"),
+            );
+            let fonts = Fonts::new().unwrap();
+            let viewport = Viewport::default();
+            let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+            assert_eq!(
+                probe
+                    .observe(&page.document, &layout, viewport)
+                    .unwrap()
+                    .is_match(),
+                matched
+            );
+        }
+    }
+
     fn checkpoint() -> Checkpoint {
         Checkpoint {
             name: "results".into(),
             within_id: "report".into(),
-            descendant_class: "ran".into(),
-            text: "2".into(),
+            descendant_class: Some("ran".into()),
+            text: Some("2".into()),
+            positive: false,
             timeout_ms: 100,
             diagnose_timeout: false,
             timeout_context: None,

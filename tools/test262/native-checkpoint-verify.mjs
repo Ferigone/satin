@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { completeCounters, count, site } from './website.mjs';
+import { completeCounters, count, countersConsistent, findChapter, site } from './website.mjs';
 
 const title = 'ECMAScript Language – test262';
 const resultKeys = ['ran', 'pass', 'fail', 'failedToLoad'];
@@ -41,7 +41,7 @@ export function validateNativeHarnessManifest(manifest) {
   return manifest;
 }
 
-const sameSite = url => typeof url === 'string' && url.split('#')[0] === site;
+const sameSite = (url, expected) => typeof url === 'string' && url.split('#')[0] === expected;
 const hasClass = (attrs, name) => attrs.class?.split(/\s+/).includes(name);
 const hidden = attrs => Object.hasOwn(attrs, 'hidden') || /(?:^|;)\s*display\s*:\s*none\s*(?:!important)?\s*(?:;|$)/i.test(attrs.style ?? '');
 
@@ -123,27 +123,41 @@ function observeCounters(snapshot, stage, artifactState) {
   }
 }
 
-export function verifyNativeHarnessArtifacts({ manifest, process, summary, run, results, png }) {
-  const { selection, suite: expectedSuite } = validateNativeHarnessManifest(manifest);
-  const { planned } = selection;
+function verifyNativeSession({ process, summary, png }, snapshots, url) {
   requireEvidence(process?.code === 0 && !process.signal && !process.timedOut && !process.spawnError, 'Native process did not succeed');
   requireEvidence(summary?.window_smoke === true && Number.isSafeInteger(summary.frames_presented) &&
     summary.frames_presented > 0 && summary.layout_limited === false && summary.paint_limited === false &&
-    sameSite(summary.url) && summary.title === title, 'Missing successful native frame summary');
+    sameSite(summary.url, url) && summary.title === title, 'Missing successful native frame summary');
   const envelope = summary.checkpoints;
+  const names = Object.keys(snapshots);
   requireEvidence(typeof envelope?.runId === 'string' && /^\d+-\d+$/.test(envelope.runId) &&
-    Array.isArray(envelope.names) && envelope.names.length === 2 &&
-    envelope.names[0] === 'run' && envelope.names[1] === 'results', 'Missing ordered checkpoint success envelope');
+    Array.isArray(envelope.names) && envelope.names.length === names.length &&
+    names.every((name, i) => envelope.names[i] === name), 'Missing ordered checkpoint success envelope');
   requireEvidence(validPng(png), 'Missing or invalid final PNG');
-  for (const snapshot of [run, results]) {
+  const first = snapshots[names[0]];
+  for (const snapshot of Object.values(snapshots)) {
     requireEvidence(snapshot?.runId === envelope.runId, 'Checkpoint is stale or from another attempt');
-    requireEvidence(sameSite(snapshot.url) && snapshot.title === title &&
+    requireEvidence(sameSite(snapshot.url, url) && snapshot.title === title &&
       Number.isSafeInteger(snapshot.tabId) && snapshot.tabId > 0 &&
       Number.isSafeInteger(snapshot.documentNavigation) && snapshot.documentNavigation > 0 &&
       typeof snapshot.html === 'string' && snapshot.html.length > 0, 'Missing or invalid checkpoint document');
+    requireEvidence(snapshot.tabId === first.tabId && snapshot.documentNavigation === first.documentNavigation, 'Tab or document changed');
   }
-  requireEvidence(run.tabId === results.tabId && run.documentNavigation === results.documentNavigation, 'Tab or document changed');
+}
 
+const paneCounters = (stage, pane) => Object.fromEntries(Object.entries(fields[stage]).map(([key, [where, name]]) =>
+  [key, text((where === 'id' ? byId : byClass)(pane, 'span', name))]));
+
+const paneSuite = pane => ({
+  version: text(byClass(pane, 'span', 'targetTestSuiteVersion')),
+  date: text(byClass(pane, 'span', 'targetTestSuiteDate')),
+});
+
+export function verifyNativeHarnessArtifacts(input) {
+  const { manifest, run, results } = input;
+  const { selection, suite: expectedSuite } = validateNativeHarnessManifest(manifest);
+  const { planned } = selection;
+  verifyNativeSession(input, { run, results }, site);
   const runPane = selectedPane(withoutInert(run.html), 'run', 'content-tests');
   const resultsPane = selectedPane(withoutInert(results.html), 'results', 'content-results');
   const progress = byId(runPane, 'div', 'progressbar');
@@ -154,17 +168,11 @@ export function verifyNativeHarnessArtifacts({ manifest, process, summary, run, 
     .map(text).filter(label => label.endsWith(`(${planned} tests)`));
   requireEvidence(sameSize.length === 1 && sameSize[0] === `Chapter - ${selection.name} (${planned} tests)`, 'Wrong or ambiguous chapter');
 
-  const counters = (stage, pane) => Object.fromEntries(Object.entries(fields[stage]).map(([key, [where, name]]) =>
-    [key, text((where === 'id' ? byId : byClass)(pane, 'span', name))]));
-  const runCounters = counters('run', runPane);
+  const runCounters = paneCounters('run', runPane);
   requireEvidence(completeCounters(runCounters, planned), 'Run counters do not establish all 55 harness tests');
-  const resultsCounters = counters('results', resultsPane);
+  const resultsCounters = paneCounters('results', resultsPane);
   requireEvidence(resultKeys.every(key => count(resultsCounters[key]) === count(runCounters[key])), 'Results counters do not match Run');
-  const suite = pane => ({
-    version: text(byClass(pane, 'span', 'targetTestSuiteVersion')),
-    date: text(byClass(pane, 'span', 'targetTestSuiteDate')),
-  });
-  const runSuite = suite(runPane), resultsSuite = suite(resultsPane);
+  const runSuite = paneSuite(runPane), resultsSuite = paneSuite(resultsPane);
   requireEvidence([runSuite, resultsSuite].every(observed =>
     observed.version === expectedSuite.version && observed.date === expectedSuite.date), 'Suite identity is missing or changed');
   return {
@@ -173,6 +181,51 @@ export function verifyNativeHarnessArtifacts({ manifest, process, summary, run, 
     selection: { kind: selection.kind, name: selection.name, planned },
     suite: runSuite,
     counters: Object.fromEntries(Object.entries(runCounters).map(([key, value]) => [key, count(value)])),
+  };
+}
+
+// Called only by the direct native probe after its own hit-tested actions.
+export function verifyNativeWebsiteRun(input, { url, chapter, until }) {
+  const { catalog, run, results } = input;
+  verifyNativeSession(input, { catalog, run, results }, url);
+  const catalogPane = selectedPane(withoutInert(catalog.html), 'run', 'content-tests');
+  const catalogTotal = count(text(byId(catalogPane, 'span', 'testsToRun')));
+  requireEvidence(catalogTotal > 0, 'Missing catalog test count');
+  const runPane = selectedPane(withoutInert(run.html), 'run', 'content-tests');
+  const resultsHtml = withoutInert(results.html);
+  const resultsPane = selectedPane(resultsHtml, 'results', 'content-results');
+  const suite = paneSuite(runPane);
+  const shownSuite = paneSuite(resultsPane);
+  requireEvidence(suite.version.length > 0 && /^\d{4}-\d{2}-\d{2}$/.test(suite.date) &&
+    suite.version === shownSuite.version && suite.date === shownSuite.date, 'Suite identity is missing or changed');
+
+  let selection = { kind: 'all', planned: catalogTotal };
+  if (chapter) {
+    const table = byId(runPane, 'div', 'chapterSelector');
+    const labels = regions(table.body, 'td', attrs => hasClass(attrs, 'chapterName'), 'chapter label').map(text);
+    selection = findChapter(labels, chapter);
+    requireEvidence(selection && selection.planned <= catalogTotal, 'Selected chapter is absent from the catalog');
+  }
+  const first = paneCounters('run', runPane);
+  requireEvidence(count(first.planned) === selection.planned && count(first.ran) > 0 &&
+    countersConsistent(first), 'Run counters do not match the selected scope');
+  let counters = first;
+  if (until === 'complete') {
+    const marker = byId(runPane, 'div', 'progressbar');
+    requireEvidence(!hidden(marker.attrs) && text(byClass(marker.body, 'span', 'text')) === 'Testing complete!' &&
+      completeCounters(counters, selection.planned), 'Missing completion marker or final test count');
+  } else {
+    // Cases may finish between the first positive observation and the Pause click.
+    const finalRunPane = byClass(resultsHtml, 'div', 'content-tests');
+    counters = paneCounters('run', finalRunPane.body);
+    requireEvidence(count(counters.planned) === selection.planned && countersConsistent(counters) &&
+      resultKeys.every(key => count(counters[key]) >= count(first[key])), 'Run counters changed inconsistently before Results');
+  }
+  const shown = paneCounters('results', resultsPane);
+  requireEvidence(resultKeys.every(key => count(counters[key]) === count(shown[key])), 'Results counters do not match Run');
+  return {
+    websiteRun: until === 'complete' ? 'complete' : 'partial', selection, suite,
+    snapshots: { [until === 'complete' ? 'complete' : 'first-result']: { counters: first }, results: { counters } },
   };
 }
 

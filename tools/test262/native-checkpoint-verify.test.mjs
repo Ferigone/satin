@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
-  assessNativeHarnessCapture as assess, reportNativeHarnessArtifacts as report, verifyNativeHarnessArtifacts as verify,
+  verifyNativeWebsiteRun, assessNativeHarnessCapture as assess, reportNativeHarnessArtifacts as report, verifyNativeHarnessArtifacts as verify,
 } from './native-checkpoint-verify.mjs';
 import { site } from './website.mjs';
 
@@ -299,4 +299,42 @@ test('website CLI imports a manifest without spawning a browser or scoring missi
     { encoding: 'utf8', timeout: 5000 });
   assert.equal(mixed.status, 2);
   assert.match(mixed.stderr, /cannot be combined with browser capture options/);
+});
+
+function liveCapture() {
+  const capture = sample();
+  capture.summary.checkpoints.names = ['catalog', 'run', 'results'];
+  capture.catalog = { ...capture.run, html: capture.run.html.replace('id="testsToRun">55', 'id="testsToRun">136') };
+  return capture;
+}
+
+test('live chapter and Run All use the correct independent plan and same-document Results', () => {
+  const options = { url: site, chapter: 'harness', until: 'complete' };
+  const capture = liveCapture();
+  const result = verifyNativeWebsiteRun(capture, options);
+  assert.equal(result.websiteRun, 'complete');
+  assert.equal(result.selection.planned, 55);
+  assert.equal(result.snapshots.results.counters.fail, '2');
+  assert.throws(() => verifyNativeWebsiteRun(capture, { ...options, chapter: 'annexB' }), /scope/);
+  assert.throws(() => verifyNativeWebsiteRun(capture, { ...options, chapter: null }), /scope/);
+  capture.catalog.html = capture.run.html;
+  assert.deepEqual(verifyNativeWebsiteRun(capture, { ...options, chapter: null }).selection, { kind: 'all', planned: 55 });
+  capture.catalog.documentNavigation++;
+  assert.throws(() => verifyNativeWebsiteRun(capture, options), /document changed/);
+});
+
+test('first-result captures accept progress through Pause and require the final Run and Results counters to match', () => {
+  const options = { url: site, chapter: 'harness', until: 'first' };
+  const capture = liveCapture();
+  const laterRun = capture.run.html.slice(capture.run.html.indexOf('<div class="content-tests">'));
+  capture.results.html += laterRun;
+  capture.run.html = capture.run.html.replace('id="totalCounter">55', 'id="totalCounter">1')
+    .replace('id="Pass">53', 'id="Pass">1').replace('id="Fail">2', 'id="Fail">0')
+    .replace('id="failedToLoadCounter1">1', 'id="failedToLoadCounter1">0').replace('Testing complete!', 'Running');
+  const result = verifyNativeWebsiteRun(capture, options);
+  assert.equal(result.websiteRun, 'partial');
+  assert.equal(result.snapshots['first-result'].counters.ran, '1');
+  assert.equal(result.snapshots.results.counters.ran, '55');
+  capture.results.html = capture.results.html.replace('class="passedCases">53', 'class="passedCases">52');
+  assert.throws(() => verifyNativeWebsiteRun(capture, options), /Results counters/);
 });

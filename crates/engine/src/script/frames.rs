@@ -651,6 +651,24 @@ mod tests {
     }
 
     #[test]
+    fn discarded_initial_realms_release_their_globals_and_intrinsics() {
+        let page = LoadedPage::from_html("https://example.test/", "<body></body>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        runtime.eval("function cycle() { const f = document.createElement('iframe'); document.body.appendChild(f); const w = f.contentWindow; w.marker = {}; f.remove(); }").unwrap();
+        runtime.vm.collect_garbage();
+        let before = runtime.vm.heap_cell_count();
+        for _ in 0..32 {
+            runtime.eval("cycle()").unwrap();
+            runtime.pump_with_network_errors().unwrap();
+        }
+        runtime.vm.collect_garbage();
+        assert!(runtime.state.borrow().frames.active.is_empty());
+        // The DOM arena retains stable node identities and one wrapper per
+        // created element. Entire per-frame intrinsic graphs must not remain.
+        assert!(runtime.vm.heap_cell_count() <= before + 4 * 32);
+    }
+
+    #[test]
     fn initial_iframe_timers_use_the_child_window_and_are_cancelled_on_removal() {
         let page = LoadedPage::from_html(
             "https://example.test/",

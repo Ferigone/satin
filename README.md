@@ -19,6 +19,7 @@ Satin brings tabs, browsing history, zoom, and a persistent profile to a desktop
 | --- | --- |
 | Browse | HTTP and HTTPS pages, tabs, tab history, bookmarks, startup settings, and zoom |
 | Interact | Links, forms, JavaScript events, and DOM updates |
+| Read JSON and save files | Fetch, XHR and the scrollable JSON source viewer handle up to 64 MiB after decompression. Desktop downloads stream to disk with no file-size cap. [Limits and controls](docs/DESKTOP_DOWNLOADS_UX.md) |
 | Render | Text and images, CSS Flexbox and Grid, SVG, and Canvas 2D |
 | Play media | Progressive and segmented H.264/AAC MP4 playback on Windows |
 | Inspect | **F12** opens Console, Network, Elements, Sources, Performance and Application. [DevTools guide](docs/DEVTOOLS.md) |

@@ -58,7 +58,7 @@ use crate::{
 };
 use devtools_console::report_error;
 use navigation::{dynamic_scripts, module_tasks};
-use rust_browser_javascript::{ErrorKind, JsError, ObjectId, RootId, Value, Vm};
+use rust_browser_javascript::{ErrorKind, JsError, ObjectId, RootId, Value, Vm, VmLimits};
 use scheduler::schedule_timer;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant};
 
@@ -128,7 +128,8 @@ pub struct ScriptRuntime {
     vm: Vm,
     state: Shared,
     fetch: fetch::FetchHost,
-    next_stream_collection: usize,
+    next_collection_bytes: usize,
+    next_collection_cells: usize,
     forms: forms::FormHost,
     layout: layout_api::LayoutHost,
     intersections: intersection_observers::Observers,
@@ -141,6 +142,17 @@ pub struct ScriptRuntime {
 fn mark_dirty(state: &mut State) {
     state.dirty = true;
     state.revision = state.revision.wrapping_add(1);
+}
+
+/// Bound each web realm independently. A response, its UTF-16 string and its
+/// parsed data can coexist; ordinary interpreted JS has the standalone task budget.
+fn web_vm() -> Vm {
+    Vm::with_limits(VmLimits {
+        max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
+        max_heap_bytes: 512 * 1024 * 1024,
+        buffer_units_per_instruction: 1024,
+        ..VmLimits::default()
+    })
 }
 
 fn restrict_document_policy(vm: &mut Vm, state: &Shared, policy: DocumentPolicy) {
@@ -584,7 +596,7 @@ impl ScriptRuntime {
                 "DOM string data exceeds 16 MiB",
             ));
         }
-        let mut vm = Vm::new();
+        let mut vm = web_vm();
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
@@ -869,12 +881,14 @@ impl ScriptRuntime {
         let base_state = state.clone();
         fetch.set_base_resolver(Rc::new(move || document_base(&base_state.borrow())));
         fetch.set_document(&state);
-        let next_stream_collection = vm.estimated_heap_bytes() + 1024 * 1024;
+        let next_collection_bytes = vm.estimated_heap_bytes() + 1024 * 1024;
+        let next_collection_cells = vm.limits().max_heap_objects / 2;
         Ok(Self {
             vm,
             state,
             fetch,
-            next_stream_collection,
+            next_collection_bytes,
+            next_collection_cells,
             forms,
             layout,
             intersections,
@@ -1240,15 +1254,43 @@ impl ScriptRuntime {
             drain_microtask_queue(vm, &state)
         });
         report_unhandled(&mut self.vm, &self.state);
-        let bytes = self.vm.estimated_heap_bytes();
-        if collect
-            || self.vm.heap_cell_count() >= self.vm.limits().max_heap_objects / 2
-            || bytes >= self.next_stream_collection
-        {
-            self.vm.collect_garbage();
-            self.next_stream_collection = self.vm.estimated_heap_bytes() + 1024 * 1024;
-        }
+        self.collect_after_task(collect);
         result
+    }
+
+    fn collect_after_task(&mut self, eager: bool) {
+        const MIB: usize = 1024 * 1024;
+        const LARGE_HEAP: usize = 16 * MIB;
+
+        let bytes = self.vm.estimated_heap_bytes();
+        if !(eager && bytes < LARGE_HEAP)
+            && bytes < self.next_collection_bytes
+            && self.vm.heap_cell_count() < self.next_collection_cells
+        {
+            return;
+        }
+        self.vm.collect_garbage();
+        let live = self.vm.estimated_heap_bytes();
+        let limits = self.vm.limits();
+        if live < LARGE_HEAP {
+            self.next_collection_bytes = live + MIB;
+            self.next_collection_cells = limits.max_heap_objects / 2;
+            return;
+        }
+        // A retained manifest may survive thousands of small document tasks.
+        // Trace it again after measurable allocation, with less headroom when
+        // close to either hard VM limit. No execution budget resets occur here.
+        let threshold = |used: usize, cap: usize, min_step: usize, max_step: usize| {
+            let growth = (used / 8).clamp(min_step, max_step);
+            used.saturating_add(growth.min((cap.saturating_sub(used) / 2).max(1)))
+        };
+        self.next_collection_bytes = threshold(live, limits.max_heap_bytes, MIB, 16 * MIB);
+        self.next_collection_cells = threshold(
+            self.vm.heap_cell_count(),
+            limits.max_heap_objects,
+            512,
+            4096,
+        );
     }
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
@@ -1446,7 +1488,7 @@ impl ScriptRuntime {
                 .update(&self.layout, &self.state, timestamp);
         }
         report_unhandled(&mut self.vm, &self.state);
-        self.vm.collect_garbage();
+        self.collect_after_task(true);
         Ok(())
     }
     pub fn snapshot(&self, page: &mut LoadedPage) -> bool {
@@ -2618,6 +2660,37 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::ExecutionLimit);
         assert_eq!(runtime.eval("1+2").unwrap(), Value::from(3));
     }
+    #[test]
+    fn large_live_document_collects_on_growth_and_leaves_idle_pumps_alone() {
+        let page = LoadedPage::from_html("https://example.test/", "<body></body>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let retained = runtime
+            .vm
+            .finish_buffer_string(vec![b'x' as u16; 9 * 1024 * 1024])
+            .unwrap();
+        runtime.vm.set_global("catalog", retained).unwrap();
+        runtime.pump_with_network_errors().unwrap();
+        let baseline = runtime.vm.heap_cell_count();
+        let before = runtime.next_collection_bytes;
+        for _ in 0..32 {
+            let _ = runtime.vm.new_object();
+        }
+        let with_garbage = runtime.vm.heap_cell_count();
+        runtime.pump_with_network_errors().unwrap();
+        assert_eq!(runtime.next_collection_bytes, before);
+        assert!(runtime.vm.heap_cell_count() >= with_garbage);
+        // Exhaust the object allocation interval with unreachable objects.
+        while runtime.vm.heap_cell_count() < runtime.next_collection_cells {
+            let _ = runtime.vm.new_object();
+        }
+        runtime.pump_with_network_errors().unwrap();
+        assert!(runtime.vm.heap_cell_count() <= baseline + 4);
+        assert_eq!(
+            runtime.eval("catalog.length").unwrap(),
+            Value::from(9 * 1024 * 1024)
+        );
+    }
+
     #[test]
     fn node_identity_mutations_events_and_roots_survive_gc() {
         let mut page = LoadedPage::from_html(

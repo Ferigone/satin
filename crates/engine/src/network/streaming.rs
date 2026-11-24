@@ -1,6 +1,7 @@
 //! Fetch exposes authorized headers before the response body is buffered.
 use super::{
-    FETCH_BODY_LIMIT, FetchError, UploadBody, WebRequest, WebResponse, interrupted_fetch, net_error,
+    FETCH_RESPONSE_BODY_LIMIT, FetchError, UploadBody, WebRequest, WebResponse, interrupted_fetch,
+    net_error,
 };
 use crate::{
     Loader,
@@ -146,7 +147,12 @@ impl FetchTransfer {
             let Some(chunk) = chunk else {
                 return Ok(Some(received));
             };
+            // reqwest yields decoded chunks, including when Content-Length
+            // described compressed bytes or was absent on the wire.
             received = received.saturating_add(chunk.len() as u64);
+            if received > FETCH_RESPONSE_BODY_LIMIT as u64 {
+                return Err(FetchError::limit("Fetch response body exceeds 64 MiB"));
+            }
             let mut first = Some(permit);
             for piece in chunk.chunks(FETCH_CHUNK_BYTES) {
                 let slot = match first.take() {
@@ -206,7 +212,14 @@ impl Loader {
         let control =
             RequestControl::new(generation, deadline).with_request(request.signal.as_ref());
         let opened = self
-            .open_fetch(request, &control, FETCH_BODY_LIMIT, true, upload, policy)
+            .open_fetch(
+                request,
+                &control,
+                FETCH_RESPONSE_BODY_LIMIT,
+                true,
+                upload,
+                policy,
+            )
             .await?;
         let Some(response) = opened.transfer else {
             return Ok((opened.metadata.into(), None));

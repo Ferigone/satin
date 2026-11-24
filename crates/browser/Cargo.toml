@@ -7,7 +7,7 @@ build = "build.rs"
 
 [dependencies]
 rust-browser-engine = { path = "../engine" }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }
 winit = "0.30"
 softbuffer = "0.4"
 arboard = { version = "3", default-features = false }
@@ -24,11 +24,14 @@ rustls-platform-verifier = "0.7"
 ring = "0.17"
 semver = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.62.2", features = ["Win32_Graphics_Dxgi_Common", "Win32_Graphics_Imaging", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_UI_Shell"] }
 windows-core = "=0.62.2"
-windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_UI_Controls_Dialogs"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_UI_Controls_Dialogs", "Win32_Storage_FileSystem"] }
 

@@ -19,6 +19,7 @@ struct Parser<'a> {
     source: &'a [u16],
     pos: usize,
     records: Option<Records>,
+    punctuation_credit: usize,
 }
 impl Vm {
     /// Intrinsic JSON parser, independent of the mutable global JSON object.
@@ -51,7 +52,14 @@ impl Parser<'_> {
         self.source.get(self.pos).copied()
     }
     fn bump(&mut self, vm: &mut Vm) -> Result<Option<u16>, JsError> {
-        vm.tick()?;
+        // These are grammar units in a native scan. Parsing never calls user
+        // code until the complete value has been built; revivers pay script
+        // instruction costs when they subsequently run.
+        if self.punctuation_credit == 0 {
+            vm.tick()?;
+            self.punctuation_credit = vm.limits().buffer_units_per_instruction;
+        }
+        self.punctuation_credit -= 1;
         let value = self.peek();
         if value.is_some() {
             self.pos += 1;
@@ -60,7 +68,14 @@ impl Parser<'_> {
     }
     fn whitespace(&mut self, vm: &mut Vm) -> Result<(), JsError> {
         while matches!(self.peek(), Some(9 | 10 | 13 | 32)) {
-            self.bump(vm)?;
+            let end = self.source.len().min(self.pos.saturating_add(4096));
+            let batch = &self.source[self.pos..end];
+            let n = batch
+                .iter()
+                .position(|c| !matches!(c, 9 | 10 | 13 | 32))
+                .unwrap_or(batch.len());
+            vm.charge_buffer_work(n)?;
+            self.pos += n;
         }
         Ok(())
     }
@@ -115,47 +130,66 @@ impl Parser<'_> {
         };
         Ok(unit)
     }
+    /// Scan literal UTF-16 in bounded batches. Escapes and control characters
+    /// still go through the JSON grammar, including isolated surrogate units.
+    fn string_run(&mut self, vm: &mut Vm, decoded_len: Option<usize>) -> Result<(), JsError> {
+        let start = self.pos;
+        while self.pos < self.source.len() {
+            let end = self.source.len().min(self.pos.saturating_add(4096));
+            let batch = &self.source[self.pos..end];
+            let n = batch
+                .iter()
+                .position(|&unit| matches!(unit, 0..=31 | 34 | 92))
+                .unwrap_or(batch.len());
+            vm.charge_buffer_work(n)?;
+            self.pos += n;
+            if decoded_len.is_some() || vm.limits().buffer_units_per_instruction == 1 {
+                vm.ensure_string_allocation(
+                    decoded_len.unwrap_or(0).saturating_add(self.pos - start),
+                )?;
+            } else {
+                // An unescaped token is copied directly into final UTF-16
+                // storage. There is no growing Vec or second result allocation.
+                let units = self.pos - start;
+                vm.check_string_length(units)?;
+                vm.ensure_allocation(units.saturating_mul(2).saturating_add(128))?;
+            }
+            if n != batch.len() {
+                break;
+            }
+        }
+        Ok(())
+    }
     fn string(&mut self, vm: &mut Vm) -> Result<JsString, JsError> {
         self.expect(vm, 34)?;
-        let start = self.pos;
-        let prefix_end = loop {
+        let mut decoded: Option<Vec<u16>> = None;
+        loop {
+            let start = self.pos;
+            let decoded_len = decoded.as_ref().map_or(0, Vec::len);
+            self.string_run(vm, decoded.as_ref().map(Vec::len))?;
             let end = self.pos;
             match self.string_unit(vm)? {
                 34 => {
-                    // Copy into final storage without a temporary decoded Vec.
-                    let units = &self.source[start..end];
-                    vm.ensure_string_allocation(units.len())?;
-                    vm.consume_work(units.len())?;
-                    let value = vm.checked_string(JsString::from_utf16_slice(units))?;
+                    let run = &self.source[start..end];
+                    let value = if let Some(mut decoded) = decoded {
+                        decoded.extend_from_slice(run);
+                        vm.finish_buffer_string(decoded)?
+                    } else {
+                        vm.charge_buffer_work(run.len())?;
+                        vm.checked_string(JsString::from_utf16_slice(run))?
+                    };
                     return Ok(value.as_string().unwrap().clone());
                 }
-                92 => break end,
-                // Keep the same output check and its error ordering even though
-                // no temporary decoded buffer has been allocated yet.
-                _ => vm.ensure_string_allocation(self.pos - start)?,
+                92 => {
+                    let unit = self.string_escape(vm)?;
+                    let run = &self.source[start..end];
+                    vm.ensure_string_allocation(decoded_len.saturating_add(run.len() + 1))?;
+                    let out = decoded.get_or_insert_with(Vec::new);
+                    out.extend_from_slice(run);
+                    out.push(unit);
+                }
+                _ => unreachable!("string_run stops at a quote, escape, or invalid control"),
             }
-        };
-
-        let first = self.string_escape(vm)?;
-        let prefix = &self.source[start..prefix_end];
-        let len = prefix.len() + 1;
-        vm.ensure_string_allocation(len)?;
-        // Match the geometric growth of the decoded buffer without replaying
-        // the validated prefix or growing a vector one code unit at a time.
-        let mut units = Vec::with_capacity(len.next_power_of_two().max(4));
-        units.extend_from_slice(prefix);
-        units.push(first);
-        loop {
-            let unit = match self.string_unit(vm)? {
-                34 => {
-                    let value = vm.finish_string(units)?;
-                    return Ok(value.as_string().unwrap().clone());
-                }
-                92 => self.string_escape(vm)?,
-                unit => unit,
-            };
-            vm.ensure_string_allocation(units.len().saturating_add(1))?;
-            units.push(unit);
         }
     }
     fn number(&mut self, vm: &mut Vm) -> Result<Value, JsError> {
@@ -322,6 +356,7 @@ fn parse(vm: &mut Vm, source: &JsString, reviver: Value) -> Result<Value, JsErro
         source: source.as_utf16(),
         pos: 0,
         records: if revive { Some(BTreeMap::new()) } else { None },
+        punctuation_credit: 0,
     };
     let root = parser.value(vm)?;
     parser.whitespace(vm)?;

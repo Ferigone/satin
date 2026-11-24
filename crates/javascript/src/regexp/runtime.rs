@@ -93,14 +93,24 @@ pub(crate) fn install(vm: &mut Vm) {
             }
         },
     );
-    method(vm, prototype.clone(), "exec", 1, |vm, this, args| {
+    let intrinsic_exec = method(vm, prototype.clone(), "exec", 1, |vm, this, args| {
         require_program(vm, &this)?;
         let input = vm.to_string(&arg(args, 0))?;
         builtin_exec(vm, this, input)
     });
+    vm.realm.regexp_exec = intrinsic_exec.as_object();
+    vm.root(intrinsic_exec);
     method(vm, prototype.clone(), "test", 1, |vm, this, args| {
         require_object(&this)?;
         let input = vm.to_string(&arg(args, 0))?;
+        if super::bulk::Search::eligible(vm, &input)
+            && let Some(program) = plain_exec_program(vm, &this)
+            && !program.flags.has(Flags::GLOBAL | Flags::STICKY)
+            && let Some(search) = super::bulk::Search::new(vm, &program)?
+            && let Some(matched) = search.is_match(vm, input.as_utf16())?
+        {
+            return Ok(Value::Bool(matched));
+        }
         Ok(Value::Bool(exec(vm, this, input)? != Value::Null))
     });
     method(vm, prototype.clone(), "toString", 0, |vm, this, _| {
@@ -176,6 +186,40 @@ fn native_program(vm: &Vm, receiver: &Value) -> Option<Rc<Program>> {
         Some(program.clone())
     } else {
         None
+    }
+}
+
+// Skipping repeated Get("exec") and ToLength(lastIndex) is only observable
+// when user accessors, conversions or a custom method participate.
+pub(super) fn plain_exec_program(vm: &Vm, receiver: &Value) -> Option<Rc<Program>> {
+    use crate::heap::PropertyKind;
+    let program = native_program(vm, receiver)?;
+    let id = receiver.as_object()?;
+    let prototype = vm.realm.regexp_prototype?;
+    if vm.heap.object(id).ok()?.prototype != Some(prototype) {
+        return None;
+    }
+    let last_index = vm.own_descriptor(id, &"lastIndex".into()).ok()??;
+    if !matches!(
+        last_index.kind,
+        PropertyKind::Data {
+            value: Value::Number(_),
+            ..
+        }
+    ) {
+        return None;
+    }
+    let key = "exec".into();
+    let descriptor = vm
+        .own_descriptor(id, &key)
+        .ok()?
+        .or_else(|| vm.own_descriptor(prototype, &key).ok().flatten())?;
+    match descriptor.kind {
+        PropertyKind::Data {
+            value: Value::Object(function),
+            ..
+        } if Some(function) == vm.realm.regexp_exec => Some(program),
+        _ => None,
     }
 }
 

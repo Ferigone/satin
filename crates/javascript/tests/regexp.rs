@@ -344,3 +344,99 @@ fn parsing_matching_and_dropping_a_pattern_on_a_one_mib_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn large_ascii_matches_preserve_ecmascript_priority_boundaries_and_empty_matches() {
+    let mut regular = Vm::with_limits(VmLimits {
+        max_instructions: 16_000_000,
+        ..Default::default()
+    });
+    let mut document = Vm::with_limits(VmLimits {
+        buffer_units_per_instruction: 256,
+        max_instructions: 16_000_000,
+        ..Default::default()
+    });
+    let input = format!(
+        "{} aaab aabb bab true false 44e+ 44e+4 \"source\" ",
+        "#".repeat(4096)
+    );
+    for vm in [&mut regular, &mut document] {
+        vm.set_global("input", Value::from(input.as_str())).unwrap();
+    }
+    for pattern in [
+        "a|ab",
+        "ab|a",
+        "a+?b",
+        "(a|ab)+",
+        "(?:a?)*b",
+        "(a)(b)\\2",
+        r#"\d+(?:[eE][+\-]?\d+)?"#,
+        r#""[^"\\\n\r]*"|true|false|null"#,
+        r#"^(\s|\u00a0)+|(\s|\u00a0)+$"#,
+        "(?:^|$)",
+        r#"^[^\n]*$"#,
+    ] {
+        document.set_global("pattern", pattern.into()).unwrap();
+        regular.set_global("pattern", pattern.into()).unwrap();
+        for script in [
+            r#"var re = new RegExp(pattern, 'g'); input.replace(re, '@') + ':' + re.lastIndex"#,
+            r#"new RegExp(pattern).test(input)"#,
+        ] {
+            assert_eq!(
+                document.eval(script).unwrap(),
+                regular.eval(script).unwrap(),
+                "{pattern}"
+            );
+        }
+    }
+}
+
+#[test]
+fn large_regexp_does_not_bypass_custom_exec_utf16_or_capture_replacements() {
+    let mut vm = Vm::with_limits(VmLimits {
+        buffer_units_per_instruction: 256,
+        max_instructions: 16_000_000,
+        ..Default::default()
+    });
+    let input = format!("{}xé", "#".repeat(4096));
+    vm.set_global("input", Value::from(input.as_str())).unwrap();
+    assert_eq!(
+        vm.eval(r#"input.replace(/(x)/g, '<$1>').slice(-4)"#)
+            .unwrap(),
+        "<x>é".into()
+    );
+    assert_eq!(
+        vm.eval(r#"input.replace(/x|é/g, '!').slice(-2)"#).unwrap(),
+        "!!".into()
+    );
+    assert_eq!(
+        vm.eval(
+            r#"var calls = 0, re = /x/g;
+        Object.defineProperty(re, 'exec', { get() { calls++; return RegExp.prototype.exec; } });
+        input.replace(re, '!').slice(-2) + ':' + calls + ':' + re.lastIndex"#
+        )
+        .unwrap(),
+        "!é:2:0".into()
+    );
+    assert_eq!(
+        vm.eval(
+            r#"var converted = 0, r = /x/; r.lastIndex = {valueOf(){converted++; return 0;}};
+        r.test(input) + ':' + converted"#
+        )
+        .unwrap(),
+        "true:1".into()
+    );
+}
+
+#[test]
+fn large_regexp_speculative_scans_still_consume_the_vm_work_budget() {
+    let mut vm = Vm::with_limits(VmLimits {
+        buffer_units_per_instruction: 256,
+        max_instructions: 5000,
+        ..Default::default()
+    });
+    vm.set_global("input", Value::from("a".repeat(20_000)))
+        .unwrap();
+    let result = vm.eval("input.replace(/a*b|a/g, 'x')");
+    assert_eq!(result.unwrap_err().kind, ErrorKind::ExecutionLimit);
+}

@@ -20,6 +20,7 @@ pub(crate) struct NetworkScope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RequestKind {
+    Download,
     Navigation,
     Resource,
     // Both enter the same transport path without an API source tag.
@@ -179,6 +180,7 @@ impl NetworkRow {
     pub(crate) fn category(&self) -> &'static str {
         self.resource_type.unwrap_or(match self.key.kind {
             RequestKind::Navigation => "Document",
+            RequestKind::Download => "Download",
             RequestKind::Resource => "Resource",
             RequestKind::FetchOrXhr => "Fetch/XHR",
         })

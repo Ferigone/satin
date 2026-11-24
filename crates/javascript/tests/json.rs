@@ -113,6 +113,44 @@ fn verbatim_json_strings_keep_copy_work_and_heap_preflight() {
     assert_eq!(vm.parse_json(&text).unwrap_err().kind, ErrorKind::HeapLimit);
 }
 #[test]
+fn batched_json_scans_obey_the_task_budget_across_calls() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 500,
+        buffer_units_per_instruction: 256,
+        ..VmLimits::default()
+    });
+    let source = JsString::from(format!(r#""{}""#, "x".repeat(40_000)));
+    assert_eq!(
+        vm.parse_json(&source).unwrap().as_string().unwrap().len(),
+        40_000
+    );
+    let err = vm
+        .with_task(|vm| {
+            vm.parse_json(&source)?;
+            vm.parse_json(&source)
+        })
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ExecutionLimit);
+    assert_eq!(
+        vm.eval("while (true) {}").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
+    );
+
+    // Boundary between a full scan batch and a grammar character.
+    for n in [4095, 4096, 4097] {
+        let body = "a".repeat(n);
+        let escaped = JsString::from(format!(r#""{body}\n\ud800""#));
+        let text = vm.parse_json(&escaped).unwrap();
+        let units = text.as_string().unwrap().as_utf16();
+        assert_eq!(&units[n..], &[10, 0xd800]);
+        let invalid = JsString::from(format!("\"{body}\t\""));
+        assert_eq!(
+            vm.parse_json(&invalid).unwrap_err().kind,
+            ErrorKind::SyntaxError
+        );
+    }
+}
+#[test]
 fn proto_is_an_ordinary_json_data_property() {
     assert_eq!(
         run(

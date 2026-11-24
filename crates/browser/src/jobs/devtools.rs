@@ -33,6 +33,7 @@ pub(crate) struct Key {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Request {
     Navigate,
+    Download(u64),
     Resource(u64),
     /// A script Fetch job. There is no distinct XHR marker at this boundary.
     Fetch(u64),

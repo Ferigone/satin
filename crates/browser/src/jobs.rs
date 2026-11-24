@@ -20,12 +20,14 @@ use tokio::{
     sync::{Mutex, Semaphore, mpsc},
 };
 
-use self::devtools::{Key, Observer, Phase, Request, ResponseDetails};
+use self::devtools::{Key, Observer, Phase, Request, ResponseDetails, Trace};
+use rust_browser_engine::loader::DownloadResponse;
 
 const FETCH_TRANSFERS: usize = 64;
 
 pub(crate) enum Task {
     Navigate(Box<NavigationRequest>),
+    DownloadLink(Box<NavigationRequest>, String),
     Fetch(Box<FetchJob>),
     Resource(Box<ResourceLoad>),
 }
@@ -40,6 +42,13 @@ pub(crate) enum Payload {
     WorkerWake,
     Navigation(NavigationPart),
     NavigationError(String),
+    DownloadOffer {
+        response: OfferedDownload,
+        from_link: bool,
+    },
+    DownloadLinkError(String),
+    DownloadProgress(u64),
+    DownloadDone(Result<u64, String>),
     Fetch {
         id: u64,
         result: Result<StreamingResponse, FetchError>,
@@ -50,6 +59,41 @@ pub(crate) enum Payload {
         id: u64,
         result: Result<DocumentResource, String>,
     },
+}
+pub(crate) struct OfferedDownload {
+    pub response: DownloadResponse,
+    transfer: DownloadTrace,
+}
+
+// Dropping an offer (dismissed chooser, closed tab or stale navigation) ends its observation.
+struct DownloadTrace(Option<Trace>);
+
+impl Drop for DownloadTrace {
+    fn drop(&mut self) {
+        if let Some(trace) = self.0.take() {
+            trace.record(Phase::Cancelled);
+        }
+    }
+}
+
+impl OfferedDownload {
+    fn new(response: DownloadResponse, trace: Option<Trace>) -> Self {
+        if let Some(trace) = &trace {
+            let (url, status, content) = response.http_metadata();
+            let mut details = ResponseDetails::from_url(url.as_str());
+            details.mime = content.mime;
+            details.declared_bytes = content.declared_bytes;
+            trace.record(Phase::Response {
+                status: Some(status),
+                headers_at: Some(response.headers_at),
+                details,
+            });
+        }
+        Self {
+            response,
+            transfer: DownloadTrace(trace),
+        }
+    }
 }
 pub(crate) struct Message {
     pub tab: u64,
@@ -63,6 +107,9 @@ pub(crate) struct Workers {
     uploads: mpsc::Sender<QueuedJob>,
     handle: Handle,
     shutdown: CancelSignal,
+    results: mpsc::Sender<Message>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    downloads: Vec<tokio::task::JoinHandle<()>>,
 }
 
 struct QueuedJob {
@@ -139,6 +186,9 @@ impl Workers {
             resources: pool(),
             fetches: pool(),
             uploads: pool(),
+            results: results.clone(),
+            wake: wake.clone(),
+            downloads: Vec::new(),
             handle,
             shutdown,
         })
@@ -151,7 +201,7 @@ impl Workers {
 
     pub fn try_submit(&self, job: Job) -> Result<(), TrySendError<Job>> {
         let sender = match &job.task {
-            Task::Navigate(_) => &self.pages,
+            Task::Navigate(_) | Task::DownloadLink(_, _) => &self.pages,
             Task::Resource(_) => &self.resources,
             Task::Fetch(job) if job.upload.is_some() => &self.uploads,
             Task::Fetch(_) => &self.fetches,
@@ -165,6 +215,44 @@ impl Workers {
                 mpsc::error::TrySendError::Full(queued) => TrySendError::Full(queued.job),
                 mpsc::error::TrySendError::Closed(queued) => TrySendError::Disconnected(queued.job),
             })
+    }
+
+    pub fn save_download(
+        &mut self,
+        tab: u64,
+        id: u64,
+        path: std::path::PathBuf,
+        offer: OfferedDownload,
+    ) -> CancelSignal {
+        let token = self.shutdown.child_token();
+        let cancel = token.clone();
+        let results = self.results.clone();
+        let wake = self.wake.clone();
+        let shutdown = self.shutdown.clone();
+        self.downloads.retain(|task| !task.is_finished());
+        self.downloads.push(self.handle.spawn(async move {
+            let OfferedDownload{response,mut transfer}=offer;
+            let mut observed=Instant::now();
+            let result=crate::downloads::save(response,&path,&cancel,|count| {
+                if observed.elapsed() >= std::time::Duration::from_millis(200)
+                    && results.try_send(Message{tab,navigation:id,payload:Payload::DownloadProgress(count)}).is_ok() {
+                    observed=Instant::now(); wake();
+                }
+            }).await;
+            if let Some(trace) = transfer.0.take() {
+                trace.record(match &result {
+                    Ok(n) => Phase::Finished {body_bytes: Some(*n)},
+                    Err(_) if cancel.is_cancelled() => Phase::Cancelled,
+                    Err(_) => Phase::Failed,
+                });
+                wake();
+            }
+            tokio::select!{
+                ()=shutdown.cancelled()=>{},
+                _=results.send(Message{tab,navigation:id,payload:Payload::DownloadDone(result)})=>wake(),
+            }
+        }));
+        token
     }
 
     pub fn receive_until(
@@ -187,6 +275,13 @@ impl Workers {
 impl Drop for Workers {
     fn drop(&mut self) {
         self.shutdown.cancel();
+        if !self.downloads.is_empty() {
+            self.handle.block_on(async {
+                for task in self.downloads.drain(..) {
+                    let _ = task.await;
+                }
+            });
+        }
     }
 }
 
@@ -237,7 +332,7 @@ async fn run_job(
             }
             let mut body_bytes = None;
             let result = loader
-                .stream_navigation_cancellable(&request, &cancel, deadline, |part| {
+                .stream_desktop_navigation(&request, &cancel, deadline, |part| {
                     if let (Some(trace), NavigationPart::Open(opened)) = (trace.as_ref(), &part)
                         && let Some((status, _)) = opened.http_response()
                     {
@@ -266,9 +361,20 @@ async fn run_job(
                     }
                 })
                 .await;
+            if let Ok(Some(response)) = result {
+                let response = OfferedDownload::new(response, trace);
+                if !cancel.is_cancelled() {
+                    terminal.send(message(Payload::DownloadOffer {
+                        response,
+                        from_link: false,
+                    }));
+                    wake();
+                }
+                return;
+            }
             if let Some(trace) = trace {
                 trace.record(match &result {
-                    Ok(()) => Phase::Finished { body_bytes },
+                    Ok(_) => Phase::Finished { body_bytes },
                     Err(_) if cancel.is_cancelled() => Phase::Cancelled,
                     Err(_) => Phase::Failed,
                 });
@@ -278,8 +384,40 @@ async fn run_job(
                 }
             }
             match result {
-                Ok(()) => return,
+                Ok(_) => return,
                 Err(error) => Payload::NavigationError(error),
+            }
+        }
+        Task::DownloadLink(request, hint) => {
+            static NEXT_LINK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let trace = observer.and_then(|observer| {
+                let id = NEXT_LINK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                observer.begin(
+                    key(Request::Download(id)),
+                    &request.method,
+                    &request.url,
+                    Some("Download"),
+                )
+            });
+            match loader
+                .open_download_link(&request, &hint, &cancel, queued.queued + NAVIGATION_TIMEOUT)
+                .await
+            {
+                Ok(response) => Payload::DownloadOffer {
+                    response: OfferedDownload::new(response, trace),
+                    from_link: true,
+                },
+                Err(e) => {
+                    if let Some(trace) = trace {
+                        trace.record(if cancel.is_cancelled() {
+                            Phase::Cancelled
+                        } else {
+                            Phase::Failed
+                        });
+                        wake();
+                    }
+                    Payload::DownloadLinkError(e)
+                }
             }
         }
         Task::Fetch(job) => {

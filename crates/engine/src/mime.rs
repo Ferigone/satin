@@ -145,6 +145,10 @@ impl MimeType {
         }
         out
     }
+    pub fn json(&self) -> bool {
+        matches!(self.essence.as_str(), "application/json" | "text/json")
+            || self.essence.ends_with("+json")
+    }
     pub fn javascript(&self) -> bool {
         matches!(
             self.essence.as_str(),

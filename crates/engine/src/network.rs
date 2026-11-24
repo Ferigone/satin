@@ -26,7 +26,10 @@ pub use upload::{FetchJob, UploadBody, UploadDemand};
 pub(crate) use upload::{UploadSender, upload_pipe};
 use url::Url;
 
+/// Maximum size of an outgoing request body.
 pub const FETCH_BODY_LIMIT: usize = 4 * 1024 * 1024;
+/// Maximum decoded response size for Fetch and XMLHttpRequest.
+pub const FETCH_RESPONSE_BODY_LIMIT: usize = 64 * 1024 * 1024;
 pub const FETCH_HEADER_LIMIT: usize = 64 * 1024;
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(18);
 pub type HeaderList = Vec<(String, String)>;
@@ -603,7 +606,7 @@ impl Loader {
         self.transport_handle().block_on(self.fetch_with_policy(
             request,
             &control,
-            FETCH_BODY_LIMIT,
+            FETCH_RESPONSE_BODY_LIMIT,
             true,
         ))
     }
@@ -615,7 +618,7 @@ impl Loader {
         deadline: Instant,
     ) -> Result<WebResponse, FetchError> {
         let control = RequestControl::new(cancel, deadline).with_request(request.signal.as_ref());
-        self.fetch_with_policy(request, &control, FETCH_BODY_LIMIT, true)
+        self.fetch_with_policy(request, &control, FETCH_RESPONSE_BODY_LIMIT, true)
             .await
     }
 

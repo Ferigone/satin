@@ -1,4 +1,5 @@
 //! Independent ECMAScript regular-expression compiler and matcher.
+mod bulk;
 mod case;
 mod operations;
 mod pattern;

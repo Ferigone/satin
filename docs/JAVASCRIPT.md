@@ -100,6 +100,8 @@ Patterns support alternation, greedy and lazy quantifiers, character classes and
 
 The VM honors overridden `exec`, `Symbol.match`, `Symbol.matchAll`, `Symbol.search`, `Symbol.replace`, `Symbol.split`, and species constructors. String methods include matching, lazy `matchAll`, search, split with captures, and string or callback replacements. RegExp string iterators retain a traced matcher and the input until they finish. `RegExp.escape`, source formatting, and the browser compatibility method `compile` are available.
 
+Large document strings can use a bounded deterministic automaton for boolean tests and literal replacements on ordinary RegExp instances. Satin translates eligible ECMAScript expressions into ASCII character classes and charges each searched or copied span to the VM’s native work budget. Capture substitutions, custom execution methods, unsupported flags, backreferences and lookarounds use the ordinary matcher.
+
 The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. Unicode property escapes and the `v` flag currently raise `UnsupportedFeature`. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
 
 ## Keyed collections

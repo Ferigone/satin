@@ -290,7 +290,7 @@ fn run_worker(
     if connection.cancelled.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let mut vm = Vm::new();
+    let mut vm = super::web_vm();
     vm.set_wasm_compilation_allowed(source.policy.allows_wasm_compilation());
     vm.set_interrupt_flag(connection.cancelled.clone());
     let parent = connection.clone();

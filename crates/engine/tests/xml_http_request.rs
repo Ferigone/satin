@@ -1,6 +1,9 @@
 use rust_browser_engine::{
     LoadedPage, Loader,
-    network::{CancelSignal, FETCH_TIMEOUT, ResponseType, WebResponse},
+    network::{
+        CancelSignal, FETCH_BODY_LIMIT, FETCH_RESPONSE_BODY_LIMIT, FETCH_TIMEOUT, FetchErrorKind,
+        ResponseType, WebRequest, WebResponse,
+    },
     script::ScriptRuntime,
 };
 use rust_browser_javascript::Value;
@@ -80,6 +83,173 @@ fn synchronous_text_bootstrap_reads_filtered_response_before_send_returns() {
         )
     );
     server.join().unwrap();
+}
+
+// A tiny compressed reply exercises the decoded byte limit on loopback.
+fn gzip_json(bytes: usize) -> Vec<u8> {
+    let mut encoded = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let padding = [b' '; 32 * 1024];
+    let data = br#"{"ok":true}"#;
+    let mut left = bytes - data.len();
+    while left > 0 {
+        let n = left.min(padding.len());
+        encoded.write_all(&padding[..n]).unwrap();
+        left -= n;
+    }
+    encoded.write_all(data).unwrap();
+    let body = encoded.finish().unwrap();
+    let mut reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    ).into_bytes();
+    reply.extend_from_slice(&body);
+    reply
+}
+
+#[test]
+fn synchronous_xhr_accepts_exactly_64_mib_after_decompression() {
+    let (address, server) = serve(|request| {
+        assert!(request.starts_with("GET /manifest.json "));
+        gzip_json(FETCH_RESPONSE_BODY_LIMIT)
+    });
+    let mut runtime = realm(&format!("http://{address}/page"), "");
+    assert_eq!(runtime.eval(
+        "var xhr = new XMLHttpRequest(); xhr.open('GET', '/manifest.json', false); xhr.send();
+         xhr.status === 200 && xhr.responseText.length === 67108864 &&
+         xhr.responseText.charAt(67108863) === '}' && xhr.response === xhr.responseText"
+    ).unwrap(), Value::Bool(true));
+    server.join().unwrap();
+}
+
+#[test]
+fn buffered_fetch_rejects_oversized_decoded_response_and_preserves_upload_cap() {
+    let (address, server) = serve(|_| gzip_json(FETCH_RESPONSE_BODY_LIMIT + 1));
+    let url = url::Url::parse(&format!("http://{address}/large")).unwrap();
+    let mut request = WebRequest::get(url.clone(), url);
+    let loader = Loader::new().unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        loader.web_fetch(&request, &stop).unwrap_err().kind,
+        FetchErrorKind::Limit
+    );
+    server.join().unwrap();
+    request.method = "POST".into();
+    request.body = Some(Arc::new(vec![0; FETCH_BODY_LIMIT + 1]));
+    assert_eq!(request.validate().unwrap_err().kind, FetchErrorKind::Limit);
+}
+
+#[test]
+fn streamed_fetch_enforces_the_same_limit_on_decoded_chunks() {
+    let (address, server) = serve(|_| gzip_json(FETCH_RESPONSE_BODY_LIMIT + 1));
+    let url = url::Url::parse(&format!("http://{address}/large")).unwrap();
+    let request = WebRequest::get(url.clone(), url);
+    let loader = Loader::new().unwrap();
+    loader.transport_handle().block_on(async {
+        let (response, transfer) = loader
+            .open_web_fetch(
+                &request,
+                &CancelSignal::new(),
+                Instant::now() + FETCH_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        let mut body = response.transfer.unwrap();
+        let producer = tokio::spawn(transfer.unwrap().run(|| async {}));
+        let mut delivered = 0;
+        loop {
+            match body.read() {
+                std::task::Poll::Ready(Ok(Some(chunk))) => delivered += chunk.len(),
+                std::task::Poll::Ready(Err(error)) => {
+                    assert_eq!(error.kind, FetchErrorKind::Limit);
+                    break;
+                }
+                std::task::Poll::Ready(Ok(None)) => panic!("oversized response reported EOF"),
+                std::task::Poll::Pending => tokio::task::yield_now().await,
+            }
+        }
+        assert!((FETCH_BODY_LIMIT..=FETCH_RESPONSE_BODY_LIMIT).contains(&delivered));
+        producer.await.unwrap();
+    });
+    server.join().unwrap();
+}
+
+#[test]
+fn async_xhr_buffers_large_response_once_and_rejects_oversized_replacement() {
+    const BIG: usize = 7 * 1024 * 1024;
+    let mut runtime = realm("https://example.test/page", "");
+    runtime.eval(
+        "var xhr = new XMLHttpRequest(), progress = false, error = false;
+         xhr.onprogress = function(e) {
+           if (e.loaded === 7340032) progress = xhr.responseText === xhr.response && xhr.responseText.length === e.loaded;
+         };
+         xhr.onerror = function() { error = true; };
+         xhr.open('GET', '/manifest.json'); xhr.send();"
+    ).unwrap();
+    let id = runtime.take_network_jobs().pop().unwrap().id;
+    let mut response = buffered_response("/manifest.json", &[]);
+    response.body = Some(Arc::new(vec![b'x'; BIG]));
+    runtime.complete_network(id, Ok(response)).unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime
+            .eval("xhr.status === 200 && progress && !error && xhr.responseText.length === 7340032")
+            .unwrap(),
+        Value::Bool(true)
+    );
+    runtime
+        .eval("xhr.open('GET', '/oversize'); xhr.send()")
+        .unwrap();
+    let id = runtime.take_network_jobs().pop().unwrap().id;
+    let mut response = buffered_response("/oversize", &[]);
+    response.body = Some(Arc::new(vec![b'x'; FETCH_RESPONSE_BODY_LIMIT + 1]));
+    runtime.complete_network(id, Ok(response)).unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime
+            .eval("error && xhr.status === 0 && xhr.responseText === '' && xhr.readyState === 4")
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn concurrent_xhr_body_budget_recovers_after_aborting_the_owners() {
+    let mut runtime = realm("https://example.test/page", "");
+    runtime.eval(
+        "function request() { var xhr = new XMLHttpRequest(); xhr.open('GET', '/data'); xhr.send(); return xhr; }
+         var a = request(), b = request(), c = request(), failed = false;
+         c.onerror = function() { failed = true; };"
+    ).unwrap();
+    let jobs = runtime.take_network_jobs();
+    // The two 64 MiB bodies are received at HEADERS_RECEIVED and have not run
+    // their queued body tasks. A third allocation would exceed this realm's cap.
+    let full = Arc::new(vec![b'x'; FETCH_RESPONSE_BODY_LIMIT]);
+    for job in &jobs[..2] {
+        let mut response = buffered_response("/data", &[]);
+        response.body = Some(full.clone());
+        runtime.complete_network(job.id, Ok(response)).unwrap();
+    }
+    runtime
+        .complete_network(jobs[2].id, Ok(buffered_response("/data", b"x")))
+        .unwrap();
+    runtime.eval("a.abort(); b.abort();").unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime
+            .eval("failed && c.status === 0 && c.responseText === ''")
+            .unwrap(),
+        Value::Bool(true)
+    );
+    runtime.eval("var d = request();").unwrap();
+    let job = runtime.take_network_jobs().pop().unwrap();
+    runtime
+        .complete_network(job.id, Ok(buffered_response("/data", b"recovered")))
+        .unwrap();
+    runtime.pump_with_network_errors().unwrap();
+    assert_eq!(
+        runtime.eval("d.responseText").unwrap(),
+        Value::from("recovered")
+    );
 }
 
 #[test]

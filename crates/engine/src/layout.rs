@@ -375,7 +375,11 @@ impl Layout {
             .elements
             .iter()
             .fold(line.y, |h, e| h.max(e.rect.y + e.rect.height));
-        Ok(b.finish_visual(height.max(1.), background, scroll, observe_intersections))
+        let mut layout = b.finish_visual(height.max(1.), background, scroll, observe_intersections);
+        if let Some(json) = &page.raw_json {
+            json.lock().unwrap().paint_rows(&mut layout, fonts);
+        }
+        Ok(layout)
     }
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {
         let node = self.element_at(x, y)?;

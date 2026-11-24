@@ -1,51 +1,47 @@
-# Public legacy Test262 website probe
+# Running the legacy Test262 website
 
-`website.mjs` navigates to [the original public Test262 website](https://v8.github.io/test262/website/default.html) with fresh profiles. It runs the live site in each selected browser, without replacing assets, changing URLs, calling the site's controller from automation, or evaluating test source in Node. It does not run modern Test262 or produce a comparable score.
+Satin can run a chapter or the entire suite through the controls on the [original Test262 website](https://v8.github.io/test262/website/default.html). This is the legacy browser suite. The [modern Test262 runner](README.md) uses the pinned upstream JavaScript tests and a standalone Satin VM.
 
-Use Node 22.15+ and existing browser executables. No packages, browser installation, or desktop interaction are required. From the repository root (PowerShell):
+## Run a chapter in Satin
+
+Build the native browser, then run the website probe from the repository root with Node 22.15 or newer. These PowerShell examples use a Windows release build. Linux uses `target/release/rust-browser` and needs a display for the native window.
 
 ```powershell
-node tools/test262/website.mjs `
-  --satin 'target/release/rust-browser.exe' --native `
-  --chromium 'C:/Program Files/Google/Chrome/Application/chrome.exe' `
-  --chromium 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe' `
-  --until first --output target/test262/website
+cargo build --release --locked -p rust-browser
+node tools/test262/website.mjs --satin target/release/rust-browser.exe --chapter json/language.json
 ```
 
-Provide `--satin`, one or more `--chromium` paths, or both. Omit `--native` if hidden-window smoke mode is unavailable. `--satin-run-ms` changes the headless task budget (default 4,000 ms).
+The site’s default catalog lists `harness`, `language`, `annexB` and `built-ins`. Supply the chapter name, `json/NAME` or `json/NAME.json`. The probe opens Run, waits for the matching chapter row to load and clicks its **Run** image. The browser locates the image inside the row and hit-tests it before sending the click. The chapter’s advertised count comes from that run.
 
-- **Satin:** captures a load snapshot and independent headless `#run` and `#btnRunAll` dispatches. A headless by-ID dispatch can reach hidden controls; the `run-all-by-id-diagnostic` artifact and `firstResultByIdObserved` never establish a website score. The optional hidden-window smoke mode also clicks Run, then attempts Run All in the same session through normal content hit testing. It can capture a frame or a failed click but cannot export a post-sequence DOM snapshot. `websiteRun` stays `unverified`, even if both clicks succeed.
-- **Chrome/Edge:** uses the owned browser's local DevTools connection. It captures DOM state in an isolated world and sends pointer events only to a visible, hit-tested target. The default `--until first` clicks Run → Run All, observes a positive count, clicks Pause, checks Results, and resets. `first-result` is the **first observed** nonzero count, not a guarantee of a single executed case.
-- **Full reference run:** `--until complete` leaves Run All uninterrupted and waits up to `--timeout-ms` (default 420,000 ms) for the page's completion marker. It requires reconciled counters, the planned number of executed tests, and matching Results. If it times out, `lastObserved` is the last responsive sample, **not** a final score. The full-run option does not change what the Satin CLI can verify.
+| Goal | Arguments after `node tools/test262/website.mjs --satin target/release/rust-browser.exe` |
+| --- | --- |
+| Complete the short harness chapter | `--chapter harness` |
+| Complete the language chapter | `--chapter json/language.json` |
+| Complete the built-in object chapter | `--chapter built-ins` |
+| Complete Annex B | `--chapter annexB` |
+| Complete Run All | `--until complete --timeout-ms 1800000` |
+| Observe Run All making progress, pause and open Results | `--until first` |
 
-Each invocation writes `run-*/report.json` and raw evidence under `--output`: executable digests, launch arguments, counters and stage observations, diagnostics, DOM, and Satin screenshots. Chromium also logs site requests/statuses, available response identifiers, and the browser build. The live endpoint can change between runs; keep the report with its UTC date and site version/date. Missing elements are `null`, blank counters are `""`, and an observed zero is `"0"`. “Failed to load” is included in “Fail,” not added to it. Expected iframe prerequisite exceptions and unrelated resource errors remain in the diagnostic log; they do not by themselves mean the workflow failed.
+`--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. The default observation timeout is 420,000 ms and the maximum is 1,800,000 ms. Startup, catalog and row availability, execution and Results observation each have their own deadline. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
 
-Exit `0` means all requested runs reached their reference target (`partial` for the first-result workflow or `complete`); exit `1` means at least one run is `unverified`, including a Satin-only capture; exit `2` means invalid invocation or inability to write a report. A nonzero exit does not turn blank or partial counters into a score.
+To run an existing HTTP(S) mirror, pass its document URL with `--site-url http://127.0.0.1:8000/default.html`. The report records the actual URL and identifies alternate sites separately from the public endpoint.
 
-## Repeatable chapter comparison
+## Reading results
 
-Use the smallest published chapter, **`harness` (55 tests)** at suite version `1234`, dated `2016-03-23`. This is a short check of the website's loading, runner, and reporting path, not a representative ES5.1 score. In the page, open **Run**, wait for `Chapter - harness (55 tests)`, and click **Run** on that row. Do not use **Run All** or a **Select** button. Wait for **Testing complete!**, then open **Results**.
+Satin records the initial Run catalog, the selected run and the Results pane from one native tab. A completed run requires the site's **Testing complete!** marker, the expected number of executed cases, consistent pass/fail counts, matching suite version/date, and matching Results counters. Each snapshot must share the same capture, tab and document. A failure reported by the test suite counts as a test outcome. The website includes failed-to-load cases in its Fail total.
 
-Satin on Windows completed this chapter with 55 passed cases and zero
-loading failures. Use the [native checkpoint procedure](native-checkpoint.md)
-to capture the Run and Results states from the same window. **Run All**
-can start. Loading the larger `language` chapter can exhaust the current
-script budget.
+A first-result capture records the first observed positive count and pauses the browser. More cases can finish before the pause takes effect. The report preserves the first counts and verifies the paused counts against Results. A timeout or invalid capture is `unverified`. Exit 0 means each requested browser reached its observation target, exit 1 means at least one capture was unverified and exit 2 means invalid arguments or a runner failure. The report records separate outcomes if several browsers are selected.
 
-The reference probe uses those same controls. Run it twice with fresh profiles (the tool creates them), keeping the browser paths and budget fixed. To reduce contention, run one Chromium executable per invocation:
+## Chromium reference and headless diagnostics
+
+Add one or more `--chromium FILE` arguments to run the same selection in Chromium. The reference probe uses a fresh browser profile, a local DevTools connection and hit-tested pointer input. For a reproducible short comparison, the public suite version `1234`, dated `2016-03-23`, advertises 55 tests in its harness chapter.
 
 ```powershell
-node tools/test262/website.mjs `
-  --chromium 'C:/Program Files/Google/Chrome/Application/chrome.exe' `
-  --chapter harness --timeout-ms 15000 --output target/test262/website-harness
+node tools/test262/website.mjs --chromium 'C:/Program Files/Google/Chrome/Application/chrome.exe' --chapter harness
 ```
 
-`--chapter` matches the exact loaded chapter name, implies completion mode, and requires Chromium. The chapter lookup is bounded at 15 seconds after opening Run. The chapter observation budget (default 15 seconds) starts at the row click attempt and includes the site's initial iframe check. Startup, navigation, individual DevTools commands, and Results capture have separate bounds.
-
-Compare only reports with the same `selection.kind`, `selection.name`, `selection.planned`, and suite version/date. Check recorded chapter data response identifiers (`json/harness.json` ETag/Last-Modified, if present) and browser version/digest. A comparable completion requires `websiteRun: "complete"`, the completion marker, ran equal to the selected 55, reconciled counters, and matching Results. An early snapshot or a Pause checkpoint is partial evidence even if its counters reconcile. If the marker and final counters were observed but Results capture timed out, report both facts; that attempt is still `unverified`. For Satin chapter evidence, use the native checkpoint capture.
-
-The report interpretation tests require no browser or network:
+A plain `--satin FILE` invocation keeps the independent headless load and control diagnostics for investigating a site that fails to initialize. Select `--native`, `--chapter` or `--until` for the native evidence workflow. `--satin-run-ms` controls the headless diagnostic task budget (4,000 ms by default). The separate [native checkpoint verification procedure](native-checkpoint.md) also accepts previously recorded manual harness captures.
 
 ```powershell
-node --test tools/test262/website.test.mjs
+node --test tools/test262/website.test.mjs tools/test262/native-checkpoint-verify.test.mjs
 ```

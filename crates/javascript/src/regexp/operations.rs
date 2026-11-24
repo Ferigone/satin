@@ -423,6 +423,19 @@ fn replace(vm: &mut Vm, regexp: Value, args: &[Value]) -> Result<Value, JsError>
     if global {
         set_last_index(vm, &regexp, 0)?;
     }
+    if super::bulk::Search::eligible(vm, &input)
+        && let Replacer::Template(template) = &replacer
+        && template.len() <= 256
+        && !template.as_utf16().contains(&u16::from(b'$'))
+        && let Some(program) = super::runtime::plain_exec_program(vm, &regexp)
+        && program.flags == flags
+        && let Some(search) = super::bulk::Search::new(vm, &program)?
+        && let Some(value) = search.replace(vm, &input, template, global)?
+    {
+        // A global intrinsic loop starts at zero and ends with a failed exec
+        // resetting lastIndex to zero. No callback can observe its intermediate values.
+        return Ok(value);
+    }
     let mut matches = Vec::new();
     loop {
         vm.consume_work(1)?;

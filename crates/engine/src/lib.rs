@@ -14,6 +14,7 @@ pub mod loader;
 pub mod mime;
 pub mod network;
 pub mod paint;
+mod raw_json;
 pub mod script;
 pub mod svg;
 pub mod web_storage;

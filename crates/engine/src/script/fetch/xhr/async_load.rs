@@ -3,7 +3,7 @@ use super::{
     Host, Ready, Request, TEXT_SLOT, content_length, receiver, response_size, response_text,
 };
 use crate::network::{
-    CancelSignal, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT, FetchBody, FetchError, FetchJob,
+    CancelSignal, FETCH_HEADER_LIMIT, FETCH_RESPONSE_BODY_LIMIT, FetchBody, FetchError, FetchJob,
     StreamingResponse, WebRequest,
 };
 use rust_browser_javascript::{JsError, RootId, Value, Vm};
@@ -23,15 +23,15 @@ pub(in crate::script::fetch) struct Pending {
     scheduled: Option<Task>,
     author_timeout: AuthorTimeout,
     received: Vec<u8>,
-    request_size: usize,
+    // Only a primitive string is cached; it never holds a VM object outside the GC.
+    cached_text: Option<Value>,
+    pub(in crate::script::fetch) request_size: usize,
     last_progress: Option<Instant>,
 }
 
 impl Pending {
-    pub(in crate::script::fetch) fn size(&self) -> usize {
-        self.request_size
-            + self.received.capacity()
-            + self.buffered.as_ref().map_or(0, |bytes| bytes.capacity())
+    fn body_capacity(&self) -> usize {
+        self.received.capacity() + self.buffered.as_ref().map_or(0, |bytes| bytes.capacity())
     }
 }
 
@@ -63,7 +63,21 @@ impl AuthorTimeout {
     }
 }
 
+// Async XHR retains whole bodies until the final progress and load events. Bound
+// all such allocations per document independently of Fetch request/upload data.
+const LIVE_XHR_BODY_LIMIT: usize = 2 * FETCH_RESPONSE_BODY_LIMIT;
+
 impl Host {
+    fn can_grow_bodies(&self, extra: usize) -> bool {
+        let bodies = self.fetch.borrow();
+        let used: usize = bodies
+            .pending_xhr
+            .values()
+            .map(Pending::body_capacity)
+            .sum();
+        used.saturating_add(extra) <= LIVE_XHR_BODY_LIMIT
+    }
+
     pub(super) fn queue(
         &self,
         vm: &mut Vm,
@@ -97,6 +111,7 @@ impl Host {
                     author_timeout: Default::default(),
                     received: Vec::new(),
                     request_size,
+                    cached_text: None,
                     last_progress: None,
                 },
             );
@@ -369,10 +384,9 @@ impl Host {
             return Ok(());
         }
         if let Some(body) = body {
-            if body.len() > FETCH_BODY_LIMIT {
+            if body.len() > FETCH_RESPONSE_BODY_LIMIT || !self.can_grow_bodies(body.capacity()) {
                 self.schedule(id, Task::Error);
             } else {
-                super::super::budget(vm, &self.fetch, body.capacity())?;
                 self.fetch
                     .borrow_mut()
                     .pending_xhr
@@ -469,18 +483,18 @@ impl Host {
     }
 
     fn append_owned(&self, vm: &mut Vm, id: u64, bytes: Vec<u8>) -> Result<bool, JsError> {
-        if bytes.capacity() <= FETCH_BODY_LIMIT
+        if bytes.capacity() <= FETCH_RESPONSE_BODY_LIMIT
             && self.fetch.borrow().pending_xhr[&id].received.capacity() == 0
         {
             // Keep a uniquely owned first chunk instead of copying it into a
-            // second allocation. Its allocation still counts in Fetch's budget.
-            super::super::budget(vm, &self.fetch, bytes.capacity())?;
-            self.fetch
-                .borrow_mut()
-                .pending_xhr
-                .get_mut(&id)
-                .unwrap()
-                .received = bytes;
+            // second allocation. Count its capacity against the document's XHR budget.
+            if !self.can_grow_bodies(bytes.capacity()) {
+                return Ok(false);
+            }
+            let mut host = self.fetch.borrow_mut();
+            let pending = host.pending_xhr.get_mut(&id).unwrap();
+            pending.cached_text = None;
+            pending.received = bytes;
             Ok(true)
         } else {
             self.append(vm, id, &bytes)
@@ -491,23 +505,30 @@ impl Host {
         let (new_len, capacity) = {
             let host = self.fetch.borrow();
             let received = &host.pending_xhr[&id].received;
-            (received.len() + bytes.len(), received.capacity())
+            (
+                received.len().saturating_add(bytes.len()),
+                received.capacity(),
+            )
         };
-        if new_len > FETCH_BODY_LIMIT {
+        if new_len > FETCH_RESPONSE_BODY_LIMIT {
             return Ok(false);
         }
-        vm.charge_work(bytes.len())?;
+        vm.charge_buffer_work(bytes.len())?;
         let mut growth = 0;
         if new_len > capacity {
             // Stay within both the per-response cap and the realm's aggregate budget.
             growth = capacity
                 .max(32 * 1024)
-                .min(FETCH_BODY_LIMIT - capacity)
+                .min(FETCH_RESPONSE_BODY_LIMIT - capacity)
                 .max(new_len - capacity);
-            super::super::budget(vm, &self.fetch, growth)?;
+            if !self.can_grow_bodies(growth) {
+                return Ok(false);
+            }
         }
         let mut host = self.fetch.borrow_mut();
-        let received = &mut host.pending_xhr.get_mut(&id).unwrap().received;
+        let pending = host.pending_xhr.get_mut(&id).unwrap();
+        pending.cached_text = None;
+        let received = &mut pending.received;
         if growth > 0 {
             received.reserve_exact(capacity + growth - received.len());
         }
@@ -594,9 +615,14 @@ impl Host {
     pub(super) fn partial_text(&self, vm: &mut Vm, data: &Request) -> Result<Value, JsError> {
         if let Some(id) = data.pending
             && let Some(response) = &data.response
-            && let Some(pending) = self.fetch.borrow().pending_xhr.get(&id)
+            && let Some(pending) = self.fetch.borrow_mut().pending_xhr.get_mut(&id)
         {
-            return response_text(vm, response, &pending.received);
+            if let Some(cached) = &pending.cached_text {
+                return Ok(cached.clone());
+            }
+            let text = response_text(vm, response, &pending.received)?;
+            pending.cached_text = Some(text.clone());
+            return Ok(text);
         }
         Ok("".into())
     }
