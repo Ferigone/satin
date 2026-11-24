@@ -686,15 +686,60 @@ impl Default for Visual {
 #[derive(Clone, Copy)]
 enum PaintItem {
     Command(usize),
-    Context(usize),
+    Group(usize),
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PaintPhase {
+    OwnDecoration,
+    Negative,
+    BlockDecoration,
+    Float,
+    Inline,
+    Positioned,
+    Positive,
 }
 #[derive(Clone, Copy)]
 struct PaintEntry {
-    phase: u8,
+    phase: PaintPhase,
     z: i32,
     order: usize,
     minor: usize,
     item: PaintItem,
+}
+#[derive(Default)]
+struct PaintGroup {
+    entries: Vec<PaintEntry>,
+    owner: Option<NodeId>,
+    has_float: bool,
+    inline_parent: Option<usize>,
+}
+
+fn push_paint_group(
+    groups: &mut Vec<PaintGroup>,
+    parent: usize,
+    owner: NodeId,
+    phase: PaintPhase,
+    z: i32,
+    order: usize,
+) -> usize {
+    let group = groups.len();
+    let inline_parent = (phase == PaintPhase::Inline).then_some(parent);
+    groups.push(PaintGroup {
+        owner: Some(owner),
+        inline_parent,
+        ..PaintGroup::default()
+    });
+    if inline_parent.is_none() {
+        groups[parent].has_float |= phase == PaintPhase::Float;
+        groups[parent].entries.push(PaintEntry {
+            phase,
+            z,
+            order,
+            minor: 0,
+            item: PaintItem::Group(group),
+        });
+    }
+    group
 }
 
 impl Builder<'_> {
@@ -979,73 +1024,139 @@ impl Builder<'_> {
         let (sticky_uses_viewport, sticky_inset_sizes) = sticky
             .map(|sticky| (sticky.uses_viewport, sticky.inset_sizes))
             .unwrap_or_default();
-        // A stacking context is atomic in its parent's paint list. Descendant
-        // contexts of z-index:auto positioned boxes still enter the true parent.
-        let mut contexts: Vec<Vec<PaintEntry>> = vec![vec![]];
-        let mut context_owner = vec![None];
+        let flex_or_grid_item = |parent: Option<NodeId>| {
+            parent.is_some_and(|p| {
+                matches!(
+                    self.styles[p.0].display,
+                    Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+                )
+            })
+        };
+        let static_float = |id: NodeId| {
+            let style = &self.styles[id.0];
+            let parent = doc.nodes[id.0].parent;
+            style.float != css::Float::None
+                && style.position == Position::Static
+                && style.transform.is_empty()
+                && parent != Some(doc.root)
+                && !flex_or_grid_item(parent)
+                && boxes[id.0].is_some()
+        };
+        let mut groups = vec![PaintGroup::default()];
         let mut context_for = vec![0usize; count];
+        let mut float_contexts = HashSet::new();
         let mut pseudo = vec![None; count];
         for (index, &id) in order.iter().enumerate() {
             let style = &self.styles[id.0];
             let parent = doc.nodes[id.0].parent;
             let ctx = parent.map_or(0, |p| context_for[p.0]);
+            context_for[id.0] = ctx;
             if !matches!(doc.nodes[id.0].kind, NodeKind::Element { .. }) {
-                context_for[id.0] = ctx;
                 pseudo[id.0] = parent.and_then(|p| pseudo[p.0]);
                 continue;
             }
             if doc.tag(id) == "html" {
                 context_for[id.0] = 0;
-                context_owner[0] = Some(id);
+                groups[0].owner = Some(id);
                 continue;
             }
-            let flex_item = parent.is_some_and(|p| {
-                matches!(
-                    self.styles[p.0].display,
-                    Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
-                )
-            });
+            let flex_item = flex_or_grid_item(parent);
             let creates = matches!(style.position, Position::Fixed | Position::Sticky)
                 || !style.transform.is_empty()
                     && (style.display != Display::Inline || self.is_replaced_image(id))
                 || style.z_index.is_some() && (style.position != Position::Static || flex_item);
             if creates {
-                let next = contexts.len();
                 let z = style.z_index.unwrap_or(0);
-                contexts[ctx].push(PaintEntry {
-                    phase: if z < 0 {
-                        1
-                    } else if z > 0 {
-                        4
-                    } else {
-                        3
-                    },
-                    z,
-                    order: index,
-                    minor: 0,
-                    item: PaintItem::Context(next),
-                });
-                contexts.push(vec![]);
-                context_owner.push(Some(id));
+                let phase = if z < 0 {
+                    PaintPhase::Negative
+                } else if z > 0 {
+                    PaintPhase::Positive
+                } else {
+                    PaintPhase::Positioned
+                };
+                let next = push_paint_group(&mut groups, ctx, id, phase, z, index);
                 context_for[id.0] = next;
             } else {
-                context_for[id.0] = ctx;
+                if static_float(id) {
+                    float_contexts.insert(ctx);
+                }
                 pseudo[id.0] = parent
                     .and_then(|p| pseudo[p.0])
                     .or_else(|| (style.position != Position::Static).then_some(index));
             }
         }
+        // CSS 2.2 Appendix E: floats paint as a group between in-flow block
+        // decorations and inline content. Form those groups only in affected
+        // contexts. Positioned descendants go to the true context, just as
+        // actual stacking contexts did in the first pass.
+        let group_for = (!float_contexts.is_empty()).then(|| {
+            let mut group_for = context_for.clone();
+            for (index, &id) in order.iter().enumerate() {
+                let ctx = context_for[id.0];
+                if !float_contexts.contains(&ctx) || groups[ctx].owner == Some(id) {
+                    continue;
+                }
+                let node = &doc.nodes[id.0];
+                let local = node.parent.map_or(ctx, |p| group_for[p.0]);
+                group_for[id.0] = local;
+                pseudo[id.0] = None;
+                if !matches!(node.kind, NodeKind::Element { .. }) {
+                    continue;
+                }
+                let style = &self.styles[id.0];
+                if style.position != Position::Static {
+                    group_for[id.0] =
+                        push_paint_group(&mut groups, ctx, id, PaintPhase::Positioned, 0, index);
+                } else if static_float(id) {
+                    group_for[id.0] =
+                        push_paint_group(&mut groups, local, id, PaintPhase::Float, 0, index);
+                } else if boxes[id.0].is_some()
+                    && (flex_or_grid_item(node.parent)
+                        || matches!(
+                            style.display,
+                            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+                        ))
+                {
+                    group_for[id.0] =
+                        push_paint_group(&mut groups, local, id, PaintPhase::Inline, 0, index);
+                }
+            }
+            group_for
+        });
         for (index, meta) in self.commands.meta.iter().enumerate() {
-            let ctx = context_for[meta.node.0];
-            let own_background = meta.background && context_owner[ctx] == Some(meta.node);
+            let group = group_for
+                .as_ref()
+                .map_or(context_for[meta.node.0], |g| g[meta.node.0]);
+            // Attach atomic inline groups at their first in-flow command so
+            // they keep their line (or flex/grid item) order among siblings.
+            let mut ancestor = group;
+            while let Some(parent) = groups[ancestor].inline_parent.take() {
+                groups[parent].entries.push(PaintEntry {
+                    phase: PaintPhase::Inline,
+                    z: 0,
+                    order: index,
+                    minor: index,
+                    item: PaintItem::Group(ancestor),
+                });
+                ancestor = parent;
+            }
+            let own_background = meta.background && groups[group].owner == Some(meta.node);
             let p = pseudo[meta.node.0];
-            contexts[ctx].push(PaintEntry {
+            let block_decoration = groups[group].has_float
+                && meta.background
+                && matches!(
+                    self.styles[meta.node.0].display,
+                    Display::Block | Display::Flex | Display::Grid
+                );
+            groups[group].entries.push(PaintEntry {
                 phase: if own_background {
-                    0
+                    PaintPhase::OwnDecoration
                 } else if p.is_some() {
-                    3
+                    PaintPhase::Positioned
+                } else if block_decoration {
+                    PaintPhase::BlockDecoration
                 } else {
-                    2
+                    PaintPhase::Inline
                 },
                 z: 0,
                 order: if own_background {
@@ -1057,17 +1168,19 @@ impl Builder<'_> {
                 item: PaintItem::Command(index),
             });
         }
-        for context in &mut contexts {
-            context.sort_by_key(|e| (e.phase, e.z, e.order, e.minor));
+        for group in &mut groups {
+            group
+                .entries
+                .sort_by_key(|e| (e.phase, e.z, e.order, e.minor));
         }
         let mut paint_order = vec![];
         let mut stack = vec![(0usize, 0usize)];
-        while let Some((ctx, index)) = stack.pop() {
-            if let Some(entry) = contexts[ctx].get(index) {
-                stack.push((ctx, index + 1));
+        while let Some((group, index)) = stack.pop() {
+            if let Some(entry) = groups[group].entries.get(index) {
+                stack.push((group, index + 1));
                 match entry.item {
                     PaintItem::Command(index) => paint_order.push(index),
-                    PaintItem::Context(ctx) => stack.push((ctx, 0)),
+                    PaintItem::Group(group) => stack.push((group, 0)),
                 }
             }
         }
@@ -1076,8 +1189,21 @@ impl Builder<'_> {
             let id = self.commands.meta[index].node;
             ranks[id.0] = ranks[id.0].min(rank);
         }
+        // An escaped negative-z descendant can paint before the float's own
+        // decoration. It must not drag the float's hit region below that paint
+        // phase. Keep descendant ranks as a fallback for unpainted ancestors.
+        let own_ranks = group_for.as_ref().map(|_| {
+            ranks
+                .iter()
+                .map(|&rank| rank != usize::MAX)
+                .collect::<Vec<_>>()
+        });
         for &id in order.iter().rev() {
-            if let Some(parent) = doc.nodes[id.0].parent {
+            if let Some(parent) = doc.nodes[id.0].parent
+                && own_ranks.as_ref().is_none_or(|own| {
+                    !own[parent.0] || !float_contexts.contains(&context_for[parent.0])
+                })
+            {
                 ranks[parent.0] = ranks[parent.0].min(ranks[id.0]);
             }
         }
