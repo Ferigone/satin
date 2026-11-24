@@ -534,3 +534,22 @@ fn surface_and_pixel_work_limits_preserve_the_callers_buffer() {
     assert!(report.work <= rust_browser_engine::svg::MAX_SVG_RENDER_WORK);
     assert!(report.pixels <= rust_browser_engine::svg::MAX_SVG_PAINT_PIXELS);
 }
+
+#[test]
+fn presentation_colors_resolve_inherited_custom_properties_before_paint() {
+    let (_, scene) = build_cascaded(
+        "<style>body { --ink:#9400d3; --nav:#2364aa } .accent { fill:blue }</style><svg><rect width='12' height='12' fill='var(--nav)'/><rect x='12' width='12' height='12' class='accent' fill='var(--nav)'/><g color='var(--ink)' fill='currentColor'><rect x='24' width='12' height='12'/></g><rect x='36' width='12' height='12' fill='var(--missing, red)'/></svg>",
+        48,
+        12,
+    );
+    let pixels = image(&scene, 48, 12);
+    assert_eq!(
+        [
+            pixel(&pixels, 48, 5, 5),
+            pixel(&pixels, 48, 17, 5),
+            pixel(&pixels, 48, 29, 5),
+            pixel(&pixels, 48, 41, 5)
+        ],
+        [0x2364aa, 0x0000ff, 0x9400d3, 0xff0000]
+    );
+}
