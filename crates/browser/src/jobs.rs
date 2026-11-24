@@ -230,28 +230,44 @@ impl Workers {
         let wake = self.wake.clone();
         let shutdown = self.shutdown.clone();
         self.downloads.retain(|task| !task.is_finished());
-        self.downloads.push(self.handle.spawn(async move {
-            let OfferedDownload{response,mut transfer}=offer;
-            let mut observed=Instant::now();
-            let result=crate::downloads::save(response,&path,&cancel,|count| {
-                if observed.elapsed() >= std::time::Duration::from_millis(200)
-                    && results.try_send(Message{tab,navigation:id,payload:Payload::DownloadProgress(count)}).is_ok() {
-                    observed=Instant::now(); wake();
+        let task = self.handle.spawn(async move {
+            let OfferedDownload {
+                response,
+                mut transfer,
+            } = offer;
+            let message = |payload| Message {
+                tab,
+                navigation: id,
+                payload,
+            };
+            let mut last_update = Instant::now();
+            let result = crate::downloads::save(response, &path, &cancel, |count| {
+                if last_update.elapsed() >= std::time::Duration::from_millis(200)
+                    && results
+                        .try_send(message(Payload::DownloadProgress(count)))
+                        .is_ok()
+                {
+                    last_update = Instant::now();
+                    wake();
                 }
-            }).await;
+            })
+            .await;
             if let Some(trace) = transfer.0.take() {
                 trace.record(match &result {
-                    Ok(n) => Phase::Finished {body_bytes: Some(*n)},
+                    Ok(n) => Phase::Finished {
+                        body_bytes: Some(*n),
+                    },
                     Err(_) if cancel.is_cancelled() => Phase::Cancelled,
                     Err(_) => Phase::Failed,
                 });
                 wake();
             }
-            tokio::select!{
-                ()=shutdown.cancelled()=>{},
-                _=results.send(Message{tab,navigation:id,payload:Payload::DownloadDone(result)})=>wake(),
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                _ = results.send(message(Payload::DownloadDone(result))) => wake(),
             }
-        }));
+        });
+        self.downloads.push(task);
         token
     }
 

@@ -173,6 +173,19 @@ fn geometry_charges_displayed_text_and_allows_large_inert_data_blocks() {
 }
 
 #[test]
+fn detached_subtrees_keep_identity_without_paying_for_style_resolution_on_every_slot() {
+    let html = format!(
+        "<!doctype html><div id='old'>{}</div><p id='current' style='height:37px'>Current</p>",
+        "<span></span>".repeat(33_000)
+    );
+    let mut r = runtime(&html);
+    check(
+        &mut r,
+        "var old = document.getElementById('old'), first = old.firstChild; document.body.removeChild(old); document.getElementById('current').offsetHeight === 37 && old.firstChild === first && first.offsetHeight === 0",
+    );
+}
+
+#[test]
 fn geometry_uses_border_boxes_but_offsets_ignore_transforms() {
     let mut r = runtime(
         "<!doctype html><style>body{margin:0}#box{width:100px;height:50px;padding:10px;border:2px solid red;margin:5px;transform:scale(2);transform-origin:0 0}</style><div id=box></div>",

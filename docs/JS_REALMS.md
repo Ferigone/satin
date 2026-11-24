@@ -15,6 +15,12 @@ frame or changing its navigation attributes cancels its timers and
 releases the host root. JavaScript references to its Window or exported
 functions can keep the realm alive.
 
+A script written into a child frame receives a bounded share of the current
+task’s remaining instructions and heap capacity. If it exhausts that share,
+the child’s error handler receives the failure and the parser can continue
+with the following script. Unsupported engine features also reach the child’s
+error handler. The parent and its children still share one overall task budget.
+
 Frame coverage is limited to initial blank documents. Frame navigation,
 `srcdoc`, sandboxed documents, nested frame loading and the full child
 DOM are still open. Realm handles are valid inside the VM that created

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 pub(super) struct Geometry<'a> {
     pub document: &'a Document,
-    pub styles: &'a [Style],
+    pub styles: &'a crate::layout::ComputedStyles,
     pub border_boxes: &'a [Option<Rect>],
     pub content_boxes: &'a [Option<Rect>],
     pub scroll_sizes: &'a [Option<(f32, f32)>],

@@ -122,3 +122,13 @@ test('native Run All records the initial catalog, and first mode pauses after a 
   assert.ok(!steps.some(item => item.action === 'click_in_row'));
   assert.equal(parseOptions(['--satin', 'satin']).native, false);
 });
+
+test('long full-suite budgets apply to execution while startup and Results waits stay bounded', () => {
+  const options = parseOptions(['--satin', 'satin', '--chapter', 'built-ins', '--timeout-ms', '21600000']);
+  const steps = nativeWebsiteActions(options);
+  assert.equal(steps.find(s => s.name === 'catalog').timeout_ms, 120000);
+  assert.equal(steps.find(s => s.action === 'click_in_row').timeout_ms, 120000);
+  assert.equal(steps.find(s => s.name === 'run').timeout_ms, 21600000);
+  assert.equal(steps.find(s => s.name === 'results').timeout_ms, 15000);
+  assert.throws(() => parseOptions(['--satin', 'satin', '--timeout-ms', '21600001']), /Invalid arguments/);
+});

@@ -2,7 +2,9 @@
 
 Satin can run a chapter or the entire suite through the controls on the [original Test262 website](https://v8.github.io/test262/website/default.html). This is the legacy browser suite. The [modern Test262 runner](README.md) uses the pinned upstream JavaScript tests and a standalone Satin VM.
 
-## Run a chapter in Satin
+If Satin is already installed, open the website, select **Run**, then click **Run** in the row for the chapter you want or **Run All** above the table. Open **Results** when testing finishes, or click **Pause** first to see results so far.
+
+## Run a chapter from the command line
 
 Build the native browser, then run the website probe from the repository root with Node 22.15 or newer. These PowerShell examples use a Windows release build. Linux uses `target/release/rust-browser` and needs a display for the native window.
 
@@ -19,10 +21,10 @@ The site’s default catalog lists `harness`, `language`, `annexB` and `built-in
 | Complete the language chapter | `--chapter json/language.json` |
 | Complete the built-in object chapter | `--chapter built-ins` |
 | Complete Annex B | `--chapter annexB` |
-| Complete Run All | `--until complete --timeout-ms 1800000` |
+| Complete Run All | `--until complete --timeout-ms 7200000` |
 | Observe Run All making progress, pause and open Results | `--until first` |
 
-`--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. The default observation timeout is 420,000 ms and the maximum is 1,800,000 ms. Startup, catalog and row availability, execution and Results observation each have their own deadline. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
+`--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. The default observation timeout is 420,000 ms and long runs can request up to 21,600,000 ms (six hours). Execution, startup and Results observation have separate deadlines. The native catalog and row waits are capped at two minutes each. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
 
 To run an existing HTTP(S) mirror, pass its document URL with `--site-url http://127.0.0.1:8000/default.html`. The report records the actual URL and identifies alternate sites separately from the public endpoint.
 

@@ -344,6 +344,41 @@ impl Vm {
         self.eval_with_referrer(source, Some(SourceReferrer::Script(identifier)), None)
     }
 
+    /// An embedded parser may synchronously execute a child script while its
+    /// caller is still on the stack. Set aside part of the *existing* task
+    /// instruction and heap headroom so the host can deliver a child resource
+    /// error and resume its caller. Work and live objects remain charged to
+    /// the enclosing task. Host interruption and internal errors propagate.
+    pub fn eval_embedded_script(
+        &mut self,
+        source: &str,
+        identifier: &str,
+    ) -> (Result<Value, JsError>, bool) {
+        if self.active == 0 {
+            return (self.eval_with_identifier(source, identifier), false);
+        }
+        let reserved = self.remaining / 4;
+        let parent_cells = self.limits.max_heap_objects;
+        let parent_bytes = self.limits.max_heap_bytes;
+        let reserved_cells = parent_cells.saturating_sub(self.heap.live) / 4;
+        let reserved_bytes = parent_bytes.saturating_sub(self.estimated_heap_bytes()) / 4;
+        self.remaining -= reserved;
+        self.limits.max_heap_objects -= reserved_cells;
+        self.limits.max_heap_bytes -= reserved_bytes;
+        let result = self.eval_with_identifier(source, identifier);
+        let used_allowance = result.as_ref().is_err_and(|error| match error.kind {
+            ErrorKind::ExecutionLimit => reserved != 0 && self.remaining == 0,
+            ErrorKind::HeapLimit => reserved_cells != 0 && reserved_bytes != 0,
+            _ => false,
+        });
+        self.remaining += reserved;
+        self.limits.max_heap_objects = parent_cells;
+        self.limits.max_heap_bytes = parent_bytes;
+        let local_exhaustion = used_allowance && self.check_interrupt().is_ok()
+            && self.heap.live < parent_cells && self.ensure_allocation(0).is_ok();
+        (result, local_exhaustion)
+    }
+
     fn eval_with_referrer(
         &mut self,
         source: &str,

@@ -151,12 +151,49 @@ pub struct ElementBox {
     pub node: NodeId,
     pub rect: Rect,
 }
+/// Node IDs remain stable across detach and reparent operations. Only connected
+/// elements need their own computed style; text inherits its parent's entry.
+#[derive(Debug)]
+pub struct ComputedStyles {
+    by_node: Vec<usize>,
+    entries: Vec<Style>,
+}
+
+impl ComputedStyles {
+    fn new(node_count: usize) -> Self {
+        Self {
+            by_node: vec![0; node_count],
+            entries: vec![Style::default()],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_node.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.by_node.is_empty()
+    }
+    pub fn get(&self, id: usize) -> Option<&Style> {
+        self.by_node.get(id).map(|&entry| &self.entries[entry])
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &Style> {
+        self.by_node.iter().map(|&entry| &self.entries[entry])
+    }
+}
+
+impl std::ops::Index<usize> for ComputedStyles {
+    type Output = Style;
+    fn index(&self, id: usize) -> &Style {
+        &self.entries[self.by_node[id]]
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Layout {
     pub viewport: Viewport,
     pub viewport_overflow: [Overflow; 2],
     pub depends_on_viewport_scroll: bool,
-    pub computed_styles: Arc<[Style]>,
+    pub computed_styles: Arc<ComputedStyles>,
     pub scroll_regions: Vec<ScrollRegion>,
     flow_elements: Vec<ElementBox>,
     hit_elements: Vec<positioning::HitRegion>,
@@ -263,7 +300,7 @@ impl Layout {
         mut viewport: Viewport,
         scroll: &HashMap<NodeId, ScrollOffset>,
         observe_intersections: bool,
-        check_text: impl FnOnce(&[Style]) -> Result<(), E>,
+        check_text: impl FnOnce(&ComputedStyles) -> Result<(), E>,
     ) -> Result<Self, E> {
         let width = viewport.width;
         let width = if width.is_finite() {
@@ -299,15 +336,18 @@ impl Layout {
             }
         }
         let stylesheet = css::Stylesheet::with_viewport(rules, width, viewport.height);
-        let mut styles = vec![Style::default(); page.document.nodes.len()];
+        let mut styles = ComputedStyles::new(page.document.nodes.len());
         // HTML recovery and DOM reparenting can allocate parents after children.
         let mut stack = vec![page.document.root];
         let mut root_font = 16.;
         while let Some(id) = stack.pop() {
             let n = &page.document.nodes[id.0];
-            let parent = n.parent.map(|p| styles[p.0].clone()).unwrap_or_default();
-            styles[id.0] = if matches!(n.kind, NodeKind::Element { .. }) {
-                stylesheet.compute(&page.document, id, &parent, root_font)
+            let parent = n.parent.map_or(0, |p| styles.by_node[p.0]);
+            styles.by_node[id.0] = if matches!(n.kind, NodeKind::Element { .. }) {
+                let style =
+                    stylesheet.compute(&page.document, id, &styles.entries[parent], root_font);
+                styles.entries.push(style);
+                styles.entries.len() - 1
             } else {
                 parent
             };
@@ -323,7 +363,7 @@ impl Layout {
             .chain(page.document.elements("body"))
             .find_map(|id| styles[id.0].background.filter(|c| c.3 > 0))
             .unwrap_or(Color::WHITE);
-        let styles: Arc<[Style]> = styles.into();
+        let styles: Arc<ComputedStyles> = styles.into();
         let mut b = Builder {
             page,
             fonts,
@@ -609,7 +649,7 @@ struct Builder<'a> {
     fonts: &'a Fonts,
     // Layout treats computed styles as immutable. Borrow them across recursive
     // calls so the size of a CSS value does not multiply with layout depth.
-    styles: &'a Arc<[Style]>,
+    styles: &'a Arc<ComputedStyles>,
     commands: TrackedCommands,
     positioned: Vec<positioning::Positioned>,
     viewport: Viewport,
@@ -761,7 +801,7 @@ struct GridText {
 }
 fn grid_placement(
     nodes: Vec<NodeId>,
-    styles: &[Style],
+    styles: &ComputedStyles,
     text: impl Fn(NodeId) -> bool,
     container: &Style,
     [rows, columns]: [&Axis<'_>; 2],

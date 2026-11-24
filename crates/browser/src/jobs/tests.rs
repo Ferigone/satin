@@ -586,3 +586,40 @@ fn a_full_metadata_queue_does_not_delay_the_page_fetch_result() {
     assert_eq!(head.metadata.status, 404);
     assert_eq!(events.take_dropped(), 2);
 }
+
+#[test]
+fn dismissed_download_observes_headers_and_cancellation_without_reading_the_body() {
+    let server = listener();
+    let (out, mut rx) = mpsc::channel(8);
+    let (workers, mut events) = Workers::new_observed(CookieStore::new(), out, || {}).unwrap();
+    workers
+        .submit(navigation(&server, "/file", 7, 2, CancelSignal::new()))
+        .unwrap();
+    let deadline = Instant::now() + WAIT;
+    let (_, mut stream) = accept(&server, deadline);
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=notes.txt\r\nContent-Type: text/plain\r\nContent-Length: 99\r\n\r\n").unwrap();
+    let Payload::DownloadOffer {
+        response,
+        from_link: false,
+    } = workers.receive_until(&mut rx, deadline).unwrap().payload
+    else {
+        panic!("expected the original attachment before its body arrived")
+    };
+    assert!(matches!(
+        events.try_recv().unwrap().phase,
+        Phase::Started { .. }
+    ));
+    let Phase::Response {
+        status, details, ..
+    } = events.try_recv().unwrap().phase
+    else {
+        panic!("expected the attachment headers")
+    };
+    assert_eq!(status, Some(200));
+    assert_eq!(details.declared_bytes, Some(99));
+    assert_eq!(details.mime.as_deref(), Some("text/plain"));
+    assert!(events.try_recv().is_none());
+    drop(response);
+    assert_eq!(events.try_recv().unwrap().phase, Phase::Cancelled);
+    assert!(events.try_recv().is_none());
+}

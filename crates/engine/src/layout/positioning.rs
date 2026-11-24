@@ -340,7 +340,7 @@ fn padding_box(rect: Rect, style: &Style) -> Rect {
     }
 }
 
-fn viewport_overflow_source(doc: &Document, styles: &[Style]) -> Option<NodeId> {
+fn viewport_overflow_source(doc: &Document, styles: &ComputedStyles) -> Option<NodeId> {
     use crate::dom::Namespace;
 
     let html_element = |node, tag| doc.namespace(node) == Namespace::Html && doc.tag(node) == tag;
@@ -1444,7 +1444,11 @@ impl Builder<'_> {
             viewport: self.viewport,
             viewport_overflow,
             depends_on_viewport_scroll: sticky_uses_viewport
-                || self.styles.iter().any(|s| s.position == Position::Fixed),
+                || self
+                    .styles
+                    .entries
+                    .iter()
+                    .any(|s| s.position == Position::Fixed),
             computed_styles: Arc::clone(self.styles),
             scroll_regions,
             flow_elements,

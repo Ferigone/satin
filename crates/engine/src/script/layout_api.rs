@@ -84,24 +84,19 @@ impl Data {
                     .values()
                     .map(|image| image.retained_bytes())
                     .sum::<usize>();
-            let attributes = document
-                .nodes
-                .iter()
-                .filter_map(|node| match &node.kind {
-                    NodeKind::Element { attrs, .. } => Some(attrs),
-                    _ => None,
-                })
-                .flat_map(|attrs| attrs.iter())
-                .map(|(name, value)| name.len() + value.len())
-                .sum::<usize>();
-            vm.charge_work(
-                document
-                    .nodes
-                    .len()
-                    .saturating_mul(32)
-                    .saturating_add(source_work)
-                    .saturating_add(attributes),
-            )?;
+            // Layout initializes small slot-indexed arrays. Only connected
+            // elements enter the cascade and expose attributes to selectors.
+            let mut tree_work = document.nodes.len();
+            for id in document.connected_nodes() {
+                tree_work = tree_work.saturating_add(1);
+                if let NodeKind::Element { attrs, .. } = &document.nodes[id.0].kind {
+                    tree_work = tree_work.saturating_add(16);
+                    for (name, value) in attrs {
+                        tree_work = tree_work.saturating_add(name.len() + value.len());
+                    }
+                }
+            }
+            vm.charge_work(tree_work.saturating_add(source_work))?;
             return Layout::build_checked_for_viewport(
                 &self.page,
                 fonts,

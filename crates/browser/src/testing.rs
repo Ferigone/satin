@@ -358,7 +358,7 @@ impl Checkpoint {
                 .text
                 .as_ref()
                 .is_some_and(|text| text.is_empty() || text.len() > 1024 || text.trim() != text)
-            || !(1..=1_800_000).contains(&self.timeout_ms)
+            || !(1..=21_600_000).contains(&self.timeout_ms)
         {
             return Err("Invalid smoke checkpoint parameters".into());
         }

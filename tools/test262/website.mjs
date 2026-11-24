@@ -103,18 +103,19 @@ function launch(executable, args, timeoutMs) {
 }
 
 export function nativeWebsiteActions({ chapter, until, timeoutMs }) {
+  const catalogMs = Math.min(timeoutMs, 120_000);
   const checkpoint = (name, within_id, condition, timeout_ms = 15_000) =>
     ({ action: 'checkpoint', name, within_id, ...condition, timeout_ms, diagnose_timeout: true });
   const select = chapter
     ? { action: 'click_in_row', within_id: 'chapterSelector', label_class: 'chapterName',
-        label_prefix: `Chapter - ${chapter} (`, control_alt: 'Run', timeout_ms: timeoutMs }
+        label_prefix: `Chapter - ${chapter} (`, control_alt: 'Run', timeout_ms: catalogMs }
     : { action: 'click', id: 'btnRunAll' };
   const observation = until === 'complete'
     ? [checkpoint('run', 'progressbar', { descendant_class: 'text', text: 'Testing complete!' }, timeoutMs)]
     : [checkpoint('run', 'totalCounter', { positive: true }, timeoutMs), { action: 'click', id: 'btnPause' }];
   return [
     { action: 'title', value: title }, { action: 'click', id: 'run' },
-    checkpoint('catalog', 'testsToRun', { positive: true }, timeoutMs),
+    checkpoint('catalog', 'testsToRun', { positive: true }, catalogMs),
     select, ...observation, { action: 'click', id: 'results' },
     checkpoint('results', 'contentContainer', { descendant_class: 'totalCases', positive: true }),
   ];
@@ -493,7 +494,8 @@ export function parseOptions(argv) {
   if (options.satin && (options.chapter || argv.includes('--until'))) options.native = true;
   if ((!options.satin && !options.chromium.length) || (options.native && !options.satin) ||
       !['first', 'complete'].includes(options.until) ||
-      ![options.timeoutMs, options.satinRunMs].every(ms => Number.isSafeInteger(ms) && ms > 0 && ms <= 1_800_000)) {
+      !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 21_600_000 ||
+      !Number.isSafeInteger(options.satinRunMs) || options.satinRunMs < 1 || options.satinRunMs > 1_800_000) {
     throw new Error('Invalid arguments; see --help');
   }
   return options;
