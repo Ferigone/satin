@@ -511,6 +511,9 @@ impl Parser {
             TokenKind::Punct("(" | "[" | "!" | "~" | "+" | "-" | "++" | "--" | "/" | "/=")
                 | TokenKind::Number(_) | TokenKind::BigInt(_) | TokenKind::String(_)
                 | TokenKind::Template { head: true, .. })
+            || (matches!(&self.current().kind, TokenKind::Word(word) | TokenKind::EscapedWord(word)
+                if !reserved(word) && !matches!(word.as_str(), "let" | "async"))
+                && !self.label_ahead())
         {
             self.expression_statement()
         } else {
