@@ -30,7 +30,7 @@ fn node_mask(document: &Document, id: NodeId) -> u32 {
         NodeKind::Element { .. } => 0x1,
         NodeKind::Text(_) => 0x4,
         NodeKind::Comment(_) => 0x80,
-        NodeKind::Document if id == document.root => 0x100,
+        NodeKind::Document if document.is_document(id) => 0x100,
         NodeKind::Doctype { .. } => 0x200,
         NodeKind::Document => 0x400,
     }
@@ -209,7 +209,6 @@ pub(super) fn install(
         let filter = vm.host_slot(&object, FILTER_SLOT).unwrap_or(Value::Null);
         walker.next(vm, &filter, &errors)
     })?;
-    let owner = document.clone();
     let state = state.clone();
     webidl::operation(
         vm,
@@ -217,9 +216,7 @@ pub(super) fn install(
         "createTreeWalker",
         1,
         move |vm, this, args| {
-            if this != owner {
-                return Err(JsError::type_error("Illegal Document receiver"));
-            }
+            super::document_node(&state, &this)?;
             webidl::required(args, 1, "createTreeWalker")?;
             let root = node(&state, &args[0])?;
             let mask = match args.get(1) {

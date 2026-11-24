@@ -26,6 +26,9 @@ fn dump(document: &Document) -> String {
             NodeKind::Element { tag, attrs } => {
                 let namespace = match document.namespace(id) {
                     Namespace::Html => "",
+                    Namespace::Null => {
+                        unreachable!("HTML parsing never creates null-namespace elements")
+                    }
                     Namespace::Svg => "svg ",
                     Namespace::MathMl => "math ",
                 };

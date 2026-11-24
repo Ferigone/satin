@@ -325,7 +325,7 @@ impl Tree {
                             || value.eq_ignore_ascii_case("application/xhtml+xml")
                     })
             }
-            Namespace::Html => false,
+            Namespace::Html | Namespace::Null => false,
         }
     }
 
@@ -2333,7 +2333,7 @@ fn foreign_special(namespace: Namespace, name: &str) -> bool {
     match namespace {
         Namespace::MathMl => matches!(name, "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"),
         Namespace::Svg => matches!(name, "foreignObject" | "desc" | "title"),
-        Namespace::Html => false,
+        Namespace::Html | Namespace::Null => false,
     }
 }
 

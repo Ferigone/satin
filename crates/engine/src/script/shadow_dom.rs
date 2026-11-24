@@ -118,6 +118,8 @@ pub(super) fn install(
             let value = dom_api::new_fragment(vm, &attached, &errors, prototype)?;
             let root = node(&attached, &value)?;
             let mut state = attached.borrow_mut();
+            let doc = state.document.node_document(id);
+            state.document.adopt(root, doc);
             state
                 .document
                 .shadow_roots

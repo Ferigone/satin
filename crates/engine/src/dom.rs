@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "dom/mutation.rs"]
 pub(crate) mod mutation;
@@ -12,11 +12,13 @@ pub enum Namespace {
     Html,
     Svg,
     MathMl,
+    Null,
 }
 
 impl Namespace {
     pub fn uri(self) -> &'static str {
         match self {
+            Self::Null => "",
             Self::Html => "http://www.w3.org/1999/xhtml",
             Self::Svg => "http://www.w3.org/2000/svg",
             Self::MathMl => "http://www.w3.org/1998/Math/MathML",
@@ -90,6 +92,10 @@ pub struct Document {
     pub root: NodeId,
     pub truncated: bool,
     pub quirks_mode: QuirksMode,
+    /// Script-created XML documents live in the same arena so adoption preserves node identity.
+    pub(crate) xml_documents: BTreeSet<NodeId>,
+    // Only nodes owned by a document other than the active page need an entry.
+    pub(crate) node_documents: BTreeMap<NodeId, NodeId>,
     pub scripting_enabled: bool,
     /// Template element -> detached Document-kind fragment container. Its
     /// children are inert, and are not ordinary children of the template node.
@@ -116,6 +122,8 @@ impl Default for Document {
             root: NodeId(0),
             truncated: false,
             quirks_mode: QuirksMode::NoQuirks,
+            xml_documents: BTreeSet::new(),
+            node_documents: BTreeMap::new(),
             scripting_enabled: false,
             template_contents: BTreeMap::new(),
             shadow_roots: BTreeMap::new(),
@@ -147,9 +155,47 @@ impl Document {
             Some(id)
         })
     }
-    pub fn is_connected(&self, mut node: NodeId) -> bool {
+    pub(crate) fn is_document(&self, node: NodeId) -> bool {
+        node == self.root || self.xml_documents.contains(&node)
+    }
+
+    pub(crate) fn node_document(&self, node: NodeId) -> NodeId {
+        if self.is_document(node) {
+            node
+        } else {
+            self.node_documents.get(&node).copied().unwrap_or(self.root)
+        }
+    }
+
+    pub(crate) fn html_element_in_html_document(&self, id: NodeId) -> bool {
+        self.namespace(id) == Namespace::Html && self.node_document(id) == self.root
+    }
+
+    /// Adopt a detached subtree, including its shadow tree and template contents.
+    pub(crate) fn adopt(&mut self, node: NodeId, document: NodeId) {
+        if self.node_document(node) == document {
+            return;
+        }
+        let mut pending = vec![node];
+        while let Some(id) = pending.pop() {
+            if document == self.root {
+                self.node_documents.remove(&id);
+            } else {
+                self.node_documents.insert(id, document);
+            }
+            pending.extend(self.nodes[id.0].children.iter().copied());
+            pending.extend(self.template_contents.get(&id).copied());
+            pending.extend(self.shadow_roots.get(&id).map(|tree| tree.root));
+        }
+    }
+
+    pub fn is_connected(&self, node: NodeId) -> bool {
+        self.connected_to(node, self.root)
+    }
+
+    pub(crate) fn connected_to(&self, mut node: NodeId, document: NodeId) -> bool {
         while let Some(entry) = self.nodes.get(node.0) {
-            if node == self.root {
+            if node == document {
                 return true;
             }
             let Some(parent) = entry
@@ -171,6 +217,10 @@ impl Document {
             children: vec![],
         });
         self.nodes[parent.0].children.push(id);
+        let document = self.node_document(parent);
+        if document != self.root {
+            self.node_documents.insert(id, document);
+        }
         id
     }
 
@@ -191,7 +241,9 @@ impl Document {
     }
 
     pub fn namespace_uri(&self, id: NodeId) -> Option<&'static str> {
-        matches!(self.nodes[id.0].kind, NodeKind::Element { .. }).then(|| self.namespace(id).uri())
+        (matches!(self.nodes[id.0].kind, NodeKind::Element { .. })
+            && self.namespace(id) != Namespace::Null)
+            .then(|| self.namespace(id).uri())
     }
 
     pub fn attribute_namespace(&self, id: NodeId, name: &str) -> Option<AttributeNamespace> {

@@ -11,6 +11,7 @@ mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
 mod dom_api;
+mod document_interface;
 mod element_interface;
 mod error_event;
 mod event_target;
@@ -34,13 +35,13 @@ mod navigator;
 mod scheduler;
 mod shadow_dom;
 mod storage;
-mod style_sheets;
 mod streams;
 mod structured_clone;
+mod style_sheets;
 mod text_encoding;
+mod tree_walker;
 mod url_api;
 mod webidl;
-mod tree_walker;
 mod workers;
 pub use devtools_console::{
     CONSOLE_RECORD_LIMIT, CONSOLE_TEXT_BYTES, ConsoleLevel, ConsoleOrigin, ConsolePhase,
@@ -90,6 +91,7 @@ struct State {
     prototype: Value,
     element_prototype: Value,
     html_element_prototype: Value,
+    document_prototype: Value,
     fragment_prototype: Value,
     shadow_prototype: Value,
     iframe_prototype: Value,
@@ -294,9 +296,9 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             }
         } else if state.document.shadow_hosts.contains_key(&id) {
             state.shadow_prototype.clone()
-        } else if id != state.document.root
-            && matches!(state.document.nodes[id.0].kind, NodeKind::Document)
-        {
+        } else if state.document.is_document(id) {
+            state.document_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Document) {
             state.fragment_prototype.clone()
         } else {
             state.prototype.clone()
@@ -398,14 +400,19 @@ fn set_attribute(
     let host = state;
     let mut state = host.borrow_mut();
     let present = value.is_some();
-    let key = if state.document.namespace(id) == crate::dom::Namespace::Html {
+    let key = if state.document.html_element_in_html_document(id) {
         key.to_ascii_lowercase()
     } else {
         key.to_owned()
     };
     let old = state.document.attr(id, &key);
     let custom_reaction = custom_elements::attribute(
-        &state, id, &key, old, value.as_deref(), state.document.attribute_namespace(id, &key),
+        &state,
+        id,
+        &key,
+        old,
+        value.as_deref(),
+        state.document.attribute_namespace(id, &key),
     );
     let changes_canvas_attribute = matches!(key.as_str(), "width" | "height")
         && (present || old.is_some())
@@ -649,6 +656,8 @@ impl ScriptRuntime {
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
+        let document_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(document_prototype.clone());
         let fragment_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(fragment_prototype.clone());
         let shadow_prototype = vm.new_object_with_prototype(fragment_prototype.clone())?;
@@ -688,6 +697,7 @@ impl ScriptRuntime {
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
+            document_prototype: document_prototype.clone(),
             fragment_prototype,
             shadow_prototype,
             custom_elements: Rc::default(),
@@ -752,16 +762,6 @@ impl ScriptRuntime {
         navigator::install(&mut vm, &window)?;
         let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
-        for name in ["body", "head", "documentElement"] {
-            let state = state.clone();
-            getter(&mut vm, document.clone(), name, move |vm, _, _| {
-                let id = {
-                    let state = state.borrow();
-                    document_part(&state.document, name)
-                };
-                wrap(vm, &state, id)
-            })?;
-        }
         let state_get = state.clone();
         let get = vm.new_native_function("title", move |_, _, _| {
             Ok(state_get.borrow().document.title().into())
@@ -777,7 +777,8 @@ impl ScriptRuntime {
                 if state.document.nodes.len() >= NODE_LIMIT {
                     return Err(unsupported("DOM node budget exceeded"));
                 }
-                let Some(parent) = document_part(&state.document, "head") else {
+                let Some(parent) = document_part(&state.document, "head")
+                else {
                     return Ok(Value::Undefined);
                 };
                 state.dom_bytes = changed_bytes(&state, 0, "title".len())?;
@@ -805,71 +806,28 @@ impl ScriptRuntime {
             Ok(Value::Undefined)
         });
         vm.define_accessor(document.clone(), "title", Some(get), Some(set))?;
-        let state_ready = state.clone();
-        getter(&mut vm, document.clone(), "readyState", move |_, _, _| {
-            Ok(state_ready.borrow().ready_state.into())
-        })?;
-        let state_create = state.clone();
-        method(
+        document_interface::install(&mut vm, &state, document_prototype.clone())?;
+        let dom_errors = dom_api::install(
             &mut vm,
-            document.clone(),
-            "createElement",
-            move |vm, _, args| {
-                let tag = text(vm, arg(args, 0))?.to_ascii_lowercase();
-                if tag.is_empty()
-                    || !tag
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
-                {
-                    return Err(JsError::type_error("Invalid element name"));
-                }
-                let id = new_detached(
-                    &state_create,
-                    NodeKind::Element {
-                        tag,
-                        attrs: Default::default(),
-                    },
-                )?;
-                wrap(vm, &state_create, Some(id))
-            },
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
         )?;
-        for name in ["createTextNode", "createComment"] {
-            let state_create = state.clone();
-            method(&mut vm, document.clone(), name, move |vm, _, args| {
-                let value = text(vm, arg(args, 0))?;
-                let kind = if name == "createTextNode" {
-                    NodeKind::Text(value)
-                } else {
-                    NodeKind::Comment(value)
-                };
-                let id = new_detached(&state_create, kind)?;
-                wrap(vm, &state_create, Some(id))
-            })?;
-        }
-        let state_id = state.clone();
-        method(
-            &mut vm,
-            document.clone(),
-            "getElementById",
-            move |vm, _, args| {
-                let name = text(vm, arg(args, 0))?;
-                let id = if name.is_empty() {
-                    None
-                } else {
-                    let state = state_id.borrow();
-                    descendants(&state.document, state.document.root)
-                        .find(|&id| state.document.attr(id, "id") == Some(&name))
-                };
-                wrap(vm, &state_id, id)
-            },
-        )?;
-        let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        tree_walker::install(&mut vm, &state, &document, &dom_errors)?;
+        tree_walker::install(&mut vm, &state, &document_prototype, &dom_errors)?;
         style_sheets::install(&mut vm, &dom_errors)?;
         class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
-        namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        let node_lists =
-            collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        namespaces::install(
+            &mut vm,
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
+        )?;
+        let node_lists = collections::install(
+            &mut vm,
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
+        )?;
         navigation::install_parser_methods(&mut vm, &state, document.clone(), &dom_errors)?;
         let file_lists = file_list::FileListHost::install(&mut vm)?;
         let forms = forms::FormHost::install(
@@ -1607,8 +1565,21 @@ fn report_unhandled(vm: &mut Vm, state: &Shared) {
     }
 }
 
+fn document_node(state: &Shared, value: &Value) -> Result<NodeId, JsError> {
+    let id = node(state, value)?;
+    if state.borrow().document.is_document(id) {
+        Ok(id)
+    } else {
+        Err(JsError::type_error("Expected a Document receiver"))
+    }
+}
+
 fn document_part(document: &Document, name: &str) -> Option<NodeId> {
-    let root = document.nodes[document.root.0]
+    document_part_in(document, document.root, name)
+}
+
+fn document_part_in(document: &Document, root: NodeId, name: &str) -> Option<NodeId> {
+    let root = document.nodes[root.0]
         .children
         .iter()
         .copied()
@@ -1815,7 +1786,9 @@ fn install_node(
     let connected = state.clone();
     getter(vm, prototype.clone(), "isConnected", move |_, this, _| {
         let id = node(&connected, &this)?;
-        Ok(connected.borrow().document.is_connected(id).into())
+        let state = connected.borrow();
+        let doc = &state.document;
+        Ok(doc.connected_to(id, doc.node_document(id)).into())
     })?;
     for property in [
         "parentNode",
@@ -1840,7 +1813,7 @@ fn install_node(
                     }),
                     "firstChild" => current.children.first().copied(),
                     "lastChild" => current.children.last().copied(),
-                    "ownerDocument" => (id != doc.root).then_some(doc.root),
+                    "ownerDocument" => (!doc.is_document(id)).then(|| doc.node_document(id)),
                     _ => current.parent.and_then(|parent| {
                         let children = &doc.nodes[parent.0].children;
                         let index = children.iter().position(|child| *child == id)?;
@@ -1873,7 +1846,7 @@ fn install_node(
             };
             let state = state.borrow();
             let (number, name) = match &state.document.nodes[id.0].kind {
-                NodeKind::Document if id != state.document.root => {
+                NodeKind::Document if !state.document.is_document(id) => {
                     (11, "#document-fragment".into())
                 }
                 NodeKind::Document => (9, "#document".into()),
@@ -1882,7 +1855,7 @@ fn install_node(
                 NodeKind::Doctype { name, .. } => (10, name.clone()),
                 NodeKind::Element { tag, .. } => (
                     1,
-                    if state.document.namespace(id) == crate::dom::Namespace::Html {
+                    if state.document.html_element_in_html_document(id) {
                         tag.to_ascii_uppercase()
                     } else {
                         tag.clone()
@@ -1907,7 +1880,7 @@ fn install_node(
         method(vm, owner, name, move |vm, this, args| {
             let id = element(&state, &this)?;
             let key = text(vm, arg(args, 0))?;
-            let key = if state.borrow().document.namespace(id) == crate::dom::Namespace::Html {
+            let key = if state.borrow().document.html_element_in_html_document(id) {
                 key.to_ascii_lowercase()
             } else {
                 key

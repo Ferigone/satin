@@ -16,6 +16,31 @@ pub(super) fn install(
         Err(JsError::type_error("Illegal Element constructor"))
     })?;
 
+    let document_state = state.clone();
+    let document_prototype = state.borrow().document_prototype.clone();
+    let document_constructor = webidl::interface(
+        vm,
+        document_prototype.clone(),
+        "Document",
+        0,
+        move |vm, _, _, new_target| {
+            let target = new_target.ok_or_else(|| JsError::type_error("Document requires new"))?;
+            let prototype = vm.get_property(target, "prototype")?;
+            let prototype = if prototype.as_object().is_some() {
+                prototype
+            } else {
+                document_prototype.clone()
+            };
+            let id = super::new_detached(&document_state, crate::dom::NodeKind::Document)?;
+            document_state
+                .borrow_mut()
+                .document
+                .xml_documents
+                .insert(id);
+            super::wrap_new_node(vm, &document_state, id, prototype)
+        },
+    )?;
+
     let fragment_state = state.clone();
     let fragment_errors = errors.clone();
     let fragment_prototype = state.borrow().fragment_prototype.clone();
@@ -46,7 +71,11 @@ pub(super) fn install(
         Value::Undefined,
         &[node_constructor.clone(), target_constructor],
     )?;
-    for constructor in [element_constructor, fragment_constructor] {
+    for constructor in [
+        element_constructor,
+        document_constructor,
+        fragment_constructor,
+    ] {
         vm.call(
             set_prototype.clone(),
             Value::Undefined,
@@ -83,9 +112,10 @@ pub(super) fn install(
 
 pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
     let state = state.clone();
-    let constructor = webidl::interface(vm, prototype, "HTMLElement", 0, move |vm, _, _, target| {
-        super::custom_elements::html_constructor(vm, &state, target)
-    })?;
+    let constructor =
+        webidl::interface(vm, prototype, "HTMLElement", 0, move |vm, _, _, target| {
+            super::custom_elements::html_constructor(vm, &state, target)
+        })?;
     let element = vm.get_global("Element")?;
     let object = vm.get_global("Object")?;
     let set_prototype = vm.get_property(object, "setPrototypeOf")?;
