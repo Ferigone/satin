@@ -1,6 +1,6 @@
 {
   "date": "2026-11-24",
-  "satinRevision": "be5bde9b2b1dfdcaa6b9b0a9bc5652afa1cb926d",
+  "satinRevision": "9ac59b8aa87bee3bbcd7472b99a6deb0156105bb",
   "platform": "Linux x86_64",
   "build": "a Rust 1.99.1 release worker with Node 24.22.3 supervising the tests",
   "css": [
