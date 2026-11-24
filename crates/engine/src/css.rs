@@ -739,17 +739,7 @@ fn matching_close(source: &str, open: usize, left: u8, right: u8) -> Option<usiz
     None
 }
 
-// An unquoted url() is a token, not a function containing simple blocks.
 fn unquoted_stylesheet_url_end(source: &[u8], open: usize) -> Option<usize> {
-    let start = open.checked_sub(3)?;
-    if !source[start..open].eq_ignore_ascii_case(b"url")
-        || start.checked_sub(1).is_some_and(|prev| {
-            let b = source[prev];
-            b.is_ascii_alphanumeric() || b >= 128 || matches!(b, b'-' | b'_' | b'\\' | b'#' | b'@')
-        })
-    {
-        return None;
-    }
     let body = &source[open + 1..];
     let first = body
         .iter()
@@ -770,31 +760,48 @@ fn unquoted_stylesheet_url_end(source: &[u8], open: usize) -> Option<usize> {
 }
 
 fn stylesheet_block_end(source: &str, open: usize) -> Option<usize> {
-    let mut offset = open + 1;
-    let mut bytes = structural_bytes(source.get(offset..)?);
+    let bytes = source.as_bytes();
+    let mut i = open + 1;
     let mut closers = Vec::new();
-    while let Some((i, token)) = bytes.next() {
-        let CssByte::Unquoted(b) = token else {
-            continue;
-        };
+    while let Some(&b) = bytes.get(i) {
         match b {
-            b'(' => {
-                if let Some(end) = unquoted_stylesheet_url_end(source.as_bytes(), offset + i) {
-                    offset = end;
-                    bytes = structural_bytes(&source[offset..]);
-                } else {
-                    closers.push(b')');
-                }
+            b'\'' | b'"' => {
+                i = quoted_end(bytes, i).unwrap_or_else(|newline| newline);
+                continue;
             }
+            b if css_name_byte(b) || b == b'\\' => {
+                // Consume the whole name, including any dimension unit, so a
+                // suffix of a name cannot be mistaken for a url() token.
+                let mut is_url = !matches!(bytes[i - 1], b'#' | b'@');
+                let mut expected = "url".chars();
+                if consume_name(source, &mut i, |c| {
+                    is_url = is_url && expected.next().is_some_and(|e| c.eq_ignore_ascii_case(&e));
+                })
+                .is_none()
+                {
+                    // An invalid escape leaves the cursor at the backslash.
+                    i += 2;
+                } else if is_url
+                    && expected.next().is_none()
+                    && bytes.get(i) == Some(&b'(')
+                    && let Some(end) = unquoted_stylesheet_url_end(bytes, i)
+                {
+                    // An unquoted url() is a token, not a component block.
+                    i = end;
+                }
+                continue;
+            }
+            b'(' => closers.push(b')'),
             b'[' => closers.push(b']'),
             b'{' => closers.push(b'}'),
-            b'}' if closers.is_empty() => return Some(offset + i),
+            b'}' if closers.is_empty() => return Some(i),
             // Other closing tokens within a component cannot close it.
             b')' | b']' | b'}' if closers.last() == Some(&b) => {
                 closers.pop();
             }
             _ => {}
         }
+        i += 1;
     }
     None
 }
@@ -1582,50 +1589,63 @@ struct Selector {
     combinators: Vec<Combinator>,
     specificity: Specificity,
 }
-fn identifier(source: &str, offset: &mut usize) -> Option<String> {
-    let mut out = String::new();
+fn css_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-') || b >= 128
+}
+
+/// Consume CSS name code points and escapes without allocating the decoded name.
+fn consume_name(source: &str, offset: &mut usize, mut push: impl FnMut(char)) -> Option<()> {
     let bytes = source.as_bytes();
-    while bytes.get(*offset) == Some(&0) {
-        *offset += 1;
-    }
-    while *offset < bytes.len() {
-        let b = bytes[*offset];
+    while let Some(&b) = bytes.get(*offset) {
         if b == b'\\' {
-            *offset += 1;
-            if *offset == bytes.len() {
-                return None;
+            let start = *offset + 1;
+            let mut end = start;
+            while end - start < 6 && bytes.get(end).is_some_and(u8::is_ascii_hexdigit) {
+                end += 1;
             }
-            let start = *offset;
-            while *offset < bytes.len() && bytes[*offset].is_ascii_hexdigit() && *offset - start < 6
-            {
-                *offset += 1;
-            }
-            if *offset > start {
-                let code = u32::from_str_radix(&source[start..*offset], 16).ok()?;
-                out.push(
+            if end > start {
+                let code = u32::from_str_radix(&source[start..end], 16).ok()?;
+                push(
                     char::from_u32(code)
                         .filter(|c| *c != '\0')
                         .unwrap_or('\u{fffd}'),
                 );
-                if bytes.get(*offset).is_some_and(u8::is_ascii_whitespace) {
-                    *offset += 1;
-                }
+                // CSS preprocessing treats CRLF as one newline.
+                end += match bytes.get(end) {
+                    Some(b'\r') if bytes.get(end + 1) == Some(&b'\n') => 2,
+                    Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c') => 1,
+                    _ => 0,
+                };
             } else {
-                let c = source[*offset..].chars().next()?;
-                if matches!(c, '\n' | '\r') {
+                let c = source[start..].chars().next()?;
+                if matches!(c, '\n' | '\r' | '\x0c') {
                     return None;
                 }
-                out.push(c);
-                *offset += c.len_utf8();
+                push(c);
+                end += c.len_utf8();
             }
-        } else if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-') || b >= 128 {
-            let c = source[*offset..].chars().next()?;
-            out.push(c);
+            *offset = end;
+        } else if css_name_byte(b) {
+            let c = if b.is_ascii() {
+                b as char
+            } else {
+                source[*offset..].chars().next()?
+            };
+            push(c);
             *offset += c.len_utf8();
         } else {
             break;
         }
     }
+    Some(())
+}
+
+fn identifier(source: &str, offset: &mut usize) -> Option<String> {
+    let mut out = String::new();
+    while source.as_bytes().get(*offset) == Some(&0) {
+        *offset += 1;
+    }
+    consume_name(source, offset, |c| out.push(c))?;
     if out.is_empty() { None } else { Some(out) }
 }
 fn compile_selector(source: &str, depth: usize) -> Option<Selector> {

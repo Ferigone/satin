@@ -124,11 +124,38 @@ fn css_block_recovery_does_not_open_blocks_in_unquoted_urls() {
         r"URL(asset[\).svg)",
         "url(asset{.svg)",
         r#"url("asset[.svg")"#,
+        r"u\72l(asset[.svg)",
+        r"\url(asset{.svg)",
+        r"\55\52\00004C(asset[.svg)",
+        "u\\72\r\nl(asset[.svg)",
+        "u\\72\x0cl(asset{.svg)",
+        r"u\72l(bad([\).svg)",
+        r#"u\72l( "asset) } [.svg")"#,
     ] {
         let sheet = format!("#first {{ --asset:{value} }} #later {{ width:53px; }}");
         let rules = css::parse(&sheet, 800.);
         assert_eq!(rules.len(), 2, "{value}");
         assert_eq!(rules[1].selector, "#later", "{value}");
+    }
+}
+
+#[test]
+fn css_block_recovery_only_treats_a_url_token_as_opaque() {
+    for head in [
+        r"x-\75 rl",
+        r"x\61 url",
+        r"1.5\75 rl",
+        r"#\75 rl",
+        r"@\75 rl",
+        r"u/**/\72l",
+        r"u\72l/**/",
+        r"u\72l ",
+    ] {
+        // The second `}` is outside the inner function, but still nested.
+        let sheet = format!("#first {{ --asset:{head}(fn(}}) }}) }} #later {{ width:53px; }}");
+        let rules = css::parse(&sheet, 800.);
+        assert_eq!(rules.len(), 2, "{head}");
+        assert_eq!(rules[1].selector, "#later", "{head}");
     }
 }
 
