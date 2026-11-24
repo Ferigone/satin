@@ -50,6 +50,7 @@ impl Data {
         drop(dom);
         if self.page_revision != revision {
             self.page.document = document_snapshot(&mut self.dom.borrow_mut());
+            self.page.focused_element = self.forms.focused();
             self.page.form_controls = Arc::new(
                 self.forms
                     .snapshot()
@@ -236,6 +237,7 @@ impl LayoutHost {
         d.sync_page();
         page.url.clone_from(&d.page.url);
         page.document = d.page.document.clone();
+        page.focused_element = d.page.focused_element;
         page.form_controls = d.page.form_controls.clone();
         page.base = d.page.base.clone();
         page.stylesheets = d.page.stylesheets.clone();
