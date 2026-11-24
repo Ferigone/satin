@@ -143,6 +143,7 @@ fn parser_script_sees_navigation_and_response_timing() {
         input: DocumentInput::Html(src.into()),
         started,
         response_start: started + Duration::from_millis(25),
+        http_status: None,
     })
     .unwrap();
     let mut runtime = None;
@@ -209,6 +210,7 @@ fn start(source: &str) -> (LoadedPage, DocumentSession, Option<ScriptRuntime>) {
         input: DocumentInput::Html(source.into()),
         started,
         response_start: started,
+        http_status: None,
     })
     .unwrap();
     let mut runtime = None;
@@ -269,32 +271,49 @@ fn detached_images_use_document_requests_and_ignore_replaced_sources() {
         </script>"#,
     );
     let first = session.next_resource().expect("detached image request");
-    assert_eq!(first.request.url.as_str(), "https://example.test/assets/first.png");
+    assert_eq!(
+        first.request.url.as_str(),
+        "https://example.test/assets/first.png"
+    );
     assert_eq!(evaluate(&mut runtime, "image.complete"), Value::Bool(false));
     evaluate(&mut runtime, "image.src = 'second.png'");
     advance_ready(&mut page, &mut session, &mut runtime);
     let second = session.next_resource().expect("new image request");
-    assert_eq!(second.request.url.as_str(), "https://example.test/assets/second.png");
+    assert_eq!(
+        second.request.url.as_str(),
+        "https://example.test/assets/second.png"
+    );
 
     for (request, width) in [(first, 3), (second, 7)] {
         let id = request.id;
-        session.complete_resource(
-            id,
-            Ok(DocumentResource {
-                url: request.request.url,
-                body: ResourceBody::Image(Arc::new(image::RgbaImage::new(width, 2))),
-                transferred: 12,
-                origin_clean: true,
-            }),
-            &mut page,
-            &mut runtime,
-            Viewport::default(),
-        ).unwrap();
+        session
+            .complete_resource(
+                id,
+                Ok(DocumentResource {
+                    url: request.request.url,
+                    body: ResourceBody::Image(Arc::new(image::RgbaImage::new(width, 2))),
+                    transferred: 12,
+                    origin_clean: true,
+                }),
+                &mut page,
+                &mut runtime,
+                Viewport::default(),
+            )
+            .unwrap();
         advance_ready(&mut page, &mut session, &mut runtime);
     }
-    assert_eq!(evaluate(&mut runtime, "events.join('|')"), "load:7x2".into());
-    assert_eq!(evaluate(&mut runtime, "image.complete && image.width === 7"), Value::Bool(true));
-    assert_eq!(evaluate(&mut runtime, "image.currentSrc"), "https://example.test/assets/second.png".into());
+    assert_eq!(
+        evaluate(&mut runtime, "events.join('|')"),
+        "load:7x2".into()
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "image.complete && image.width === 7"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "image.currentSrc"),
+        "https://example.test/assets/second.png".into()
+    );
     assert!(runtime.unwrap().diagnostics().is_empty());
 }
 
@@ -391,7 +410,9 @@ fn resource_transfer_gets_a_fresh_deadline_without_resetting_queue_wait() {
     assert_eq!(queue.next_deadline(), Some(queue_deadline));
 
     let dispatch_at = queued_at + Duration::from_secs(20);
-    let load = queue.take(dispatch_at).expect("still eligible after queueing");
+    let load = queue
+        .take(dispatch_at)
+        .expect("still eligible after queueing");
     let transfer_deadline = dispatch_at + DOCUMENT_RESOURCE_TIMEOUT;
     assert_eq!(load.request.deadline, transfer_deadline);
     assert_eq!(queue.next_deadline(), Some(transfer_deadline));

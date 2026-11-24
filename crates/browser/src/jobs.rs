@@ -1,5 +1,7 @@
 //! Bounded transport queues share a reactor. A stalled Fetch has no effect on
 //! the slots reserved for navigation or parser resources.
+pub(crate) mod devtools;
+
 use rust_browser_engine::{
     Loader,
     cookies::CookieStore,
@@ -17,6 +19,8 @@ use tokio::{
     runtime::Handle,
     sync::{Mutex, Semaphore, mpsc},
 };
+
+use self::devtools::{Key, Observer, Phase, Request};
 
 const FETCH_TRANSFERS: usize = 64;
 
@@ -72,6 +76,25 @@ impl Workers {
         results: mpsc::Sender<Message>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, String> {
+        Self::with_observer(cookies, results, wake, None)
+    }
+
+    pub fn new_observed(
+        cookies: CookieStore,
+        results: mpsc::Sender<Message>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(Self, devtools::Receiver), String> {
+        let (observer, receiver) = devtools::channel();
+        Self::with_observer(cookies, results, wake, Some(observer))
+            .map(|workers| (workers, receiver))
+    }
+
+    fn with_observer(
+        cookies: CookieStore,
+        results: mpsc::Sender<Message>,
+        wake: impl Fn() + Send + Sync + 'static,
+        observer: Option<Observer>,
+    ) -> Result<Self, String> {
         let loader = Arc::new(Loader::with_cookies(cookies)?);
         let handle = loader.transport_handle().clone();
         let wake = Arc::new(wake);
@@ -87,6 +110,7 @@ impl Workers {
                 let wake = wake.clone();
                 let shutdown = shutdown.clone();
                 let transfers = transfers.clone();
+                let observer = observer.clone();
                 handle.spawn(async move {
                     loop {
                         let next = tokio::select! {
@@ -100,7 +124,10 @@ impl Workers {
                         tokio::select! {
                             biased;
                             () = shutdown.cancelled() => break,
-                            () = run_job(job, &loader, &results, &wake, &transfers, &shutdown) => {}
+                            () = run_job(
+                                job, &loader, &results, &wake, &transfers, &shutdown,
+                                observer.as_ref(),
+                            ) => {}
                         }
                     }
                 });
@@ -170,6 +197,7 @@ async fn run_job(
     wake: &Arc<impl Fn() + Send + Sync + 'static>,
     transfers: &Arc<Semaphore>,
     shutdown: &CancelSignal,
+    observer: Option<&Observer>,
 ) {
     let Job {
         tab,
@@ -193,19 +221,51 @@ async fn run_job(
         navigation,
         payload,
     };
+    let key = |request| Key {
+        tab,
+        navigation,
+        request,
+    };
     let payload = match task {
         Task::Navigate(request) => {
             let deadline = queued.queued + NAVIGATION_TIMEOUT;
+            let trace = observer.and_then(|observer| {
+                observer.begin(key(Request::Navigate), &request.method, &request.url)
+            });
+            if trace.is_some() {
+                wake();
+            }
             let result = loader
-                .stream_navigation_cancellable(&request, &cancel, deadline, |part| async move {
-                    results
-                        .send(message(Payload::Navigation(part)))
-                        .await
-                        .map_err(|_| "Browser result channel closed")?;
-                    wake();
-                    Ok(())
+                .stream_navigation_cancellable(&request, &cancel, deadline, |part| {
+                    if let (Some(trace), NavigationPart::Open(opened)) = (trace, &part)
+                        && let Some((status, response_time)) = opened.http_response()
+                    {
+                        trace.record(Phase::NavigationOpened {
+                            status,
+                            response_time,
+                        });
+                    }
+                    async move {
+                        results
+                            .send(message(Payload::Navigation(part)))
+                            .await
+                            .map_err(|_| "Browser result channel closed")?;
+                        wake();
+                        Ok(())
+                    }
                 })
                 .await;
+            if let Some(trace) = trace {
+                trace.record(match &result {
+                    Ok(()) => Phase::NavigationFinished,
+                    Err(_) if cancel.is_cancelled() => Phase::Cancelled,
+                    Err(_) => Phase::Failed,
+                });
+                // A successful stream has no separate terminal page message.
+                if result.is_ok() || cancel.is_cancelled() {
+                    wake();
+                }
+            }
             match result {
                 Ok(()) => return,
                 Err(error) => Payload::NavigationError(error),
@@ -217,6 +277,12 @@ async fn run_job(
                 request,
                 upload,
             } = *job;
+            let trace = observer.and_then(|observer| {
+                observer.begin(key(Request::Fetch(id)), &request.method, &request.url)
+            });
+            if trace.is_some() {
+                wake();
+            }
             let demand = upload.as_ref().map(|body| body.demand());
             let response = loader.open_web_fetch_with_upload(
                 &request,
@@ -241,6 +307,12 @@ async fn run_job(
             } else {
                 response.await
             };
+            if let (Some(trace), Ok((head, _))) = (trace, &result) {
+                let status = head.metadata.status;
+                trace.record(Phase::FetchResponse {
+                    status: (status != 0).then_some(status),
+                });
+            }
             let result = match result {
                 Ok((head, Some(body))) => match transfers.clone().try_acquire_owned() {
                     Ok(permit) if !cancel.is_cancelled() => {
@@ -271,7 +343,13 @@ async fn run_job(
                         });
                         return;
                     }
-                    Ok(_) => return,
+                    Ok(_) => {
+                        if let Some(trace) = trace {
+                            trace.record(Phase::Cancelled);
+                            wake();
+                        }
+                        return;
+                    }
                     Err(_) => Err(FetchError::new(
                         FetchErrorKind::Limit,
                         "Too many open Fetch response bodies",
@@ -280,14 +358,31 @@ async fn run_job(
                 Ok((head, None)) => Ok(head),
                 Err(error) => Err(error),
             };
+            if let (Some(trace), Err(error)) = (trace, &result) {
+                trace.record(if error.kind == FetchErrorKind::Aborted {
+                    Phase::Cancelled
+                } else {
+                    Phase::Failed
+                });
+                if cancel.is_cancelled() {
+                    wake();
+                }
+            }
             Payload::Fetch { id, result }
         }
-        Task::Resource(load) => Payload::Resource {
-            id: load.id,
-            result: loader
+        Task::Resource(load) => {
+            let started = observer.map(|_| Instant::now());
+            let result = loader
                 .load_document_resource_cancellable(&load.request, &cancel)
-                .await,
-        },
+                .await;
+            if let (Some(observer), Some(started), Ok(resource)) = (observer, started, &result) {
+                observer.resource_loaded(key(Request::Resource(load.id)), started, &resource.url);
+            }
+            Payload::Resource {
+                id: load.id,
+                result,
+            }
+        }
     };
     if !cancel.is_cancelled() {
         terminal.send(message(payload));

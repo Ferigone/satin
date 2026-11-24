@@ -1,7 +1,9 @@
 use super::*;
 use rust_browser_engine::{
     cookies::CookieContext,
+    layout::Viewport,
     network::{FetchErrorKind, WebRequest},
+    script::DocumentSession,
 };
 use std::{
     io::{BufRead, BufReader, ErrorKind, Write},
@@ -159,7 +161,7 @@ fn request_abort_is_reported_without_canceling_the_page() {
     let server = listener();
     let cookies = CookieStore::new();
     let (out, mut rx) = mpsc::channel(16);
-    let workers = Workers::new(cookies.clone(), out, || {}).unwrap();
+    let (workers, mut events) = Workers::new_observed(cookies.clone(), out, || {}).unwrap();
     let client = Url::parse(&format!("http://{}/", server.local_addr().unwrap())).unwrap();
     let generation = CancelSignal::new();
     let headers = CancelSignal::new();
@@ -181,13 +183,13 @@ fn request_abort_is_reported_without_canceling_the_page() {
             .unwrap();
     };
     submit(1, "headers", Some(headers.clone()));
-    submit(2, "body", Some(body.clone()));
+    submit(2, "body?keep=secret#private", Some(body.clone()));
     let mut old_connections = Vec::new();
     for _ in 0..2 {
         let (path, mut stream) = accept(&server, Instant::now() + WAIT);
         match path.as_str() {
             "/headers" => {}
-            "/body" => open_body(
+            "/body?keep=secret" => open_body(
                 &mut stream,
                 "The rest of this body never arrives.",
                 "Set-Cookie: started=1; Path=/\r\n",
@@ -257,6 +259,37 @@ fn request_abort_is_reported_without_canceling_the_page() {
         }
     }
     assert!(!generation.is_cancelled());
+    let mut aborted = Vec::new();
+    let mut streaming = Vec::new();
+    while let Some(event) = events.try_recv() {
+        assert_eq!((event.key.tab, event.key.navigation), (1, 1));
+        match event.key.request {
+            Request::Fetch(1) => aborted.push(event.phase),
+            Request::Fetch(2) => streaming.push(event.phase),
+            _ => panic!("Unexpected observation: {event:?}"),
+        }
+    }
+    assert_eq!(
+        aborted,
+        [
+            Phase::Started {
+                method: Some("GET".into()),
+                url: client.join("headers").unwrap().to_string(),
+            },
+            Phase::Cancelled,
+        ]
+    );
+    assert_eq!(
+        streaming,
+        [
+            Phase::Started {
+                method: Some("GET".into()),
+                url: client.join("body").unwrap().to_string(),
+            },
+            Phase::FetchResponse { status: Some(200) },
+        ],
+        "The observer must not infer an outcome from body progress"
+    );
     submit(3, "healthy", None);
     let (path, mut healthy) = accept(&server, Instant::now() + WAIT);
     assert_eq!(path, "/healthy");
@@ -291,6 +324,7 @@ fn redirect_and_full_result_queue_share_the_navigation_deadline() {
     let loader = Loader::new().unwrap();
     let handle = loader.transport_handle().clone();
     let deadline = Instant::now() + Duration::from_secs(3);
+    let (observer, mut events) = devtools::channel();
     let job = QueuedJob {
         job: navigation(&server, "/redirect", 1, 1, CancelSignal::new()),
         queued: deadline - NAVIGATION_TIMEOUT,
@@ -303,6 +337,7 @@ fn redirect_and_full_result_queue_share_the_navigation_deadline() {
             &Arc::new(|| {}),
             &Arc::new(Semaphore::new(FETCH_TRANSFERS)),
             &CancelSignal::new(),
+            Some(&observer),
         )
         .await
     });
@@ -338,4 +373,174 @@ fn redirect_and_full_result_queue_share_the_navigation_deadline() {
         matches!(error.payload, Payload::NavigationError(error) if error.contains("deadline exceeded"))
     );
     assert!(rx.try_recv().is_err());
+    let key = Key {
+        tab: 1,
+        navigation: 1,
+        request: Request::Navigate,
+    };
+    let started = events.try_recv().unwrap();
+    assert_eq!(started.key, key);
+    assert_eq!(
+        started.phase,
+        Phase::Started {
+            method: Some("GET".into()),
+            url: format!("http://{}/redirect", server.local_addr().unwrap()),
+        }
+    );
+    let opened = events.try_recv().unwrap();
+    assert_eq!(opened.key, key);
+    let Phase::NavigationOpened {
+        status,
+        response_time,
+    } = opened.phase
+    else {
+        panic!("Expected real navigation headers");
+    };
+    assert_eq!(status, 200);
+    assert!(response_time <= opened.elapsed);
+    let failed = events.try_recv().unwrap();
+    assert_eq!(failed.key, key);
+    assert_eq!(failed.phase, Phase::Failed);
+    assert!(failed.elapsed >= opened.elapsed);
+    assert!(events.try_recv().is_none());
+}
+
+#[test]
+fn successful_document_resource_uses_its_existing_id_and_sanitized_final_url() {
+    let server = listener();
+    let (out, mut rx) = mpsc::channel(16);
+    let (workers, mut events) = Workers::new_observed(CookieStore::new(), out, || {}).unwrap();
+    let cancel = CancelSignal::new();
+    workers
+        .submit(navigation(&server, "/index", 12, 7, cancel.clone()))
+        .unwrap();
+    let (path, mut stream) = accept(&server, Instant::now() + WAIT);
+    assert_eq!(path, "/index");
+    finish_body(
+        &mut stream,
+        "<!doctype html><link rel=stylesheet href='/style.css?private=1#fragment'>",
+    );
+    let end = Instant::now() + WAIT;
+    let open = workers.receive_until(&mut rx, end).unwrap();
+    let Payload::Navigation(NavigationPart::Open(open)) = open.payload else {
+        panic!("Expected the initial document");
+    };
+    let (mut page, mut session) = DocumentSession::start(*open).unwrap();
+    loop {
+        match workers.receive_until(&mut rx, end).unwrap().payload {
+            Payload::Navigation(NavigationPart::Text(text, _)) => session.feed(&text).unwrap(),
+            Payload::Navigation(NavigationPart::Finish) => break,
+            _ => panic!("Expected streamed document input"),
+        }
+    }
+    session.finish_input().unwrap();
+    let mut runtime = None;
+    let load = loop {
+        session
+            .advance(&mut page, &mut runtime, Viewport::default())
+            .unwrap();
+        if let Some(load) = session.next_resource() {
+            break load;
+        }
+        assert!(Instant::now() < end, "No stylesheet discovered");
+    };
+    let id = load.id;
+    workers
+        .submit(Job {
+            tab: 12,
+            navigation: 7,
+            task: Task::Resource(Box::new(load)),
+            cancel,
+        })
+        .unwrap();
+    let (path, mut stream) = accept(&server, Instant::now() + WAIT);
+    assert_eq!(path, "/style.css?private=1");
+    stream
+        .write_all(b"HTTP/1.1 302 Found\r\nLocation: /final.css?private=2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    stream.flush().unwrap();
+    let (path, mut stream) = accept(&server, Instant::now() + WAIT);
+    assert_eq!(path, "/final.css?private=2");
+    stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/css\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    stream.flush().unwrap();
+    let result = workers
+        .receive_until(&mut rx, Instant::now() + WAIT)
+        .unwrap();
+    assert_eq!((result.tab, result.navigation), (12, 7));
+    let Payload::Resource {
+        id: result_id,
+        result: Ok(resource),
+    } = result.payload
+    else {
+        panic!("Expected the unchanged stylesheet result");
+    };
+    assert_eq!(result_id, id);
+    assert_eq!(resource.url.query(), Some("private=2"));
+    let event = std::iter::from_fn(|| events.try_recv())
+        .find(|event| event.key.request == Request::Resource(id))
+        .expect("The HTTP resource was observed");
+    assert_eq!((event.key.tab, event.key.navigation), (12, 7));
+    assert_eq!(
+        event.phase,
+        Phase::ResourceLoaded {
+            url: format!("http://{}/final.css", server.local_addr().unwrap()),
+        }
+    );
+}
+
+#[test]
+fn a_full_metadata_queue_does_not_delay_the_page_fetch_result() {
+    let server = listener();
+    let (out, mut rx) = mpsc::channel(16);
+    let (observer, events) = devtools::channel();
+    let client = Url::parse(&format!("http://{}/", server.local_addr().unwrap())).unwrap();
+    for id in 0..devtools::CAPACITY {
+        observer
+            .begin(
+                Key {
+                    tab: 1,
+                    navigation: 1,
+                    request: Request::Fetch(id as u64),
+                },
+                "GET",
+                &client,
+            )
+            .unwrap();
+    }
+    let workers = Workers::with_observer(CookieStore::new(), out, || {}, Some(observer)).unwrap();
+    let fetch_id = devtools::CAPACITY as u64;
+    workers
+        .submit(Job {
+            tab: 3,
+            navigation: 9,
+            task: Task::Fetch(Box::new(FetchJob {
+                id: fetch_id,
+                request: WebRequest::get(client.join("missing").unwrap(), client),
+                upload: None,
+            })),
+            cancel: CancelSignal::new(),
+        })
+        .unwrap();
+    let (path, mut stream) = accept(&server, Instant::now() + WAIT);
+    assert_eq!(path, "/missing");
+    stream
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    stream.flush().unwrap();
+    let result = workers
+        .receive_until(&mut rx, Instant::now() + WAIT)
+        .unwrap();
+    assert_eq!((result.tab, result.navigation), (3, 9));
+    let Payload::Fetch {
+        id,
+        result: Ok(head),
+    } = result.payload
+    else {
+        panic!("Expected the Fetch headers despite observer overflow");
+    };
+    assert_eq!(id, fetch_id);
+    assert_eq!(head.metadata.status, 404);
+    assert_eq!(events.take_dropped(), 2);
 }

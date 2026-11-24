@@ -113,8 +113,7 @@ impl ResourceQueue {
         Ok(())
     }
     fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
-        if self.active.len() >= CONCURRENT_RESOURCES
-            || self.retry_at.is_some_and(|next| next > now)
+        if self.active.len() >= CONCURRENT_RESOURCES || self.retry_at.is_some_and(|next| next > now)
         {
             return None;
         }
@@ -124,7 +123,10 @@ impl ResourceQueue {
             return None;
         }
         let mut load = self.waiting.pop_front()?;
-        let (_, deadline) = self.pending.get_mut(&load.id).expect("queued resource exists");
+        let (_, deadline) = self
+            .pending
+            .get_mut(&load.id)
+            .expect("queued resource exists");
         *deadline = now + DOCUMENT_RESOURCE_TIMEOUT;
         load.request.deadline = *deadline;
         self.active.insert(load.id);
@@ -248,6 +250,7 @@ impl DocumentSession {
             input,
             started,
             response_start,
+            ..
         } = opened;
         let client = Arc::new(Url::parse(&page.url).map_err(|e| e.to_string())?);
         history.commit_address((*client).clone());
@@ -316,7 +319,8 @@ impl DocumentSession {
     }
     pub fn needs_advance(&self, runtime: Option<&ScriptRuntime>) -> bool {
         runtime.is_some_and(|realm| {
-            realm.has_queued_script_tasks() || realm.state.borrow().media.has_loads()
+            realm.has_queued_script_tasks()
+                || realm.state.borrow().media.has_loads()
                 || self.module_tasks.ready(&self.modules, realm)
         }) || self
             .next_deadline()
@@ -507,13 +511,7 @@ impl DocumentSession {
                 } else {
                     "Document resource queue deadline exceeded"
                 };
-                self.complete_resource(
-                    id,
-                    Err(reason.into()),
-                    page,
-                    runtime,
-                    viewport,
-                )?;
+                self.complete_resource(id, Err(reason.into()), page, runtime, viewport)?;
             }
         }
         self.runnable = true;
@@ -524,7 +522,9 @@ impl DocumentSession {
             if let Some(realm) = runtime {
                 loop {
                     let load = realm.state.borrow_mut().media.take_load();
-                    let Some((key, request)) = load else { break; };
+                    let Some((key, request)) = load else {
+                        break;
+                    };
                     if let Err(error) = self.resources.queue(request, Consumer::Media(key)) {
                         realm.accept_media_bytes(key, Err(error));
                     }
@@ -584,14 +584,11 @@ impl DocumentSession {
                     runtime.as_mut().expect("blocking script has a realm"),
                 )?;
             } else if self.phase == Phase::Parsing {
-                let step = self
-                    .parser
-                    .as_ref()
-                    .map_or(Ok(Step::Complete), |parser| {
-                        parser
-                            .borrow_mut()
-                            .advance(runtime.as_ref().map(|realm| &realm.state), None)
-                    });
+                let step = self.parser.as_ref().map_or(Ok(Step::Complete), |parser| {
+                    parser
+                        .borrow_mut()
+                        .advance(runtime.as_ref().map(|realm| &realm.state), None)
+                });
                 self.sync_parser_policy(page, runtime.as_mut());
                 let step = step.map_err(|error| error.to_string())?;
                 if let Some(realm) = runtime {

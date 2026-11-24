@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>DevTools __TAB__ loading</title>
+<style>
+body { margin: 20px; font: 16px sans-serif; color: #172b3d; background: #eef4f7; }
+main { background: white; border: 2px solid #bacad4; padding: 16px; }
+h1 { margin-top: 0; }
+li { padding: 3px; }
+</style>
+<main>
+  <h1>DevTools tab __TAB__</h1>
+  <ul>
+    <li>F12 opens and closes the dock.</li>
+    <li id="fetch-result">Fetch: pending</li>
+    <li id="xhr-result">XHR: pending</li>
+    <li id="coercion-count">Thrown-object hooks: 0</li>
+  </ul>
+  <p><a id="clean" href="/devtools-clean">Navigate this tab to a clean document</a></p>
+  <button id="burst" type="button">Emit 520 debug messages (optional)</button>
+</main>
+<script>
+var prefix = 'DT-__TAB__-';
+var path = '/devtools-__LOWER__';
+var coercions = 0;
+var hostile = {};
+function hook() {
+    coercions += 1;
+    document.getElementById('coercion-count').textContent = 'Thrown-object hooks: ' + coercions;
+    return prefix + 'HOOK-RAN';
+}
+Object.defineProperty(hostile, 'message', {get: hook});
+Object.defineProperty(hostile, 'name', {get: hook});
+hostile.toString = hook;
+hostile.valueOf = hook;
+if (typeof Symbol === 'function' && Symbol.toPrimitive) hostile[Symbol.toPrimitive] = hook;
+
+console.log(prefix + 'LOG');
+console.info(prefix + 'INFO');
+console.warn(prefix + 'WARN');
+console.error(prefix + 'ERROR');
+console.debug(prefix + 'DEBUG');
+try {
+    throw prefix + 'CAUGHT';
+} catch (error) {
+    console.info(error);
+}
+Promise.reject(prefix + 'HANDLED-REJECTION').catch(function () {});
+document.getElementById('burst').onclick = function () {
+    for (var i = 0; i < 520; i += 1) console.debug(prefix + 'BURST-' + i);
+};
+</script>
+<script>throw 'DT-__TAB__-THROWN';</script>
+<script>throw hostile;</script>
+<script>
+Promise.reject('DT-__TAB__-UNHANDLED');
+Promise.reject(hostile);
+</script>
+<script>
+function runXhr() {
+    if (typeof XMLHttpRequest !== 'function') return Promise.resolve('unsupported');
+    function status(suffix) {
+        return new Promise(function (resolve, reject) {
+            var request = new XMLHttpRequest();
+            request.open('GET', path + suffix);
+            request.timeout = 5000;
+            request.onload = function () { resolve(request.status); };
+            request.onerror = request.onabort = request.ontimeout = function () { reject(); };
+            request.send();
+        });
+    }
+    return Promise.all([status('/xhr-ok'), status('/xhr-missing')]).then(function (codes) {
+        return codes[0] + '/' + codes[1];
+    });
+}
+
+async function runFetch() {
+    var ok = await fetch(path + '/fetch-ok?token=DT-FETCH-QUERY#DT-FETCH-FRAGMENT', {
+        method: 'POST',
+        headers: {'X-Fixture-Private': 'DT-REQUEST-HEADER', Authorization: 'Bearer DT-REQUEST-AUTH'},
+        body: 'DT-REQUEST-BODY'
+    });
+    var missing = await fetch(path + '/fetch-missing');
+    // Check the body in the page, but never display or log it.
+    if (await ok.text() !== 'DT-RESPONSE-BODY' || await missing.text() !== 'not found') {
+        return 'unexpected body';
+    }
+    return ok.status + '/' + missing.status;
+}
+
+async function runChecks() {
+    var fetchResult = 'failed';
+    var xhrResult = 'failed';
+    try { fetchResult = await runFetch(); } catch (error) {}
+    document.getElementById('fetch-result').textContent = 'Fetch: ' + fetchResult;
+    try { xhrResult = await runXhr(); } catch (error) {}
+    document.getElementById('xhr-result').textContent = 'XHR: ' + xhrResult;
+    var ok = fetchResult === '200/404' && (xhrResult === '200/404' || xhrResult === 'unsupported');
+    document.title = 'DevTools __TAB__ ' + (ok && coercions === 0 ? 'ready' : 'failed');
+}
+runChecks();
+</script>

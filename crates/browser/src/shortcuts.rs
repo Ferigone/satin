@@ -20,6 +20,7 @@ pub enum Command {
     ResetZoom,
     Menu,
     BookmarkPage,
+    ToggleDevtools,
 }
 
 enum Chord {
@@ -29,6 +30,7 @@ enum Chord {
     AltChar(&'static str),
     AltNamed(NamedKey),
     Named(NamedKey),
+    PlainNamed(NamedKey),
 }
 
 impl Chord {
@@ -50,6 +52,7 @@ impl Chord {
             Self::AltChar(chars) => modifiers.alt_key() && character(key, chars),
             Self::AltNamed(named) => modifiers.alt_key() && *key == Key::Named(named),
             Self::Named(named) => *key == Key::Named(named),
+            Self::PlainNamed(named) => modifiers.is_empty() && *key == Key::Named(named),
         }
     }
 }
@@ -154,7 +157,19 @@ const BINDINGS: &[Binding] = &[
         "Alt+F",
         "Toggle the Satin menu",
     ),
+    binding(
+        Command::ToggleDevtools,
+        &[Chord::PlainNamed(NamedKey::F12)],
+        "F12",
+        "Toggle Developer Tools",
+    ),
 ];
+
+/// A repeat of a reserved key is consumed but must not dispatch a command.
+pub(crate) fn devtools_toggle(key: &Key, modifiers: ModifiersState, repeat: bool) -> Option<bool> {
+    (*key == Key::Named(NamedKey::F12) && command(key, modifiers) == Some(Command::ToggleDevtools))
+        .then_some(!repeat)
+}
 
 pub fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
     BINDINGS
@@ -274,6 +289,27 @@ mod tests {
         for (key, modifiers) in cases {
             assert_eq!(command(&key, modifiers), None, "{modifiers:?} {key:?}");
         }
+    }
+
+    #[test]
+    fn f12_is_reserved_only_without_modifiers_and_does_not_repeat() {
+        let f12 = Key::Named(NamedKey::F12);
+        assert_eq!(devtools_toggle(&f12, Mods::empty(), false), Some(true));
+        assert_eq!(devtools_toggle(&f12, Mods::empty(), true), Some(false));
+        for mods in [
+            Mods::CONTROL,
+            Mods::ALT,
+            Mods::SHIFT,
+            Mods::SUPER,
+            Mods::all(),
+        ] {
+            assert_eq!(command(&f12, mods), None);
+            assert_eq!(devtools_toggle(&f12, mods, false), None);
+        }
+        assert_eq!(
+            devtools_toggle(&Key::Named(NamedKey::F5), Mods::empty(), false),
+            None
+        );
     }
 
     #[test]
