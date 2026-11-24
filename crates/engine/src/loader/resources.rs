@@ -46,6 +46,53 @@ pub enum ResourceBody {
     Font(FontFace),
 }
 
+/// Final HTTP subresource response seen by the buffered loader, before local
+/// status, integrity or decoder checks. This is not resource acceptance.
+#[derive(Debug)]
+pub struct HttpResourceObservation {
+    pub kind: ResourceKind,
+    pub method: &'static str,
+    /// Final HTTP(S) URL, without userinfo, query or fragment.
+    pub url: String,
+    pub status: u16,
+    /// Body bytes delivered by the HTTP client (possibly decompressed), not
+    /// wire bytes. `None` means the HTTP client did not deliver a body.
+    pub body_bytes: Option<usize>,
+    /// When the loader received headers, if the chosen fetch path exposes it.
+    pub headers_at: Option<Instant>,
+    /// When the buffered HTTP result reached this loader boundary.
+    pub observed_at: Instant,
+}
+
+impl HttpResourceObservation {
+    fn capture(
+        request: &ResourceRequest,
+        final_url: &str,
+        status: u16,
+        body_bytes: Option<usize>,
+        headers_at: Option<Instant>,
+    ) -> Option<Self> {
+        use url::Position::{AfterPath, BeforeHost};
+        if !matches!(request.url.scheme(), "http" | "https") {
+            return None;
+        }
+        let observed_at = Instant::now();
+        let url = Url::parse(final_url).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        Some(Self {
+            kind: request.kind.clone(),
+            method: "GET",
+            url: format!("{}://{}", url.scheme(), &url[BeforeHost..AfterPath]),
+            status,
+            body_bytes,
+            headers_at,
+            observed_at,
+        })
+    }
+}
+
 impl Loader {
     pub fn load_document_resource(
         &self,
@@ -54,7 +101,7 @@ impl Loader {
     ) -> Result<DocumentResource, String> {
         let control = RequestControl::legacy(cancel, request.transport_deadline());
         self.reactor
-            .block_on(self.load_resource_controlled(request, &control))
+            .block_on(self.load_resource_controlled(request, &control, None))
     }
 
     pub async fn load_document_resource_cancellable(
@@ -63,13 +110,31 @@ impl Loader {
         cancel: &CancelSignal,
     ) -> Result<DocumentResource, String> {
         let control = RequestControl::new(cancel, request.transport_deadline());
-        self.load_resource_controlled(request, &control).await
+        self.load_resource_controlled(request, &control, None).await
+    }
+
+    /// Opt in to one observation for this call, with no shared observer or
+    /// queue. Intermediate redirect hops and local loads are not recorded.
+    /// Failures before a buffered HTTP result produce no observation; a later
+    /// resource failure can still have one (e.g. HTTP 404 or bad MIME).
+    pub async fn load_document_resource_observed_cancellable(
+        &self,
+        request: &ResourceRequest,
+        cancel: &CancelSignal,
+    ) -> (Result<DocumentResource, String>, Option<HttpResourceObservation>) {
+        let control = RequestControl::new(cancel, request.transport_deadline());
+        let mut observation = None;
+        let result = self
+            .load_resource_controlled(request, &control, Some(&mut observation))
+            .await;
+        (result, observation)
     }
 
     async fn load_resource_controlled(
         &self,
         request: &ResourceRequest,
         control: &RequestControl<'_>,
+        observation: Option<&mut Option<HttpResourceObservation>>,
     ) -> Result<DocumentResource, String> {
         use ResourceKind::*;
         control.check().map_err(interrupted_resource)?;
@@ -119,6 +184,15 @@ impl Loader {
                 .fetch_with_policy(&web, control, limit, false)
                 .await
                 .map_err(|error| error.to_string())?;
+            if let Some(observation) = observation {
+                *observation = HttpResourceObservation::capture(
+                    request,
+                    &data.url,
+                    data.status,
+                    data.body.as_ref().map(|body| body.len()),
+                    None,
+                );
+            }
             if !(200..300).contains(&data.status) {
                 return Err(format!("HTTP {} loading resource", data.status));
             }
@@ -148,8 +222,17 @@ impl Loader {
                     limit,
                     control,
                 )
-                .await?
-                .resource()?;
+                .await?;
+            if let Some(observation) = observation {
+                *observation = HttpResourceObservation::capture(
+                    request,
+                    &data.url,
+                    data.status,
+                    Some(data.bytes.len()),
+                    Some(data.response_start),
+                );
+            }
+            let data = data.resource()?;
             (
                 data.url,
                 data.content_type,
@@ -368,3 +451,6 @@ pub(crate) fn decode_oriented_bitmap(
     image.apply_orientation(orientation);
     checked_rgba(image)
 }
+
+#[cfg(test)]
+mod tests;

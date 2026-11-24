@@ -25,7 +25,9 @@ pub(crate) use connect_policy::ConnectPolicy;
 pub use home_assets::built_in_site_icon;
 pub(crate) use home_assets::is_home_image;
 pub(crate) use resources::decode_oriented_bitmap;
-pub use resources::{DocumentResource, ResourceBody, ResourceKind, ResourceRequest};
+pub use resources::{
+    DocumentResource, HttpResourceObservation, ResourceBody, ResourceKind, ResourceRequest,
+};
 pub use svg_image::SvgImage;
 use svg_image::svg_mime;
 use transport::{BodyError, CancelSignal, Interrupted, RequestControl};
