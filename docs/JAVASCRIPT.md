@@ -1,6 +1,8 @@
-# JavaScript language foundation in alpha.9
+# Satin JavaScript engine
 
-`crates/javascript` is an independent, dependency-free Rust implementation. It does not embed V8, Chromium, WebView, Boa, QuickJS, or another JavaScript runtime. The lexer, parser, compiler, typed stack bytecode, interpreter, object model, lexical environments, native bindings and tracing collector are project code. The implemented language surface and the remaining gaps are described below.
+Satin executes JavaScript in its own Rust interpreter. The lexer, parser, bytecode compiler, object model, lexical environments, native bindings and tracing collector are project code. ICU4X provides internationalization data and algorithms, Jiff provides time-zone transitions, and Satin executes the vendored Temporal calendar and duration code in its own VM. [Temporal implementation and license](../crates/javascript/src/temporal/README.md)
+
+The [compatibility roadmap](../README.md#compatibility-roadmap) links to the full pinned Test262 results, the machine-readable summary and the outcome of each strict, non-strict or module variant. The CLI and browser share the same engine. Browser-specific policies still govern which capabilities a page receives.
 
 ## Execution architecture
 
@@ -102,7 +104,7 @@ The VM honors overridden `exec`, `Symbol.match`, `Symbol.matchAll`, `Symbol.sear
 
 Large document strings can use a bounded deterministic automaton for boolean tests and literal replacements on ordinary RegExp instances. Satin translates eligible ECMAScript expressions into ASCII character classes and charges each searched or copied span to the VM’s native work budget. Capture substitutions, custom execution methods, unsupported flags, backreferences and lookarounds use the ordinary matcher.
 
-The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. Unicode property escapes and the `v` flag currently raise `UnsupportedFeature`. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
+The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. Unicode property escapes in `u` mode use ICU4X general categories, scripts, script extensions and binary properties. Unicode sets in `v` mode remain open. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
 
 ## Keyed collections
 
@@ -261,7 +263,7 @@ Linear memory, tables, control flow, calls to defined functions, other numeric t
 
 ## Explicit gaps and validation
 
-Import attributes and assignment heads in for-in, for-of, and for-await-of remain unsupported. Await and yield within destructuring subexpressions or class computed keys and heritage expressions remain unsupported. Proxy, iterator helpers, Intl, WeakRef/finalization, and SharedArrayBuffer/Atomics remain absent. Date calendar arithmetic and local timezone integration are covered separately. [Date](DATE.md)
+Static import attributes and assignment heads in for-in, for-of, and for-await-of remain unsupported. Await and yield within destructuring subexpressions or class computed keys and heritage expressions remain unsupported. The VM implements Proxy traps, iterator helpers, Intl services, shared buffers and single-agent Atomics. Document and worker hosts keep SharedArrayBuffer disabled until cross-origin isolation is available. WeakRef/finalization and multithreaded Test262 agent coordination remain open. Date calendar arithmetic and local timezone integration are covered separately. [Date](DATE.md)
 
 Additional compatibility gaps include complete Annex B and lexical grammar, mapped non-strict arguments, complete early-error and directive handling, exact source preservation for Function.prototype.toString, Unicode identifiers and case handling, numeric formatting and rounding, cross-realm behavior, consumers of exposed well-known Symbols, and standard-library methods. Unsupported productions surface as UnsupportedFeature, so entering unsupported syntax cannot satisfy a negative test expecting SyntaxError.
 

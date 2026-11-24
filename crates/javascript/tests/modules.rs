@@ -239,7 +239,6 @@ fn module_early_errors_and_unsupported_productions_are_distinct() {
     }
     for source in [
         "let item; for await ([item = await 1] of []) {}",
-        "import('./m', {});",
         "import './m' with {type:'json'};",
         "import source m from './m';",
     ] {

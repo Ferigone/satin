@@ -369,12 +369,7 @@ fn recursive_grammar_and_dynamic_function_share_the_budget() {
         );
         // Unsupported valid syntax must retain its own category; resource guards
         // must never turn it into a SyntaxError that could pass a negative test.
-        assert_eq!(
-            vm.check_syntax("import('./example.js', {})")
-                .unwrap_err()
-                .kind,
-            ErrorKind::UnsupportedFeature
-        );
+        vm.check_syntax("import('./example.js', {})").unwrap();
         assert_eq!(
             vm.check_syntax("var = ;").unwrap_err().kind,
             ErrorKind::SyntaxError

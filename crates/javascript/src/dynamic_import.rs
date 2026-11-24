@@ -75,11 +75,65 @@ impl Vm {
         })
     }
 
-    pub(crate) fn dynamic_import(&mut self, value: Value) -> Result<Value, JsError> {
+    fn check_import_options(&mut self, options: Value) -> Result<(), JsError> {
+        if options.is_undefined() {
+            return Ok(());
+        }
+        if options.as_object().is_none() {
+            return Err(JsError::type_error("Import options must be an object"));
+        }
+        let attributes = self.get_property(options, "with")?;
+        if attributes.is_undefined() {
+            return Ok(());
+        }
+        let Some(id) = attributes.as_object() else {
+            return Err(JsError::type_error("Import attributes must be an object"));
+        };
+        // The current loader supports source-text JavaScript with no attribute keys.
+        // Read all enumerable values in order before rejecting unsupported keys.
+        let mut has_attributes = false;
+        let mut invalid_value = false;
+        for name in self.own_keys(attributes.clone(), false)? {
+            let key = crate::PropertyKey::String(name);
+            if !self.own_enumerability(id, &key)?.unwrap_or(false) {
+                continue;
+            }
+            if !matches!(
+                self.get_property_key(attributes.clone(), key)?,
+                Value::String(_)
+            ) {
+                invalid_value = true;
+            }
+            has_attributes = true;
+        }
+        if invalid_value {
+            return Err(JsError::type_error(
+                "Import attributes require string values",
+            ));
+        }
+        if has_attributes {
+            return Err(JsError::type_error("Unsupported import attribute"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn dynamic_import(
+        &mut self,
+        phase: crate::parser::ImportPhase,
+        value: Value,
+        options: Value,
+    ) -> Result<Value, JsError> {
         let capability = self.new_promise_capability()?;
         let result = (|| {
             let specifier = self.to_string(&value)?;
             self.account_value(Value::String(specifier.clone()))?;
+            self.check_import_options(options)?;
+            if phase != crate::parser::ImportPhase::Evaluation {
+                return Err(JsError::new(
+                    crate::ErrorKind::UnsupportedFeature,
+                    "The module loader does not implement deferred or source-phase evaluation",
+                ));
+            }
             let (referrer, referrer_module) = match self.realm.active_referrer.as_ref() {
                 Some(SourceReferrer::Script(identifier)) => (Some(identifier.clone()), None),
                 Some(SourceReferrer::Module(module)) => {

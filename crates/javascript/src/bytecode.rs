@@ -108,7 +108,7 @@ pub(crate) enum Op {
     This,
     NewTarget,
     ImportMeta,
-    DynamicImport,
+    DynamicImport(crate::parser::ImportPhase),
     Await,
     Yield {
         delegate: bool,
@@ -1495,7 +1495,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     }
                     pending.push(value.as_deref().map_or(I(Op::Push(Value::Undefined)), E));
                 }
-                Expr::DynamicImport(value) => pending.extend([I(Op::DynamicImport), E(value)]),
+                Expr::DynamicImport(phase, value, options) => pending.extend([
+                    I(Op::DynamicImport(*phase)),
+                    options.as_deref().map_or(I(Op::Push(Value::Undefined)), E),
+                    E(value),
+                ]),
                 Expr::Binary(op, left, right) if matches!(*op, "&&" | "||" | "??") => {
                     pending.extend([Emit::ShortCircuit(op, right), E(left)])
                 }

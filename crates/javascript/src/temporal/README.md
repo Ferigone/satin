@@ -7,13 +7,17 @@ in its JavaScript interpreter. The source distribution is MIT-licensed.
 
 The upstream input is `package/full/global.js`, SHA-256
 `95a7fde114214858e9fc6379f3c2f8d9d36c635d23040e2a222aa4fc0401bb28`.
-The local wrapper takes its intrinsic constructors as arguments and returns
-the Temporal namespace and Date conversion method. It omits the global and
-Intl overrides and the optional development-only instance string.
+The local wrapper accepts intrinsic constructors and returns the Temporal
+namespace and Date conversion method. It omits the upstream global and Intl
+overrides and the optional debug string. ISO durations format their exact
+integer components directly. ICU4X supplies Chinese, Dangi and Umm al-Qura
+calendar fields. Jiff reads time zone offsets and transitions from TZDB.
 
-Each public realm receives independent classes, prototypes and internal slot
-maps. First use initializes the implementation in a private realm on the same
-VM and heap. Exported constructors, prototypes, methods and errors belong to
-the public realm; the algorithm’s private collections and intrinsic methods
-remain independent of changes to page globals. Each calling task retains
-its ordinary instruction, allocation and execution-depth limits.
+Each public realm receives its own constructors and prototypes. First use
+initializes the algorithms in a private realm on the same VM and heap.
+Exported functions and errors use the public realm’s prototypes. Each Temporal
+instance carries a native brand and garbage-collected internal slots. Methods
+and Intl.DateTimeFormat recognize those slots across realms. The internal
+calendar algorithms use pristine intrinsics even if page scripts replace
+public methods. Instructions, allocation and call depth count against the
+calling task’s usual budget.

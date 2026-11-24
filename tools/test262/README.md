@@ -26,7 +26,7 @@ Module variants use the separate strict module grammar. The parser supplies impo
 
 Negative resolution tests require the expected error class during linking. Host setup, missing fixtures, and entry syntax errors get separate outcomes. Negative runtime tests execute the linked graph. Top-level await suspends module execution until the relevant Promise jobs run. A graph still suspended after the queue drains receives `async_incomplete`.
 
-Dynamic import and top-level await cases supply the original relative `_FIXTURE.js` files. The worker resolves a dynamic request when it runs and shares the module record for each file. A dynamic fixture set is limited to 1,023 files and 4 MiB of source. A static graph is limited to 1,023 fixtures, 16,384 edges, and 8 MiB of source. Source-phase and deferred imports, import attributes, JSON modules, external URLs, and agent hosts remain unsupported.
+Dynamic import and top-level await cases supply the original relative `_FIXTURE.js` files. The worker resolves a dynamic request when it runs and shares the module record for each file. A dynamic fixture set is limited to 1,023 files and 4 MiB of source. A static graph is limited to 1,023 fixtures, 16,384 edges, and 8 MiB of source. The parser accepts dynamic import options and source/defer call syntax. Evaluation-phase imports accept an empty attribute set. The fixture loader supports JavaScript source text. JSON modules, deferred evaluation, source-phase loading, external URLs and agent hosts remain open.
 
 ## Asynchronous tests
 

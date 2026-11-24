@@ -42,14 +42,43 @@ fn temporal_uses_intrinsics_and_preserves_subclass_and_realm_identity() {
          threw = error instanceof other.RangeError && !(error instanceof RangeError);
        }
        let duration = new other.Temporal.Duration(1, 1);
+       const hebrew = new other.Temporal.PlainDate(2024, 1, 31, "hebrew");
+       const derived = Temporal.PlainDate.prototype.add.call(hebrew, {days: 1});
        Object.getPrototypeOf(OtherDate) === other.Function.prototype &&
          Object.getPrototypeOf(OtherDate.prototype) === other.Object.prototype &&
          Object.getPrototypeOf(foreignMethod) === other.Function.prototype &&
          date instanceof MyDate && date instanceof OtherDate &&
+         derived instanceof Temporal.PlainDate && derived.calendarId === "hebrew" &&
+         Temporal.PlainDate.prototype.equals.call(hebrew, new Temporal.PlainDate(2024, 1, 31, "hebrew")) &&
+         Temporal.Duration.prototype.toString.call(duration) === "P1Y1M" &&
          duration.toString() === "P1Y1M" && date.add({ days: 1 }).month === 2 && threw
     "#
         )
         .unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn first_use_recovers_from_interruption_on_a_browser_sized_stack() {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            let mut vm = Vm::new();
+            let exhausted = vm
+                .with_task_limits(8_000, None, |vm| vm.eval("Temporal.Instant"))
+                .unwrap_err();
+            assert_eq!(exhausted.kind, rust_browser_javascript::ErrorKind::ExecutionLimit);
+            vm.collect_garbage();
+            let value = vm.eval(r#"
+                let z = Temporal.ZonedDateTime.from("2024-03-10T00:00[America/New_York]");
+                z.add({days: 1}).since(z).total("hours") === 23 &&
+                  new Intl.DateTimeFormat("en", {year:"numeric"}).format(z.toPlainDate()) === "2024" &&
+                  new Temporal.PlainDate(2024, 2, 11, "chinese").day === 2
+            "#).unwrap();
+            assert_eq!(value, Value::Bool(true));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

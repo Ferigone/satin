@@ -30,6 +30,12 @@ pub(super) fn parse(tag: &str) -> Result<Locale,JsError> {
 }
 fn canonical(locale:&mut Locale) {
     LocaleCanonicalizer::new_extended().canonicalize(locale);
+    let replacements: Vec<_> = locale.extensions.unicode.keywords.iter().filter_map(|(k,v)| {
+        table(data::UNICODE_ALIASES, &format!("{k}:{v}")).map(|value|(*k,value))
+    }).collect();
+    for (k, value) in replacements {
+        if let Ok(v) = value.parse::<Keyword>() { locale.extensions.unicode.keywords.set(k,v); }
+    }
 }
 pub(super) fn list(vm:&mut Vm,value:Value)->Result<Vec<Locale>,JsError>{
     if matches!(value,Value::Undefined){return Ok(Vec::new())}
@@ -117,16 +123,15 @@ fn new_locale(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
         if let Some(mut s)=opt(vm,&opts,name,valid)?{
             if k=="fw" {
                 s=day_string(&s).into();
-                if day_no(&s).is_none(){return Err(range("Invalid first day of week"))}
             }
-            if s.is_empty(){return Err(range("Empty extension type"))}
+            if !services::unicode_type(&s){return Err(range("Invalid Unicode extension type"))}
             set_key(&mut l,k,&s)?;
         }
     }
     let n=get(vm,&opts,"numeric")?;
     if !matches!(n,Value::Undefined){set_key(&mut l,"kn",if n.is_truthy(){"true"}else{"false"})?}
     if let Some(s)=opt(vm,&opts,"numberingSystem",&[])?{
-        if s.is_empty(){return Err(range("Empty numbering system"))}set_key(&mut l,"nu",&s)?;
+        if !services::unicode_type(&s){return Err(range("Invalid numbering system"))}set_key(&mut l,"nu",&s)?;
     }
     canonical(&mut l);
     vm.reserve_allocation(l.to_string().len()*2)?;

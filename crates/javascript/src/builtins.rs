@@ -9,6 +9,9 @@ use std::{cmp::Ordering, mem::size_of, rc::Rc};
 
 mod array_iteration;
 mod array_methods;
+mod disposable;
+pub(crate) mod math;
+mod web_legacy;
 
 pub(crate) fn install(vm: &mut Vm) {
     for (name, value) in [
@@ -24,6 +27,7 @@ pub(crate) fn install(vm: &mut Vm) {
     install_function(vm);
     install_array(vm);
     install_string(vm);
+    web_legacy::install(vm);
     install_number(vm);
     install_math(vm);
     install_errors(vm);
@@ -51,6 +55,7 @@ pub(crate) fn install(vm: &mut Vm) {
     crate::regexp::install_protocols(vm);
     crate::collections::install(vm);
     crate::promise::install(vm);
+    disposable::install(vm);
     crate::json::install(vm);
     crate::intl::install(vm);
     crate::wasm::install(vm);
@@ -490,8 +495,10 @@ impl Definition {
         let id = target.as_object().unwrap();
         match self {
             Self::Proxy(descriptor) => {
-                let ok=vm.proxy_define(id,&key,descriptor)?;
-                if !ok && throw {return Err(JsError::type_error("Proxy rejected property definition"))}
+                let ok = vm.proxy_define(id, &key, descriptor)?;
+                if !ok && throw {
+                    return Err(JsError::type_error("Proxy rejected property definition"));
+                }
                 Ok(ok)
             }
             Self::Named(value) => {
@@ -547,7 +554,11 @@ pub(crate) fn descriptor(
     if descriptor.as_object().is_none() {
         return Err(JsError::type_error("Property descriptor must be an object"));
     }
-    if vm.proxy(id){return Ok(Definition::Proxy(crate::proxy::PartialDescriptor::read(vm,descriptor)?))}
+    if vm.proxy(id) {
+        return Ok(Definition::Proxy(crate::proxy::PartialDescriptor::read(
+            vm, descriptor,
+        )?));
+    }
     if let PropertyKey::String(name) = key
         && matches!(vm.heap.object(id)?.kind, ObjectKind::TypedArray(_))
         && let Some(index) = numeric_index(name)
@@ -1143,7 +1154,7 @@ fn install_array(vm: &mut Vm) {
         create_array(vm, args, prototype)
     });
     method(vm, array.clone(), "isArray", 1, |vm, _, a| {
-        Ok(Value::Bool(vm.is_array_exotic(&arg(a,0))?))
+        Ok(Value::Bool(vm.is_array_exotic(&arg(a, 0))?))
     });
     method(vm, array, "of", 0, array_methods::array_of);
     method(vm, proto.clone(), "at", 1, |vm, this, args| {
@@ -1410,7 +1421,11 @@ fn install_array(vm: &mut Vm) {
                     &[value.clone(), Value::from(i), object.clone()],
                 )?;
                 if mapped.is_truthy() {
-                    return Ok(if name == "find" { value } else { Value::from(i) });
+                    return Ok(if name == "find" {
+                        value
+                    } else {
+                        Value::from(i)
+                    });
                 }
             }
             Ok(if name == "find" {
@@ -1537,6 +1552,74 @@ fn append_units(vm: &mut Vm, out: &mut Vec<u16>, units: &[u16]) -> Result<(), Js
     vm.consume_work(units.len())?;
     out.extend_from_slice(units);
     Ok(())
+}
+
+fn string_normalize(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
+    use icu_normalizer::{
+        ComposingNormalizerBorrowed as Compose, DecomposingNormalizerBorrowed as Decompose,
+    };
+    let string = string_this(vm, this)?;
+    let form = match args.first() {
+        None | Some(Value::Undefined) => JsString::from("NFC"),
+        Some(value) => vm.to_string(value)?,
+    };
+    enum Form {
+        Compose(Compose<'static>),
+        Decompose(Decompose<'static>),
+    }
+    let form = match form.to_string_lossy().as_str() {
+        "NFC" => Form::Compose(Compose::new_nfc()),
+        "NFD" => Form::Decompose(Decompose::new_nfd()),
+        "NFKC" => Form::Compose(Compose::new_nfkc()),
+        "NFKD" => Form::Decompose(Decompose::new_nfkd()),
+        _ => {
+            return Err(JsError::new(
+                ErrorKind::RangeError,
+                "Invalid normalization form",
+            ));
+        }
+    };
+    let units = string.as_utf16();
+    vm.consume_work(units.len())?;
+    if units.iter().all(|&unit| unit < 128) {
+        return Ok(Value::String(string));
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    // Normalization applies to scalar runs. Unpaired UTF-16 surrogates are
+    // retained verbatim by ECMAScript, while ICU's lossy UTF-16 input replaces them.
+    while index <= units.len() {
+        if let Some(&unit) = units.get(index) {
+            if (0xd800..=0xdbff).contains(&unit)
+                && units
+                    .get(index + 1)
+                    .is_some_and(|trail| (0xdc00..=0xdfff).contains(trail))
+            {
+                index += 2;
+                continue;
+            }
+            if !(0xd800..=0xdfff).contains(&unit) {
+                index += 1;
+                continue;
+            }
+        }
+        let scalars = char::decode_utf16(units[start..index].iter().copied())
+            .map(|value| value.expect("validated UTF-16 run"));
+        let normalized: Box<dyn Iterator<Item = char> + '_> = match &form {
+            Form::Compose(normalizer) => Box::new(normalizer.normalize_iter(scalars)),
+            Form::Decompose(normalizer) => Box::new(normalizer.normalize_iter(scalars)),
+        };
+        for ch in normalized {
+            append_units(vm, &mut out, ch.encode_utf16(&mut [0; 2]))?;
+        }
+        if let Some(unit) = units.get(index) {
+            append_units(vm, &mut out, std::slice::from_ref(unit))?;
+        }
+        index += 1;
+        start = index;
+    }
+    vm.finish_string(out)
 }
 
 // None is Case_Ignorable; otherwise the result records whether the point is Cased.
@@ -1888,6 +1971,7 @@ fn install_string(vm: &mut Vm) {
         }
         vm.finish_string(units)
     });
+    method(vm, proto.clone(), "normalize", 0, string_normalize);
     // Satin's non-Intl casing locale uses the Unicode default mappings.
     // The locale argument positions are reserved by ECMA-262.
     for (name, upper) in [
@@ -1919,6 +2003,35 @@ fn install_string(vm: &mut Vm) {
                 }
             }
             vm.copy_string(&units[start..end])
+        });
+    }
+    for (name, repair) in [("isWellFormed", false), ("toWellFormed", true)] {
+        method(vm, proto.clone(), name, 0, move |vm, this, _| {
+            if this.is_nullish() {
+                return Err(JsError::type_error("String method requires a receiver"));
+            }
+            let text = vm.to_string(&this)?;
+            let units = text.as_utf16();
+            vm.consume_work(units.len())?;
+            if char::decode_utf16(units.iter().copied()).all(|c| c.is_ok()) {
+                return Ok(if repair {
+                    Value::String(text)
+                } else {
+                    true.into()
+                });
+            }
+            if !repair {
+                return Ok(false.into());
+            }
+            vm.ensure_string_allocation(units.len())?;
+            let mut out = Vec::with_capacity(units.len());
+            for c in char::decode_utf16(units.iter().copied()) {
+                out.extend_from_slice(
+                    c.unwrap_or(char::REPLACEMENT_CHARACTER)
+                        .encode_utf16(&mut [0; 2]),
+                );
+            }
+            vm.finish_string(out)
         });
     }
     method(vm, proto.clone(), "repeat", 1, |vm, this, a| {
@@ -2248,6 +2361,7 @@ fn install_math(vm: &mut Vm) {
         vm.define_data_property(math.clone(), name, Value::Number(n), false, false, false)
             .unwrap();
     }
+    math::install(vm, math.clone());
     for name in [
         "abs", "floor", "ceil", "round", "trunc", "sqrt", "cbrt", "sin", "cos", "tan", "asin",
         "acos", "atan", "exp", "expm1", "log", "log2", "log10", "log1p", "sign", "fround", "clz32",
@@ -2259,10 +2373,17 @@ fn install_math(vm: &mut Vm) {
                 "floor" => n.floor(),
                 "ceil" => n.ceil(),
                 "round" => {
-                    if (-0.5..0.0).contains(&n) {
+                    if n == 0.0 || !n.is_finite() || n.fract() == 0.0 {
+                        n
+                    } else if (-0.5..0.0).contains(&n) {
                         -0.0
                     } else {
-                        (n + 0.5).floor()
+                        let floor = n.floor();
+                        if n - floor < 0.5 {
+                            floor
+                        } else {
+                            floor + 1.0
+                        }
                     }
                 }
                 "trunc" => n.trunc(),
@@ -2299,7 +2420,7 @@ fn install_math(vm: &mut Vm) {
             let x = vm.to_number(&arg(a, 0))?;
             let y = vm.to_number(&arg(a, 1))?;
             Ok(Value::Number(match name {
-                "pow" => x.powf(y),
+                "pow" => math::pow(x, y),
                 "atan2" => x.atan2(y),
                 _ => to_i32(x).wrapping_mul(to_i32(y)) as f64,
             }))
@@ -2314,8 +2435,9 @@ fn install_math(vm: &mut Vm) {
             };
             for value in a {
                 let n = vm.to_number(value)?;
-                if n.is_nan() {
-                    return Ok(Value::Number(n));
+                if n.is_nan() || result.is_nan() {
+                    result = f64::NAN;
+                    continue;
                 }
                 result = if max {
                     if n == 0.0 && result == 0.0 {

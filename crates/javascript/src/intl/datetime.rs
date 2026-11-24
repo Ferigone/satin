@@ -1,5 +1,7 @@
 //! Date and time formatting with ICU calendar/locale data and the IANA TZDB.
 use super::*;
+use crate::temporal::slots::{Kind, intl_fields};
+use std::cell::RefCell;
 use icu_calendar::{Date, Iso, types::RataDie};
 use icu_datetime::{DateTimeFormatter, fieldsets::{builder::{DateFields, FieldSetBuilder},enums::CompositeDateTimeFieldSet}, input::{DateTime,Time}, options::{Length,YearStyle,TimePrecision,SubsecondDigits}};
 use jiff::{Timestamp,tz::{Offset,TimeZone}};
@@ -30,6 +32,9 @@ impl PartsWrite for Parts {
 type Fields=BTreeMap<&'static str,String>;
 struct DateFormat {
     locale:String,calendar:String,numbering:String,zone:TimeZone,zone_name:String,hour_cycle:String,
+    locale_preferences: Locale,
+    use_defaults: bool,
+    temporal_formats: RefCell<BTreeMap<Kind, (DateTimeFormatter<CompositeDateTimeFieldSet>, Fields)>>,
     fields:Fields,date_style:Option<String>,time_style:Option<String>,formatter:DateTimeFormatter<CompositeDateTimeFieldSet>,
 }
 const COMPONENTS:&[(&str,&[&str])]=&[
@@ -90,6 +95,7 @@ fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
     if let Some(s)=opt(vm,&opts,"timeZoneName",&["short","long","shortOffset","longOffset","shortGeneric","longGeneric"])?{fields.insert("timeZoneName",s);}
     opt(vm,&opts,"formatMatcher",&["basic","best fit"])?;
     let ds=opt(vm,&opts,"dateStyle",STYLES)?;let ts=opt(vm,&opts,"timeStyle",STYLES)?;
+    let use_defaults = ds.is_none() && ts.is_none() && fields.keys().all(|&k| matches!(k, "era" | "timeZoneName"));
     if ds.is_some()||ts.is_some(){
         if !fields.is_empty(){return Err(JsError::type_error("Date and time styles cannot be combined with components"))}
         if let Some(s)=&ds {
@@ -103,6 +109,17 @@ fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
     }else if fields.keys().all(|&k|matches!(k,"era"|"timeZoneName")){
         for key in ["year","month","day"]{fields.insert(key,"numeric".into());}
     }
+    let formatter = make_formatter(&l, &fields)?;
+    let calendar=locale::key(&l,"ca").filter(|s|data::CALENDARS.contains(&s.as_str())).unwrap_or_else(||locale::regional(data::CALENDAR_PREFS,&l).split_whitespace().next().unwrap_or("gregory").into());
+    let numbering=locale::key(&l,"nu").filter(|s|data::NUMBERING.contains(&s.as_str())).unwrap_or_else(||locale::default_numbering(&l).into());
+    let mut resolved:Locale=locale::lookup(&l).unwrap_or_else(||"en-US".into()).parse().unwrap();
+    if cal_opt.is_none()&&locs.first().and_then(|l|locale::key(l,"ca")).as_deref()==Some(&calendar){locale::set_key(&mut resolved,"ca",&calendar)?;}
+    if num_opt.is_none()&&locs.first().and_then(|l|locale::key(l,"nu")).as_deref()==Some(&numbering){locale::set_key(&mut resolved,"nu",&numbering)?;}
+    if locs.first().and_then(|l|locale::key(l,"hc")).as_deref()==Some(&hc)&&matches!(hour12,Value::Undefined){locale::set_key(&mut resolved,"hc",&hc)?}
+    vm.reserve_allocation(std::mem::size_of::<DateFormat>()+fields.len()*64)?;
+    create(vm,proto,DateFormat{locale:resolved.to_string(),calendar,numbering,zone,zone_name,hour_cycle:hc,locale_preferences:l,use_defaults,temporal_formats:RefCell::new(BTreeMap::new()),fields,date_style:ds,time_style:ts,formatter})
+}
+fn make_formatter(l: &Locale, fields: &Fields) -> Result<DateTimeFormatter<CompositeDateTimeFieldSet>, JsError> {
     let mut b=FieldSetBuilder::new();
     let has=|k:&str|fields.contains_key(k);
     let (y,m,d,e)=(has("year")||has("era"),has("month"),has("day"),has("weekday"));
@@ -121,31 +138,78 @@ fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
         else if has("second"){TimePrecision::Second}else if has("minute"){TimePrecision::Minute}else{TimePrecision::Hour});
     }
     let set=b.build_composite_datetime().map_err(|_|range("Unsupported date and time field combination"))?;
-    let formatter=DateTimeFormatter::try_new(l.clone().into(),set).map_err(|_|range("Cannot format this locale"))?;
-    let calendar=locale::key(&l,"ca").filter(|s|data::CALENDARS.contains(&s.as_str())).unwrap_or_else(||locale::regional(data::CALENDAR_PREFS,&l).split_whitespace().next().unwrap_or("gregory").into());
-    let numbering=locale::key(&l,"nu").filter(|s|data::NUMBERING.contains(&s.as_str())).unwrap_or_else(||locale::default_numbering(&l).into());
-    let mut resolved:Locale=locale::lookup(&l).unwrap_or_else(||"en-US".into()).parse().unwrap();
-    if cal_opt.is_none()&&locs.first().and_then(|l|locale::key(l,"ca")).as_deref()==Some(&calendar){locale::set_key(&mut resolved,"ca",&calendar)?;}
-    if num_opt.is_none()&&locs.first().and_then(|l|locale::key(l,"nu")).as_deref()==Some(&numbering){locale::set_key(&mut resolved,"nu",&numbering)?;}
-    if locs.first().and_then(|l|locale::key(l,"hc")).as_deref()==Some(&hc)&&matches!(hour12,Value::Undefined){locale::set_key(&mut resolved,"hc",&hc)?}
-    vm.reserve_allocation(std::mem::size_of::<DateFormat>()+fields.len()*64)?;
-    create(vm,proto,DateFormat{locale:resolved.to_string(),calendar,numbering,zone,zone_name,hour_cycle:hc,fields,date_style:ds,time_style:ts,formatter})
+    DateTimeFormatter::try_new(l.clone().into(),set).map_err(|_|range("Cannot format this locale"))
 }
 fn millis(vm:&mut Vm,v:&Value)->Result<i64,JsError>{
     let x=if matches!(v,Value::Undefined){SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.,|s|s.as_millis() as f64)}else{vm.to_number(v)?};
     if !x.is_finite() || x.abs()>8.64e15 {return Err(range("Invalid time value"))} Ok(x.trunc() as i64)
 }
 impl DateFormat{
-    fn parts(&self,ms:i64)->Result<Vec<(&'static str,String)>,JsError>{
+    fn local_millis(&self,ms:i64)->i64 {
         let ts=Timestamp::from_millisecond(ms).unwrap_or_else(|_|if ms<0{Timestamp::MIN}else{Timestamp::MAX});
-        let local=ms+i64::from(self.zone.to_offset(ts).seconds())*1000;
+        ms+i64::from(self.zone.to_offset(ts).seconds())*1000
+    }
+
+    fn parts(&self, vm: &mut Vm, input: &Value) -> Result<(Option<Kind>, Vec<(&'static str, String)>), JsError> {
+        let Some((kind, calendar, ms)) = intl_fields(vm, input)? else {
+            let local = self.local_millis(millis(vm, input)?);
+            return Ok((None, self.format_local(&self.formatter, &self.fields, local)?));
+        };
+        let must_match = matches!(kind, Kind::PlainYearMonth | Kind::PlainMonthDay)
+            || matches!(kind, Kind::PlainDate | Kind::PlainDateTime) && calendar != "iso8601";
+        if must_match && calendar != self.calendar {
+            return Err(range("Temporal and formatter calendars differ"));
+        }
+
+        if !self.temporal_formats.borrow().contains_key(&kind) {
+            let date = matches!(kind, Kind::Instant | Kind::PlainDateTime | Kind::PlainDate);
+            let time = matches!(kind, Kind::Instant | Kind::PlainDateTime | Kind::PlainTime);
+            let year = date || kind == Kind::PlainYearMonth;
+            let day = date || kind == Kind::PlainMonthDay;
+            let month = year || day;
+            let mut fields = self.fields.clone();
+            if self.use_defaults {
+                for (key, enable) in [("year", year), ("month", month), ("day", day),
+                    ("hour", time), ("minute", time), ("second", time)] {
+                    if enable { fields.insert(key, "numeric".into()); }
+                }
+            }
+            fields.retain(|&key, _| match key {
+                "year" | "era" => year,
+                "month" => month,
+                "day" => day,
+                "weekday" => date,
+                "timeZoneName" => kind == Kind::Instant,
+                _ => time,
+            });
+            if fields.is_empty() {
+                return Err(JsError::type_error("Formatting options do not overlap with Temporal fields"));
+            }
+            let formatter = make_formatter(&self.locale_preferences, &fields)?;
+            vm.reserve_allocation(std::mem::size_of_val(&formatter))?;
+            self.temporal_formats.borrow_mut().insert(kind, (formatter,fields));
+        }
+        let formats = self.temporal_formats.borrow();
+        let local = if kind == Kind::Instant { self.local_millis(ms) } else { ms };
+        Ok((Some(kind), self.format_local(&formats[&kind].0, &formats[&kind].1, local)?))
+    }
+    fn format_local(&self, formatter: &DateTimeFormatter<CompositeDateTimeFieldSet>, fields: &Fields, local: i64)->Result<Vec<(&'static str,String)>,JsError>{
         let day=local.div_euclid(86400000); let time=local.rem_euclid(86400000);
         let datetime=DateTime{
             date:Date::from_rata_die(RataDie::new(day+719163),Iso),
             time:Time::try_new((time/3600000) as u8,(time/60000%60) as u8,(time/1000%60) as u8,(time%1000) as u32*1_000_000).unwrap(),
         };
         let mut parts=Parts::default();
-        self.formatter.format(&datetime).write_to_parts(&mut parts).map_err(|_|range("Date formatting failed"))?;
+        formatter.format(&datetime).write_to_parts(&mut parts).map_err(|_|range("Date formatting failed"))?;
+        // CLDR short patterns may pad numeric month/day even when ECMA-402 requests
+        // a single digit. Remove padding only from numeric representations.
+        let zero = data::DIGIT_ZERO.iter().find(|(_, name)| *name == self.numbering).map(|(s,_)|*s).unwrap_or("0");
+        for (key, text) in &mut parts.spans {
+            if matches!(*key, "month" | "day") && fields.get(key).is_some_and(|s|s=="numeric")
+                && text.starts_with(zero) && text.len()>zero.len() {
+                text.drain(..zero.len());
+            }
+        }
         Ok(parts.spans)
     }
     fn resolved(&self,vm:&mut Vm)->ResultValue{
@@ -178,21 +242,22 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
         let fmt=slots::<DateFormat>(vm,&this)?;
         if let Some(cached)=vm.host_slot(&this,0){return Ok(cached)}
         let f=vm.native("",1,false,Rc::new(move|vm,_,args|{
-            let ms=millis(vm,&arg(args,0))?;render(vm,fmt.parts(ms)?,false,None)
+            let (_, parts) = fmt.parts(vm, &arg(args,0))?; render(vm, parts, false, None)
         }));
         vm.set_host_slot(this,0,f.clone())?; Ok(f)
     });
     method(vm,proto.clone(),"formatToParts",1,|vm,this,args|{
         let f=slots::<DateFormat>(vm,&this)?;
-        let ms=millis(vm,&arg(args,0))?;render(vm,f.parts(ms)?,true,None)
+        let (_, parts) = f.parts(vm, &arg(args,0))?; render(vm, parts, true, None)
     });
     method(vm,proto.clone(),"resolvedOptions",0,|vm,this,_|slots::<DateFormat>(vm,&this)?.resolved(vm));
     for name in ["formatRange","formatRangeToParts"]{
         method(vm,proto.clone(),name,2,move|vm,this,args|{
             let f=slots::<DateFormat>(vm,&this)?;
             if matches!(arg(args,0),Value::Undefined)||matches!(arg(args,1),Value::Undefined){return Err(JsError::type_error("Both range endpoints are required"))}
-            let start=millis(vm,&arg(args,0))?;let end=millis(vm,&arg(args,1))?;
-            let left=f.parts(start)?;let right=f.parts(end)?;
+            let (start_type, left) = f.parts(vm, &arg(args,0))?;
+            let (end_type, right) = f.parts(vm, &arg(args,1))?;
+            if start_type != end_type { return Err(JsError::type_error("Range endpoints have different Temporal types")); }
             let as_parts=name=="formatRangeToParts";
             if left==right{return render(vm,left,as_parts,Some("shared"))}
             if !as_parts{return Ok(format!("{} – {}",left.into_iter().map(|(_,s)|s).collect::<String>(),right.into_iter().map(|(_,s)|s).collect::<String>()).into())}

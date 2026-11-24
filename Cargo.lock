@@ -2530,19 +2530,23 @@ dependencies = [
 name = "rust-browser-javascript"
 version = "0.1.0-alpha.29"
 dependencies = [
+ "base64 0.22.1",
  "fixed_decimal",
  "icu_calendar",
+ "icu_casemap",
  "icu_collator",
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",
  "icu_list",
  "icu_locale",
+ "icu_normalizer",
  "icu_plurals",
  "icu_properties",
  "icu_time",
  "jiff",
  "libc",
+ "miniz_oxide 0.8.9",
  "num-bigint",
  "num-traits",
  "regex-automata",

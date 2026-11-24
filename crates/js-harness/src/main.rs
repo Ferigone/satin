@@ -473,6 +473,28 @@ mod tests {
         assert_eq!(result["value"], value_json(&Value::from("undefined")));
     }
     #[test]
+    fn reflect_construct_uses_the_new_targets_original_realm_intrinsics() {
+        let result = request(
+            r#"
+            const other = $262.createRealm();
+            const target = other.evalScript("(function C(){})");
+            target.prototype = null;
+            const original = other.global.Array.prototype;
+            other.global.Array = function Replacement() {};
+            for (const T of [target, new Proxy(target, {}), target.bind(null)]) {
+                const value = Reflect.construct(Array, [], T);
+                if (Object.getPrototypeOf(value) !== original) throw "foreign prototype lost";
+            }
+            const sentinel = {};
+            target.prototype = sentinel;
+            if (Object.getPrototypeOf(Reflect.construct(Array, [], target)) !== sentinel)
+                throw "explicit prototype lost";
+        "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+    }
+    #[test]
     fn eval_script_preserves_phase_and_text_and_shares_the_execution_budget() {
         let result = request(r#"$262.evalScript("let =");"#, false);
         assert_eq!(result["phase"], "runtime", "{result}");

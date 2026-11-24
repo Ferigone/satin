@@ -2675,10 +2675,18 @@ impl Vm {
         new_target: Value,
         fallback: ObjectId,
     ) -> Result<ObjectId, JsError> {
-        Ok(self
-            .get_property(new_target, "prototype")?
+        if let Some(prototype) = self
+            .get_property(new_target.clone(), "prototype")?
             .as_object()
-            .unwrap_or(fallback))
+        {
+            return Ok(prototype);
+        }
+        self.constructor_realm_prototype(
+            new_target
+                .as_object()
+                .ok_or_else(|| JsError::type_error("Expected a constructor"))?,
+            fallback,
+        )
     }
     pub(crate) fn allocate_constructed(
         &mut self,
@@ -3165,7 +3173,7 @@ impl Vm {
             | Op::Argument(..)
             | Op::Call
             | Op::Construct
-            | Op::DynamicImport) => self.run_call_op(op, stack, env, strict)?,
+            | Op::DynamicImport(_)) => self.run_call_op(op, stack, env, strict)?,
             Op::Await | Op::Yield { .. } => {
                 return Err(JsError::new(
                     ErrorKind::InternalError,
@@ -3474,9 +3482,10 @@ impl Vm {
         strict: bool,
     ) -> Result<(), JsError> {
         match op {
-            Op::DynamicImport => {
+            Op::DynamicImport(phase) => {
+                let options = self.pop_value(stack)?;
                 let value = self.pop_value(stack)?;
-                let promise = self.dynamic_import(value)?;
+                let promise = self.dynamic_import(*phase, value, options)?;
                 stack.push(Item::Value(promise));
             }
             Op::PrepareCall(allow_direct_eval) => {
@@ -4057,7 +4066,7 @@ impl Vm {
             "*" => a * b,
             "/" => a / b,
             "%" => a % b,
-            "**" => a.powf(b),
+            "**" => crate::builtins::math::pow(a, b),
             "|" => (to_i32(a) | to_i32(b)) as f64,
             "&" => (to_i32(a) & to_i32(b)) as f64,
             "^" => (to_i32(a) ^ to_i32(b)) as f64,

@@ -74,12 +74,7 @@ fn early_errors_without_execution() {
         vm.check_syntax("return 1").unwrap_err().kind,
         ErrorKind::SyntaxError
     );
-    assert_eq!(
-        vm.check_syntax("import('./example.js', {})")
-            .unwrap_err()
-            .kind,
-        ErrorKind::UnsupportedFeature
-    );
+    vm.check_syntax("import('./example.js', {})").unwrap();
 }
 #[test]
 fn per_iteration_closure_environments() {
@@ -546,10 +541,7 @@ fn unsupported_grammar_cannot_pass_negative_syntax_tests() {
     let mut vm = Vm::new();
     vm.check_syntax("async function g(){for await ([target] of source){}}")
         .unwrap();
-    for source in [
-        "async function g(){for await ([target = await 1] of source){}}",
-        "import('./module.js', {})",
-    ] {
+    for source in ["async function g(){for await ([target = await 1] of source){}}"] {
         assert_eq!(
             vm.check_syntax(source).unwrap_err().kind,
             ErrorKind::UnsupportedFeature,

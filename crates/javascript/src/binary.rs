@@ -19,6 +19,8 @@ use std::{ops::Range, rc::Rc};
 pub(crate) use structured_clone::ViewLayout;
 pub(crate) use typed_array::{NumericIndex, TypedDescriptor, numeric_index};
 
+pub(crate) use element::f16_round;
+
 const CELL_BYTES: usize = 384;
 const MAX_INDEX: f64 = 9_007_199_254_740_991.0;
 const MAX_BUFFER_BYTES: usize = u32::MAX as usize;

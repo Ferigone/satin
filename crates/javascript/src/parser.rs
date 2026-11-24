@@ -16,6 +16,12 @@ const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ImportPhase {
+    Evaluation,
+    Defer,
+    Source,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum VarKind {
     Var,
     Let,
@@ -166,7 +172,7 @@ pub(crate) enum Expr {
     Super,
     NewTarget,
     ImportMeta,
-    DynamicImport(Box<Expr>),
+    DynamicImport(ImportPhase, Box<Expr>, Option<Box<Expr>>),
     Await(Box<Expr>),
     Yield {
         value: Option<Box<Expr>>,
@@ -1432,9 +1438,9 @@ impl Parser {
             if simple_assignment && stop_before_simple_assignment {
                 break;
             }
-            if op == "**" && matches!(left, Expr::Await(_)) {
+            if op == "**" && matches!(left, Expr::Await(_) | Expr::Unary(..)) {
                 return Err(
-                    self.error("Await on the left side of exponentiation requires parentheses")
+                    self.error("A unary expression on the left side of exponentiation requires parentheses")
                 );
             }
             self.advance(1);
@@ -1583,7 +1589,7 @@ impl Parser {
         }
         for op in ["!", "~", "+", "-", "typeof", "void", "delete", "++", "--"] {
             if self.eat(op) {
-                let e = self.expression(14)?;
+                let e = self.expression(15)?;
                 if matches!(op, "++" | "--") {
                     if !assignable(&e) {
                         return Err(self.error("Invalid update target"));
@@ -1605,7 +1611,7 @@ impl Parser {
                 return self.postfix(Expr::NewTarget, true);
             }
             let primary = self.primary()?;
-            if matches!(primary, Expr::DynamicImport(_)) {
+            if matches!(primary, Expr::DynamicImport(..)) {
                 return Err(self.error("A dynamic import call cannot follow new"));
             }
             let constructor = self.postfix(primary, false)?;
@@ -1829,21 +1835,25 @@ impl Parser {
             return Ok(Expr::Super);
         }
         if self.eat("import") {
-            if self.eat("(") {
-                if self.at("...") {
-                    return Err(self.error("Dynamic import does not accept spread arguments"));
-                }
-                let specifier = self.expression_in(2)?;
-                if self.eat(",") && !self.at(")") {
-                    return Err(self.error("Dynamic import options are not implemented"));
-                }
-                self.expect(")")?;
-                return self.checked_expression(Expr::DynamicImport(Box::new(specifier)));
-            }
-            if self.at(".") && self.lookahead(1).is_some_and(|token| {
-                matches!(&token.kind, TokenKind::Word(phase) if phase == "defer" || phase == "source")
+            let phase = if self.at(".") && self.lookahead(1).is_some_and(|token| {
+                matches!(&token.kind, TokenKind::Word(name) if name == "defer" || name == "source")
             }) {
-                return Err(self.error("Deferred and source-phase dynamic imports are not implemented"));
+                self.expect(".")?;
+                if self.eat("defer") { Some(ImportPhase::Defer) }
+                else { self.expect("source")?; Some(ImportPhase::Source) }
+            } else if self.at("(") { Some(ImportPhase::Evaluation) } else { None };
+            if let Some(phase) = phase {
+                self.expect("(")?;
+                let specifier = Box::new(self.expression_in(2)?);
+                let options = if self.eat(",") && !self.at(")") {
+                    let options = self.expression_in(2)?;
+                    self.eat(",");
+                    Some(Box::new(options))
+                } else {
+                    None
+                };
+                self.expect(")")?;
+                return self.checked_expression(Expr::DynamicImport(phase, specifier, options));
             }
             if !self.module_goal {
                 return Err(self.error("import.meta outside a module"));
@@ -2026,6 +2036,10 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Expression(a), child_depth));
                     pending.push((Ast::Expression(b), child_depth));
                 }
+                Expr::DynamicImport(_, value, options) => {
+                    pending.push((Ast::Expression(value), child_depth));
+                    pending.extend(options.iter().map(|e| (Ast::Expression(e), child_depth)));
+                }
                 Expr::Sequence(terms) => {
                     pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
@@ -2038,7 +2052,6 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 | Expr::Spread(e)
                 | Expr::Group(e)
                 | Expr::Await(e)
-                | Expr::DynamicImport(e)
                 | Expr::PrivateMember(e, _)
                 | Expr::PrivateIn(_, e) => pending.push((Ast::Expression(e), child_depth)),
                 Expr::Yield { value, .. } => {

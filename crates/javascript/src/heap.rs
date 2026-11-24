@@ -79,6 +79,10 @@ pub(crate) enum ObjectKind {
     Promise(crate::promise::PromiseData),
     PromiseFunction(crate::promise::PromiseFunction, EnvId),
     Iterator(crate::iterator::IteratorData),
+    DisposableStack {
+        asynchronous: bool,
+        disposed: bool,
+    },
     Collection(Box<crate::collections::CollectionData>),
     CollectionIterator(crate::collections::CollectionIterator),
     WeakCollection(Box<crate::collections::weak::WeakData>),

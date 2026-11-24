@@ -3,7 +3,7 @@
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
     dynamic_import::{DynamicImportHook, SourceReferrer},
-    heap::{Cell, EnvId, Environment, Heap, Object, ObjectKind},
+    heap::{Cell, EnvId, Environment, Heap, Object, ObjectKind, PropertyKind},
 };
 use std::{collections::BTreeMap, rc::Rc};
 
@@ -49,6 +49,7 @@ pub(crate) struct RealmState {
     pub(crate) async_iterator_prototype: Option<ObjectId>,
     pub(crate) async_from_sync_prototype: Option<ObjectId>,
     pub(crate) array_prototype: ObjectId,
+    constructor_prototypes: Vec<Option<ObjectId>>,
     pub(crate) intl_prototypes: Vec<(&'static str, ObjectId)>,
     pub(crate) binary: crate::binary::Intrinsics,
     pub(crate) clone_intrinsics: crate::structured_clone::Intrinsics,
@@ -104,6 +105,7 @@ impl RealmState {
             async_iterator_prototype: None,
             async_from_sync_prototype: None,
             array_prototype,
+            constructor_prototypes: Vec::new(),
             intl_prototypes: Vec::new(),
             binary: crate::binary::Intrinsics::default(),
             clone_intrinsics: crate::structured_clone::Intrinsics::default(),
@@ -279,18 +281,155 @@ impl Vm {
         if self.inactive_realms.is_empty() {
             return body(self);
         }
-        let env = match self.heap.object(function)?.kind {
-            ObjectKind::Native {
-                realm_environment, ..
-            } => realm_environment,
-            ObjectKind::Function { environment, .. } => self.environment_realm(environment),
-            ObjectKind::PromiseFunction(_, env) => env,
-            ObjectKind::Module(ref data) => data
-                .environment
-                .map_or(self.realm.global_env, |env| self.environment_realm(env)),
-            _ => self.realm.global_env,
-        };
+        let env = self.function_defining_environment(function)?;
         self.with_realm(RealmId(env), body)
+    }
+
+    // GetFunctionRealm follows internal target slots without invoking proxy traps.
+    fn function_defining_environment(&self, mut function: ObjectId) -> Result<EnvId, JsError> {
+        loop {
+            match &self.heap.object(function)?.kind {
+                ObjectKind::Proxy(proxy) => {
+                    function = proxy
+                        .pair
+                        .ok_or_else(|| JsError::type_error("Revoked Proxy"))?
+                        .0;
+                }
+                ObjectKind::Bound { target, .. } => {
+                    function = target.as_object().expect("bound callable target");
+                }
+                ObjectKind::Native {
+                    realm_environment, ..
+                }
+                | ObjectKind::PromiseFunction(_, realm_environment) => {
+                    return Ok(*realm_environment);
+                }
+                ObjectKind::Function { environment, .. } => {
+                    return Ok(self.environment_realm(*environment));
+                }
+                ObjectKind::Module(module) => {
+                    return Ok(module
+                        .environment
+                        .map_or(self.realm.global_env, |env| self.environment_realm(env)));
+                }
+                _ => return Ok(self.realm.global_env),
+            }
+        }
+    }
+
+    pub(super) fn constructor_realm_prototype(
+        &self,
+        function: ObjectId,
+        fallback: ObjectId,
+    ) -> Result<ObjectId, JsError> {
+        let env = self.function_defining_environment(function)?;
+        let Some(foreign) = self.inactive_realms.get(&env) else {
+            return Ok(fallback);
+        };
+        let prototype = self
+            .realm
+            .constructor_prototypes
+            .iter()
+            .position(|id| *id == Some(fallback))
+            .and_then(|slot| foreign.constructor_prototypes[slot]);
+        Ok(prototype.unwrap_or(fallback))
+    }
+
+    // Snapshot the built-in prototype identities during trusted bootstrap. A page
+    // may later overwrite or delete any of the corresponding global properties.
+    fn constructor_prototypes(&self) -> Vec<Option<ObjectId>> {
+        fn data_object(heap: &Heap, object: ObjectId, key: &str) -> Option<ObjectId> {
+            match &heap.object(object).ok()?.properties.get(&key.into())?.kind {
+                PropertyKind::Data { value, .. } => value.as_object(),
+                _ => None,
+            }
+        }
+        let realm = &self.realm;
+        let mut slots = vec![
+            realm.async_function_prototype,
+            realm.generator_function_prototype,
+            realm.generator_prototype,
+            realm.async_generator_function_prototype,
+            realm.async_generator_prototype,
+            realm.async_iterator_prototype,
+        ];
+        let groups: &[(&str, &[&str])] = &[
+            (
+                "",
+                &[
+                    "Object",
+                    "Function",
+                    "Array",
+                    "Number",
+                    "String",
+                    "Boolean",
+                    "Date",
+                    "RegExp",
+                    "Error",
+                    "TypeError",
+                    "ReferenceError",
+                    "SyntaxError",
+                    "RangeError",
+                    "EvalError",
+                    "URIError",
+                    "AggregateError",
+                    "SuppressedError",
+                    "Promise",
+                    "Map",
+                    "Set",
+                    "WeakMap",
+                    "WeakSet",
+                    "WeakRef",
+                    "FinalizationRegistry",
+                    "Iterator",
+                    "ArrayBuffer",
+                    "SharedArrayBuffer",
+                    "DataView",
+                    "Int8Array",
+                    "Uint8Array",
+                    "Uint8ClampedArray",
+                    "Int16Array",
+                    "Uint16Array",
+                    "Int32Array",
+                    "Uint32Array",
+                    "Float16Array",
+                    "Float32Array",
+                    "Float64Array",
+                    "BigInt64Array",
+                    "BigUint64Array",
+                    "DisposableStack",
+                    "AsyncDisposableStack",
+                ],
+            ),
+            (
+                "Intl",
+                &[
+                    "Locale",
+                    "Collator",
+                    "ListFormat",
+                    "DisplayNames",
+                    "NumberFormat",
+                    "DateTimeFormat",
+                    "RelativeTimeFormat",
+                    "PluralRules",
+                    "Segmenter",
+                    "DurationFormat",
+                ],
+            ),
+            ("WebAssembly", &["Module", "Instance", "Memory"]),
+        ];
+        for &(namespace, names) in groups {
+            let container = if namespace.is_empty() {
+                Some(realm.global_object)
+            } else {
+                data_object(&self.heap, realm.global_object, namespace)
+            };
+            slots.extend(names.iter().map(|name| {
+                let class = data_object(&self.heap, container?, name)?;
+                data_object(&self.heap, class, "prototype")
+            }));
+        }
+        slots
     }
 
     fn environment_realm(&self, mut environment: EnvId) -> EnvId {
@@ -311,7 +450,9 @@ impl Vm {
             .into_values()
             .filter_map(|value| value.as_object())
             .collect::<Vec<_>>();
+        self.realm.constructor_prototypes = self.constructor_prototypes();
         let realm = &self.realm;
+        intrinsics.extend(realm.constructor_prototypes.iter().flatten().copied());
         intrinsics.extend(
             [
                 realm.async_function_prototype,

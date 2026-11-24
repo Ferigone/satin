@@ -7,6 +7,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use writeable::{PartsWrite,Part,Writeable};
 use std::fmt;
 mod numeric;
+mod time;
+mod display;
 fn requested(vm:&mut Vm,args:&[Value],coerce:bool)->Result<(Locale,Value),JsError>{
     let ll=locale::list(vm,arg(args,0))?;
     let opts=options(vm,arg(args,1),coerce)?;
@@ -14,7 +16,7 @@ fn requested(vm:&mut Vm,args:&[Value],coerce:bool)->Result<(Locale,Value),JsErro
     Ok((resolve(&ll),opts))
 }
 fn base(l:&Locale)->String { locale::lookup(l).unwrap_or_else(||"en-US".into()) }
-fn unicode_type(s:&str)->bool {s.split('-').all(|p|(3..=8).contains(&p.len())&&p.bytes().all(|c|c.is_ascii_alphanumeric()))}
+pub(super) fn unicode_type(s:&str)->bool {s.split('-').all(|p|(3..=8).contains(&p.len())&&p.bytes().all(|c|c.is_ascii_alphanumeric()))}
 struct Collation{coll:CollatorBorrowed<'static>, locale:String,usage:String,co:String,sensitivity:String,numeric:bool,first:String,punctuation:bool}
 fn new_collator(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue{
     let ll=locale::list(vm,arg(args,0))?;
@@ -180,5 +182,7 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
         });
     }
     install_segmenter(vm,intl.clone());
+    display::install(vm,intl.clone());
+    time::install(vm,intl.clone());
     numeric::install(vm,intl);
 }

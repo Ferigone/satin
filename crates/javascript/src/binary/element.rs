@@ -136,6 +136,10 @@ impl Element {
     }
 }
 
+pub(crate) fn f16_round(input: f64) -> f64 {
+    decode_half(encode_half(input))
+}
+
 fn encode_half(number: f64) -> u16 {
     let bits = number.to_bits();
     let sign = (bits >> 48) as u16 & 0x8000;
