@@ -43,6 +43,8 @@ pub(crate) struct ConsoleInput<'a> {
     pub(crate) message: &'a str,
     pub(crate) source: Option<&'a str>,
     pub(crate) phase: Option<&'a str>,
+    /// The engine clipped text, source, or arguments before delivering this record.
+    pub(crate) capture_truncated: bool,
 }
 
 /// Borrow from the model when painting; all text is bounded and remains inert.
@@ -54,6 +56,7 @@ pub(crate) struct ConsoleRow {
     pub(crate) message: Box<str>,
     pub(crate) source: Option<Box<str>>,
     pub(crate) phase: Option<Box<str>>,
+    pub(crate) capture_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +122,7 @@ impl Console {
             message: bounded(input.message, MAX_MESSAGE_BYTES),
             source: input.source.map(|text| bounded(text, MAX_SOURCE_BYTES)),
             phase: input.phase.map(|text| bounded(text, MAX_PHASE_BYTES)),
+            capture_truncated: input.capture_truncated,
         });
         true
     }
@@ -175,6 +179,7 @@ mod tests {
             message,
             source: None,
             phase: None,
+            capture_truncated: false,
         }
     }
 
@@ -225,6 +230,7 @@ mod tests {
                 message: "unhandled",
                 source: Some("app.js"),
                 phase: Some("promise rejection"),
+                capture_truncated: false,
             },
         );
 

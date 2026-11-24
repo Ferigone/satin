@@ -60,6 +60,7 @@ pub(super) struct ConsoleRow<'a> {
     pub(super) failure: Option<Failure>,
     pub(super) source: Option<&'a str>,
     pub(super) phase: Option<&'a str>,
+    pub(super) capture_truncated: bool,
     /// Total occurrences for a merged row; 0 or 1 does not draw a count.
     pub(super) repeat: usize,
 }
@@ -338,6 +339,9 @@ impl Painter<'_> {
 
 fn details(row: &ConsoleRow<'_>) -> Option<String> {
     let mut parts = Vec::new();
+    if row.capture_truncated {
+        parts.push("Preview truncated".into());
+    }
     if row.repeat > 1 {
         parts.push(format!("×{}", row.repeat));
     }
@@ -525,6 +529,7 @@ mod tests {
             failure: None,
             phase: None,
             source: Some(""),
+            capture_truncated: false,
             repeat: 1,
         };
         assert_eq!(details(&row), None);
@@ -537,5 +542,41 @@ mod tests {
         );
         assert_eq!(Failure::Caught.label(), "Caught");
         assert_eq!(Failure::BrowserReported.label(), "Browser-reported");
+    }
+
+    #[test]
+    fn engine_truncation_is_labeled_even_when_the_preview_fits() {
+        use super::super::{Document, console::ConsoleFilter, console_row};
+        use rust_browser_engine::{
+            LoadedPage,
+            script::{CONSOLE_TEXT_BYTES, ScriptRuntime},
+        };
+
+        let page = LoadedPage::from_html("https://console.test/", "<!doctype html>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let args = ["'x'"; 64].join(", ");
+        runtime
+            .eval(&format!(
+                "console.error({args}, 'omitted'); console.error({args});"
+            ))
+            .unwrap();
+        let legacy = runtime.diagnostics();
+        let snapshot = runtime.take_console_snapshot();
+        assert_eq!(snapshot.records.len(), 2);
+        assert!(snapshot.records[0].truncated);
+        assert!(snapshot.records[0].text.len() < CONSOLE_TEXT_BYTES);
+        assert!(!snapshot.records[1].truncated);
+
+        let mut document = Document::new(1, 1);
+        assert!(document.ingest_console(snapshot));
+        let mut rows = document.console.rows(ConsoleFilter::ALL).map(console_row);
+        let truncated = rows.next().unwrap();
+        let complete = rows.next().unwrap();
+        assert_eq!(truncated.message, complete.message);
+        assert_eq!(truncated.failure, None);
+        assert_eq!(details(&truncated).as_deref(), Some("Preview truncated"));
+        assert_eq!(details(&complete), None);
+        assert_eq!(document.console.discarded(), 0);
+        assert_eq!(runtime.diagnostics(), legacy);
     }
 }

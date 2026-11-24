@@ -230,6 +230,7 @@ impl Document {
                     message: &record.text,
                     source: record.source.as_deref(),
                     phase,
+                    capture_truncated: record.truncated,
                 },
             );
         }
@@ -330,6 +331,7 @@ fn console_row(row: &console::ConsoleRow) -> ConsoleRow<'_> {
         },
         source: row.source.as_deref(),
         phase: row.phase.as_deref(),
+        capture_truncated: row.capture_truncated,
         repeat: 1, // Each call is a separate record; never infer grouping or caught errors.
     }
 }
@@ -368,6 +370,7 @@ mod tests {
             message,
             source: None,
             phase: None,
+            capture_truncated: false,
         }
     }
 
