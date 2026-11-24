@@ -263,7 +263,12 @@ impl Op {
 }
 
 pub(crate) fn compile(source: &str, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
-    compile_eval(source, false, parser::EvalContext::default(), compilation_bytes)
+    compile_eval(
+        source,
+        false,
+        parser::EvalContext::default(),
+        compilation_bytes,
+    )
 }
 pub(crate) fn compile_eval(
     source: &str,
@@ -846,6 +851,25 @@ fn stmt_chunk(stmt: &Stmt, strict: bool) -> Result<Rc<Chunk>, JsError> {
     statement(stmt, &mut chunk.ops, strict)?;
     Ok(chunk.finish())
 }
+// Annex B interprets an ordinary function in an if clause as a single
+// declaration inside a block. Inherited strictness is known at compile time.
+fn if_clause(stmt: &Stmt, strict: bool) -> Result<Rc<Chunk>, JsError> {
+    if let Stmt::Function(function) = stmt {
+        if strict || function.kind != FunctionKind::Ordinary {
+            return Err(syntax(
+                "Function declaration in an if clause requires non-strict code",
+            ));
+        }
+        let declarations = block(std::slice::from_ref(stmt), false, false)?;
+        return Ok(Chunk {
+            ops: vec![Op::Block(declarations)],
+            ..Chunk::default()
+        }
+        .finish());
+    }
+    stmt_chunk(stmt, strict)
+}
+
 fn expression(e: &Expr, strict: bool) -> Result<Rc<Chunk>, JsError> {
     let mut c = Chunk {
         strict,
@@ -953,8 +977,8 @@ fn compile_statement(
         }
         Stmt::If(test, yes, no) => out.push(Op::Branch(
             expression(test, strict)?,
-            stmt_chunk(yes, strict)?,
-            no.as_ref().map(|s| stmt_chunk(s, strict)).transpose()?,
+            if_clause(yes, strict)?,
+            no.as_ref().map(|s| if_clause(s, strict)).transpose()?,
         )),
         Stmt::While(test, body) => out.push(Op::While(
             expression(test, strict)?,

@@ -31,7 +31,7 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
-Satin’s JavaScript engine passed **74,819 of 103,345 Test262 checks (72.40%)** on Linux x86_64. **38,888 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `be5bde9`](https://github.com/Ferigone/satin/commit/be5bde9b2b1dfdcaa6b9b0a9bc5652afa1cb926d) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
+Satin’s JavaScript engine passed **74,978 of 103,345 Test262 checks (72.55%)** on Linux x86_64. **38,975 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `9ac59b8`](https://github.com/Ferigone/satin/commit/9ac59b8aa87bee3bbcd7472b99a6deb0156105bb) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
@@ -42,7 +42,7 @@ Colours show the pass rate within each named suite. The CSS results cover sticky
 
 | Suite | Passed / total | Pass rate | Scope and evidence |
 | --- | ---: | ---: | --- |
-| Core language | 42,413 / 44,709 | 94.86% | Test262 · `language` |
+| Core language | 42,572 / 44,709 | 95.22% | Test262 · `language` |
 | Built-in objects | 29,810 / 47,448 | 62.83% | Test262 · `built-ins` |
 | Intl (ECMA-402) | 40 / 6,786 | 0.59% | Test262 · `intl402` |
 | Annex B | 640 / 1,377 | 46.48% | Test262 · `annexB` |
@@ -55,7 +55,7 @@ Colours show the pass rate within each named suite. The CSS results cover sticky
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
 
-The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 24,040 `fail`, 4,120 `unsupported`, 365 `resource_limit`, 1 `invalid_metadata`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
+The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 23,879 `fail`, 4,122 `unsupported`, 365 `resource_limit`, 1 `invalid_metadata`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
 
 The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising the tests. Each variant had a 3-second timeout and a 1,000,000-instruction budget. [Per-file and per-variant outcomes (TSV.GZ)](docs/compatibility/test262-outcomes.tsv.gz) · [Machine-readable totals](docs/compatibility/test262.json) · [Reproduce the measurement](tools/test262/README.md#reports-and-limits)
 

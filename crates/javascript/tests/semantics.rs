@@ -768,3 +768,77 @@ fn embedder_bytecode_depth_keeps_its_own_limit_and_native_stack_guard() {
             .unwrap();
     }
 }
+
+#[test]
+fn unbraced_statement_bodies_reject_lexical_declarations_before_execution() {
+    let mut vm = Vm::new();
+    for body in [
+        "const x = null;",
+        "let x = 1;",
+        "class C {}",
+        "async function f() {}",
+        "function* g() {}",
+    ] {
+        for source in [
+            format!("do {body} while (false);"),
+            format!("while (false) {body}"),
+            format!("if (false) {body}"),
+            format!("if (true) {{}} else {body}"),
+            format!("for (; false;) {body}"),
+            format!("for (var item in {{}}) {body}"),
+            format!("for (var item of []) {body}"),
+        ] {
+            assert_eq!(
+                vm.eval(&source).unwrap_err().kind,
+                ErrorKind::SyntaxError,
+                "{source}"
+            );
+        }
+    }
+    number(
+        "var n = 0; do { const x = 1; let y = 1; class C {}; n = x+y; } while(false); if(n) var z=2; n+z",
+        4.0,
+    );
+    number(
+        "var let=1; do let++; while(false); if(true) let\nlet += 2; let",
+        4.0,
+    );
+    vm.eval("var touched = false").unwrap();
+    assert_eq!(
+        vm.eval("touched = true; do const x = null; while(false);")
+            .unwrap_err()
+            .kind,
+        ErrorKind::SyntaxError
+    );
+    assert_eq!(vm.eval("touched").unwrap(), Value::Bool(false));
+}
+
+#[test]
+fn only_sloppy_if_clauses_allow_a_direct_ordinary_function() {
+    let mut vm = Vm::new();
+    for source in [
+        "while(false) function f() {}",
+        "do function f() {} while(false);",
+        "for(;false;) function f() {}",
+        "'use strict'; if (false) function f() {}",
+        "'use strict'; if (true) {} else function f() {}",
+        "function strict(){ 'use strict'; if(true) function f(){} }",
+        "if(false) label: function f() {}",
+    ] {
+        assert_eq!(
+            vm.eval(source).unwrap_err().kind,
+            ErrorKind::SyntaxError,
+            "{source}"
+        );
+    }
+    assert_eq!(
+        vm.check_module_syntax("if (false) function f() {}")
+            .unwrap_err()
+            .kind,
+        ErrorKind::SyntaxError
+    );
+    assert!(
+        vm.eval("if(false) function f() {} else function g() {}")
+            .is_ok()
+    );
+}

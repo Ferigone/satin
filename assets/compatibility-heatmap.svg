@@ -6,11 +6,11 @@
   <text x="20" y="33" font-size="20" fill="#f6f3ed" font-weight="650" text-anchor="start">JavaScript</text>
 <text x="768" y="33" font-size="13" fill="#b7b5b1" font-weight="450" text-anchor="end">Test262  /  all six directories</text>
 <g transform="translate(20 45)">
-    <title>Core language · 94.86% · 42,413 / 44,709</title>
+    <title>Core language · 95.22% · 42,572 / 44,709</title>
     <rect width="244" height="84" rx="7" fill="#263e37"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Core language</text>
-    <text x="13" y="57" font-size="30" fill="#a1dac5" font-weight="650" text-anchor="start">94.86%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">42,413 / 44,709</text>
+    <text x="13" y="57" font-size="30" fill="#a1dac5" font-weight="650" text-anchor="start">95.22%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">42,572 / 44,709</text>
   </g>
 <g transform="translate(272 45)">
     <title>Built-in objects · 62.83% · 29,810 / 47,448</title>

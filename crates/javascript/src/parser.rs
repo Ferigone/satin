@@ -531,9 +531,9 @@ impl Parser {
             self.expect("(")?;
             let test = self.expression(1)?;
             self.expect(")")?;
-            let yes = Box::new(self.controlled_statement()?);
+            let yes = Box::new(self.if_clause()?);
             let no = if self.eat("else") {
-                Some(Box::new(self.controlled_statement()?))
+                Some(Box::new(self.if_clause()?))
             } else {
                 None
             };
@@ -729,6 +729,20 @@ impl Parser {
         Ok(Stmt::Label(id, names, Box::new(item)))
     }
 
+    #[inline(always)]
+    fn if_clause(&mut self) -> Result<Stmt, JsError> {
+        // Annex B permits only an ordinary FunctionDeclaration in an unbraced
+        // if/else clause. The compiler rejects it in inherited strict code.
+        if self.at("function")
+            && !self
+                .lookahead(1)
+                .is_some_and(|t| t.kind == TokenKind::Punct("*"))
+        {
+            return self.statement();
+        }
+        self.controlled_statement()
+    }
+
     fn controlled_statement(&mut self) -> Result<Stmt, JsError> {
         if self.eat("{") {
             // The controlling statement already occupies a parser frame.
@@ -737,6 +751,26 @@ impl Parser {
             let body = Stmt::Block(self.block_contents()?);
             self.check_ast(Ast::Statement(&body))?;
             return Ok(body);
+        }
+        if self.at("const")
+            || self.at("class")
+            || self.at("function")
+            || self.async_function_ahead()
+        {
+            return Err(self.error("Declaration requires a block in statement position"));
+        }
+        // In a Statement, sloppy `let` can begin an expression or a label.
+        // The ExpressionStatement grammar explicitly excludes the `let [` prefix.
+        if self.at("let") && !self.label_ahead() {
+            if self
+                .lookahead(1)
+                .is_some_and(|t| t.kind == TokenKind::Punct("["))
+            {
+                return Err(self.error("let [ cannot start an expression statement"));
+            }
+            let expression = self.expression(1)?;
+            self.semi()?;
+            return Ok(Stmt::Expression(expression));
         }
         let statement = self.statement()?;
         if matches!(&statement, Stmt::Label(_, _, item) if matches!(**item, Stmt::Function(_))) {
@@ -880,7 +914,7 @@ impl Parser {
             let source = self.expression(if enumerate { 1 } else { 2 })?;
             self.expect(")")?;
             self.loop_depth += 1;
-            let body = self.for_body(asynchronous);
+            let body = self.controlled_statement();
             self.loop_depth -= 1;
             let body = Box::new(body?);
             return Ok(if enumerate {
@@ -906,34 +940,9 @@ impl Parser {
         };
         self.expect(")")?;
         self.loop_depth += 1;
-        let body = self.for_body(false);
+        let body = self.controlled_statement();
         self.loop_depth -= 1;
         Ok(Stmt::For(init, test, update, Box::new(body?)))
-    }
-    #[inline(always)]
-    fn for_body(&mut self, asynchronous: bool) -> Result<Stmt, JsError> {
-        // Leave `let:` to the ordinary label parser. Otherwise `let` may start
-        // a sloppy expression statement, but `let [` is forbidden here.
-        if self.at("let") && !self.label_ahead() {
-            if self
-                .lookahead(1)
-                .is_some_and(|t| t.kind == TokenKind::Punct("["))
-            {
-                return Err(self.error("let [ cannot start a for body statement"));
-            }
-            let expression = self.expression(1)?;
-            self.semi()?;
-            return Ok(Stmt::Expression(expression));
-        }
-        if asynchronous
-            && (self.at("const")
-                || self.at("class")
-                || self.at("function")
-                || self.async_function_ahead())
-        {
-            return Err(self.error("Declaration requires a block in a for-await body"));
-        }
-        self.controlled_statement()
     }
     fn function_kind(&mut self, is_async: bool) -> FunctionKind {
         match (is_async, self.eat("*")) {
