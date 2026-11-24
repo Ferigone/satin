@@ -415,10 +415,10 @@ impl Layout {
         };
         let mut rules = vec![];
         for (index, sheet) in page.stylesheets.iter().enumerate() {
-            if !page.stylesheet_applies(index, width) {
+            if !page.stylesheet_applies(index, (width, viewport.height)) {
                 continue;
             }
-            rules.extend(css::parse(sheet, width));
+            rules.extend(css::parse_for_viewport(sheet, (width, viewport.height)));
             if rules.len() >= 8192 {
                 rules.truncate(8192);
                 break;
@@ -438,7 +438,7 @@ impl Layout {
                     id,
                     &styles.entries[parent],
                     root_font,
-                    &|node| page.placeholder_shown(node),
+                    &|node, pseudo| page.matches_form_pseudo(node, pseudo),
                 );
                 styles.entries.push(style);
                 styles.entries.len() - 1
@@ -748,6 +748,20 @@ impl BoxMetrics {
             width: width.max(0.),
             left,
         }
+    }
+    /// Intrinsic measurements are border-box widths. Automatic inline margins are zero here.
+    fn fit_content_width(self, s: &Style, available: f32, intrinsic: (f32, f32)) -> f32 {
+        let (min_content, max_content) = intrinsic;
+        let stretch = available - self.margin[1] - self.margin[3];
+        let extra = self.extra_x();
+        let mut width = stretch.min(max_content).max(min_content).max(extra);
+        if let Some(max) = s.max_width.resolve(available, s.font_size) {
+            width = width.min(to_content(max, extra, s.box_sizing) + extra);
+        }
+        if let Some(min) = s.min_width.resolve(available, s.font_size) {
+            width = width.max(to_content(min, extra, s.box_sizing) + extra);
+        }
+        width
     }
     fn extra_x(self) -> f32 {
         self.padding[1] + self.padding[3] + self.border[1] + self.border[3]
@@ -2046,6 +2060,8 @@ impl Builder<'_> {
             let available = (area_width - m.margin[1] - m.margin[3]).max(0.);
             let mut border_width = if text {
                 available
+            } else if style.width == Length::FitContent {
+                m.fit_content_width(style, area_width, (min_content, max_content))
             } else if style.width != Length::Auto {
                 m.width + m.extra_x()
             } else if justify == Align::Stretch && !auto_margins {
@@ -2439,6 +2455,8 @@ impl Builder<'_> {
                 };
                 let specified = if text {
                     None
+                } else if s.width == Length::FitContent {
+                    Some(m.fit_content_width(s, width, (min_content, max_content)))
                 } else {
                     s.width.resolve(width, s.font_size).map(to_border)
                 };
@@ -2485,6 +2503,8 @@ impl Builder<'_> {
                 };
                 let cross = if text {
                     max_content.min(width).max(min_content)
+                } else if s.width == Length::FitContent {
+                    m.fit_content_width(s, width, (min_content, max_content))
                 } else if s.width != Length::Auto || align == Align::Stretch {
                     m.width + m.extra_x()
                 } else {
@@ -3036,6 +3056,10 @@ impl Builder<'_> {
         };
         let replaced_image = self.is_replaced_image(id);
         let replaced_control = self.is_replaced_control(id);
+        if c.width.is_none() && s.width == Length::FitContent {
+            let metrics = BoxMetrics::new(s, available, c);
+            c.width = Some(metrics.fit_content_width(s, available, self.intrinsic_width(id)));
+        }
         if (replaced_image || replaced_control) && c.width.is_none() && s.width == Length::Auto {
             let m = BoxMetrics::new(s, available, c);
             c.width = self.replaced_auto_border_width(id, available, c, m);
@@ -4104,7 +4128,7 @@ impl Builder<'_> {
             return (0., 0.);
         }
         if matches!(s.display, Display::Grid | Display::InlineGrid)
-            && (s.width == Length::Auto || s.width.has_percent())
+            && (matches!(s.width, Length::Auto | Length::FitContent) || s.width.has_percent())
         {
             let result = self.grid_intrinsic(id);
             self.intrinsic[id.0] = Some(result);

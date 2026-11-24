@@ -204,6 +204,31 @@ trace.push(document.body.getAttribute('data-existing')+'|'+document.body.getAttr
     );
 }
 
+#[test]
+fn inline_script_can_delegate_textarea_enter_to_its_parent_form() {
+    let (page, _, runtime) = start(
+        r#"<!doctype html><form action="/search"><textarea name="q">term</textarea><script>
+        const form = document.currentScript.parentElement;
+        form.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter' && !event.shiftKey && event.target.tagName === 'TEXTAREA') {
+                event.preventDefault();
+                form.requestSubmit();
+            }
+        });
+        </script></form>"#,
+    );
+    let mut runtime = runtime.unwrap();
+    let textarea = page.document.html_elements("textarea").next().unwrap();
+    runtime.focus_control(Some(textarea)).unwrap();
+    runtime
+        .form_keydown(crate::script::FormKey::Enter, false, false)
+        .unwrap();
+    let submissions = runtime.take_form_submissions();
+    assert_eq!(submissions.len(), 1, "{:?}", runtime.diagnostics());
+    assert_eq!(submissions[0].url, "https://example.test/search?q=term");
+    assert_eq!(runtime.eval("form.elements[0].value").unwrap(), "term".into());
+}
+
 fn start(source: &str) -> (LoadedPage, DocumentSession, Option<ScriptRuntime>) {
     let started = Instant::now();
     let (mut page, mut session) = DocumentSession::start(OpenedPage {

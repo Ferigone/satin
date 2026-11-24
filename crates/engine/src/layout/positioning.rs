@@ -511,7 +511,11 @@ impl Builder<'_> {
                 .width
                 .resolve(cb.width, s.font_size)
                 .map(|n| to_border(n, m.extra_x()));
-            if width.is_none() {
+            if s.width == Length::FitContent {
+                let (min, max) = self.intrinsic_width(id);
+                let available = cb.width - inset[3].unwrap_or(0.) - inset[1].unwrap_or(0.);
+                width = Some(max.min(available - m.margin[1] - m.margin[3]).max(min));
+            } else if width.is_none() {
                 width = if let (Some(left), Some(right)) = (inset[3], inset[1]) {
                     Some((cb.width - left - right - m.margin[1] - m.margin[3]).max(m.extra_x()))
                 } else {

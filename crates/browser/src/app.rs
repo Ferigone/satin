@@ -1700,6 +1700,10 @@ impl App {
             }
         }
         if !self.address_focus {
+            if self.preedit && key == Key::Named(NamedKey::Space) {
+                // The input method will deliver the committed text separately.
+                return;
+            }
             if key == Key::Named(NamedKey::Tab)
                 && let Some(runtime) = &mut self.tabs[self.active].runtime
             {

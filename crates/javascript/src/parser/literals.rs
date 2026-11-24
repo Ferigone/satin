@@ -169,7 +169,7 @@ impl Parser {
         self.depth += 1;
         let result = self
             .finish_unary(primary)
-            .and_then(|left| self.expression_tail(2, false, left));
+            .and_then(|left| self.expression_tail(2, left, false));
         self.depth -= 1;
         self.checked_expression(result?)
     }

@@ -443,3 +443,35 @@ fn list_markers_follow_inherited_type_and_computed_display() {
     };
     assert_eq!(glyphs(&rendered), glyphs(&expected));
 }
+
+#[test]
+fn fit_content_container_shrinks_to_children_and_centers_with_auto_margins() {
+    let (page, rendered) = layout(
+        r#"<style>
+        .parent { width: 400px }
+        .pill { display:flex; width:fit-content; margin:0 auto; padding:0 2px }
+        .pill i { width:60px; height:10px }
+        .column { display:flex; flex-direction:column }
+        .grid { display:grid; grid-template-columns:400px }
+        #capped { max-width:84px; box-sizing:border-box }
+        #lower { min-width:140px }
+        </style>
+        <div class=parent><div class=pill id=normal><i></i><i></i></div>
+          <div class=pill id=capped><i></i><i></i></div>
+          <div class=pill id=lower><i></i><i></i></div></div>
+        <div class="column parent"><div class=pill id=flexitem><i></i><i></i></div></div>
+        <div class="grid parent"><div class=pill id=griditem><i></i><i></i></div></div>"#,
+        700.,
+    );
+    for (name, width) in [
+        ("normal", 124.),
+        ("capped", 84.),
+        ("lower", 144.),
+        ("flexitem", 124.),
+        ("griditem", 124.),
+    ] {
+        let item = rect(&page, &rendered, name);
+        close(item.width, width);
+        close(item.x, (400. - width) / 2.);
+    }
+}

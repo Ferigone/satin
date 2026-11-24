@@ -413,3 +413,44 @@ fn linked_stylesheet_source_is_included_in_native_layout_fuel() {
         rust_browser_javascript::ErrorKind::ExecutionLimit
     );
 }
+
+#[test]
+fn match_media_tracks_the_document_viewport_and_notifies_observers_on_transitions() {
+    let mut page = LoadedPage::from_html(
+        "https://example.test/",
+        "<script>document.title='loaded'</script>",
+    );
+    let mut runtime = ScriptRuntime::for_page_with_viewport(
+        &mut page,
+        Viewport {
+            width: 800.,
+            height: 600.,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    check(
+        &mut runtime,
+        "var m=matchMedia('(min-width: 900px)'), seen=[]; function listen(e){seen.push(e instanceof MediaQueryListEvent && e.media===m.media && e.matches===m.matches && this===m)}; m.addListener(listen); m instanceof EventTarget && !m.matches && matchMedia('(prefers-color-scheme: light)').matches && !matchMedia('(prefers-color-scheme: dark)').matches",
+    );
+    check(
+        &mut runtime,
+        "matchMedia('(MIN-WIDTH:10px)').media === '(min-width: 10px)' && !matchMedia('not screen junk').matches",
+    );
+    for width in [920., 950., 800.] {
+        runtime.set_viewport(Viewport {
+            width,
+            ..runtime.viewport()
+        });
+        runtime.pump();
+    }
+    check(&mut runtime, "seen.join(',')==='true,true' && !m.matches");
+    runtime.eval("m.removeListener(listen)").unwrap();
+    runtime.set_viewport(Viewport {
+        width: 1000.,
+        ..runtime.viewport()
+    });
+    runtime.pump();
+    check(&mut runtime, "seen.length===2 && m.matches");
+}

@@ -565,6 +565,15 @@ fn response_xml_is_an_inert_same_origin_document_with_case_sensitive_namespaces(
             "true|200|true|application/example+xml|true|9|true|/payload.xml|Root|Root|true|yes|no|true|urn:example|q:Sec|q|Sec|urn:example|abc|abc|true|T&T|true|true|true|true|true|1|false"
         )
     );
+    assert_eq!(
+        runtime
+            .eval(
+                "doc.parentElement === null && root.parentElement === null && \
+                 sec.parentElement === root && sec.firstChild.parentElement === sec",
+            )
+            .unwrap(),
+        Value::Bool(true)
+    );
     assert_eq!(runtime.pending_network(), 0);
     assert!(runtime.take_network_jobs().is_empty());
     server.join().unwrap();

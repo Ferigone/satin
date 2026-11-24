@@ -120,6 +120,38 @@ fn bundled_callback_can_parse_a_nested_loop_condition() {
 }
 
 #[test]
+fn nested_iterator_conditions_in_a_bundle_do_not_recurse_for_assignments() {
+    small_stack(|| {
+        let source = r#"
+            var answer = 0, hooks = {};
+            ([0], function () {
+              if (hooks) {
+                hooks.setup = function () {
+                  var make = function () {
+                    if (hooks) {
+                      hooks.visit = Object.freeze({scan: function (groups) {
+                        try {
+                          for (var a = groups[Symbol.iterator](), row, outer; !(outer = (row = a.next()).done);) {
+                            try {
+                              for (var b = row.value[Symbol.iterator](), cell, inner; !(inner = (cell = b.next()).done);) {
+                                answer += cell.value;
+                              }
+                            } finally {}
+                          }
+                        } finally {}
+                      }}).scan;
+                    }
+                  }();
+                };
+              }
+            })();
+            hooks.setup(); hooks.visit([[10, 20], [12]]); answer;
+        "#;
+        assert_eq!(Vm::new().eval(source).unwrap(), Value::Number(42.0));
+    });
+}
+
+#[test]
 fn recursive_calls_functions_and_classes_stay_bounded_on_one_mib_stack() {
     small_stack(|| {
         // Each shape keeps different parser frames live at the guard. Do

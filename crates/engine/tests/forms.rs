@@ -433,6 +433,34 @@ fn detached_form_ownership_reset_and_collections_work_before_connection() {
 }
 
 #[test]
+fn space_in_a_focused_text_control_edits_the_value_and_consumes_the_key() {
+    let (page, mut runtime) = realm("<input id=search type=search><textarea id=area></textarea>");
+    for target in ["search", "area"] {
+        runtime.focus_control(Some(id(&page, target))).unwrap();
+        runtime.insert_form_text("Rust").unwrap();
+        assert!(runtime.form_keydown(FormKey::Space, false, false).unwrap());
+        runtime.insert_form_text("language").unwrap();
+        js(
+            &mut runtime,
+            "document.activeElement.value",
+            "Rust language",
+        );
+    }
+
+    runtime
+        .eval("document.activeElement.onkeydown = e => e.preventDefault()")
+        .unwrap();
+    assert!(runtime.form_keydown(FormKey::Space, false, false).unwrap());
+    js(
+        &mut runtime,
+        "document.activeElement.value",
+        "Rust language",
+    );
+    runtime.focus_control(None).unwrap();
+    assert!(!runtime.form_keydown(FormKey::Space, false, false).unwrap());
+}
+
+#[test]
 fn tab_keydown_can_cancel_native_focus_traversal_and_shift_reverses_it() {
     let (page, mut runtime) = realm("<!doctype html><input id=a><input id=b>");
     runtime.focus_control(Some(id(&page, "a"))).unwrap();

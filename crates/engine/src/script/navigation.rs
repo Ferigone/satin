@@ -142,10 +142,10 @@ impl ResourceQueue {
             self.retry_at = Some(Instant::now() + Duration::from_millis(8));
         }
     }
-    fn has_stylesheets(&self, width: f32) -> bool {
+    fn has_stylesheets(&self, viewport: (f32, f32)) -> bool {
         self.pending.values().any(|(value, _)| {
             matches!(value, Consumer::Sheet { media, .. }
-            if css::stylesheet_media_applies(media, width))
+            if css::stylesheet_media_applies(media, viewport))
         })
     }
     fn blocks_load(&self) -> bool {
@@ -257,7 +257,9 @@ impl DocumentSession {
         history.commit_address((*client).clone());
         let streaming_json = if matches!(input, DocumentInput::StreamingJson) {
             page.raw_json.clone()
-        } else { None };
+        } else {
+            None
+        };
         let parser = if matches!(input, DocumentInput::Html(_) | DocumentInput::Streaming) {
             let mut parser = ParserHost::new(client.clone());
             if let DocumentInput::Html(source) = input {
@@ -592,7 +594,9 @@ impl DocumentSession {
                     runtime.as_mut().expect("async script has a realm"),
                 )?;
             } else if self.blocking.is_some() {
-                if self.resources.has_stylesheets(viewport.width)
+                if self
+                    .resources
+                    .has_stylesheets((viewport.width, viewport.height))
                     || self
                         .blocking
                         .as_ref()
@@ -651,7 +655,11 @@ impl DocumentSession {
                 }
             } else if self.phase == Phase::Deferred {
                 if let Some(script) = self.deferred.front() {
-                    if self.resources.has_stylesheets(viewport.width) || !self.ready(script) {
+                    if self
+                        .resources
+                        .has_stylesheets((viewport.width, viewport.height))
+                        || !self.ready(script)
+                    {
                         self.runnable = false;
                         break;
                     }
@@ -880,7 +888,7 @@ impl DocumentSession {
                         (active_type
                             && css::stylesheet_media_applies(
                                 doc.attr(node, "media").unwrap_or(""),
-                                viewport.width,
+                                (viewport.width, viewport.height),
                             ))
                         .then(|| doc.text(node))
                     };
@@ -902,7 +910,7 @@ impl DocumentSession {
                             node,
                             &source,
                             base,
-                            viewport.width,
+                            (viewport.width, viewport.height),
                             &self.client,
                             &mut self.resources,
                         );
@@ -1255,12 +1263,12 @@ impl DocumentSession {
                     && self.css_bytes + source.len() <= STYLESHEET_BYTES
                 {
                     self.css_bytes += source.len();
-                    if css::stylesheet_media_applies(&media, viewport.width) {
+                    if css::stylesheet_media_applies(&media, (viewport.width, viewport.height)) {
                         self.fonts.register(
                             node,
                             &source,
                             Arc::new(url),
-                            viewport.width,
+                            (viewport.width, viewport.height),
                             &self.client,
                             &mut self.resources,
                         );

@@ -4,6 +4,7 @@
 mod abort;
 mod blobs;
 mod canvas;
+mod class_list;
 mod collections;
 mod devtools_console;
 mod inspection_sources;
@@ -23,6 +24,7 @@ mod image_element;
 mod intersection_observers;
 mod layout_api;
 mod media;
+mod media_queries;
 mod message_ports;
 mod mutation_observers;
 mod namespaces;
@@ -136,6 +138,7 @@ pub struct ScriptRuntime {
     next_collection_cells: usize,
     forms: forms::FormHost,
     layout: layout_api::LayoutHost,
+    media_queries: media_queries::MediaQueries,
     intersections: intersection_observers::Observers,
     storage: storage::StorageHost,
     messages: message_ports::MessagePorts,
@@ -817,6 +820,7 @@ impl ScriptRuntime {
             },
         )?;
         let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =
             collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
@@ -881,6 +885,8 @@ impl ScriptRuntime {
         let form_data = form_data::install(&mut vm, &forms, &blobs)?;
         fetch.set_form_data(form_data);
         let layout = layout_api::LayoutHost::install(&mut vm, &state, forms.clone(), page)?;
+        let media_queries =
+            media_queries::MediaQueries::install(&mut vm, &window, &layout, &events)?;
         let intersections = intersection_observers::Observers::install(&mut vm, &state)?;
         let image_data = canvas::install(&mut vm, &state, canvas_prototype, &layout, &blobs)?;
         let image_bitmap = canvas::install_image_bitmap(&mut vm, &state, window.clone())?;
@@ -904,6 +910,7 @@ impl ScriptRuntime {
             next_collection_cells,
             forms,
             layout,
+            media_queries,
             intersections,
             storage,
             messages,
@@ -1472,6 +1479,18 @@ impl ScriptRuntime {
         }
         if self.layout.take_resize() {
             self.lifecycle_event(None, "resize", false);
+            if let Err(error) = self
+                .vm
+                .with_task(|vm| self.media_queries.report_changes(vm))
+            {
+                report_error(
+                    &self.state,
+                    ConsolePhase::HostTask,
+                    Some("media query change"),
+                    &error,
+                    || error.to_string(),
+                );
+            }
         }
         for target in self.layout.take_events() {
             let state = self.state.clone();
@@ -1746,6 +1765,7 @@ fn install_node(
     }
     for property in [
         "parentNode",
+        "parentElement",
         "firstChild",
         "lastChild",
         "nextSibling",
@@ -1761,6 +1781,9 @@ fn install_node(
                 let current = &doc.nodes[id.0];
                 match property {
                     "parentNode" => current.parent,
+                    "parentElement" => current.parent.filter(|parent| {
+                        matches!(doc.nodes[parent.0].kind, NodeKind::Element { .. })
+                    }),
                     "firstChild" => current.children.first().copied(),
                     "lastChild" => current.children.last().copied(),
                     "ownerDocument" => (id != doc.root).then_some(doc.root),
@@ -1899,16 +1922,16 @@ fn install_selectors(
             let ids = {
                 let state = state.borrow();
                 let doc = &state.document;
-                let placeholder = |node| forms.placeholder_shown(doc, node);
+                let form_state = |node, pseudo| forms.matches_form_pseudo(doc, node, pseudo);
                 match name {
-                    "matches" => return Ok(selectors.matches(doc, id, &placeholder).into()),
+                    "matches" => return Ok(selectors.matches(doc, id, &form_state).into()),
                     "closest" => std::iter::successors(Some(id), |id| doc.nodes[id.0].parent)
-                        .find(|&id| selectors.matches(doc, id, &placeholder))
+                        .find(|&id| selectors.matches(doc, id, &form_state))
                         .into_iter()
                         .collect(),
                     _ => {
                         let matches = descendants(doc, id)
-                            .filter(|&id| selectors.matches(doc, id, &placeholder));
+                            .filter(|&id| selectors.matches(doc, id, &form_state));
                         if name == "querySelector" {
                             matches.take(1).collect::<Vec<_>>()
                         } else {

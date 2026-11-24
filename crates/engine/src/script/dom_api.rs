@@ -167,8 +167,12 @@ pub(super) fn clone_exception(
 }
 
 impl Errors {
+    pub(super) fn exception(&self, vm: &mut Vm, name: &'static str, message: &'static str) -> JsError {
+        self.convert(vm, Failure::Dom(name, message))
+    }
+
     pub(super) fn invalid_selector(&self, vm: &mut Vm) -> JsError {
-        self.convert(vm, Failure::Dom("SyntaxError", "Invalid selector list"))
+        self.exception(vm, "SyntaxError", "Invalid selector list")
     }
 
     fn value(&self, vm: &mut Vm, name: &str, message: &str) -> Result<Value, JsError> {

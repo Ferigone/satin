@@ -352,6 +352,15 @@ fn install_node(vm: &mut Vm, proto: &Value, child_list: &Value) -> Result<(), Js
     ] {
         install_getter(vm, proto, name, id)?;
     }
+    getter(vm, proto.clone(), "parentElement", |vm, node, _| {
+        require_node(vm, &node)?;
+        let parent = slot(vm, &node, PARENT);
+        Ok(if slot(vm, &parent, KIND).as_number() == Some(1.0) {
+            parent
+        } else {
+            Value::Null
+        })
+    })?;
     getter(vm, proto.clone(), "textContent", |vm, node, _| {
         require_node(vm, &node)?;
         match slot(vm, &node, KIND).as_number() {

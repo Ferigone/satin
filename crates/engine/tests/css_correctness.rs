@@ -476,3 +476,33 @@ fn list_marker_shorthand_respects_wide_keywords_and_invalid_values() {
         assert_eq!(computed[by_id(&doc, id).0].marker, marker, "{id}");
     }
 }
+
+#[test]
+fn height_media_queries_restyle_on_resize_at_constant_width() {
+    use rust_browser_engine::{
+        Fonts, Layout, LoadedPage, css::InspectorStylesheets, layout::Viewport,
+    };
+    let page = LoadedPage::from_html(
+        "https://media.test/",
+        r#"
+        <style media="screen and (min-width: 1024px)">
+            @media only screen and (min-height: 800px) { main { margin-top: 10vh } }
+        </style>
+        <style media="(799px < height <= 801px)">main { color: red }</style>
+        <main id=hero></main>"#,
+    );
+    let target = by_id(&page.document, "hero");
+    let fonts = Fonts::new().unwrap();
+    let mut inspector = InspectorStylesheets::default();
+    for (height, top, matches) in [(799., 0., 0), (800., 80., 2), (802., 80.2, 1)] {
+        let viewport = Viewport {
+            width: 1280.,
+            height,
+            ..Viewport::default()
+        };
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+        assert_eq!(layout.computed_styles[target.0].margin[0], Length::Px(top));
+        assert!(inspector.refresh_for_viewport(&page, (viewport.width, height)));
+        assert_eq!(inspector.matching_page(&page, target).0.len(), matches);
+    }
+}
