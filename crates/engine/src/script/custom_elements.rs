@@ -21,6 +21,7 @@ struct Definition {
     disconnected: Option<Value>,
     changed: Option<Value>,
     observed: HashSet<String>,
+    disable_shadow: bool,
     // An empty entry means super() has already consumed this upgrade candidate.
     construction: RefCell<Vec<Construction>>,
 }
@@ -53,7 +54,7 @@ pub(super) enum Reaction {
     Call(NodeId, Value, Vec<Value>),
 }
 
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && name.contains('-')
@@ -324,6 +325,15 @@ pub(super) fn connection(state: &State, parent: NodeId, subtree: NodeId, added: 
 }
 
 impl Registry {
+    pub(super) fn has_definition(&self, name: &str) -> bool {
+        self.definitions.contains_key(name)
+    }
+
+    pub(super) fn shadow_disabled(&self, tag: &str) -> bool {
+        self.definitions
+            .get(tag)
+            .is_some_and(|definition| definition.disable_shadow)
+    }
     pub(super) fn has_definitions(&self) -> bool {
         !self.definitions.is_empty()
     }
@@ -341,9 +351,7 @@ impl Registry {
             return;
         }
 
-        let mut nodes = vec![subtree];
-        while let Some(id) = nodes.pop() {
-            nodes.extend(doc.nodes[id.0].children.iter().rev().copied());
+        for id in doc.shadow_including_nodes(subtree) {
             if doc.namespace(id) != Namespace::Html {
                 continue;
             }
@@ -444,6 +452,15 @@ fn read_definition(
             })?;
         }
     }
+    let mut disable_shadow = false;
+    let disabled = vm.get_property(constructor.clone(), "disabledFeatures")?;
+    if !disabled.is_undefined() {
+        let iterator = webidl::iterator_method(vm, &disabled)?;
+        webidl::sequence(vm, disabled, iterator, super::NODE_LIMIT, |vm, feature| {
+            disable_shadow |= text(vm, feature)? == "shadow";
+            Ok(())
+        })?;
+    }
     Ok((
         Definition {
             name,
@@ -452,6 +469,7 @@ fn read_definition(
             disconnected,
             changed,
             observed,
+            disable_shadow,
             construction: RefCell::default(),
         },
         bytes,
@@ -535,7 +553,7 @@ fn define(
     let candidates = {
         let state = host.borrow();
         let mut ids = vec![];
-        for id in state.document.connected_nodes() {
+        for id in state.document.shadow_including_nodes(state.document.root) {
             vm.charge_work(1)?;
             if state.document.namespace(id) == Namespace::Html && state.document.tag(id) == name {
                 ids.push(id);

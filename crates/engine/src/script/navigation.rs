@@ -621,6 +621,10 @@ impl DocumentSession {
                 let step = step.map_err(|error| error.to_string())?;
                 if let Some(realm) = runtime {
                     mutation_observers::schedule(&mut realm.vm, &realm.state);
+                    if let Some(parser) = &self.parser {
+                        ParserHost::construct_element(parser, &mut realm.vm, &realm.state)
+                            .map_err(|error| error.to_string())?;
+                    }
                     custom_elements::flush(&mut realm.vm, &realm.state)
                         .map_err(|error| error.to_string())?;
                 }
@@ -1390,6 +1394,7 @@ pub(super) fn install_parser_methods(
     vm: &mut Vm,
     state: &Shared,
     document: Value,
+    errors: &dom_api::Errors,
 ) -> Result<(), JsError> {
-    parser_host::install(vm, state, document)
+    parser_host::install(vm, state, document, errors)
 }

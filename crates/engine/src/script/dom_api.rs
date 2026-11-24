@@ -63,6 +63,7 @@ fn tree_work(
             .children
             .len()
             .saturating_add(document.template_contents.len())
+            .saturating_add(document.shadow_hosts.len())
             .saturating_add(DOM_DEPTH_LIMIT)
     }));
     let mut pending = roots.to_vec();
@@ -80,6 +81,7 @@ fn tree_work(
         }
         if matches!(walk, Walk::Ownership) {
             pending.extend(document.template_contents.get(&id).copied());
+            pending.extend(document.shadow_roots.get(&id).map(|tree| tree.root));
         }
     }
     units
@@ -526,7 +528,8 @@ fn parent_depth(
         }
         current = document.nodes[id.0]
             .parent
-            .or_else(|| owners.get(&id).copied());
+            .or_else(|| owners.get(&id).copied())
+            .or_else(|| document.shadow_hosts.get(&id).copied());
     }
     Ok(depth)
 }
@@ -552,6 +555,9 @@ fn check_depth(view: &View<'_>, roots: &[NodeId], base: usize, limits: Limits) -
         );
         if let Some(content) = view.content(id) {
             pending.push((content, depth));
+        }
+        if let Some(tree) = view.doc.shadow_roots.get(&id) {
+            pending.push((tree.root, depth));
         }
     }
     Ok(())
@@ -1193,6 +1199,51 @@ fn html_string(vm: &mut Vm, value: Value) -> Result<String, JsError> {
         text(vm, value)
     }
 }
+
+pub(super) fn install_shadow_html(
+    vm: &mut Vm,
+    state: &Shared,
+    prototype: Value,
+    errors: &Errors,
+) -> Result<(), JsError> {
+    let get_state = state.clone();
+    let get = vm.new_native_function("get innerHTML", move |vm, this, _| {
+        let root = node(&get_state, &this)?;
+        if !get_state.borrow().document.shadow_hosts.contains_key(&root) {
+            return Err(JsError::type_error("Expected a ShadowRoot receiver"));
+        }
+        charge(vm, &get_state, None, &[root], Walk::Children, true, 0)?;
+        Ok(get_state.borrow().document.inner_html(root).into())
+    });
+    let set_state = state.clone();
+    let errors = errors.clone();
+    let set = vm.new_native_function("set innerHTML", move |vm, this, args| {
+        let root = node(&set_state, &this)?;
+        let host = set_state
+            .borrow()
+            .document
+            .shadow_hosts
+            .get(&root)
+            .copied()
+            .ok_or_else(|| JsError::type_error("Expected a ShadowRoot receiver"))?;
+        let source = html_string(vm, arg(args, 0))?;
+        charge(
+            vm,
+            &set_state,
+            Some(root),
+            &[],
+            Walk::Root,
+            false,
+            source.len().saturating_mul(4),
+        )?;
+        let candidates = insert_html(&set_state, root, host, false, None, None, true, &source)
+            .map_err(|failure| errors.convert(vm, failure))?;
+        mutation_observers::schedule(vm, &set_state);
+        dynamic_scripts::post_connection(vm, &set_state, candidates)?;
+        Ok(Value::Undefined)
+    });
+    vm.define_accessor(prototype, "innerHTML", Some(get), Some(set))
+}
 fn install_html(
     vm: &mut Vm,
     state: &Shared,
@@ -1386,6 +1437,13 @@ fn clone_local_node(
     deep: bool,
     errors: &Errors,
 ) -> Result<Value, JsError> {
+    if host.borrow().document.shadow_hosts.contains_key(&id) {
+        return Err(errors.exception(
+            vm,
+            "NotSupportedError",
+            "Shadow roots cannot be cloned or imported directly",
+        ));
+    }
     charge(
         vm,
         host,

@@ -32,6 +32,7 @@ mod namespaces;
 mod navigation;
 mod navigator;
 mod scheduler;
+mod shadow_dom;
 mod storage;
 mod style_sheets;
 mod streams;
@@ -90,6 +91,7 @@ struct State {
     element_prototype: Value,
     html_element_prototype: Value,
     fragment_prototype: Value,
+    shadow_prototype: Value,
     iframe_prototype: Value,
     frames: frames::Frames,
     script_prototype: Value,
@@ -290,6 +292,8 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             } else {
                 state.element_prototype.clone()
             }
+        } else if state.document.shadow_hosts.contains_key(&id) {
+            state.shadow_prototype.clone()
         } else if id != state.document.root
             && matches!(state.document.nodes[id.0].kind, NodeKind::Document)
         {
@@ -647,6 +651,8 @@ impl ScriptRuntime {
         vm.root(prototype.clone());
         let fragment_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(fragment_prototype.clone());
+        let shadow_prototype = vm.new_object_with_prototype(fragment_prototype.clone())?;
+        vm.root(shadow_prototype.clone());
         let element_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(element_prototype.clone());
         let html_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
@@ -683,6 +689,7 @@ impl ScriptRuntime {
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
             fragment_prototype,
+            shadow_prototype,
             custom_elements: Rc::default(),
             iframe_prototype: iframe_prototype.clone(),
             frames: frames::Frames::default(),
@@ -863,7 +870,7 @@ impl ScriptRuntime {
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =
             collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        navigation::install_parser_methods(&mut vm, &state, document.clone())?;
+        navigation::install_parser_methods(&mut vm, &state, document.clone(), &dom_errors)?;
         let file_lists = file_list::FileListHost::install(&mut vm)?;
         let forms = forms::FormHost::install(
             &mut vm,
@@ -903,6 +910,7 @@ impl ScriptRuntime {
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
         devtools_console::install_public_error(&mut vm, &state, console)?;
         element_interface::install(&mut vm, &state, prototype, element_prototype, &dom_errors)?;
+        shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();
@@ -1804,6 +1812,11 @@ fn install_node(
         });
         vm.define_accessor(owner.clone(), property, Some(get), Some(set))?;
     }
+    let connected = state.clone();
+    getter(vm, prototype.clone(), "isConnected", move |_, this, _| {
+        let id = node(&connected, &this)?;
+        Ok(connected.borrow().document.is_connected(id).into())
+    })?;
     for property in [
         "parentNode",
         "parentElement",

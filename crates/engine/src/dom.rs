@@ -72,6 +72,18 @@ pub struct Node {
     pub children: Vec<NodeId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShadowMode {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowTree {
+    pub root: NodeId,
+    pub mode: ShadowMode,
+}
+
 #[derive(Clone, Debug)]
 pub struct Document {
     pub nodes: Vec<Node>,
@@ -82,6 +94,9 @@ pub struct Document {
     /// Template element -> detached Document-kind fragment container. Its
     /// children are inert, and are not ordinary children of the template node.
     pub template_contents: BTreeMap<NodeId, NodeId>,
+    /// Shadow roots stay outside the host's light-tree child list.
+    pub(crate) shadow_roots: BTreeMap<NodeId, ShadowTree>,
+    pub(crate) shadow_hosts: BTreeMap<NodeId, NodeId>,
     /// Element namespace overrides. Missing entries mean HTML. Keys and values
     /// must be copied/remapped together with the element during arena imports.
     pub namespaces: BTreeMap<NodeId, Namespace>,
@@ -103,6 +118,8 @@ impl Default for Document {
             quirks_mode: QuirksMode::NoQuirks,
             scripting_enabled: false,
             template_contents: BTreeMap::new(),
+            shadow_roots: BTreeMap::new(),
+            shadow_hosts: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             attribute_namespaces: BTreeMap::new(),
         }
@@ -110,6 +127,16 @@ impl Default for Document {
 }
 
 impl Document {
+    pub(crate) fn shadow_including_nodes(&self, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        let mut pending = vec![root];
+        std::iter::from_fn(move || {
+            let id = pending.pop()?;
+            pending.extend(self.nodes[id.0].children.iter().rev().copied());
+            pending.extend(self.shadow_roots.get(&id).map(|tree| tree.root));
+            Some(id)
+        })
+    }
+
     /// Connected tree order; arena allocation order can retain detached nodes
     /// after HTML error recovery and later DOM mutations.
     pub fn connected_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
@@ -125,7 +152,12 @@ impl Document {
             if node == self.root {
                 return true;
             }
-            let Some(parent) = entry.parent else { break };
+            let Some(parent) = entry
+                .parent
+                .or_else(|| self.shadow_hosts.get(&node).copied())
+            else {
+                break;
+            };
             node = parent;
         }
         false

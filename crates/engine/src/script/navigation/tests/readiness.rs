@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn parser_constructs_custom_elements_before_attributes_and_connection() {
+    let (_, _, mut runtime) = start(
+        r#"<!doctype html><script>
+        var trace = [];
+        class SiteBadge extends HTMLElement {
+            constructor() {
+                super();
+                trace.push(this.parentNode === null && !this.hasAttribute('a') ? 'detached' : 'attached');
+                try { document.write('unexpected') } catch (e) { trace.push(e.name); }
+            }
+            static get observedAttributes() { return ['a', 'b']; }
+            attributeChangedCallback(name) {
+                trace.push([name, this.isConnected, this.getAttribute('a'), this.getAttribute('b')].join('/'));
+            }
+            connectedCallback() { trace.push(this.firstChild === null ? 'before-children' : 'after-children'); }
+        }
+        customElements.define('site-badge', SiteBadge);
+        </script><site-badge b="two" a="one"><b></b></site-badge><script>
+        trace.push(document.querySelector('site-badge').firstChild.tagName);
+        </script>"#,
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "trace.join('|')"),
+        "detached|InvalidStateError|b/false/one/two|a/false/one/two|before-children|B".into()
+    );
+}
+
+#[test]
 fn custom_element_reactions_run_at_the_parser_token_and_before_dom_methods_return() {
     let (_, _, mut runtime) = start(
         r#"<!doctype html><script>

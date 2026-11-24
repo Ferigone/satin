@@ -264,6 +264,8 @@ impl<'a> Tokenizer<'a> {
                 .replace('\0', "\u{fffd}")
                 .to_ascii_lowercase(),
         );
+        let ordered_attributes =
+            !closing && (matches!(tag.name.as_str(), "html" | "body") || tag.name.contains('-'));
         while self.pos < bytes.len() {
             self.skip_space();
             match bytes.get(self.pos) {
@@ -330,9 +332,9 @@ impl<'a> Tokenizer<'a> {
                 }
             }
             if let std::collections::btree_map::Entry::Vacant(entry) = tag.attrs.entry(name) {
-                // These tags can add attributes to elements already in the
-                // DOM. An observer sees those additions in token order.
-                if matches!(tag.name.as_str(), "html" | "body") {
+                // Merging attributes and custom-element callbacks both
+                // expose the token's source order.
+                if ordered_attributes {
                     tag.merge_attribute_order.push(entry.key().clone());
                 }
                 entry.insert(decode_entities(&value, true));
