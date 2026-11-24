@@ -160,6 +160,7 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
                             initialized: false,
                             lexical: true,
                             strict_immutable: true,
+                            deletable: false,
                         },
                     );
                 }
@@ -615,6 +616,9 @@ fn catch_scope(
     error: &JsError,
 ) -> Result<EnvId, JsError> {
     let scope = new_scope(vm, env)?;
+    if matches!(pattern, Some(PatternCode::Name(_))) {
+        vm.heap.environment_mut(scope).kind = EnvKind::SimpleCatch;
+    }
     if let Some(pattern) = pattern {
         let value = if let Some(value) = &error.thrown {
             value.clone()

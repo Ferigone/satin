@@ -4,6 +4,7 @@ mod data_view;
 mod element;
 mod host_views;
 mod shared;
+pub(crate) mod waiters;
 mod structured_clone;
 mod typed_array;
 mod typed_methods;
@@ -316,6 +317,13 @@ impl Vm {
     /// Moves host bytes into a native Uint8Array with its own ArrayBuffer.
     pub fn new_uint8_array(&mut self, bytes: Vec<u8>) -> Result<Value, JsError> {
         self.new_binary_view(bytes, Element::Uint8)
+    }
+
+    pub(crate) fn new_immutable_uint8_array(&mut self, bytes: &[u8]) -> Result<Value, JsError> {
+        let array = self.new_uint8_array_with(bytes.len(), |output| output.copy_from_slice(bytes))?;
+        let buffer = self.array_data(array.as_object().unwrap())?.view.buffer;
+        self.buffer_data_mut(buffer)?.immutable = true;
+        Ok(array)
     }
 
     fn new_binary_view(&mut self, bytes: Vec<u8>, element: Element) -> Result<Value, JsError> {

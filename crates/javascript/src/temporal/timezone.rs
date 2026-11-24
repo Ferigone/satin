@@ -6,12 +6,13 @@ use jiff::{
     tz::{TimeZone, TimeZoneTransition},
 };
 
-const GREGORIAN_CYCLE: i64 = 146_097 * 86_400;
-const START_2400: i64 = 13_569_465_600;
+use crate::date::calendar::project_timestamp;
 const MAX_EPOCH_SECOND: i64 = 100_000_000 * 86_400;
 
 pub(super) fn resolve(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsError> {
-    let name = args.first().and_then(Value::as_string)
+    let name = args
+        .first()
+        .and_then(Value::as_string)
         .ok_or_else(|| JsError::type_error("Expected time zone identifier"))?;
     let (identifier, primary) = crate::intl::named_time_zone(&name.to_string_lossy())
         .ok_or_else(|| JsError::new(ErrorKind::RangeError, "Unknown time zone"))?;
@@ -32,7 +33,7 @@ pub(super) fn open(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsErr
                 .ok_or_else(|| JsError::type_error("Expected epoch second"))? as i64;
         let direction = args.get(1).and_then(Value::as_number).unwrap_or(0.0);
         let fraction = args.get(2).and_then(Value::as_number).unwrap_or(0.0) as i32;
-        let (instant, shift) = project(second, fraction);
+        let (instant, shift) = project_timestamp(second, fraction);
         if direction == 0.0 {
             return Ok(Value::Number(f64::from(zone.to_offset(instant).seconds())));
         }
@@ -64,17 +65,4 @@ pub(super) fn open(vm: &mut Vm, _: Value, args: &[Value]) -> Result<Value, JsErr
         }
         Ok(Value::Undefined)
     }))
-}
-
-// TZif future rules recur on the proleptic Gregorian 400-year cycle. Map
-// them into Jiff's civil range while leaving all recorded history intact.
-// Before the earliest civil instant, the first offset extends indefinitely.
-fn project(second: i64, fraction: i32) -> (Timestamp, i64) {
-    let shift = if second >= START_2400 + GREGORIAN_CYCLE {
-        ((second - START_2400) / GREGORIAN_CYCLE) * GREGORIAN_CYCLE
-    } else {
-        0
-    };
-    let instant = Timestamp::new(second - shift, fraction).unwrap_or(Timestamp::MIN);
-    (instant, shift)
 }

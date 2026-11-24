@@ -38,7 +38,7 @@ After the checkpoint, the worker checks unhandled rejections against the rooted 
 
 Timers and external worker or agent hosts are unsupported. Unsupported language constructs receive `unsupported`. An upstream harness execution error receives `harness_error`.
 
-Variants explicitly tagged `IsHTMLDDA` or requiring `CanBlockIsTrue`/`CanBlockIsFalse` are counted as `unsupported` without substituting `undefined` or guessing an agent mode. They remain in the selected denominator. The runner does not skip variants just because they declare arbitrary language features.
+The worker provides a callable `$262.IsHTMLDDA` object with the Annex B truthiness, equality and `typeof` semantics. Variants requiring `CanBlockIsTrue`/`CanBlockIsFalse` are counted as `unsupported` until the host declares its blocking mode. They remain in the selected denominator. The runner does not skip variants just because they declare arbitrary language features.
 
 ## Reports and limits
 

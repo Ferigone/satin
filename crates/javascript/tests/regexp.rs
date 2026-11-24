@@ -352,7 +352,10 @@ fn parsing_matching_and_dropping_a_pattern_on_a_one_mib_stack() {
             let mut vm = Vm::new();
             let supported = format!("/{0}a{1}/.test('a')", "(?:".repeat(32), ")+".repeat(32));
             assert_eq!(vm.eval(&supported).unwrap(), true.into());
-            let too_deep = format!("/{0}a{1}/", "(".repeat(64), ")".repeat(64));
+            let flat_captures =
+                format!("/{0}a{1}/.exec('a')[200]", "(".repeat(200), ")".repeat(200));
+            assert_eq!(vm.eval(&flat_captures).unwrap(), "a".into());
+            let too_deep = format!("/{0}a{1}/", "(".repeat(64), ")+".repeat(64));
             assert_eq!(
                 vm.check_syntax(&too_deep).unwrap_err().kind,
                 ErrorKind::ExecutionLimit

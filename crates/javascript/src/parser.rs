@@ -222,7 +222,7 @@ pub(crate) enum Stmt {
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>),
+    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>, Option<Expr>),
     ForOf(Option<VarKind>, Pattern, Expr, Box<Stmt>, bool),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Label(LabelId, Vec<JsString>, Box<Stmt>),
@@ -704,10 +704,8 @@ impl Parser {
             self.expect(")")?;
             return Ok(Stmt::With(object, Box::new(self.controlled_statement()?)));
         }
-        for unsupported in ["export"] {
-            if self.at(unsupported) {
-                return Err(self.error(format!("'{unsupported}' is not implemented")));
-            }
+        if self.at("export") {
+            return Err(self.error("An export declaration requires module code"));
         }
         let escaped = self.current().escaped_string;
         let e = self.expression(1)?;
@@ -924,11 +922,15 @@ impl Parser {
             if enumerate && asynchronous {
                 return Err(self.error("for await requires of"));
             }
+            let mut initializer = None;
             let (kind, target) = match init.map(|stmt| *stmt) {
                 Some(Stmt::Variable(kind, mut declarations))
-                    if declarations.len() == 1 && declarations[0].1.is_none() =>
+                    if declarations.len() == 1 && (declarations[0].1.is_none() ||
+                        (enumerate && kind == VarKind::Var && matches!(declarations[0].0, Pattern::Name(_)))) =>
                 {
-                    (Some(kind), declarations.remove(0).0)
+                    let (target, value) = declarations.remove(0);
+                    initializer = value;
+                    (Some(kind), target)
                 }
                 Some(Stmt::Expression(target))
                     if (enumerate || !disallowed_of_target)
@@ -936,7 +938,12 @@ impl Parser {
                             || matches!(target, Expr::Array(..) | Expr::Object(..))) =>
                 {
                     // Bare array and object literals must also parse as assignment patterns.
-                    (None, self.pattern(target, false)?)
+                    let pattern = if call_assignment_target(&target) {
+                        Pattern::Target(Box::new(target))
+                    } else {
+                        self.pattern(target, false)?
+                    };
+                    (None, pattern)
                 }
                 Some(Stmt::Expression(_)) => {
                     return Err(self.error("Invalid iteration assignment target"));
@@ -952,7 +959,7 @@ impl Parser {
             self.loop_depth -= 1;
             let body = Box::new(body?);
             return Ok(if enumerate {
-                Stmt::ForIn(kind, target, source, body)
+                Stmt::ForIn(kind, target, source, body, initializer)
             } else {
                 Stmt::ForOf(kind, target, source, body, asynchronous)
             });
@@ -1637,28 +1644,29 @@ impl Parser {
                 return self.checked_expression(Expr::Unary(op, Box::new(e)));
             }
         }
-        let e = if self.eat("new") {
+        let mut constructors = 0;
+        let mut e = loop {
+            if !self.eat("new") { break self.primary()?; }
             if self.eat(".") {
                 self.expect("target")?;
                 if !self.new_target {
                     return Err(self.error("new.target outside a function"));
                 }
-                return self.postfix(Expr::NewTarget, true);
+                break Expr::NewTarget;
             }
-            let primary = self.primary()?;
-            if matches!(primary, Expr::DynamicImport(..)) {
-                return Err(self.error("A dynamic import call cannot follow new"));
+            constructors += 1;
+            if constructors > MAX_AST_DEPTH {
+                return Err(self.error("Constructor nesting limit exceeded"));
             }
-            let constructor = self.postfix(primary, false)?;
-            let args = if self.eat("(") {
-                self.arguments()?
-            } else {
-                Vec::new()
-            };
-            self.checked_expression(Expr::New(Box::new(constructor), args))?
-        } else {
-            self.primary()?
         };
+        if constructors > 0 && matches!(e, Expr::DynamicImport(..)) {
+            return Err(self.error("A dynamic import call cannot follow new"));
+        }
+        for _ in 0..constructors {
+            let constructor = self.postfix(e, false)?;
+            let args = if self.eat("(") { self.arguments()? } else { Vec::new() };
+            e = self.checked_expression(Expr::New(Box::new(constructor), args))?;
+        }
         self.finish_unary(e)
     }
     fn finish_unary(&mut self, primary: Expr) -> Result<Expr, JsError> {
@@ -2140,7 +2148,10 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Expression(test), child_depth));
                     pending.push((Ast::Statement(body), child_depth));
                 }
-                Stmt::ForIn(_, pattern, test, body) | Stmt::ForOf(_, pattern, test, body, _) => {
+                Stmt::ForIn(_, pattern, test, body, _) | Stmt::ForOf(_, pattern, test, body, _) => {
+                    if let Stmt::ForIn(_, _, _, _, Some(initializer)) = statement {
+                        pending.push((Ast::Expression(initializer), child_depth));
+                    }
                     pending.push((Ast::Pattern(pattern), child_depth));
                     pending.push((Ast::Expression(test), child_depth));
                     pending.push((Ast::Statement(body), child_depth));
@@ -2178,10 +2189,16 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
     true
 }
 
+pub(crate) fn call_assignment_target(mut e: &Expr) -> bool {
+    while let Expr::Group(inner) = e { e = inner; }
+    matches!(e, Expr::Call(callee, _) if !matches!(callee.as_ref(), Expr::Super))
+}
+
 fn assignable(e: &Expr) -> bool {
     match e {
         Expr::Identifier(_) | Expr::Member(..) | Expr::PrivateMember(..) => true,
         Expr::Group(e) => assignable(e),
+        _ if call_assignment_target(e) => true,
         _ => false,
     }
 }

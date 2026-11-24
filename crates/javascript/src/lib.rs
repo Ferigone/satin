@@ -42,7 +42,7 @@ pub use dynamic_import::DynamicImportRequest;
 pub use parser::ImportPhase;
 pub use host_properties::{HostIndexedProperties, HostNamedProperties};
 pub use iterator::IteratorRecord;
-pub use modules::{ModuleId, ModuleRequest, ModuleStatus};
+pub use modules::{ModuleId, ModuleRequest, ModuleStatus, ModuleType};
 pub use promise::PromiseCapability;
 pub use structured_clone::{
     MAX_STRUCTURED_CLONE_TRANSFERS, PlatformClone, PlatformTransfer, StructuredCloneError,

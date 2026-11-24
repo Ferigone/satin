@@ -77,7 +77,9 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
     });
     // A getter retains its two private algorithms in GC-visible host slots.
     let make_field_getter = vm.new_native_function("", |vm, _, args| {
-        let kind = args.first().and_then(Kind::parse)
+        let kind = args
+            .first()
+            .and_then(Kind::parse)
             .ok_or_else(|| JsError::type_error("Invalid Temporal accessor"))?;
         let field = args[1].as_string().unwrap().to_string_lossy();
         let read_slots = args[2].clone();
@@ -85,7 +87,10 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
         let get_slots = read_slots.clone();
         let compute = calculate.clone();
         let getter = vm.new_native_function(&format!("get {field}"), move |vm, receiver, _| {
-            if !vm.host_data::<Instance>(&receiver).is_some_and(|data| data.kind == kind) {
+            if !vm
+                .host_data::<Instance>(&receiver)
+                .is_some_and(|data| data.kind == kind)
+            {
                 return Err(JsError::type_error("Invalid Temporal receiver"));
             }
             let slots = vm.host_slot(&receiver, 0).expect("branded Temporal slots");
@@ -102,18 +107,29 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
                 if let Some(fields) = vm.host_slot(&receiver, 2) {
                     fields
                 } else {
-                    let fields = vm.call(get_slots.clone(), Value::Undefined, std::slice::from_ref(&receiver))?;
+                    let fields = vm.call(
+                        get_slots.clone(),
+                        Value::Undefined,
+                        std::slice::from_ref(&receiver),
+                    )?;
                     vm.set_host_slot(receiver.clone(), 2, fields.clone())?;
                     fields
                 }
             } else {
                 slots
             };
-            if kind == Kind::Duration || matches!(field.as_str(), "hour" | "minute" |
-                "second" | "millisecond" | "microsecond" | "nanosecond") {
+            if kind == Kind::Duration
+                || matches!(
+                    field.as_str(),
+                    "hour" | "minute" | "second" | "millisecond" | "microsecond" | "nanosecond"
+                )
+            {
                 return vm.get_property(civil, &field);
             }
-            if matches!(field.as_str(), "year" | "month" | "day" | "monthCode" | "era" | "eraYear") {
+            if matches!(
+                field.as_str(),
+                "year" | "month" | "day" | "monthCode" | "era" | "eraYear"
+            ) {
                 let calendar = vm.get_property(civil.clone(), "calendar")?;
                 if !matches!(calendar, Value::Object(_)) {
                     return match field.as_str() {
@@ -124,12 +140,30 @@ pub(super) fn intrinsics(vm: &mut Vm) -> [Value; 3] {
                         "era" | "eraYear" if calendar.is_undefined() => Ok(Value::Undefined),
                         "era" | "eraYear" => {
                             let year = vm.get_property(civil, "year")?.as_number().unwrap();
-                            if field == "era" { Ok(if year < 1.0 { "bce" } else { "ce" }.into()) }
-                            else { Ok(Value::Number(if year < 1.0 { 1.0 - year } else { year })) }
+                            if field == "era" {
+                                Ok(if year < 1.0 { "bce" } else { "ce" }.into())
+                            } else {
+                                Ok(Value::Number(if year < 1.0 { 1.0 - year } else { year }))
+                            }
                         }
                         _ => vm.get_property(civil, &field),
                     };
                 }
+            }
+            if matches!(
+                field.as_str(),
+                "year"
+                    | "month"
+                    | "day"
+                    | "monthCode"
+                    | "inLeapYear"
+                    | "daysInMonth"
+                    | "monthsInYear"
+                    | "daysInYear"
+                    | "dayOfYear"
+            ) && let Some(value) = super::calendar::derived_field(vm, &civil, &field)?
+            {
+                return Ok(value);
             }
             vm.call(compute.clone(), Value::Undefined, &[civil])
         });

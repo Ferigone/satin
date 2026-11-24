@@ -262,24 +262,60 @@ fn install_atomics(vm: &mut Vm) {
             })
         });
     }
-    // This VM's agent cannot block. Validate arguments in spec order before
-    // reporting that restriction, including observable value/timeout coercions.
-    method(vm, object.clone(), "wait", 4, |vm, _, args| {
-        let a = atomic_view(vm, &arg(args, 0), true)?;
-        shared_id(vm, &Value::Object(a.view.buffer))?;
-        position(vm, a, &arg(args, 1))?;
-        a.element.coerce_bits(vm, &arg(args, 2))?;
-        vm.to_number(&arg(args, 3))?;
-        Err(JsError::type_error("This agent cannot suspend"))
-    });
+    for (name, asynchronous) in [("wait", false), ("waitAsync", true)] {
+        method(vm, object.clone(), name, 4, move |vm, _, args| {
+            let a = atomic_view(vm, &arg(args, 0), true)?;
+            shared_id(vm, &Value::Object(a.view.buffer))?;
+            let index = position(vm, a, &arg(args, 1))?;
+            let expected = a.element.coerce_bits(vm, &arg(args, 2))?;
+            let timeout = vm.to_number(&arg(args, 3))?;
+            if !asynchronous {
+                return Err(JsError::type_error("This agent cannot suspend"));
+            }
+            let actual = vm
+                .read_typed_bits(a, index)?
+                .ok_or_else(|| JsError::type_error("Atomic access is out of bounds"))?;
+            let result =
+                vm.allocate_constructed(ObjectKind::Ordinary, vm.realm.object_prototype)?;
+            let timeout = if timeout.is_nan() {
+                f64::INFINITY
+            } else {
+                timeout.max(0.0)
+            };
+            let pending = actual == expected && timeout > 0.0;
+            let value = if pending {
+                vm.new_promise_capability()?.promise
+            } else if actual != expected {
+                Value::from("not-equal")
+            } else {
+                Value::from("timed-out")
+            };
+            vm.define_data_property(result.clone(), "async", pending.into(), true, true, true)?;
+            vm.define_data_property(result.clone(), "value", value.clone(), true, true, true)?;
+            if let Some(promise) = value.as_object() {
+                let store = vm.backing_id(a.view.buffer)?;
+                vm.add_atomic_waiter(
+                    store,
+                    a.view.offset + index * a.element.width(),
+                    timeout,
+                    promise,
+                )?;
+            }
+            Ok(result)
+        });
+    }
     method(vm, object, "notify", 3, |vm, _, args| {
         let a = atomic_view(vm, &arg(args, 0), true)?;
-        position(vm, a, &arg(args, 1))?;
-        if !arg(args, 2).is_undefined() {
-            vm.to_number(&arg(args, 2))?;
-        }
-        // All current agents are non-blocking and no backing store crosses
-        // an agent boundary. There are no registered waiters.
-        Ok(0.into())
+        let index = position(vm, a, &arg(args, 1))?;
+        let count = if arg(args, 2).is_undefined() {
+            usize::MAX
+        } else {
+            vm.to_number(&arg(args, 2))?.trunc() as usize
+        };
+        let ObjectKind::SharedArrayBuffer(store) = vm.heap.object(a.view.buffer)?.kind else {
+            return Ok(0.into());
+        };
+        let offset = a.view.offset + index * a.element.width();
+        Ok(vm.notify_atomic_waiters(store, offset, count)?.into())
     });
 }

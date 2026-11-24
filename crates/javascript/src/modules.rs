@@ -23,9 +23,31 @@ static NEXT_MODULE_REALM: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 pub(crate) fn module_realm_id() -> u64 {
     NEXT_MODULE_REALM.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ModuleRequest {
     pub specifier: JsString,
+    pub attributes: BTreeMap<JsString, JsString>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ModuleType {
+    #[default]
+    JavaScript,
+    Json,
+    Text,
+    Bytes,
+}
+
+impl ModuleRequest {
+    pub fn module_type(&self) -> Result<ModuleType, JsError> {
+        if self.attributes.is_empty() { return Ok(ModuleType::JavaScript); }
+        if self.attributes.len() == 1 && let Some(value) = self.attributes.get(&JsString::from("type")) {
+            if value == &JsString::from("json") { return Ok(ModuleType::Json); }
+            if value == &JsString::from("text") { return Ok(ModuleType::Text); }
+            if value == &JsString::from("bytes") { return Ok(ModuleType::Bytes); }
+        }
+        Err(JsError::type_error("Unsupported import attribute"))
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModuleStatus {
@@ -36,22 +58,22 @@ pub enum ModuleStatus {
     Evaluated,
     Errored,
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct ModuleCode {
     pub body: Rc<Chunk>,
     pub requests: Vec<ModuleRequest>,
     pub imports: Vec<ImportEntry>,
     pub exports: Vec<ExportEntry>,
-    request_indices: BTreeMap<JsString, usize>,
     import_indices: BTreeMap<JsString, usize>,
     export_indices: BTreeMap<JsString, usize>,
-    star_requests: Vec<JsString>,
+    star_requests: Vec<usize>,
 }
 pub(crate) struct ModuleData {
     pub identifier: JsString,
     pub code: Rc<ModuleCode>,
     pub status: ModuleStatus,
     pub environment: Option<EnvId>,
+    synthetic_default: Option<Value>,
     pub dependencies: Vec<ModuleId>,
     pub namespace: Option<Value>,
     pub meta: Option<Value>,
@@ -68,6 +90,7 @@ pub(crate) struct ModuleNamespace {
 }
 impl ModuleData {
     pub fn trace(&self, p: &mut TraceEdges) {
+        if let Some(default) = &self.synthetic_default { p.value(default); }
         p.extend(self.environment.map(|e| e.0));
         p.extend(self.dependencies.iter().map(|m| m.0));
         p.extend(self.cycle_root.map(|m| m.0));
@@ -89,31 +112,28 @@ impl ModuleData {
         {
             s.push(reason.clone());
         }
-        s.extend(self.code.requests.iter().map(|r| r.specifier.clone()));
+        if let Some(Value::String(value)) = &self.synthetic_default { s.push(value.clone()); }
+        for request in &self.code.requests {
+            s.push(request.specifier.clone());
+            for (key, value) in &request.attributes {
+                s.extend([key.clone(), value.clone()]);
+            }
+        }
         for import in &self.code.imports {
-            s.push(import.request.clone());
             s.push(import.local.clone());
             s.extend(import.imported.iter().cloned());
         }
         for export in &self.code.exports {
             match export {
-                ExportEntry::Local { exported, local } => {
-                    s.extend([exported.clone(), local.clone()])
-                }
-                ExportEntry::Indirect {
-                    exported,
-                    request,
-                    imported,
-                } => s.extend([exported.clone(), request.clone(), imported.clone()]),
-                ExportEntry::Namespace { exported, request } => {
-                    s.extend([exported.clone(), request.clone()])
-                }
-                ExportEntry::Star { request } => s.push(request.clone()),
+                ExportEntry::Local { exported, local } => s.extend([exported.clone(), local.clone()]),
+                ExportEntry::Indirect { exported, imported, .. } => s.extend([exported.clone(), imported.clone()]),
+                ExportEntry::Namespace { exported, .. } => s.push(exported.clone()),
+                ExportEntry::Star { .. } => {}
             }
         }
     }
     pub fn extra_bytes(&self) -> usize {
-        self.code.requests.len() * 256
+        self.code.requests.iter().map(|request| 256 + 128 * request.attributes.len()).sum::<usize>()
             + self.code.imports.len() * 384
             + self.code.exports.len() * 384
             + self.dependencies.capacity() * 128
@@ -169,13 +189,47 @@ impl Vm {
         }
     }
     pub fn parse_module(&mut self, source: &str, identifier: &str) -> Result<ModuleId, JsError> {
-        self.ensure_string_allocation(identifier.encode_utf16().count())?;
         let code = compile_module(source, self.compilation_budget(source)?)?;
+        self.new_module_record(identifier, code, None)
+    }
+
+    /// Parse a fetched module according to its host-validated type. Binary imports
+    /// retain their exact octets, including a possible UTF-8 byte-order mark.
+    pub fn parse_module_bytes(&mut self, source: &[u8], identifier: &str, kind: ModuleType) -> Result<ModuleId, JsError> {
+        if source.len() > self.limits.max_source_bytes {
+            return Err(JsError::new(ErrorKind::ExecutionLimit, "Module source exceeds configured byte limit"));
+        }
+        let value = if kind == ModuleType::Bytes {
+            self.new_immutable_uint8_array(source)?
+        } else {
+            let bytes = source.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(source);
+            self.ensure_allocation(bytes.len().saturating_mul(3))?;
+            let source = String::from_utf8_lossy(bytes);
+            if kind == ModuleType::JavaScript { return self.parse_module(&source, identifier); }
+            self.ensure_string_allocation(source.encode_utf16().count())?;
+            let text = JsString::from(source.as_ref());
+            if kind == ModuleType::Json { self.parse_json(&text)? } else { self.account_value(Value::String(text))? }
+        };
+        let local = JsString::from("*default*");
+        let name = JsString::from("default");
+        let mut body = Chunk { strict: true, ..Chunk::default() };
+        body.scope.lexical.push((local.clone(), false));
+        let code = ModuleCode {
+            body: Rc::new(body),
+            exports: vec![ExportEntry::Local { local, exported: name.clone() }],
+            export_indices: BTreeMap::from([(name, 0)]),
+            ..ModuleCode::default()
+        };
+        self.new_module_record(identifier, Rc::new(code), Some(value))
+    }
+
+    fn new_module_record(&mut self, identifier: &str, code: Rc<ModuleCode>, synthetic_default: Option<Value>) -> Result<ModuleId, JsError> {
+        self.ensure_string_allocation(identifier.encode_utf16().count())?;
         self.retain_compiled_chunk(&code.body)?;
         let identifier = JsString::from(identifier);
         self.account_value(Value::String(identifier.clone()))?;
         self.ensure_allocation(
-            512 + code.requests.len() * 256 + code.imports.len() * 384 + code.exports.len() * 384,
+            512 + code.requests.iter().map(|request| 256 + 128 * request.attributes.len()).sum::<usize>() + code.imports.len() * 384 + code.exports.len() * 384,
         )?;
         if self.heap.live >= self.limits.max_heap_objects {
             return Err(JsError::new(
@@ -189,6 +243,7 @@ impl Vm {
                 code,
                 status: ModuleStatus::Unlinked,
                 environment: None,
+                synthetic_default,
                 dependencies: Vec::new(),
                 namespace: None,
                 meta: None,
@@ -256,19 +311,25 @@ impl Vm {
             .ok_or_else(|| JsError::new(ErrorKind::InternalError, "Missing import binding"))?;
         self.read_reference(Reference::Binding(target, name))
     }
-    fn dependency(&mut self, id: ModuleId, specifier: &JsString) -> Result<ModuleId, JsError> {
-        self.consume_work(specifier.len().saturating_add(1))?;
-        let data = self.module_data(id)?;
-        data.code
-            .request_indices
-            .get(specifier)
-            .and_then(|index| data.dependencies.get(*index))
-            .copied()
+    fn dependency(&mut self, id: ModuleId, index: &usize) -> Result<ModuleId, JsError> {
+        self.tick()?;
+        self.module_data(id)?.dependencies.get(*index).copied()
             .ok_or_else(|| JsError::new(ErrorKind::SyntaxError, "Unresolved module dependency"))
     }
     pub fn link_module<F>(&mut self, root: ModuleId, mut resolver: F) -> Result<(), JsError>
     where
         F: FnMut(&mut Vm, ModuleId, &JsString) -> Result<ModuleId, JsError>,
+    {
+        self.link_module_with_requests(root, |vm, importer, request| {
+            if request.module_type()? != ModuleType::JavaScript {
+                return Err(JsError::type_error("Module loader requires a typed resolver for this import"));
+            }
+            resolver(vm, importer, &request.specifier)
+        })
+    }
+
+    pub fn link_module_with_requests<F>(&mut self, root: ModuleId, mut resolver: F) -> Result<(), JsError>
+    where F: FnMut(&mut Vm, ModuleId, &ModuleRequest) -> Result<ModuleId, JsError>,
     {
         self.with_task(|vm| {
             if vm.module_data(root)?.status != ModuleStatus::Unlinked {
@@ -309,7 +370,7 @@ impl Vm {
         newly: &mut Vec<ModuleId>,
     ) -> Result<(), JsError>
     where
-        F: FnMut(&mut Vm, ModuleId, &JsString) -> Result<ModuleId, JsError>,
+        F: FnMut(&mut Vm, ModuleId, &ModuleRequest) -> Result<ModuleId, JsError>,
     {
         let mut seen = BTreeSet::new();
         let mut frames = Vec::new();
@@ -324,7 +385,7 @@ impl Vm {
             };
             *next_request += 1;
             self.reserve_allocation(128)?;
-            let dependency = resolver(self, referrer, &request.specifier)?;
+            let dependency = resolver(self, referrer, request)?;
             self.module_data(dependency)?;
             self.module_data_mut(referrer)?
                 .dependencies
@@ -398,6 +459,7 @@ impl Vm {
                                 initialized: true,
                                 lexical: true,
                                 strict_immutable: true,
+                                deletable: false,
                             },
                         );
                     }
@@ -687,16 +749,7 @@ fn compile_module(source: &str, compilation_bytes: usize) -> Result<Rc<ModuleCod
         }
     }
 
-    let requests: Vec<_> = parsed
-        .requests
-        .into_iter()
-        .map(|specifier| ModuleRequest { specifier })
-        .collect();
-    let request_indices = requests
-        .iter()
-        .enumerate()
-        .map(|(index, request)| (request.specifier.clone(), index))
-        .collect();
+    let requests = parsed.requests;
     let import_indices = parsed
         .imports
         .iter()
@@ -714,7 +767,7 @@ fn compile_module(source: &str, compilation_bytes: usize) -> Result<Rc<ModuleCod
         .iter()
         .filter_map(|entry| {
             if let ExportEntry::Star { request } = entry {
-                Some(request.clone())
+                Some(*request)
             } else {
                 None
             }
@@ -725,7 +778,6 @@ fn compile_module(source: &str, compilation_bytes: usize) -> Result<Rc<ModuleCod
         requests,
         imports: parsed.imports,
         exports: parsed.exports,
-        request_indices,
         import_indices,
         export_indices,
         star_requests,

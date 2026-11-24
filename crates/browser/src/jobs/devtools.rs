@@ -108,7 +108,7 @@ pub(super) fn resource_label(kind: &ResourceKind) -> &'static str {
     match kind {
         ResourceKind::Stylesheet => "Stylesheet",
         ResourceKind::ClassicScript => "Script",
-        ResourceKind::ModuleScript => "Module",
+        ResourceKind::ModuleScript | ResourceKind::JsonModule | ResourceKind::TextModule | ResourceKind::BytesModule => "Module",
         ResourceKind::Image => "Image",
         ResourceKind::Media => "Media",
         ResourceKind::Font | ResourceKind::LocalFont(_) => "Font",

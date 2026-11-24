@@ -20,6 +20,7 @@ pub(crate) enum PatternCode {
     Target(Rc<Chunk>, Rc<Chunk>),
     PrivateTarget(Rc<Chunk>, JsString),
     SuperTarget(Rc<Chunk>),
+    CallTarget(Rc<Chunk>),
     Array(Vec<Option<Rc<PatternCode>>>, Option<Rc<PatternCode>>),
     Object(Vec<(Rc<Chunk>, Rc<PatternCode>)>, Option<Rc<PatternCode>>),
     Default {
@@ -40,7 +41,7 @@ pub(crate) fn pattern_names(pattern: &PatternCode) -> Vec<JsString> {
             PatternCode::Name(name) => out.push(name.clone()),
             PatternCode::Target(..)
             | PatternCode::PrivateTarget(..)
-            | PatternCode::SuperTarget(_) => {}
+            | PatternCode::SuperTarget(_) | PatternCode::CallTarget(_) => {}
             PatternCode::Array(items, rest) => {
                 pending.extend(rest.iter().map(Rc::as_ref));
                 pending.extend(items.iter().rev().flatten().map(Rc::as_ref));
@@ -126,6 +127,7 @@ pub(crate) enum Op {
     PrivateIn(JsString),
     Get,
     NormalizeReference,
+    InvalidCallAssignment,
     Set,
     Delete,
     Update {
@@ -572,6 +574,7 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
                 require_non_suspending(expression(object, strict)?, "a destructuring target")?,
                 name.clone(),
             ),
+            e if !strict && crate::parser::call_assignment_target(e) => PatternCode::CallTarget(require_non_suspending(expression(e, strict)?, "an iteration target")?),
             _ => return Err(syntax("Invalid assignment target")),
         },
         Pattern::Default(target, value) => PatternCode::Default {
@@ -625,7 +628,7 @@ fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>)
                 chunks.push(object.clone());
                 bytes = bytes.saturating_add(name.len() * 2);
             }
-            PatternCode::SuperTarget(key) => chunks.push(key.clone()),
+            PatternCode::SuperTarget(key) | PatternCode::CallTarget(key) => chunks.push(key.clone()),
             PatternCode::Default { target, value, .. } => {
                 pending.push(target);
                 chunks.push(value.clone());
@@ -848,7 +851,7 @@ fn collect_declarations(stmts: &[Stmt], out: &mut BTreeSet<JsString>, annex: boo
                 }
                 collect_declarations(std::slice::from_ref(&**body), out, annex);
             }
-            Stmt::ForIn(k, n, _, body) | Stmt::ForOf(k, n, _, body, _) => {
+            Stmt::ForIn(k, n, _, body, _) | Stmt::ForOf(k, n, _, body, _) => {
                 if !annex && *k == Some(VarKind::Var) {
                     out.extend(bound_names(n));
                 }
@@ -1057,7 +1060,12 @@ fn compile_statement(
                 label,
             });
         }
-        Stmt::ForIn(kind, name, object, body) => {
+        Stmt::ForIn(kind, name, object, body, initializer) => {
+            if let Some(initializer) = initializer {
+                if strict { return Err(syntax("A strict for-in declaration cannot have an initializer")); }
+                let Pattern::Name(binding) = name else { unreachable!() };
+                out.push(Op::Initialize(VarKind::Var, compile_pattern(name, strict)?, Some(named_expression(initializer, strict, binding)?)));
+            }
             if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
                 check_loop_lexical(bound_names(name), body)?;
             }
@@ -1324,6 +1332,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::PrivateMember(object, name) => {
                     pending.extend([I(Op::PrivateProperty(name.clone())), E(object)]);
                 }
+                _ if assignment && !strict && crate::parser::call_assignment_target(e) => {
+                    pending.extend([I(Op::InvalidCallAssignment), E(e)]);
+                }
                 _ if assignment => return Err(syntax("Invalid assignment target")),
                 _ => pending.push(E(e)),
             },
@@ -1539,6 +1550,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 }
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
+                        if crate::parser::call_assignment_target(left) {
+                            return Err(syntax("Invalid logical assignment target"));
+                        }
                         let name = if anonymous(right) {
                             if let Expr::Identifier(name) = left.as_ref() {
                                 Some(name)

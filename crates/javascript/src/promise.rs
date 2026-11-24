@@ -464,6 +464,7 @@ impl Vm {
     }
     pub fn has_pending_jobs(&self) -> bool {
         !self.jobs.is_empty()
+            || self.next_atomic_wait_deadline().is_some_and(|time| std::time::Instant::now() >= time)
     }
     pub fn pending_job_count(&self) -> usize {
         self.jobs.len()
@@ -559,6 +560,7 @@ impl Vm {
             let mut count = 0;
             while count < max_jobs {
                 vm.tick()?;
+                vm.poll_atomic_timeouts()?;
                 let Some(job) = vm.jobs.pop_front() else {
                     break;
                 };
@@ -998,7 +1000,7 @@ impl Vm {
                 argument,
                 rejected,
             } => {
-                self.finish_async_module(module, argument, rejected)?;
+                self.with_function_realm(module.0, |vm| vm.finish_async_module(module, argument, rejected))?;
             }
             Job::DynamicImport {
                 module,
@@ -1006,12 +1008,15 @@ impl Vm {
                 argument,
                 rejected,
             } => {
-                if rejected {
-                    self.invoke(capability.reject, Value::Undefined, &[argument])?;
-                } else {
-                    let namespace = self.module_namespace(module)?;
-                    self.invoke(capability.resolve, Value::Undefined, &[namespace])?;
-                }
+                self.with_function_realm(module.0, |vm| {
+                    if rejected {
+                        vm.invoke(capability.reject, Value::Undefined, &[argument])?;
+                    } else {
+                        let namespace = vm.module_namespace(module)?;
+                        vm.invoke(capability.resolve, Value::Undefined, &[namespace])?;
+                    }
+                    Ok(())
+                })?;
             }
             Job::Thenable {
                 promise,

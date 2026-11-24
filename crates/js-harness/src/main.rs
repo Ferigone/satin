@@ -14,7 +14,7 @@ use std::{
     collections::BTreeMap,
     io::{self, BufRead, Write},
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const PROTOCOL_LIMIT: usize = 16 * 1024 * 1024;
@@ -33,6 +33,7 @@ struct Request {
     #[serde(default)]
     async_test: bool,
     max_instructions: Option<u64>,
+    timeout_ms: Option<u64>,
     #[serde(default)]
     module_goal: bool,
     #[serde(default)]
@@ -182,6 +183,8 @@ fn install_test262_host(
 
 fn execute(request: Request) -> Json {
     let start = Instant::now();
+    let deadline = start
+        + Duration::from_millis(request.timeout_ms.unwrap_or(3000).min(i32::MAX as u64));
     let limits = VmLimits {
         max_instructions: request
             .max_instructions
@@ -225,7 +228,14 @@ fn execute(request: Request) -> Json {
                     .iter()
                     .map(|request| request.specifier.as_utf16())
                     .collect();
-                json!({"id":request.id,"outcome":"ok","phase":"parse","module_requests":specifiers})
+                let kinds: Vec<_> = requests.iter().map(|r| match r.module_type() {
+                    Ok(rust_browser_javascript::ModuleType::JavaScript) => "javascript",
+                    Ok(rust_browser_javascript::ModuleType::Json) => "json",
+                    Ok(rust_browser_javascript::ModuleType::Text) => "text",
+                    Ok(rust_browser_javascript::ModuleType::Bytes) => "bytes",
+                    Err(_) => "unsupported",
+                }).collect();
+                json!({"id":request.id,"outcome":"ok","phase":"parse","module_requests":specifiers,"module_types":kinds})
             } else {
                 json!({"id":request.id,"outcome":"ok","phase":"parse"})
             }
@@ -259,6 +269,7 @@ fn execute(request: Request) -> Json {
                     &mut vm,
                     module,
                     &request.id,
+                    &source,
                     request.module_files,
                     request.module_edges,
                 ) {
@@ -300,10 +311,20 @@ fn execute(request: Request) -> Json {
                             continue;
                         }
                         if let Some(module) = module {
-                            match vm.module_evaluation_result(module)? {
-                                Some(result) => result?,
-                                None => module_pending = true,
+                            module_pending = match vm.module_evaluation_result(module)? {
+                                Some(result) => { result?; false },
+                                None => true,
+                            };
+                        }
+                        let awaiting_async = request.async_test && async_status.borrow().complete == 0
+                            && async_status.borrow().failure.is_none();
+                        if (module_pending || awaiting_async) && let Some(next) = vm.next_atomic_wait_deadline() {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                return Err(JsError::new(ErrorKind::ExecutionLimit, "Worker deadline exceeded while waiting for an atomic timeout"));
                             }
+                            std::thread::sleep(next.min(deadline).saturating_duration_since(now));
+                            continue;
                         }
                         let reasons=vm.take_unhandled_rejections();unhandled_count=reasons.len();
                         if request.async_test && let Some(prototype)=assertion_root.and_then(|root|vm.root_value(root)) {
@@ -411,6 +432,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             parse_only: args[0] == "--check-file",
             async_test: false,
             max_instructions: None,
+            timeout_ms: None,
             module_goal: false,
             module_files: vec![],
             module_edges: vec![],
@@ -449,6 +471,7 @@ mod tests {
             parse_only: false,
             async_test,
             max_instructions: Some(100000),
+            timeout_ms: None,
             module_goal: false,
             module_files: vec![],
             module_edges: vec![],
@@ -546,7 +569,7 @@ mod tests {
     }
     #[test]
     fn unknown_host_operations_expose_no_dummy_result_and_cannot_be_caught() {
-        for property in ["agent", "gc", "AbstractModuleSource"] {
+        for property in ["agent.start", "gc", "AbstractModuleSource"] {
             let result = request(
                 &format!("try {{ typeof $262.{property}; }} catch (e) {{ 42; }}"),
                 false,
@@ -555,7 +578,7 @@ mod tests {
             assert_eq!(result["error"]["kind"], "UnsupportedFeature", "{result}");
             assert_eq!(
                 result["error"]["unsupported_host"],
-                format!("$262.{property}")
+                format!("$262.{}", property.split('.').next().unwrap())
             );
         }
         let result = request("if (false) $262.createRealm(); 42;", false);
@@ -565,7 +588,7 @@ mod tests {
     fn unsupported_setup_host_is_distinct_from_an_upstream_setup_exception() {
         for (setup, expected) in [
             (
-                "$262.agent.getReport.bind($262.agent);",
+                "$262.agent.getReport();",
                 json!("$262.agent"),
             ),
             ("throw new TypeError('$262.agent');", Json::Null),
@@ -597,6 +620,15 @@ mod tests {
         assert_eq!(result["error"]["kind"], "AsyncTestFailure");
     }
     #[test]
+    fn idle_worker_resumes_finite_atomic_waits() {
+        let result = request(
+            "const a = new Int32Array(new SharedArrayBuffer(4));              const start = $262.agent.monotonicNow();              Atomics.waitAsync(a, 0, 0, 3).value.then(v => {                  if (v === 'timed-out' && $262.agent.monotonicNow() >= start)                      print('Test262:AsyncTestComplete');              });",
+            true,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+        assert_eq!(result["async_completions"], 1);
+    }
+    #[test]
     fn completion_does_not_mask_later_failure_or_missing_completion() {
         let result = request(
             "print('Test262:AsyncTestComplete');Promise.resolve().then(function(){print('Test262:AsyncTestFailure:Error: later');});",
@@ -620,6 +652,7 @@ mod tests {
                 parse_only: false,
                 async_test: true,
                 max_instructions: Some(100000),
+                timeout_ms: None,
                 module_goal: false,
                 module_files: vec![],
                 module_edges: vec![],
@@ -647,7 +680,7 @@ mod tests {
             id:"synchronous sentinel".into(),
             source:"var sentinel=new Test262Error('iterator abrupt completion');Promise.reject(sentinel);".into(),
             setup:vec![Setup{name:"sta contract".into(),source:"function Test262Error(message){this.message=message;}".into()}],
-            strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
+            strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),timeout_ms:None,module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
         });
         assert_eq!(result["outcome"], "ok");
         assert_eq!(result["unhandled_rejections"], 1);
@@ -663,11 +696,13 @@ mod tests {
                 parse_only: false,
                 async_test: false,
                 max_instructions: Some(100_000),
+                timeout_ms: None,
                 module_goal: true,
                 dynamic_files: None,
                 link_only,
                 module_files: if fixtures {
                     vec![ModuleFile {
+                        bytes: None,
                         identifier: "test/dep.js".into(),
                         source: "export let n=4;export function inc(){n++;}".into(),
                     }]

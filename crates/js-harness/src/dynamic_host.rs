@@ -1,7 +1,7 @@
 //! Runtime loader for source-text fixtures from pinned Test262 blobs.
 use crate::module_host::ModuleFile;
 use rust_browser_javascript::{
-    DynamicImportRequest, ErrorKind, JsError, JsString, ModuleId, RootId, Value, Vm,
+    DynamicImportRequest, ErrorKind, JsError, JsString, ModuleId, ModuleType, RealmId, RootId, Value, Vm,
 };
 use std::{
     cell::RefCell,
@@ -10,14 +10,15 @@ use std::{
 };
 
 struct Queued {
+    realm: RealmId,
     request: DynamicImportRequest,
     roots: [RootId; 3],
 }
 
 pub(super) struct DynamicHost {
     source_name: String,
-    sources: BTreeMap<String, String>,
-    modules: BTreeMap<String, ModuleId>,
+    sources: BTreeMap<String, Vec<u8>>,
+    modules: BTreeMap<(RealmId, String, ModuleType), ModuleId>,
     queued: Rc<RefCell<VecDeque<Queued>>>,
 }
 
@@ -27,10 +28,10 @@ impl DynamicHost {
         identifier: &str,
         original: String,
         files: Vec<ModuleFile>,
-        modules: BTreeMap<String, ModuleId>,
+        modules: BTreeMap<(String, ModuleType), ModuleId>,
     ) -> Result<Self, JsError> {
         if files.len() > 1023
-            || files.iter().map(|file| file.source.len()).sum::<usize>() > 4 * 1024 * 1024
+            || files.iter().map(ModuleFile::byte_len).sum::<usize>() > 4 * 1024 * 1024
         {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
@@ -38,9 +39,10 @@ impl DynamicHost {
             ));
         }
         let source_name = fixture_identifier(identifier).to_owned();
-        let mut sources = BTreeMap::from([(source_name.clone(), original)]);
+        let mut sources = BTreeMap::from([(source_name.clone(), original.into_bytes())]);
         for file in files {
-            if sources.insert(file.identifier, file.source).is_some() {
+            let (identifier, bytes) = file.into_parts();
+            if sources.insert(identifier, bytes).is_some() {
                 return Err(JsError::new(
                     ErrorKind::InternalError,
                     "Duplicate dynamic fixture",
@@ -50,7 +52,7 @@ impl DynamicHost {
         let queued = Rc::new(RefCell::new(VecDeque::new()));
         let incoming = queued.clone();
         let max = vm.limits().max_pending_jobs.min(256);
-        vm.set_dynamic_import_hook(move |vm, request| {
+        vm.set_inherited_dynamic_import_hook(move |vm, request| {
             let mut queue = incoming.borrow_mut();
             if queue.len() >= max {
                 return Err(JsError::new(
@@ -64,12 +66,12 @@ impl DynamicHost {
                 vm.root(cap.resolve.clone()),
                 vm.root(cap.reject.clone()),
             ];
-            queue.push_back(Queued { request, roots });
+            queue.push_back(Queued { realm: vm.current_realm(), request, roots });
             Ok(())
         });
         let modules = modules
             .into_iter()
-            .map(|(identifier, module)| (fixture_identifier(&identifier).to_owned(), module))
+            .map(|((identifier, kind), module)| ((vm.current_realm(), fixture_identifier(&identifier).to_owned(), kind), module))
             .collect();
         Ok(Self {
             source_name,
@@ -84,16 +86,21 @@ impl DynamicHost {
         let Some(queued) = queued else {
             return Ok(false);
         };
+        vm.with_realm(queued.realm, |vm| self.process(vm, queued))?;
+        Ok(true)
+    }
+
+    fn process(&mut self, vm: &mut Vm, queued: Queued) -> Result<(), JsError> {
         let result = self.load(vm, &queued.request).and_then(|module| {
             vm.settle_source_text_import(module, queued.request.phase, queued.request.capability.clone())
         });
         if let Err(error) = result {
-            return reject(vm, queued, error).map(|()| true);
+            return reject(vm, queued, error);
         }
         for root in queued.roots {
             vm.unroot(root);
         }
-        Ok(true)
+        Ok(())
     }
 
     fn load(&mut self, vm: &mut Vm, request: &DynamicImportRequest) -> Result<ModuleId, JsError> {
@@ -102,17 +109,18 @@ impl DynamicHost {
             referrer.as_deref().unwrap_or(&self.source_name),
             &request.specifier,
         )?;
-        let module = self.module(vm, name)?;
+        let module = self.module(vm, name, request.module_type)?;
         if request.phase == rust_browser_javascript::ImportPhase::Source { return Ok(module); }
-        vm.link_module(module, |vm, importer, specifier| {
+        vm.link_module_with_requests(module, |vm, importer, request| {
             let referrer = vm.module_identifier(importer)?.to_string_lossy();
-            self.module(vm, fixture_path(&referrer, specifier)?)
+            self.module(vm, fixture_path(&referrer, &request.specifier)?, request.module_type()?)
         })?;
         Ok(module)
     }
 
-    fn module(&mut self, vm: &mut Vm, name: String) -> Result<ModuleId, JsError> {
-        if let Some(&existing) = self.modules.get(&name) {
+    fn module(&mut self, vm: &mut Vm, name: String, kind: ModuleType) -> Result<ModuleId, JsError> {
+        let cache_key = (vm.current_realm(), name.clone(), kind);
+        if let Some(&existing) = self.modules.get(&cache_key) {
             return Ok(existing);
         }
         if self.modules.len() >= 1024 {
@@ -128,9 +136,9 @@ impl DynamicHost {
                 JsError::type_error(format!("Cannot load module {name}"))
             }
         })?;
-        let module = vm.parse_module(source, &name)?;
+        let module = crate::module_host::parse_fixture(vm, source, &name, kind)?;
         vm.root_module(module)?;
-        self.modules.insert(name, module);
+        self.modules.insert(cache_key, module);
         Ok(module)
     }
 }
@@ -180,12 +188,7 @@ fn fixture_path(referrer: &str, specifier: &JsString) -> Result<String, JsError>
             name => components.push(name),
         }
     }
-    let path = components.join("/");
-    if path.ends_with(".js") {
-        Ok(path)
-    } else {
-        Err(unsupported())
-    }
+    Ok(components.join("/"))
 }
 
 fn reject(vm: &mut Vm, queued: Queued, error: JsError) -> Result<(), JsError> {

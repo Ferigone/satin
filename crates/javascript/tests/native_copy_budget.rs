@@ -92,3 +92,22 @@ fn short_appends_preserve_utf16_and_saved_prefixes_within_one_task() {
         Value::Bool(true),
     );
 }
+
+#[test]
+fn exact_buffers_and_borrowed_slices_charge_one_copy() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 4300,
+        ..VmLimits::default()
+    });
+    vm.set_global("s", Value::from("x".repeat(2048))).unwrap();
+    assert_eq!(vm.eval("s.repeat(2).length").unwrap(), Value::from(4096));
+    assert_eq!(
+        vm.eval("s.repeat(3)").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
+    );
+    vm.set_global("s", Value::from("x".repeat(4096))).unwrap();
+    assert_eq!(
+        vm.eval("s.slice(1,4095).length").unwrap(),
+        Value::from(4094)
+    );
+}

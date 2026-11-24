@@ -12,6 +12,7 @@ mod array_methods;
 mod disposable;
 pub(crate) mod math;
 mod number_format;
+mod shadow_realm;
 mod web_legacy;
 
 pub(crate) fn install(vm: &mut Vm) {
@@ -57,6 +58,7 @@ pub(crate) fn install(vm: &mut Vm) {
     crate::collections::install(vm);
     crate::promise::install(vm);
     disposable::install(vm);
+    shadow_realm::install(vm);
     crate::json::install(vm);
     crate::intl::install(vm);
     crate::wasm::install(vm);
@@ -1783,10 +1785,11 @@ fn install_string(vm: &mut Vm) {
         for value in a {
             units.push(to_u32(vm.to_number(value)?) as u16);
         }
-        vm.finish_string(units)
+        vm.finish_written_string(units)
     });
     method(vm, string, "fromCodePoint", 1, |vm, _, a| {
-        let mut units = Vec::new();
+        vm.ensure_string_allocation(a.len())?;
+        let mut units = Vec::with_capacity(a.len());
         for value in a {
             let n = vm.to_number(value)?;
             vm.tick()?;
@@ -1797,12 +1800,14 @@ fn install_string(vm: &mut Vm) {
             if n <= 0xffff {
                 units.push(n as u16);
             } else {
+                // The per-argument tick covers the first unit.
+                vm.consume_work(1)?;
                 let n = n - 0x10000;
                 units.push((0xd800 + (n >> 10)) as u16);
                 units.push((0xdc00 + (n & 1023)) as u16);
             }
         }
-        vm.finish_string(units)
+        vm.finish_written_string(units)
     });
     for name in ["toString", "valueOf"] {
         method(vm, proto.clone(), name, 0, |vm, this, _| match this {
@@ -2095,7 +2100,7 @@ fn install_string(vm: &mut Vm) {
         }
         vm.ensure_string_allocation(s.len().saturating_mul(count))?;
         vm.consume_work(s.len().saturating_mul(count))?;
-        vm.finish_string(s.as_utf16().repeat(count))
+        vm.finish_written_string(s.as_utf16().repeat(count))
     });
     for (name, start) in [("padStart", true), ("padEnd", false)] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {

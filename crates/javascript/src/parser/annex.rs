@@ -71,7 +71,7 @@ fn descend(statement: &mut Stmt, blocked: &mut BTreeSet<JsString>) {
             let names = lexical_names(init.as_deref().into_iter(), false);
             within(names, blocked, |b| descend(body, b));
         }
-        Stmt::ForIn(kind, pattern, _, body) | Stmt::ForOf(kind, pattern, _, body, _) => {
+        Stmt::ForIn(kind, pattern, _, body, _) | Stmt::ForOf(kind, pattern, _, body, _) => {
             if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
                 within(bound_names(pattern), blocked, |b| descend(body, b));
             } else { descend(body, blocked); }

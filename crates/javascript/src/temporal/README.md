@@ -11,7 +11,11 @@ The local wrapper accepts intrinsic constructors and returns the Temporal
 namespace and Date conversion method. It omits the upstream global and Intl
 overrides and the optional debug string. ISO durations format their exact
 integer components directly. ICU4X supplies Chinese, Dangi and Umm al-Qura
-calendar fields. Jiff reads time zone offsets and transitions from TZDB.
+calendar fields and civil calendar arithmetic. Outside ICU’s civil range, the
+Chinese and Korean calendars extend its mean solar-term and synodic-month
+model. Property bag conversion, fixed-offset arithmetic, duration validation
+and exact rational totals run in native code against the same VM budget.
+Jiff reads time zone offsets and transitions from TZDB.
 
 Each public realm receives its own constructors and prototypes. First use
 initializes the algorithms in a private realm on the same VM and heap.

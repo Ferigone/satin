@@ -139,6 +139,7 @@ impl Vm {
                     initialized: true,
                     lexical: code.parameter_expressions,
                     strict_immutable: true,
+                    deletable: false,
                 },
             );
         }
@@ -197,6 +198,7 @@ impl Vm {
                         initialized: false,
                         lexical,
                         strict_immutable: true,
+                        deletable: false,
                     },
                 );
             }
@@ -214,6 +216,10 @@ impl Vm {
         }
         match pattern {
             PatternCode::Name(name) => self.resolve(env, name).map(Some),
+            PatternCode::CallTarget(call) => {
+                self.expression_value(call, env)?;
+                Err(JsError::new(ErrorKind::ReferenceError, "Cannot assign to a call result"))
+            }
             PatternCode::Target(object, key) => {
                 let object = self.expression_value(object, env)?;
                 let key = self.expression_value(key, env)?;
@@ -300,7 +306,8 @@ impl Vm {
                     Ok(())
                 }
             },
-            PatternCode::Target(..)
+            PatternCode::CallTarget(_)
+            | PatternCode::Target(..)
             | PatternCode::PrivateTarget(..)
             | PatternCode::SuperTarget(_) => {
                 let reference = match reference {

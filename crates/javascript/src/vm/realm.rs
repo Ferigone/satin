@@ -32,7 +32,7 @@ impl CoreIntrinsics {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct RealmId(EnvId);
 
 pub(crate) struct RealmState {
@@ -50,6 +50,7 @@ pub(crate) struct RealmState {
     pub(crate) async_from_sync_prototype: Option<ObjectId>,
     pub(crate) array_prototype: ObjectId,
     constructor_prototypes: Vec<Option<ObjectId>>,
+    pub(crate) intl_fallback_symbol: Option<crate::SymbolId>,
     pub(crate) intl_prototypes: Vec<(&'static str, ObjectId)>,
     pub(crate) binary: crate::binary::Intrinsics,
     pub(crate) clone_intrinsics: crate::structured_clone::Intrinsics,
@@ -73,6 +74,7 @@ pub(crate) struct RealmState {
     pub(crate) string_iterator_prototype: Option<ObjectId>,
     pub(crate) module_realm: u64,
     pub(crate) active_referrer: Option<SourceReferrer>,
+    pub(crate) inherit_dynamic_import_hook: bool,
     pub(crate) dynamic_import_hook: Option<DynamicImportHook>,
     pub(crate) wasm_compilation_allowed: bool,
 }
@@ -106,6 +108,7 @@ impl RealmState {
             async_from_sync_prototype: None,
             array_prototype,
             constructor_prototypes: Vec::new(),
+            intl_fallback_symbol: None,
             intl_prototypes: Vec::new(),
             binary: crate::binary::Intrinsics::default(),
             clone_intrinsics: crate::structured_clone::Intrinsics::default(),
@@ -129,6 +132,7 @@ impl RealmState {
             string_iterator_prototype: None,
             module_realm: crate::modules::module_realm_id(),
             active_referrer: None,
+            inherit_dynamic_import_hook: false,
             dynamic_import_hook: None,
             wasm_compilation_allowed,
         }
@@ -207,6 +211,14 @@ impl Drop for EnteredRealm<'_> {
 }
 
 impl Vm {
+    pub fn current_realm(&self) -> RealmId {
+        RealmId(self.realm.global_env)
+    }
+
+    pub(crate) fn callable_realm(&self, function: ObjectId) -> Result<RealmId, JsError> {
+        self.function_defining_environment(function).map(RealmId)
+    }
+
     /// Allocate a fresh realm in the same heap. Keep its global object rooted
     /// while the host holds the realm; a RealmId alone does not keep it alive.
     pub fn new_realm(&mut self) -> Result<(RealmId, Value), JsError> {

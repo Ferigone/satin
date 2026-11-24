@@ -75,7 +75,13 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         repeats: 0,
         names: &pattern.names,
     };
+    compiler
+        .code
+        .extend((0..pattern.wrapping_captures).map(Op::OpenCapture));
     compiler.emit(pattern.body, flags, false);
+    compiler
+        .code
+        .extend((0..pattern.wrapping_captures).rev().map(Op::CloseCapture));
     compiler.code.push(Op::Match);
     specialize_disjoint_class_repeats(&mut compiler.code);
     let mut program = Program {

@@ -91,6 +91,7 @@ impl Vm {
                 initialized: true,
                 lexical: true,
                 strict_immutable: true,
+                deletable: false,
             },
         );
         let env = self.heap.allocate_env(scope);

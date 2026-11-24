@@ -307,6 +307,7 @@ impl Vm {
                     initialized: false,
                     lexical: true,
                     strict_immutable: true,
+                    deletable: false,
                 },
             );
         }

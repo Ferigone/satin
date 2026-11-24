@@ -67,6 +67,7 @@ pub(super) enum Expr {
 pub(super) struct Pattern {
     pub(super) body: Expr,
     pub(super) captures: usize,
+    pub(super) wrapping_captures: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
 
@@ -108,16 +109,21 @@ enum Group {
 }
 
 pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
-    let (total_captures, has_named) = count_captures(units, flags.has(Flags::UNICODE_SETS));
+    let Groups {
+        total_captures,
+        has_named,
+        body,
+        wrapping_captures,
+    } = scan_groups(units, flags.has(Flags::UNICODE_SETS));
     if total_captures > MAX_CAPTURES {
         return Err(limit("Regular expression capture limit exceeded"));
     }
     let mut parser = Parser {
-        units,
+        units: &units[body],
         at: 0,
         flags,
         total_captures,
-        next_capture: 0,
+        next_capture: wrapping_captures,
         has_named,
         names: Vec::new(),
         references: Vec::new(),
@@ -136,6 +142,7 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
     Ok(Pattern {
         body,
         captures: total_captures,
+        wrapping_captures,
         names: parser
             .names
             .into_iter()
@@ -149,10 +156,21 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
     })
 }
 
-/// Decimal escapes can refer to capture groups that have not been parsed yet.
-fn count_captures(units: &[u16], nested_classes: bool) -> (usize, bool) {
+struct Groups {
+    total_captures: usize,
+    has_named: bool,
+    body: Range<usize>,
+    wrapping_captures: usize,
+}
+
+// Count forward references while recognizing groups that enclose the entire
+// pattern. Those groups share one span, so compiling their open/close ops in
+// a loop avoids building or recursively dropping a chain of identical nodes.
+fn scan_groups(units: &[u16], nested_classes: bool) -> Groups {
     let mut at = 0;
     let mut brackets = 0usize;
+    let mut depth = 0usize;
+    let mut wrappers: Vec<(usize, usize)> = Vec::new();
     let mut captures = 0;
     let mut named = false;
     while let Some(&unit) = units.get(at) {
@@ -161,7 +179,17 @@ fn count_captures(units: &[u16], nested_classes: bool) -> (usize, bool) {
             Some(b'[') if nested_classes || brackets == 0 => brackets += 1,
             Some(b']') => brackets = brackets.saturating_sub(1),
             Some(b'(') if brackets == 0 => {
-                if units.get(at + 1).copied().and_then(ascii) != Some(b'?') {
+                depth += 1;
+                let plain_capture = units.get(at + 1).copied().and_then(ascii) != Some(b'?');
+                let (previous_end, previous_captures) = wrappers.last().copied().unwrap_or((0, 0));
+                if at == previous_end {
+                    if plain_capture {
+                        wrappers.push((at + 1, previous_captures + 1));
+                    } else if units.get(at + 2) == Some(&u16::from(b':')) {
+                        wrappers.push((at + 3, previous_captures));
+                    }
+                }
+                if plain_capture {
                     captures += 1;
                 } else if units.get(at + 2).copied().and_then(ascii) == Some(b'<')
                     && !matches!(
@@ -173,11 +201,29 @@ fn count_captures(units: &[u16], nested_classes: bool) -> (usize, bool) {
                     named = true;
                 }
             }
+            Some(b')') if brackets == 0 => {
+                if depth == 0 {
+                    wrappers.clear();
+                }
+                depth = depth.saturating_sub(1);
+                if at + depth + 1 != units.len() {
+                    wrappers.truncate(depth);
+                }
+            }
             _ => {}
         }
         at += 1;
     }
-    (captures, named)
+    if depth != 0 {
+        wrappers.clear();
+    }
+    let (start, wrapping_captures) = wrappers.last().copied().unwrap_or((0, 0));
+    Groups {
+        total_captures: captures,
+        has_named: named,
+        body: start..units.len() - wrappers.len(),
+        wrapping_captures,
+    }
 }
 
 fn ascii(unit: u16) -> Option<u8> {

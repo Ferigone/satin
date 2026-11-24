@@ -201,7 +201,7 @@ pub(crate) fn array_index(key: &JsString) -> Option<u32> {
     if n == u32::MAX { None } else { Some(n) }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(crate) struct EnvId(pub ObjectId);
 #[derive(Clone)]
 pub(crate) struct Binding {
@@ -211,6 +211,7 @@ pub(crate) struct Binding {
     pub lexical: bool,
     // [[Strict]] of an immutable binding; false for a named function expression.
     pub strict_immutable: bool,
+    pub deletable: bool,
 }
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum EnvKind {
@@ -218,6 +219,7 @@ pub(crate) enum EnvKind {
     With { binding_object: ObjectId },
     Function,
     Block,
+    SimpleCatch,
     SloppyEval,
     // A Console command resolves helper names here and declares script bindings in its parent.
     Inspector,
@@ -356,7 +358,7 @@ impl Default for Heap {
     fn default() -> Self {
         static NEXT_HEAP: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_HEAP
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| (id < ObjectId::HTML_DDA).then(|| id + 1))
             .expect("heap identifier space exhausted");
         Self {
             id,
@@ -384,7 +386,6 @@ impl Heap {
             slot.cell = Some(cell);
             slot.marked = false;
             ObjectId {
-                is_html_dda: false,
                 heap_id: self.id,
                 index,
                 generation: slot.generation,
@@ -397,7 +398,6 @@ impl Heap {
                 cell: Some(cell),
             });
             ObjectId {
-                is_html_dda: false,
                 heap_id: self.id,
                 index,
                 generation: 1,
@@ -405,14 +405,14 @@ impl Heap {
         }
     }
     fn slot(&self, id: ObjectId) -> Option<&Slot> {
-        if id.heap_id != self.id {
+        if !id.belongs_to(self.id) {
             return None;
         }
         let slot = self.slots.get(id.index as usize)?;
         (slot.generation == id.generation).then_some(slot)
     }
     fn slot_mut(&mut self, id: ObjectId) -> Option<&mut Slot> {
-        if id.heap_id != self.id {
+        if !id.belongs_to(self.id) {
             return None;
         }
         let slot = self.slots.get_mut(id.index as usize)?;
@@ -446,7 +446,7 @@ impl Heap {
         second: ObjectId,
     ) -> Result<(&mut Object, &mut Object), JsError> {
         let invalid = || JsError::type_error("Invalid or overlapping object handles");
-        if first.heap_id != self.id || second.heap_id != self.id {
+        if !first.belongs_to(self.id) || !second.belongs_to(self.id) {
             return Err(invalid());
         }
         let [a, b] = self
@@ -528,13 +528,20 @@ impl Heap {
         }
     }
 
-    pub(crate) fn collect(&mut self, mut pending: TraceEdges) -> (usize, Vec<ObjectId>) {
+    pub(crate) fn collect(
+        &mut self,
+        mut pending: TraceEdges,
+        conditional_edges: impl Iterator<Item = (ObjectId, ObjectId)>,
+    ) -> (usize, Vec<ObjectId>) {
         let mut symbols = BTreeSet::new();
         let mut weak_owners = Vec::new();
         let mut cleanup = Vec::new();
         // A conditional edge is either followed immediately or registered
         // once under its unmarked key. Later marks wake the waiting values.
         let mut waiting = BTreeMap::<TraceTarget, Vec<TraceTarget>>::new();
+        for (key, value) in conditional_edges {
+            waiting.entry(TraceTarget::Object(key)).or_default().push(TraceTarget::Object(value));
+        }
         while let Some(target) = pending.pop() {
             match target {
                 TraceTarget::Object(id) => {

@@ -1,16 +1,18 @@
 //! The Module goal produces import/export records, not a function wrapper.
 use super::*;
+use crate::modules::ModuleRequest;
+use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub(crate) struct Module {
     pub body: Vec<Stmt>,
-    pub requests: Vec<JsString>,
+    pub requests: Vec<ModuleRequest>,
     pub imports: Vec<ImportEntry>,
     pub exports: Vec<ExportEntry>,
-    requested: std::collections::BTreeSet<JsString>,
+    requested: BTreeMap<ModuleRequest, usize>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ImportEntry {
-    pub request: JsString,
+    pub request: usize,
     pub imported: Option<JsString>,
     pub local: JsString,
 }
@@ -22,15 +24,15 @@ pub(crate) enum ExportEntry {
     },
     Indirect {
         exported: JsString,
-        request: JsString,
+        request: usize,
         imported: JsString,
     },
     Namespace {
         exported: JsString,
-        request: JsString,
+        request: usize,
     },
     Star {
-        request: JsString,
+        request: usize,
     },
 }
 impl ExportEntry {
@@ -75,7 +77,7 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
         requests: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
-        requested: std::collections::BTreeSet::new(),
+        requested: BTreeMap::new(),
     };
     while !p.is_eof() {
         if p.at("import")
@@ -125,23 +127,39 @@ impl Parser {
             _ => Err(self.error("Expected a module import/export name")),
         }
     }
-    fn module_specifier(&mut self, module: &mut Module) -> Result<JsString, JsError> {
+    fn module_specifier(&mut self, module: &mut Module) -> Result<usize, JsError> {
         let TokenKind::String(specifier) = self.current().kind.clone() else {
             return Err(self.error("Module specifier must be a string literal"));
         };
         self.advance(1);
-        if self.at("with")
-            || (self.at("assert")
-                && self
-                    .lookahead(1)
-                    .is_some_and(|token| token.kind == TokenKind::Punct("{")))
-        {
-            return Err(self.error("Import attributes are not implemented"));
+        let mut attributes = BTreeMap::new();
+        if self.eat("with") {
+            self.expect("{")?;
+            while !self.eat("}") {
+                let key = match self.current().kind.clone() {
+                    TokenKind::String(key) => key,
+                    TokenKind::Word(key) | TokenKind::EscapedWord(key) => key.into(),
+                    _ => return Err(self.error("Invalid import attribute key")),
+                };
+                self.advance(1);
+                self.expect(":")?;
+                let TokenKind::String(value) = self.current().kind.clone() else {
+                    return Err(self.error("Import attribute value must be a string literal"));
+                };
+                self.advance(1);
+                if attributes.insert(key, value).is_some() {
+                    return Err(self.error("Duplicate import attribute"));
+                }
+                if self.eat("}") { break; }
+                self.expect(",")?;
+            }
         }
-        if module.requested.insert(specifier.clone()) {
-            module.requests.push(specifier.clone());
-        }
-        Ok(specifier)
+        let request = ModuleRequest { specifier, attributes };
+        if let Some(index) = module.requested.get(&request) { return Ok(*index); }
+        let index = module.requests.len();
+        module.requested.insert(request.clone(), index);
+        module.requests.push(request);
+        Ok(index)
     }
     fn import_declaration(&mut self, module: &mut Module) -> Result<(), JsError> {
         if (self.at("source") || self.at("defer"))
@@ -164,7 +182,7 @@ impl Parser {
                 let request = self.module_specifier(module)?;
                 for (imported, local) in entries {
                     module.imports.push(ImportEntry {
-                        request: request.clone(),
+                        request,
                         imported,
                         local,
                     });
@@ -199,7 +217,7 @@ impl Parser {
         let request = self.module_specifier(module)?;
         for (imported, local) in entries {
             module.imports.push(ImportEntry {
-                request: request.clone(),
+                request,
                 imported,
                 local,
             });
@@ -250,7 +268,7 @@ impl Parser {
                 module.exports.push(if let Some(request) = &request {
                     ExportEntry::Indirect {
                         exported,
-                        request: request.clone(),
+                        request: *request,
                         imported: local,
                     }
                 } else {

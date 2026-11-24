@@ -13,6 +13,7 @@ pub struct DynamicImportRequest {
     pub referrer_module: Option<ModuleId>,
     pub specifier: JsString,
     pub phase: crate::ImportPhase,
+    pub module_type: crate::ModuleType,
     pub capability: PromiseCapability,
 }
 
@@ -32,7 +33,18 @@ impl Vm {
     where
         F: Fn(&mut Vm, DynamicImportRequest) -> Result<(), JsError> + 'static,
     {
+        self.realm.inherit_dynamic_import_hook = false;
         self.realm.dynamic_import_hook = Some(Rc::new(hook));
+    }
+
+    /// Install a loader which understands the invoking realm and keeps its
+    /// module graphs isolated. Shadow realms may delegate to this host.
+    pub fn set_inherited_dynamic_import_hook<F>(&mut self, hook: F)
+    where
+        F: Fn(&mut Vm, DynamicImportRequest) -> Result<(), JsError> + 'static,
+    {
+        self.set_dynamic_import_hook(hook);
+        self.realm.inherit_dynamic_import_hook = true;
     }
 
     /// Complete a dynamic import once the host has loaded a JavaScript module.
@@ -86,46 +98,42 @@ impl Vm {
         })
     }
 
-    fn check_import_options(&mut self, options: Value) -> Result<(), JsError> {
+    fn import_attributes(&mut self, options: Value) -> Result<std::collections::BTreeMap<JsString, JsString>, JsError> {
         if options.is_undefined() {
-            return Ok(());
+            return Ok(Default::default());
         }
         if options.as_object().is_none() {
             return Err(JsError::type_error("Import options must be an object"));
         }
         let attributes = self.get_property(options, "with")?;
         if attributes.is_undefined() {
-            return Ok(());
+            return Ok(Default::default());
         }
         let Some(id) = attributes.as_object() else {
             return Err(JsError::type_error("Import attributes must be an object"));
         };
-        // The current loader supports source-text JavaScript with no attribute keys.
-        // Read all enumerable values in order before rejecting unsupported keys.
-        let mut has_attributes = false;
+        let mut entries = std::collections::BTreeMap::new();
         let mut invalid_value = false;
         for name in self.own_keys(attributes.clone(), false)? {
             let key = crate::PropertyKey::String(name);
             if !self.own_enumerability(id, &key)?.unwrap_or(false) {
                 continue;
             }
-            if !matches!(
-                self.get_property_key(attributes.clone(), key)?,
-                Value::String(_)
-            ) {
-                invalid_value = true;
+            match self.get_property_key(attributes.clone(), key.clone())? {
+                Value::String(value) => {
+                    self.reserve_allocation(128)?;
+                    let crate::PropertyKey::String(name) = key else { unreachable!() };
+                    entries.insert(name, value);
+                }
+                _ => invalid_value = true,
             }
-            has_attributes = true;
         }
         if invalid_value {
             return Err(JsError::type_error(
                 "Import attributes require string values",
             ));
         }
-        if has_attributes {
-            return Err(JsError::type_error("Unsupported import attribute"));
-        }
-        Ok(())
+        Ok(entries)
     }
 
     pub(crate) fn dynamic_import(
@@ -138,7 +146,9 @@ impl Vm {
         let result = (|| {
             let specifier = self.to_string(&value)?;
             self.account_value(Value::String(specifier.clone()))?;
-            self.check_import_options(options)?;
+            let attributes = self.import_attributes(options)?;
+            let request = crate::ModuleRequest { specifier, attributes };
+            let module_type = request.module_type()?;
             let (referrer, referrer_module) = match self.realm.active_referrer.as_ref() {
                 Some(SourceReferrer::Script(identifier)) => (Some(identifier.clone()), None),
                 Some(SourceReferrer::Module(module)) => {
@@ -156,8 +166,9 @@ impl Vm {
                 DynamicImportRequest {
                     referrer,
                     referrer_module,
-                    specifier,
+                    specifier: request.specifier,
                     phase,
+                    module_type,
                     capability: capability.clone(),
                 },
             )

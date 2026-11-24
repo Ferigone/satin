@@ -1228,7 +1228,7 @@ impl DocumentSession {
             Consumer::Module(key, credentials) => match result {
                 Ok(DocumentResource {
                     url,
-                    body: ResourceBody::Text(source),
+                    body: ResourceBody::Module(source),
                     ..
                 }) => {
                     accepted = true;

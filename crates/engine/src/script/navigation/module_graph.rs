@@ -5,7 +5,7 @@ use crate::{
     loader::{ResourceKind, ResourceRequest},
     network::CredentialsMode,
 };
-use rust_browser_javascript::{JsError, JsString, ModuleId, Vm};
+use rust_browser_javascript::{JsError, ModuleRequest, ModuleType, ModuleId, Vm};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -19,13 +19,13 @@ const MAX_GRAPH_URL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODULE_URL: usize = 128 * 1024;
 
 #[derive(Clone, Copy)]
-pub(super) struct ModuleKey(usize);
+pub(super) struct ModuleKey(usize, ModuleType);
 
 enum Record {
     Loading,
     Parsed {
         id: ModuleId,
-        edges: Vec<(JsString, ModuleKey)>,
+        edges: Vec<(ModuleRequest, ModuleKey)>,
         credentials: CredentialsMode,
     },
     Failed(Arc<str>),
@@ -41,18 +41,18 @@ pub(super) struct ModuleGraph {
     pub(super) imports: ImportMap,
     pub(super) sources: crate::script::inspection_sources::SourceArchive,
     records: Vec<Record>,
-    requests: HashMap<Arc<Url>, ModuleKey>,
+    requests: HashMap<(Arc<Url>, ModuleType), ModuleKey>,
     ids: HashMap<ModuleId, ModuleKey>,
     url_bytes: usize,
     source_bytes: usize,
     edges: usize,
 }
 impl ModuleGraph {
-    fn allocate(&mut self) -> Result<ModuleKey, String> {
+    fn allocate(&mut self, kind: ModuleType) -> Result<ModuleKey, String> {
         if self.records.len() >= MAX_MODULES {
             return Err("Module graph exceeds 512 records".into());
         }
-        let key = ModuleKey(self.records.len());
+        let key = ModuleKey(self.records.len(), kind);
         self.records.push(Record::Loading);
         Ok(key)
     }
@@ -98,21 +98,39 @@ impl ModuleGraph {
         integrity: Option<Arc<str>>,
         resources: &mut ResourceQueue,
     ) -> Result<ModuleKey, String> {
-        if let Some(key) = self.requests.get(&url) {
+        self.external_typed(url, client, credentials, integrity, resources, ModuleType::JavaScript)
+    }
+
+    pub(super) fn external_typed(
+        &mut self,
+        url: Url,
+        client: &Arc<Url>,
+        credentials: CredentialsMode,
+        integrity: Option<Arc<str>>,
+        resources: &mut ResourceQueue,
+        kind: ModuleType,
+    ) -> Result<ModuleKey, String> {
+        let url = Arc::new(url);
+        if let Some(key) = self.requests.get(&(url.clone(), kind)) {
             return Ok(*key);
         }
         self.charge_url(&url)?;
-        let key = self.allocate()?;
+        let key = self.allocate(kind)?;
         let integrity = integrity.or_else(|| self.imports.integrity(&url));
         let request = ResourceRequest {
-            url: url.clone(),
+            url: url.as_ref().clone(),
             client: client.clone(),
-            kind: ResourceKind::ModuleScript,
+            kind: match kind {
+                ModuleType::JavaScript => ResourceKind::ModuleScript,
+                ModuleType::Json => ResourceKind::JsonModule,
+                ModuleType::Text => ResourceKind::TextModule,
+                ModuleType::Bytes => ResourceKind::BytesModule,
+            },
             cors: Some(credentials),
             integrity,
             deadline: ResourceQueue::queue_deadline(),
         };
-        self.requests.insert(Arc::new(url), key);
+        self.requests.insert((url, kind), key);
         if !matches!(request.url.scheme(), "http" | "https" | "data") {
             self.fail(key, "Module URL is not fetchable in this document".into());
         } else if let Err(error) = resources.queue(request, Consumer::Module(key, credentials)) {
@@ -130,8 +148,8 @@ impl ModuleGraph {
         vm: &mut Vm,
         resources: &mut ResourceQueue,
     ) -> Result<ModuleKey, String> {
-        let key = self.allocate()?;
-        self.parsed_response(key, source, base, client, credentials, vm, resources);
+        let key = self.allocate(ModuleType::JavaScript)?;
+        self.parsed_response(key, source.into_bytes(), base, client, credentials, vm, resources);
         Ok(key)
     }
 
@@ -139,7 +157,7 @@ impl ModuleGraph {
     pub(super) fn parsed_response(
         &mut self,
         key: ModuleKey,
-        source: String,
+        source: Vec<u8>,
         base: Arc<Url>,
         client: &Arc<Url>,
         credentials: CredentialsMode,
@@ -154,16 +172,16 @@ impl ModuleGraph {
                 return Err("Module source byte budget exceeded".into());
             }
             self.source_bytes += source.len();
-            let external = self.requests.values().any(|entry| entry.0 == key.0);
-            self.sources.capture(
-                None,
-                external.then_some(base.as_str()),
-                || format!("Module #{}", key.0 + 1),
-                &source,
-            );
-            let id = vm
-                .parse_module(&source, base.as_str())
-                .map_err(|e| e.to_string())?;
+            if key.1 == ModuleType::JavaScript {
+                let external = self.requests.values().any(|entry| entry.0 == key.0);
+                self.sources.capture(
+                    None,
+                    external.then_some(base.as_str()),
+                    || format!("Module #{}", key.0 + 1),
+                    &String::from_utf8_lossy(source.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&source)),
+                );
+            }
+            let id = vm.parse_module_bytes(&source, base.as_str(), key.1).map_err(|e| e.to_string())?;
             let requests = vm.module_requests(id).map_err(|e| e.to_string())?;
             if self.edges + requests.len() > MAX_MODULE_EDGES {
                 return Err("Module graph dependency budget exceeded".into());
@@ -173,8 +191,8 @@ impl ModuleGraph {
             for request in requests {
                 let specifier = request.specifier.to_string_lossy();
                 let url = self.resolve_specifier(&specifier, &base)?;
-                let dep = self.external(url, client, credentials, None, resources)?;
-                edges.push((request.specifier, dep));
+                let dep = self.external_typed(url, client, credentials, None, resources, request.module_type().map_err(|e| e.to_string())?)?;
+                edges.push((request, dep));
             }
             vm.root_module(id).map_err(|e| e.to_string())?;
             Ok((id, edges))
@@ -219,10 +237,10 @@ impl ModuleGraph {
     }
 
     pub(super) fn link(&self, vm: &mut Vm, root: ModuleId) -> Result<(), JsError> {
-        vm.link_module(root, |_, parent, specifier| {
+        vm.link_module_with_requests(root, |_, parent, request| {
             if let Some(key) = self.ids.get(&parent)
                 && let Record::Parsed { edges, .. } = &self.records[key.0]
-                && let Some((_, target)) = edges.iter().find(|(name, _)| name == specifier)
+                && let Some((_, target)) = edges.iter().find(|(name, _)| name == request)
                 && let Record::Parsed { id, .. } = &self.records[target.0]
             {
                 Ok(*id)

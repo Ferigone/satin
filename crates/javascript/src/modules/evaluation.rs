@@ -259,6 +259,9 @@ impl Vm {
         let data = self.module_data(module)?;
         let body = data.code.body.clone();
         let env = data.environment.unwrap();
+        if let Some(value) = data.synthetic_default.clone() {
+            return self.initialize(env, crate::parser::VarKind::Const, &crate::JsString::from("*default*"), value, true);
+        }
         let result = self.with_referrer(Some(SourceReferrer::Module(module)), |vm| {
             vm.run_prepared_chunk(&body, env)
         })?;
@@ -373,8 +376,10 @@ impl Vm {
             && let Ok(object) = self.heap.object(owner)
             && matches!(object.kind, ObjectKind::Module(_))
         {
-            let module = ModuleId(owner, self.realm.module_realm);
-            let _ = self.fail_module_evaluations(vec![module], None, error.clone());
+            let _ = self.with_function_realm(owner, |vm| {
+                let module = ModuleId(owner, vm.realm.module_realm);
+                vm.fail_module_evaluations(vec![module], None, error.clone())
+            });
         }
     }
 

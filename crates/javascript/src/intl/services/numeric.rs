@@ -1,4 +1,5 @@
 use super::*;
+mod patterns;
 use fixed_decimal::{Decimal,FloatPrecision,SignedRoundingMode as Signed,UnsignedRoundingMode as Unsigned,RoundingIncrement,SignDisplay};
 use icu_decimal::{DecimalFormatter,options::GroupingStrategy};
 use icu_plurals::{PluralRules,PluralCategory};
@@ -105,6 +106,7 @@ fn numeric(vm:&mut Vm,v:&Value)->Result<Numeric,JsError>{
     Ok(Numeric::Finite(Decimal::try_from_f64(n,FloatPrecision::RoundTrip).map_err(|_|range("Invalid decimal number"))?))
 }
 struct NumberFormat{
+    patterns: patterns::Patterns, compact_rules:Option<PluralRules>,
     number:DecimalFormatter,currency_fmt:Option<CurrencyFormatter<DecimalFormatter>>,percent:Option<PercentFormatter<DecimalFormatter>>,
     locale:String,numbering:String,style:String,notation:String,sign:String,group:Value,digits:Digits,
     currency:Option<String>,display:String,currency_sign:String,unit:Option<String>,unit_display:String,compact:String,
@@ -154,8 +156,10 @@ fn new_number(vm:&mut Vm,args:&[Value],p:ObjectId)->ResultValue{
             "narrowSymbol"=>CurrencyFormatter::try_new_symbol_narrow(l.clone().into(),code,opts),_=>CurrencyFormatter::try_new_symbol(l.clone().into(),code,opts),
         }.map_err(|_|range("Unsupported currency format"))?)
     }else{None};
+    let patterns=patterns::Patterns::new(&l,&number);
+    let compact_rules=if notation=="compact"{Some(PluralRules::try_new_cardinal(l.clone().into()).map_err(|_|range("Unsupported compact plural rules"))?)}else{None};
     let percent=if style=="percent"{Some(PercentFormatter::try_new(l.into(),Default::default()).map_err(|_|range("Unsupported percent format"))?)}else{None};
-    create(vm,p,NumberFormat{number:fmt,currency_fmt,percent,locale:resolved.to_string(),numbering:number,style,notation,sign,group,digits,currency,display,currency_sign,unit,unit_display,compact})
+    create(vm,p,NumberFormat{patterns,compact_rules,number:fmt,currency_fmt,percent,locale:resolved.to_string(),numbering:number,style,notation,sign,group,digits,currency,display,currency_sign,unit,unit_display,compact})
 }
 #[derive(Default)]
 struct Parts{fields:Vec<(&'static str,String)>,kind:&'static str}
@@ -181,24 +185,51 @@ fn part_objects(vm:&mut Vm,seq:Vec<(&'static str,String)>,parts:bool)->ResultVal
 }
 impl NumberFormat {
     fn parts(&self,n:Numeric)->Result<Vec<(&'static str,String)>,JsError>{
-        let mut d=match n{Numeric::Special(k,s)=>return Ok(vec![(k,s.into())]),Numeric::Finite(d)=>d};
+        let (mut d, special) = match n {
+            Numeric::Finite(d) => (d, None),
+            Numeric::Special(kind, raw) => {
+                let sign_sample = if kind == "nan" { 0 } else if raw.starts_with('-') { -1 } else { 1 };
+                (Decimal::from(sign_sample), Some((kind, self.patterns.symbol(kind, raw.trim_start_matches('-')))))
+            }
+        };
         if self.style=="percent"{d.multiply_pow10(2)}
+        let scientific=matches!(self.notation.as_str(),"engineering"|"scientific") && special.is_none();
         let mut exponent=0;
-        if matches!(self.notation.as_str(),"engineering"|"scientific")&&!d.is_zero(){
-            exponent=d.nonzero_magnitude_start();if self.notation=="engineering"{exponent=exponent.div_euclid(3)*3}
-            d.multiply_pow10(-exponent);
+        let mut compact_pattern=None;
+        if let Some(rules)=&self.compact_rules && special.is_none(){
+            compact_pattern=self.patterns.compact(&self.compact,&mut d,&self.digits,rules);
+        } else {
+            if scientific && !d.is_zero(){
+                exponent=d.nonzero_magnitude_start();
+                if self.notation=="engineering"{exponent=exponent.div_euclid(3)*3}
+                d.multiply_pow10(-exponent);
+            }
+            self.digits.round(&mut d);
         }
-        self.digits.round(&mut d);
         let sign=match self.sign.as_str(){"always"=>SignDisplay::Always,"never"=>SignDisplay::Never,"exceptZero"=>SignDisplay::ExceptZero,"negative"=>SignDisplay::Negative,_=>SignDisplay::Auto};
         let d=d.with_sign_display(sign);
         let mut parts=Parts::default();
         if let Some(c)=&self.currency_fmt{c.format_fixed_decimal(&d).write_to_parts(&mut parts).unwrap()}
         else if let Some(p)=&self.percent{p.format(&d).write_to_parts(&mut parts).unwrap()}
         else {self.number.format(&d).write_to_parts(&mut parts).unwrap()}
-        if matches!(self.notation.as_str(),"scientific"|"engineering"){
-            parts.fields.push(("exponentSeparator","E".into()));
-            if exponent<0{parts.fields.push(("exponentMinusSign","-".into()))}
+        let is_number_part=|(k,_):&(&str,String)|matches!(*k,"integer"|"group"|"fraction"|"decimal");
+        if let Some(first)=parts.fields.iter().position(is_number_part){
+            let end=parts.fields.iter().rposition(is_number_part).unwrap()+1;
+            if let Some((kind,symbol))=special{
+                parts.fields.splice(first..end,[(kind,symbol.to_owned())]);
+            }else if let Some(pattern)=compact_pattern{
+                let (before,show_value,after)=patterns::affixes(pattern);
+                parts.fields.splice(end..end,after);
+                parts.fields.splice(first..if show_value{first}else{end},before);
+            }
+        }
+        if scientific {
+            parts.fields.push(("exponentSeparator",self.patterns.symbol("exponential","E").to_owned()));
+            if exponent<0{parts.fields.push(("exponentMinusSign",self.patterns.symbol("minusSign","-").to_owned()))}
             parts.fields.push(("exponentInteger",exponent.unsigned_abs().to_string()));
+        }
+        for (kind,text) in &mut parts.fields{
+            if matches!(*kind,"integer"|"fraction"|"exponentInteger"){self.patterns.shape_digits(text)}
         }
         if self.style=="unit"&&let Some(unit)=&self.unit{
             let sym=match(unit.as_str(),self.unit_display.as_str()){("percent",_)=>"%",("meter","short"|"narrow")=>"m",("kilometer","short"|"narrow")=>"km",("second","short"|"narrow")=>"s",("hour","short"|"narrow")=>"hr",_=>unit};
@@ -232,12 +263,16 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
     });
     let (ctor,p)=class(vm,intl,"NumberFormat",0,true,new_number);supported(vm,&ctor);
     accessor(vm,&p,"format",|vm,this,_|{
+        let this=unwrap_formatter::<NumberFormat>(vm,this,"NumberFormat")?;
         let fmt=slots::<NumberFormat>(vm,&this)?;if let Some(f)=vm.host_slot(&this,0){return Ok(f)}
         let f=vm.native("",1,false,Rc::new(move|vm,_,args|{let n=numeric(vm,&arg(args,0))?;part_objects(vm,fmt.parts(n)?,false)}));
         vm.set_host_slot(this,0,f.clone())?;Ok(f)
     });
     method(vm,p.clone(),"formatToParts",1,|vm,this,args|{let fmt=slots::<NumberFormat>(vm,&this)?;let n=numeric(vm,&arg(args,0))?;part_objects(vm,fmt.parts(n)?,true)});
-    method(vm,p.clone(),"resolvedOptions",0,|vm,this,_|slots::<NumberFormat>(vm,&this)?.resolved(vm));
+    method(vm,p.clone(),"resolvedOptions",0,|vm,this,_|{
+        let this=unwrap_formatter::<NumberFormat>(vm,this,"NumberFormat")?;
+        slots::<NumberFormat>(vm,&this)?.resolved(vm)
+    });
     for name in ["formatRange","formatRangeToParts"]{
         method(vm,p.clone(),name,2,move|vm,this,args|{
             let f=slots::<NumberFormat>(vm,&this)?;
