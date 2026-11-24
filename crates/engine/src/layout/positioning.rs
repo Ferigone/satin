@@ -15,6 +15,7 @@ pub(super) struct CommandMeta {
     node: NodeId,
     background: bool,
 }
+#[derive(Clone)]
 pub(super) struct TrackedCommands {
     items: Vec<DrawCommand>,
     meta: Vec<CommandMeta>,
@@ -86,7 +87,7 @@ pub(super) struct Positioned {
     pub y: f32,
     pub href: Option<Arc<str>>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct LinkCache {
     values: HashMap<NodeId, Option<Arc<str>>>,
     bytes: usize,
@@ -440,6 +441,9 @@ impl Builder<'_> {
         }
     }
     pub(super) fn layout_positioned(&mut self) {
+        if self.positioned.is_empty() {
+            return;
+        }
         let (abs, fixed) = containing_blocks(self);
         let mut boxes = vec![None; self.styles.len()];
         for e in &self.elements {
@@ -753,7 +757,6 @@ fn push_paint_group(
 impl Builder<'_> {
     pub(super) fn finish_visual(
         mut self,
-        _height: f32,
         background: Color,
         scroll: &HashMap<NodeId, ScrollOffset>,
         observe_intersections: bool,
@@ -1398,6 +1401,12 @@ impl Builder<'_> {
         for e in &mut flow_elements {
             e.rect = offset_matrices[e.node.0].rect(e.rect);
         }
+        let viewport_fixed = order.iter().any(|id| {
+            boxes[id.0].is_some()
+                && self.styles[id.0].position == Position::Fixed
+                && fixed[id.0].is_none()
+                && matches!(doc.nodes[id.0].kind, NodeKind::Element { .. })
+        });
         let mut observation_boxes = observe_intersections.then(|| {
             boxes
                 .into_iter()
@@ -1463,12 +1472,8 @@ impl Builder<'_> {
         Layout {
             viewport: self.viewport,
             viewport_overflow,
-            depends_on_viewport_scroll: sticky_uses_viewport
-                || self
-                    .styles
-                    .entries
-                    .iter()
-                    .any(|s| s.position == Position::Fixed),
+            depends_on_viewport_scroll: sticky_uses_viewport || viewport_fixed,
+            scroll_flow: None,
             computed_styles: Arc::clone(self.styles),
             scroll_regions,
             flow_elements,

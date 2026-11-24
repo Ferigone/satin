@@ -147,16 +147,14 @@ impl Canvas {
             self.clips.truncate(prior.clips);
         }
     }
-    pub(super) fn raster_rect<F: Fn(f32, f32) -> Option<Color>>(&mut self, rect: Rect, sample: F) {
+    /// Device-pixel bounds shared by transformed and axis-aligned sampling.
+    pub(super) fn raster_bounds(&self, rect: Rect) -> Option<[usize; 4]> {
         if !valid_rect(rect) || !valid_rect(self.clip) {
-            return;
+            return None;
         }
-        let Some(inverse) = self.transform.inverse() else {
-            return;
-        };
         let bounds = self.transform.rect(rect);
         if !valid_rect(bounds) {
-            return;
+            return None;
         }
         let bounds = intersection(
             intersection(bounds, self.clip),
@@ -168,13 +166,22 @@ impl Canvas {
             },
         );
         if !valid_rect(bounds) {
-            return;
+            return None;
         }
-        let left = bounds.x.floor().max(0.) as u32;
-        let top = bounds.y.floor().max(0.) as u32;
-        let right = (bounds.x + bounds.width).ceil().min(self.width as f32) as u32;
-        let bottom = (bounds.y + bounds.height).ceil().min(self.height as f32) as u32;
-        let work = (right - left) as usize * (bottom - top) as usize;
+        let left = bounds.x.floor().max(0.) as usize;
+        let top = bounds.y.floor().max(0.) as usize;
+        let right = (bounds.x + bounds.width).ceil().min(self.width as f32) as usize;
+        let bottom = (bounds.y + bounds.height).ceil().min(self.height as f32) as usize;
+        Some([left, top, right, bottom])
+    }
+    pub(super) fn raster_rect<F: Fn(f32, f32) -> Option<Color>>(&mut self, rect: Rect, sample: F) {
+        let Some([left, top, right, bottom]) = self.raster_bounds(rect) else {
+            return;
+        };
+        let Some(inverse) = self.transform.inverse() else {
+            return;
+        };
+        let work = (right - left) * (bottom - top);
         if !self.charge_pixels(work.saturating_mul(self.clips.len() + 1)) {
             return;
         }
@@ -192,7 +199,7 @@ impl Canvas {
                 if let Some(color) = sample(lx, ly)
                     && color.3 != 0
                 {
-                    let index = (y * self.width + x) as usize;
+                    let index = y * self.width as usize + x;
                     self.pixels[index] = blend(self.pixels[index], color);
                 }
             }

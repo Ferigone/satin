@@ -45,6 +45,7 @@ mod chrome_menu;
 mod history_ui;
 mod icons;
 mod navigation_error;
+mod scroll;
 mod settings;
 mod tab_strip;
 use self::address_bar::{AddressBar, Movement};
@@ -389,6 +390,7 @@ pub(crate) fn run(
         incoming,
         network_observations,
         mouse: (0., 0.),
+        wheel: None,
         pointer_inside: false,
         devtools,
         devtools_open: false,
@@ -489,6 +491,7 @@ struct App {
     incoming: Receiver<Message>,
     network_observations: crate::jobs::devtools::Receiver,
     mouse: (f32, f32),
+    wheel: Option<scroll::WheelGesture>,
     pointer_inside: bool,
     devtools: Option<crate::devtools::DevTools>,
     devtools_open: bool,
@@ -780,6 +783,7 @@ impl App {
     }
 
     fn window_geometry_changed(&mut self) {
+        self.wheel = None;
         self.tab_hits_current = false;
         self.select_popup = None;
         self.hover = None;
@@ -1069,11 +1073,12 @@ impl App {
                 || (l.depends_on_viewport_scroll && (l.viewport.scroll_y - tab.scroll).abs() > 0.1)
         }) && let Some(page) = &tab.page
         {
-            tab.layout = Some(Arc::new(Layout::build_with_scroll(
+            tab.layout = Some(Arc::new(Layout::for_scrolling(
                 page,
                 &self.fonts,
                 viewport,
                 &tab.nested_scroll,
+                tab.layout.as_deref(),
             )));
         }
         if matches!(tab.history_scroll, Some(HistoryScroll::Fragment))
@@ -1118,11 +1123,12 @@ impl App {
                     tab.layout = Some(layout);
                 }
             } else if let Some(page) = &tab.page {
-                tab.layout = Some(Arc::new(Layout::build_with_scroll(
+                tab.layout = Some(Arc::new(Layout::for_scrolling(
                     page,
                     &self.fonts,
                     viewport,
                     &tab.nested_scroll,
+                    tab.layout.as_deref(),
                 )));
             }
         }
@@ -1328,6 +1334,7 @@ impl App {
         self.redraw();
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        self.wheel = None;
         if !action.in_menu() {
             self.chrome_menu = None;
         }
@@ -1464,61 +1471,6 @@ impl App {
         }
         event_loop.exit();
     }
-    fn scroll(&mut self, dy: f32) {
-        if self.settings_panel.is_some() {
-            return;
-        }
-        if !self.devtools_focused {
-            self.address_focus = false;
-        }
-        self.ensure_layout();
-        let at_content = self.pointer_in(self.window_regions(self.active).page);
-        let tab = &mut self.tabs[self.active];
-        let x = self.mouse.0 / tab.zoom + tab.scroll_x;
-        let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
-        let mut consumed = false;
-        if at_content && let (Some(layout), Some(page)) = (&tab.layout, &tab.page) {
-            let mut current = layout.element_at(x, y);
-            while let Some(node) = current {
-                if let Some(region) = layout.scroll_regions.iter().find(|r| r.node == node)
-                    && layout.computed_styles[node.0].overflow[1].user_scrollable()
-                    && ((dy > 0. && region.offset.y < region.max_y)
-                        || (dy < 0. && region.offset.y > 0.))
-                {
-                    if let Some(runtime) = &mut tab.runtime {
-                        match runtime.scroll_element(node, 0., dy) {
-                            Ok(changed) => consumed = changed,
-                            Err(e) => self.status = e.to_string(),
-                        }
-                    } else {
-                        tab.nested_scroll.insert(
-                            node,
-                            ScrollOffset {
-                                x: region.offset.x,
-                                y: (region.offset.y + dy).clamp(0., region.max_y),
-                            },
-                        );
-                        consumed = true;
-                    }
-                    if consumed {
-                        break;
-                    }
-                }
-                current = page.document.nodes[node.0].parent;
-            }
-        }
-        if consumed {
-            tab.layout = None;
-        } else if tab
-            .layout
-            .as_ref()
-            .is_none_or(|layout| layout.viewport_overflow[1].user_scrollable())
-        {
-            tab.scroll += dy;
-        }
-        self.ensure_layout();
-        self.redraw();
-    }
     fn insert(&mut self, text: &str) {
         if self.devtools_focused
             && self.settings_panel.is_none()
@@ -1591,6 +1543,7 @@ impl App {
     }
 
     fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
+        self.wheel = None;
         if key == Key::Named(NamedKey::Escape)
             && let Some(d) = &self.tabs[self.active].download
         {
@@ -2950,6 +2903,7 @@ impl App {
     }
 
     fn left_press(&mut self, event_loop: &ActiveEventLoop) {
+        self.wheel = None;
         if !self.pointer_inside {
             return;
         }
@@ -3651,7 +3605,7 @@ impl ApplicationHandler<()> for App {
             return;
         }
         let mut redraw = self.apply_media_updates() | self.drain_network_observations();
-        let mut deadline = None;
+        let mut deadline = self.tick_wheel(Instant::now());
         for index in 0..self.tabs.len() {
             let changed = self.advance_page(index) | self.sync_runtime(index);
             redraw |= changed && index == self.active;
@@ -3937,6 +3891,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Focused(false) => {
+                self.wheel = None;
                 self.resizing_dock = false;
                 self.preedit = false;
                 self.dismiss_history_menu();
@@ -4037,20 +3992,17 @@ impl ApplicationHandler<()> for App {
                 if self.settings_panel.is_some() || self.history_menu.is_some() {
                     return;
                 }
-                let amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y * 54.,
-                    MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.scale,
-                };
+                let (delta, detent) = scroll::wheel_delta(delta, self.scale);
                 let regions = self.window_regions(self.active);
                 if let Some(bounds) = regions.dock
                     && self.pointer_in(bounds)
                 {
                     let frame = self.dock_frame(bounds);
                     if frame.pointer.is_some() {
-                        self.send_dock_input(frame, DockInput::Wheel(amount));
+                        self.send_dock_input(frame, DockInput::Wheel(delta.y));
                     }
                 } else if self.pointer_in(regions.page) {
-                    self.scroll(amount / self.tabs[self.active].zoom);
+                    self.queue_wheel(delta, detent);
                 }
             }
             WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
