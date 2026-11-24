@@ -55,6 +55,9 @@ const TAB_H: f32 = 58.;
 const TOP: f32 = TAB_H + 64.;
 const MAX_TABS: usize = 24;
 const FOOT: f32 = 23.;
+const DOCK_MIN: f32 = 96.;
+const DOCK_MAX: f32 = 320.;
+const PAGE_MIN_WITH_DOCK: f32 = 64.;
 const WINDOW_FRAME: bool = cfg!(windows);
 const CAPTION_BUTTON_WIDTH: f32 = 59.;
 const CAPTION_BUTTON_HEIGHT: f32 = 52.;
@@ -66,19 +69,83 @@ const CHROME_LINE: Color = Color(55, 54, 55, 255);
 const CHROME_TEXT: Color = Color(242, 241, 241, 255);
 const CHROME_MUTED: Color = Color(169, 165, 167, 255);
 
-fn page_viewport(window: Option<&Window>, scale: f32, tab: &Tab) -> Viewport {
-    let (width, height) = window.map_or((1280., 800.), |w| {
-        (
-            w.inner_size().width as f32 / scale,
-            w.inner_size().height as f32 / scale,
-        )
-    });
-    Viewport {
-        width: (width / tab.zoom).max(120.),
-        height: ((height - TOP - tab.footer_height()) / tab.zoom).max(1.),
-        scroll_x: tab.scroll_x,
-        scroll_y: tab.scroll,
+struct WindowRegions {
+    page: Rect,
+    dock: Option<Rect>,
+}
+
+impl WindowRegions {
+    fn new(width: f32, height: f32, footer: f32, dock_open: bool) -> Self {
+        // A mounted dock sits above a stable footer, including on the home page
+        // where the status footer would otherwise overlay the dock.
+        let dock_space = (height - TOP - footer.max(FOOT)).max(0.);
+        let dock =
+            (dock_open && width > 0. && dock_space >= DOCK_MIN + PAGE_MIN_WITH_DOCK).then(|| {
+                let height = (dock_space * 0.4).clamp(DOCK_MIN, DOCK_MAX);
+                Rect {
+                    x: 0.,
+                    y: TOP + dock_space - height,
+                    width,
+                    height,
+                }
+            });
+        let page_bottom = dock.map_or(height - footer, |bounds| bounds.y);
+        Self {
+            page: Rect {
+                x: 0.,
+                y: TOP,
+                width,
+                height: (page_bottom - TOP).max(0.),
+            },
+            dock,
+        }
     }
+
+    fn viewport(&self, tab: &Tab) -> Viewport {
+        Viewport {
+            width: (self.page.width / tab.zoom).max(120.),
+            height: (self.page.height / tab.zoom).max(1.),
+            scroll_x: tab.scroll_x,
+            scroll_y: tab.scroll,
+        }
+    }
+}
+
+/// Lane 09 supplies the dock shell via `run`. App owns visibility, reserved
+/// bounds, and dispatch. It does not own panel controls, rows or data.
+pub(crate) trait DevtoolsDock {
+    fn draw(&mut self, canvas: &mut Canvas, fonts: &mut Fonts, frame: DockFrame);
+    fn input(&mut self, frame: DockFrame, input: DockInput);
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DockFrame {
+    /// Logical window pixels, independent of document zoom. Canvas is clipped
+    /// to these bounds × scale; any additional clips must stay within them.
+    pub bounds: Rect,
+    pub scale: f32,
+    pub focused: bool,
+    /// Logical pixels relative to the dock origin; absent outside or occluded.
+    pub pointer: Option<(f32, f32)>,
+    pub tab: u64,
+    pub document_navigation: u64,
+}
+
+pub(crate) enum DockInput {
+    /// Left press; position is in `frame.pointer`. App owns release routing.
+    Click,
+    /// Positive logical window pixels scroll down, independent of page zoom.
+    Wheel(f32),
+    /// Non-browser key press while the dock owns keyboard input; no IME/text.
+    Key {
+        key: Key,
+        modifiers: ModifiersState,
+        repeat: bool,
+    },
+}
+
+fn physical_rect(scale: f32, rect: Rect) -> Rect {
+    scaled_rect(scale, rect.x, rect.y, rect.width, rect.height)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,7 +263,7 @@ struct SelectPopup {
     first: usize,
 }
 
-pub fn run(
+pub(crate) fn run(
     path: PathBuf,
     url: Option<String>,
     smoke_output: Option<PathBuf>,
@@ -204,6 +271,7 @@ pub fn run(
     smoke_actions: Option<PathBuf>,
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
+    devtools: Option<Box<dyn DevtoolsDock>>,
 ) -> Result<(), String> {
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
@@ -263,6 +331,10 @@ pub fn run(
         worker_wake,
         incoming,
         mouse: (0., 0.),
+        pointer_inside: false,
+        devtools,
+        devtools_open: false,
+        devtools_focused: false,
         modifiers: ModifiersState::empty(),
         address: AddressBar::default(),
         address_focus: false,
@@ -345,6 +417,10 @@ struct App {
     worker_wake: Arc<dyn Fn() + Send + Sync>,
     incoming: Receiver<Message>,
     mouse: (f32, f32),
+    pointer_inside: bool,
+    devtools: Option<Box<dyn DevtoolsDock>>,
+    devtools_open: bool,
+    devtools_focused: bool,
     modifiers: ModifiersState,
     address: AddressBar,
     address_focus: bool,
@@ -363,8 +439,96 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
 }
 impl App {
+    fn window_regions(&self, index: usize) -> WindowRegions {
+        let (width, height) = self.window.as_ref().map_or((1280., 800.), |window| {
+            let size = window.inner_size();
+            (
+                size.width as f32 / self.scale,
+                size.height as f32 / self.scale,
+            )
+        });
+        WindowRegions::new(
+            width,
+            height,
+            self.tabs[index].footer_height(),
+            self.devtools_open,
+        )
+    }
+
     fn tab_viewport(&self, index: usize) -> Viewport {
-        page_viewport(self.window.as_deref(), self.scale, &self.tabs[index])
+        self.window_regions(index).viewport(&self.tabs[index])
+    }
+
+    fn pointer_in(&self, rect: Rect) -> bool {
+        self.pointer_inside && rect.contains(self.mouse.0, self.mouse.1)
+    }
+
+    fn dock_frame(&self, bounds: Rect) -> DockFrame {
+        let tab = &self.tabs[self.active];
+        let pointer = (self.pointer_in(bounds)
+            && self.settings_panel.is_none()
+            && self.history_menu.is_none()
+            && self.chrome_menu.is_none()
+            && self.frame_resize_at_pointer().is_none())
+        .then_some((self.mouse.0 - bounds.x, self.mouse.1 - bounds.y));
+        DockFrame {
+            bounds,
+            scale: self.scale,
+            focused: self.devtools_focused,
+            pointer,
+            tab: tab.id,
+            document_navigation: tab.document_navigation,
+        }
+    }
+
+    fn send_dock_input(&mut self, frame: DockFrame, input: DockInput) {
+        if let Some(dock) = &mut self.devtools {
+            dock.input(frame, input);
+            self.redraw();
+        }
+    }
+
+    fn set_dock_focus(&mut self, focused: bool) {
+        if self.devtools_focused != focused {
+            self.devtools_focused = focused;
+            self.preedit = false;
+            if let Some(window) = &self.window {
+                window.set_ime_allowed(!focused && self.settings_panel.is_none());
+            }
+            self.redraw();
+        }
+    }
+
+    fn toggle_devtools(&mut self) {
+        if self.devtools.is_none() {
+            return;
+        }
+        self.devtools_open = !self.devtools_open;
+        self.dismiss_history_menu();
+        self.chrome_menu = None;
+        self.select_popup = None;
+        self.hover = None;
+        self.chrome_hover = None;
+        self.caption_pressed = None;
+        self.last_title_press = None;
+        let visible = self.window_regions(self.active).dock.is_some();
+        self.set_dock_focus(visible && self.settings_panel.is_none());
+        self.ensure_layout();
+        if self.pointer_inside {
+            self.update_pointer(false);
+        }
+        self.redraw();
+    }
+
+    fn window_geometry_changed(&mut self) {
+        self.tab_hits_current = false;
+        self.select_popup = None;
+        self.hover = None;
+        if self.window_regions(self.active).dock.is_none() {
+            self.set_dock_focus(false);
+        }
+        self.ensure_layout();
+        self.redraw();
     }
 
     fn start_page(&mut self, index: usize, opened: OpenedPage) {
@@ -614,9 +778,10 @@ impl App {
         }
     }
     fn ensure_layout(&mut self) {
-        let Some(w) = &self.window else {
+        if self.window.is_none() {
             return;
-        };
+        }
+        let regions = self.window_regions(self.active);
         let tab = &mut self.tabs[self.active];
         match tab.history_scroll {
             Some(HistoryScroll::Restore(offset)) if !tab.loading => {
@@ -627,21 +792,14 @@ impl App {
             Some(HistoryScroll::Keep) => tab.history_scroll = None,
             _ => {}
         }
-        let width = (w.inner_size().width as f32 / (self.scale * tab.zoom)).max(120.);
-        let height = (w.inner_size().height as f32 - (TOP + tab.footer_height()) * self.scale)
-            / (self.scale * tab.zoom);
         if let Some(runtime) = &tab.runtime
             && let Some(request) = runtime.take_scroll_request()
         {
             tab.scroll = request.y;
             tab.scroll_x = request.x;
         }
-        let mut viewport = Viewport {
-            width,
-            height: height.max(1.),
-            scroll_x: tab.scroll_x,
-            scroll_y: tab.scroll,
-        };
+        let mut viewport = regions.viewport(tab);
+        let (width, height) = (viewport.width, viewport.height);
         if let Some(runtime) = &tab.runtime {
             match runtime.layout_for_viewport(viewport) {
                 Ok(layout) => tab.layout = Some(layout),
@@ -895,6 +1053,7 @@ impl App {
         }
         self.tab_hits_current = false;
         self.active = index;
+        self.select_popup = None;
         self.address_focus = false;
         self.sync_address();
         if self.tabs[index].page.is_none() && !self.tabs[index].loading {
@@ -911,6 +1070,7 @@ impl App {
         }
         match action {
             Action::Address => {
+                self.set_dock_focus(false);
                 if let Some(runtime) = &mut self.tabs[self.active].runtime
                     && let Err(error) = runtime.focus_control(None)
                 {
@@ -953,7 +1113,10 @@ impl App {
                 }
             }
             Action::Home => self.navigate("about:home".into(), true),
-            Action::Settings => self.open_settings(),
+            Action::Settings => {
+                self.set_dock_focus(false);
+                self.open_settings();
+            }
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
             Action::ShortcutHelp => self.navigate(shortcuts::HELP_URL.into(), true),
@@ -1036,15 +1199,16 @@ impl App {
         if self.settings_panel.is_some() {
             return;
         }
-        self.address_focus = false;
+        if !self.devtools_focused {
+            self.address_focus = false;
+        }
         self.ensure_layout();
+        let at_content = self.pointer_in(self.window_regions(self.active).page);
         let tab = &mut self.tabs[self.active];
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
         let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
         let mut consumed = false;
-        if self.mouse.1 >= TOP
-            && let (Some(layout), Some(page)) = (&tab.layout, &tab.page)
-        {
+        if at_content && let (Some(layout), Some(page)) = (&tab.layout, &tab.page) {
             let mut current = layout.element_at(x, y);
             while let Some(node) = current {
                 if let Some(region) = layout.scroll_regions.iter().find(|r| r.node == node)
@@ -1088,6 +1252,7 @@ impl App {
     }
     fn insert(&mut self, text: &str) {
         if self.settings_panel.is_some()
+            || self.devtools_focused
             || self.history_menu.is_some()
             || matches!(self.chrome_menu, Some(Menu::Bookmarks(_)))
         {
@@ -1122,7 +1287,9 @@ impl App {
             Command::Forward => self.action(Action::Forward, event_loop),
             Command::Menu => self.action(Action::Menu, event_loop),
             Command::BookmarkPage => self.save_current_bookmark(),
+            Command::ToggleDevtools => self.toggle_devtools(),
             Command::ZoomIn | Command::ZoomOut | Command::ResetZoom => {
+                self.select_popup = None;
                 let tab = &mut self.tabs[self.active];
                 tab.zoom = match command {
                     Command::ZoomIn => tab.zoom * 1.1,
@@ -1137,7 +1304,15 @@ impl App {
         }
     }
 
-    fn key(&mut self, key: Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+    fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
+        // F12 is window chrome, not a panel, address, or document key. Settings
+        // can remain modal above the dock when it opens or closes underneath.
+        if let Some(toggle) = shortcuts::devtools_toggle(&key, self.modifiers, repeat) {
+            if toggle {
+                self.run_shortcut(Command::ToggleDevtools, event_loop);
+            }
+            return;
+        }
         if self.settings_panel.is_some() {
             self.settings_key(key);
             return;
@@ -1183,6 +1358,26 @@ impl App {
         }
         if let Some(command) = shortcuts::command(&key, self.modifiers) {
             self.run_shortcut(command, event_loop);
+            return;
+        }
+        if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
+            if let Some(window) = &self.window {
+                window.show_window_menu(LogicalPosition::new(0., TAB_H));
+            }
+            return;
+        }
+        if self.devtools_focused {
+            if let Some(bounds) = self.window_regions(self.active).dock {
+                let frame = self.dock_frame(bounds);
+                self.send_dock_input(
+                    frame,
+                    DockInput::Key {
+                        key,
+                        modifiers: self.modifiers,
+                        repeat,
+                    },
+                );
+            }
             return;
         }
         let ctrl = self.modifiers.control_key() && !self.modifiers.alt_key();
@@ -1252,12 +1447,6 @@ impl App {
                     _ => {}
                 }
             }
-        }
-        if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
-            if let Some(window) = &self.window {
-                window.show_window_menu(LogicalPosition::new(0., TAB_H));
-            }
-            return;
         }
         if !self.address_focus {
             if key == Key::Named(NamedKey::Tab)
@@ -1376,8 +1565,9 @@ impl App {
             .take()
             .filter(|c| c.width == size.width && c.height == size.height)
             .unwrap_or_else(|| Canvas::new(size.width, size.height, Color::WHITE));
+        let regions = self.window_regions(self.active);
+        let dock_frame = regions.dock.map(|bounds| self.dock_frame(bounds));
         let tab = &self.tabs[self.active];
-        let footer = tab.footer_height();
         if let Some(runtime) = &tab.runtime {
             runtime.publish_canvas_frames();
         }
@@ -1385,35 +1575,44 @@ impl App {
         let u = self.scale;
         let width = size.width as f32 / u;
         let height = size.height as f32 / u;
-        canvas.clip(Rect {
-            x: 0.,
-            y: TOP * u,
-            width: size.width as f32,
-            height: ((height - TOP - footer) * u).max(0.),
-        });
-        if let Some(layout) = &tab.layout {
+        let content_clip = physical_rect(u, regions.page);
+        canvas.clip(content_clip);
+        if regions.page.height > 0.
+            && let Some(layout) = &tab.layout
+        {
             canvas.document_scaled(layout, &mut self.fonts, TOP * u, tab.scroll, u * tab.zoom);
         }
-        canvas.clip(Rect {
+        if let (Some(frame), Some(dock)) = (dock_frame, &mut self.devtools) {
+            canvas.clip(physical_rect(u, frame.bounds));
+            dock.draw(&mut canvas, &mut self.fonts, frame);
+        }
+        let full_canvas = Rect {
             x: 0.,
             y: 0.,
             width: size.width as f32,
             height: size.height as f32,
-        });
+        };
+        canvas.clip(full_canvas);
         let rect = |x: f32, y: f32, w: f32, h: f32| Rect {
             x: x * u,
             y: y * u,
             width: w * u,
             height: h * u,
         };
-        self.draw_chrome(&mut canvas, width, height, window.is_maximized());
+        self.draw_chrome(
+            &mut canvas,
+            width,
+            height,
+            window.is_maximized(),
+            dock_frame.is_some(),
+        );
         if let Some(popup) = self.select_popup
             && let Some(control) = self.tabs[self.active]
                 .page
                 .as_ref()
                 .and_then(|page| page.form_controls.get(&popup.node))
         {
-            canvas.clip(rect(0., TOP, width, height - TOP - footer));
+            canvas.clip(content_clip);
             canvas.fill_rect(
                 rect(
                     popup.rect.x + 3.,
@@ -1489,6 +1688,7 @@ impl App {
                     Color(93, 106, 118, 255),
                 );
             }
+            canvas.clip(full_canvas);
         }
         if let Some(panel) = &self.settings_panel {
             panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
@@ -1523,7 +1723,14 @@ impl App {
         self.canvas = Some(canvas);
     }
 
-    fn draw_chrome(&mut self, canvas: &mut Canvas, width: f32, height: f32, maximized: bool) {
+    fn draw_chrome(
+        &mut self,
+        canvas: &mut Canvas,
+        width: f32,
+        height: f32,
+        maximized: bool,
+        dock_visible: bool,
+    ) {
         let u = self.scale;
         canvas.fill_rect(scaled_rect(u, 0., 0., width, TAB_H), TAB_STRIP);
         canvas.fill_rect(
@@ -1544,7 +1751,7 @@ impl App {
             self.draw_caption_buttons(canvas, width, maximized);
         }
         self.draw_toolbar(canvas, width);
-        self.draw_footer(canvas, width, height);
+        self.draw_footer(canvas, width, height, dock_visible);
         self.draw_chrome_menu(canvas, width);
         self.draw_history_menu(canvas, width);
     }
@@ -1807,8 +2014,9 @@ impl App {
             width: address_width,
             height: row_height,
         };
-        let border = if self.address_focus { 2. } else { 1. };
-        let border_color = if self.address_focus {
+        let address_focus = self.address_focus && !self.devtools_focused;
+        let border = if address_focus { 2. } else { 1. };
+        let border_color = if address_focus {
             Color(132, 130, 132, 255)
         } else if pointer == Some(Action::Address) {
             Color(96, 94, 96, 255)
@@ -1861,14 +2069,10 @@ impl App {
                 / u
         };
         let caret = self.address.caret();
-        let cursor_width = if self.address_focus {
-            measure(caret)
-        } else {
-            0.
-        };
+        let cursor_width = if address_focus { measure(caret) } else { 0. };
         let shift = (cursor_width - available + 8.).max(0.);
         let selected = self.address.selection();
-        if self.address_focus && !selected.is_empty() {
+        if address_focus && !selected.is_empty() {
             let start = if selected.start == caret {
                 cursor_width
             } else {
@@ -1894,7 +2098,7 @@ impl App {
             (text_x - shift) * u,
             (row_y + 30.) * u,
             font_size,
-            if empty && self.address_focus {
+            if empty && address_focus {
                 CHROME_MUTED
             } else {
                 CHROME_TEXT
@@ -1902,7 +2106,7 @@ impl App {
             false,
             &mut self.fonts,
         );
-        if self.address_focus && selected.is_empty() {
+        if address_focus && selected.is_empty() {
             canvas.fill_rect(
                 scaled_rect(u, text_x + cursor_width - shift, row_y + 12., 1., 22.),
                 CHROME_TEXT,
@@ -1917,9 +2121,10 @@ impl App {
         self.hits.push((address_rect, Action::Address));
     }
 
-    fn draw_footer(&mut self, canvas: &mut Canvas, width: f32, height: f32) {
+    fn draw_footer(&mut self, canvas: &mut Canvas, width: f32, height: f32, dock_visible: bool) {
         let tab = &self.tabs[self.active];
-        if tab.footer_height() == 0.
+        if !dock_visible
+            && tab.footer_height() == 0.
             && self.status.is_empty()
             && self.hover.is_none()
             && !tab.loading
@@ -2144,14 +2349,19 @@ impl App {
         event_loop.exit();
     }
     fn chrome_action_at_pointer(&self) -> Option<Action> {
-        self.hits
-            .iter()
-            .rev()
-            .find_map(|(rect, action)| rect.contains(self.mouse.0, self.mouse.1).then_some(*action))
+        self.hits.iter().rev().find_map(|(rect, action)| {
+            let current = match action {
+                Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
+                Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
+                _ => true,
+            };
+            (current && self.pointer_in(*rect)).then_some(*action)
+        })
     }
     fn frame_resize_at_pointer(&self) -> Option<ResizeDirection> {
         let window = self.window.as_ref()?;
-        if !WINDOW_FRAME || window.is_maximized() || !window.is_resizable() {
+        if !self.pointer_inside || !WINDOW_FRAME || window.is_maximized() || !window.is_resizable()
+        {
             return None;
         }
         let size = window.inner_size();
@@ -2187,6 +2397,9 @@ impl App {
     }
 
     fn left_press(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.pointer_inside {
+            return;
+        }
         if self.settings_panel.is_some() {
             self.settings_press();
             return;
@@ -2206,9 +2419,28 @@ impl App {
         if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
             return;
         }
-        if self.chrome_menu.is_some() && !action.is_some_and(Action::in_menu) {
+        let dismissed_menu = self.chrome_menu.is_some() && !action.is_some_and(Action::in_menu);
+        if dismissed_menu {
             self.chrome_menu = None;
             self.redraw();
+        }
+        let regions = self.window_regions(self.active);
+        if let Some(bounds) = regions.dock
+            && self.pointer_in(bounds)
+            && !action.is_some_and(Action::in_menu)
+        {
+            // An outside click dismisses an overlapping browser menu; it must
+            // not also activate a dock control underneath.
+            if dismissed_menu {
+                return;
+            }
+            self.select_popup = None;
+            self.last_title_press = None;
+            self.caption_pressed = None;
+            self.set_dock_focus(true);
+            let frame = self.dock_frame(bounds);
+            self.send_dock_input(frame, DockInput::Click);
+            return;
         }
         if let Some(action) = action {
             self.last_title_press = None;
@@ -2234,8 +2466,13 @@ impl App {
             }
         } else {
             self.last_title_press = None;
-            self.address_focus = false;
-            self.content_click();
+            if self.pointer_in(regions.page) {
+                self.set_dock_focus(false);
+                self.address_focus = false;
+                self.content_click();
+            } else if self.select_popup.take().is_some() {
+                self.redraw();
+            }
         }
     }
 
@@ -2253,18 +2490,13 @@ impl App {
     }
 
     fn pointer_link(&self) -> Option<String> {
-        if self.settings_panel.is_some() {
-            return None;
-        }
-        let tab = &self.tabs[self.active];
-        if self.history_menu.is_some()
-            || self.mouse.1 < TOP
-            || self.window.as_ref().is_some_and(|window| {
-                self.mouse.1 >= window.inner_size().height as f32 / self.scale - tab.footer_height()
-            })
+        if self.settings_panel.is_some()
+            || self.history_menu.is_some()
+            || !self.pointer_in(self.window_regions(self.active).page)
         {
             return None;
         }
+        let tab = &self.tabs[self.active];
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
         let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
         tab.layout
@@ -2272,6 +2504,43 @@ impl App {
             .and_then(|l| l.link_at(x, y))
             .map(str::to_owned)
     }
+
+    fn update_pointer(&mut self, redraw_dock: bool) {
+        if self.settings_panel.is_some() {
+            self.settings_cursor();
+            return;
+        }
+        if self.update_history_pointer() {
+            return;
+        }
+        let chrome = self.chrome_action_at_pointer();
+        let link = if chrome.is_none() {
+            self.pointer_link()
+        } else {
+            None
+        };
+        if self.chrome_hover != chrome || self.hover != link || redraw_dock {
+            self.chrome_hover = chrome;
+            self.hover = link;
+            self.redraw();
+        }
+        if let Some(window) = &self.window {
+            let history = &self.tabs[self.active].history;
+            window.set_cursor(self.frame_resize_at_pointer().map_or_else(
+                || match chrome {
+                    Some(Action::Address) => CursorIcon::Text,
+                    Some(Action::Back) if !history.can_traverse(-1) => CursorIcon::Default,
+                    Some(Action::Forward) if !history.can_traverse(1) => CursorIcon::Default,
+                    Some(action) if action.caption() => CursorIcon::Default,
+                    Some(_) => CursorIcon::Pointer,
+                    None if self.hover.is_some() => CursorIcon::Pointer,
+                    None => CursorIcon::Default,
+                },
+                resize_cursor,
+            ));
+        }
+    }
+
     fn smoke_target(&mut self, name: &str) -> Result<(), String> {
         self.ensure_layout();
         let height = self.tab_viewport(self.active).height;
@@ -2297,6 +2566,8 @@ impl App {
             (rect.x + rect.width / 2. - tab.scroll_x) * tab.zoom,
             TOP + (rect.y + rect.height.min(height) / 2. - tab.scroll) * tab.zoom,
         );
+        self.pointer_inside = true;
+        self.set_dock_focus(false);
         self.content_click();
         Ok(())
     }
@@ -2318,6 +2589,7 @@ impl App {
                 }
                 self.draw();
                 self.mouse = (x, y);
+                self.pointer_inside = true;
                 self.left_press(event_loop);
                 self.left_release(event_loop);
                 Ok(())
@@ -2354,13 +2626,14 @@ impl App {
                     "ArrowDown" => NamedKey::ArrowDown,
                     "Home" => NamedKey::Home,
                     "End" => NamedKey::End,
+                    "F12" => NamedKey::F12,
                     _ => {
                         let prior = self.modifiers;
                         self.modifiers = ModifiersState::empty();
                         self.modifiers.set(ModifiersState::CONTROL, control);
                         self.modifiers.set(ModifiersState::SHIFT, shift);
                         self.modifiers.set(ModifiersState::ALT, alt);
-                        self.key(Key::Character(value.into()), None, event_loop);
+                        self.key(Key::Character(value.into()), None, false, event_loop);
                         self.modifiers = prior;
                         return Ok(());
                     }
@@ -2370,14 +2643,15 @@ impl App {
                 self.modifiers.set(ModifiersState::CONTROL, control);
                 self.modifiers.set(ModifiersState::SHIFT, shift);
                 self.modifiers.set(ModifiersState::ALT, alt);
-                self.key(Key::Named(named), None, event_loop);
+                self.key(Key::Named(named), None, false, event_loop);
                 self.modifiers = prior;
                 Ok(())
             }
         }
     }
     fn content_click(&mut self) {
-        if self.settings_panel.is_some() {
+        if self.settings_panel.is_some() || !self.pointer_in(self.window_regions(self.active).page)
+        {
             return;
         }
         if let Some(popup) = self.select_popup.take() {
@@ -2399,14 +2673,6 @@ impl App {
                 return;
             }
             self.redraw();
-            return;
-        }
-        let footer = self.tabs[self.active].footer_height();
-        if self.mouse.1 < TOP
-            || self.window.as_ref().is_some_and(|window| {
-                self.mouse.1 >= window.inner_size().height as f32 / self.scale - footer
-            })
-        {
             return;
         }
         let mut link = self.pointer_link();
@@ -2505,26 +2771,28 @@ impl App {
         let Some(element) = tab.layout.as_ref().and_then(|layout| layout.rect_for(node)) else {
             return;
         };
-        let height = self.window.as_ref().map_or(840., |window| {
-            window.inner_size().height as f32 / self.scale
-        });
-        let width = self.window.as_ref().map_or(1180., |window| {
-            window.inner_size().width as f32 / self.scale
-        });
+        let content = self.window_regions(self.active).page;
+        let bottom = content.y + content.height;
+        let width = content.width;
         let row_height = 24.;
-        let rows = control.options.len().min(12).min(
-            ((height - TOP - tab.footer_height()) / row_height)
-                .floor()
-                .max(1.) as usize,
-        );
+        let rows = control
+            .options
+            .len()
+            .min(12)
+            .min((content.height / row_height) as usize);
+        if rows == 0 || width <= 0. {
+            self.select_popup = None;
+            return;
+        }
         let y = TOP + (element.y + element.height - tab.scroll) * tab.zoom;
         let popup_height = row_height * rows as f32;
-        let y = if y + popup_height > height - tab.footer_height() {
-            (y - element.height * tab.zoom - popup_height).max(TOP)
+        let y = if y + popup_height > bottom {
+            y - element.height * tab.zoom - popup_height
         } else {
             y
-        };
-        let x = (element.x * tab.zoom).max(0.).min((width - 120.).max(0.));
+        }
+        .clamp(TOP, bottom - popup_height);
+        let x = ((element.x - tab.scroll_x) * tab.zoom).clamp(0., (width - 120.).max(0.));
         let selected = control
             .options
             .iter()
@@ -2917,24 +3185,35 @@ impl ApplicationHandler<()> for App {
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Resized(_) => {
-                self.tab_hits_current = false;
-                self.ensure_layout();
-                self.redraw();
-            }
+            WindowEvent::Resized(_) => self.window_geometry_changed(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.tab_hits_current = false;
-                self.scale = scale_factor as f32;
-                self.ensure_layout();
-                self.redraw();
+                let new_scale = scale_factor as f32;
+                if self.pointer_inside {
+                    self.mouse.0 *= self.scale / new_scale;
+                    self.mouse.1 *= self.scale / new_scale;
+                }
+                self.scale = new_scale;
+                self.window_geometry_changed();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
-            WindowEvent::Focused(false) => self.dismiss_history_menu(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::Focused(false) => {
+                self.preedit = false;
+                self.dismiss_history_menu();
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } if event.state == ElementState::Pressed => {
+                if is_synthetic && event.logical_key == Key::Named(NamedKey::F12) {
+                    return;
+                }
                 let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
                 let changes_panel = match event.logical_key {
                     Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                        self.settings_panel.is_some() || self.history_menu.is_some() || bookmarks_open
+                        self.settings_panel.is_some()
+                            || self.history_menu.is_some()
+                            || bookmarks_open
                     }
                     Key::Named(NamedKey::Delete) => bookmarks_open,
                     _ => false,
@@ -2942,55 +3221,36 @@ impl ApplicationHandler<()> for App {
                 if event.repeat && changes_panel {
                     return;
                 }
-                self.key(event.logical_key, event.text.as_deref(), event_loop);
+                self.key(
+                    event.logical_key,
+                    event.text.as_deref(),
+                    event.repeat,
+                    event_loop,
+                );
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
                 self.insert(&text);
             }
-            WindowEvent::Ime(Ime::Preedit(text, _)) => self.preedit = !text.is_empty(),
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.preedit =
+                    !self.devtools_focused && self.settings_panel.is_none() && !text.is_empty();
+            }
+            WindowEvent::Ime(Ime::Disabled) => self.preedit = false,
             WindowEvent::CursorMoved { position, .. } => {
+                let dock = self.window_regions(self.active).dock;
+                let was_in_dock = dock.is_some_and(|bounds| self.pointer_in(bounds));
                 self.mouse = (
                     position.x as f32 / self.scale,
                     position.y as f32 / self.scale,
                 );
-                if self.settings_panel.is_some() {
-                    self.settings_cursor();
-                    return;
-                }
-                if self.update_history_pointer() {
-                    return;
-                }
-                let chrome = self.chrome_action_at_pointer();
-                let link = if chrome.is_none() {
-                    self.pointer_link()
-                } else {
-                    None
-                };
-                if self.chrome_hover != chrome || self.hover != link {
-                    self.chrome_hover = chrome;
-                    self.hover = link;
-                    self.redraw();
-                }
-                if let Some(window) = &self.window {
-                    let history = &self.tabs[self.active].history;
-                    window.set_cursor(self.frame_resize_at_pointer().map_or_else(
-                        || match chrome {
-                            Some(Action::Address) => CursorIcon::Text,
-                            Some(Action::Back) if !history.can_traverse(-1) => CursorIcon::Default,
-                            Some(Action::Forward) if !history.can_traverse(1) => {
-                                CursorIcon::Default
-                            }
-                            Some(action) if action.caption() => CursorIcon::Default,
-                            Some(_) => CursorIcon::Pointer,
-                            None if self.hover.is_some() => CursorIcon::Pointer,
-                            None => CursorIcon::Default,
-                        },
-                        resize_cursor,
-                    ));
-                }
+                self.pointer_inside = true;
+                let in_dock = dock.is_some_and(|bounds| self.pointer_in(bounds));
+                self.update_pointer(was_in_dock || in_dock);
             }
             WindowEvent::CursorLeft { .. } => {
+                self.pointer_inside = false;
+                self.mouse = (f32::NEG_INFINITY, f32::NEG_INFINITY);
                 self.clear_history_hover();
                 self.chrome_hover = None;
                 self.caption_pressed = None;
@@ -3005,6 +3265,7 @@ impl ApplicationHandler<()> for App {
                 if button == MouseButton::Left {
                     self.left_press(event_loop);
                 } else if button == MouseButton::Right
+                    && self.pointer_inside
                     && self.history_menu.is_none()
                     && WINDOW_FRAME
                     && self.settings_panel.is_none()
@@ -3026,14 +3287,24 @@ impl ApplicationHandler<()> for App {
                 ..
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.history_menu.is_some() {
+                if self.settings_panel.is_some() || self.history_menu.is_some() {
                     return;
                 }
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * 54.,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32 / self.scale,
                 };
-                self.scroll(amount / self.tabs[self.active].zoom);
+                let regions = self.window_regions(self.active);
+                if let Some(bounds) = regions.dock
+                    && self.pointer_in(bounds)
+                {
+                    let frame = self.dock_frame(bounds);
+                    if frame.pointer.is_some() {
+                        self.send_dock_input(frame, DockInput::Wheel(amount));
+                    }
+                } else if self.pointer_in(regions.page) {
+                    self.scroll(amount / self.tabs[self.active].zoom);
+                }
             }
             WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
                 self.dismiss_history_menu();
@@ -3339,4 +3610,61 @@ fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod dock_tests {
+    use super::*;
+
+    #[test]
+    fn page_and_dock_share_a_half_open_boundary_above_the_footer() {
+        for footer in [0., FOOT] {
+            let closed = WindowRegions::new(640., 400., footer, false);
+            assert!(closed.dock.is_none());
+            assert_eq!(closed.page.height, 400. - TOP - footer);
+
+            let open = WindowRegions::new(640., 400., footer, true);
+            let dock = open.dock.unwrap();
+            assert_eq!(open.page.y + open.page.height, dock.y);
+            assert_eq!(dock.y + dock.height, 400. - FOOT);
+            assert!(open.page.contains(10., dock.y - 1.));
+            assert!(!dock.contains(10., dock.y - 1.));
+            assert!(!open.page.contains(10., dock.y));
+            assert!(dock.contains(10., dock.y));
+            assert!(!dock.contains(10., 400. - FOOT));
+        }
+    }
+
+    #[test]
+    fn dock_caps_height_and_suspends_when_the_page_would_be_too_small() {
+        let large = WindowRegions::new(1180., 1600., FOOT, true);
+        assert_eq!(large.dock.unwrap().height, DOCK_MAX);
+        let minimum = TOP + FOOT + DOCK_MIN + PAGE_MIN_WITH_DOCK;
+        let visible = WindowRegions::new(640., minimum, FOOT, true);
+        assert_eq!(visible.page.height, PAGE_MIN_WITH_DOCK);
+        assert_eq!(visible.dock.unwrap().height, DOCK_MIN);
+        let small = WindowRegions::new(640., minimum - 1., FOOT, true);
+        assert!(small.dock.is_none());
+        assert_eq!(small.page.height, DOCK_MIN + PAGE_MIN_WITH_DOCK - 1.);
+        let minimized = WindowRegions::new(0., 0., FOOT, true);
+        assert!(minimized.dock.is_none());
+        assert_eq!(minimized.page.height, 0.);
+    }
+
+    #[test]
+    fn viewport_uses_page_bounds_at_nondefault_zoom_without_scaling_the_dock() {
+        let mut tab = Tab::new(1, "about:home".into(), Default::default());
+        tab.zoom = 2.;
+        tab.scroll_x = 10.;
+        tab.scroll = 20.;
+        let open = WindowRegions::new(640., 400., tab.footer_height(), true);
+        let viewport = open.viewport(&tab);
+        assert_eq!(viewport.width, open.page.width / 2.);
+        assert_eq!(viewport.height, open.page.height / 2.);
+        assert_eq!((viewport.scroll_x, viewport.scroll_y), (10., 20.));
+        let scale = 1.25;
+        let clip = physical_rect(scale, open.page);
+        let dock = physical_rect(scale, open.dock.unwrap());
+        assert_eq!(clip.y + clip.height, dock.y);
+    }
 }

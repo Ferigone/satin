@@ -221,5 +221,7 @@ fn run() -> Result<(), String> {
         value("--smoke-actions").map(PathBuf::from),
         file_picker_responses,
         smoke_size,
+        // Register lane 09's native shell here once the facade is integrated.
+        None,
     )
 }
