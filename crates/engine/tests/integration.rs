@@ -310,3 +310,49 @@ fn raw_json_size_limit_counts_decompressed_bytes_for_chunked_gzip() {
     assert!(received <= FETCH_RESPONSE_BODY_LIMIT);
     assert!(!finished);
 }
+
+#[test]
+fn compressed_navigation_groups_ready_frames_without_losing_decoded_bytes() {
+    use flate2::{Compression, write::GzEncoder};
+    let body = "<p>Żółć 🙂</p>".repeat(32_768);
+    let mut gzip = GzEncoder::new(Vec::new(), Compression::fast());
+    gzip.write_all(body.as_bytes()).unwrap();
+    let compressed = gzip.finish().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/compressed", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&socket);
+        let mut headers = String::new();
+        while reader.read_line(&mut headers).unwrap() != 0 && !headers.ends_with("\r\n\r\n") {}
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", compressed.len()).unwrap();
+        socket.write_all(&compressed).unwrap();
+    });
+    let mut decoded = String::new();
+    let mut transfer = 0;
+    let mut parts = 0;
+    Loader::new()
+        .unwrap()
+        .stream_navigation(
+            &NavigationRequest::get(&url).unwrap(),
+            &AtomicBool::new(false),
+            |part| {
+                if let NavigationPart::Text(text, bytes) = part {
+                    parts += 1;
+                    transfer += bytes;
+                    decoded.push_str(&text);
+                }
+            },
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(decoded, body);
+    assert_eq!(transfer, body.len());
+    // A single small compressed response expands into hundreds of KiB. One
+    // event per decompression frame used to overwhelm the desktop UI queue.
+    assert!(
+        parts < 24,
+        "generated {parts} text messages for {} decoded bytes",
+        body.len()
+    );
+}
