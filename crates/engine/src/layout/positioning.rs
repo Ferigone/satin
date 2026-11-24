@@ -1146,7 +1146,7 @@ impl Builder<'_> {
                 && meta.background
                 && matches!(
                     self.styles[meta.node.0].display,
-                    Display::Block | Display::Flex | Display::Grid
+                    Display::Block | Display::ListItem | Display::Flex | Display::Grid
                 );
             groups[group].entries.push(PaintEntry {
                 phase: if own_background {

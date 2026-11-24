@@ -157,3 +157,22 @@ fn float_aliases_do_not_skip_a_same_value_priority_change() {
         "#,
     );
 }
+
+#[test]
+fn computed_list_marker_tracks_inline_changes_on_the_list() {
+    check(
+        r#"
+        var list = document.createElement("ol");
+        var item = document.createElement("li");
+        list.appendChild(item);
+        document.body.appendChild(list);
+        var computed = getComputedStyle(item);
+        var initial = computed.display === "list-item" && computed.listStyleType === "decimal";
+        list.style.listStyle = "none";
+        var hidden = computed.listStyle === "outside none none" &&
+            computed.getPropertyValue("list-style-type") === "none";
+        item.style.listStyleType = "square";
+        initial && hidden && computed.listStyleType === "square";
+        "#,
+    );
+}

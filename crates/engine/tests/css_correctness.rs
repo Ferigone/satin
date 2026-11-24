@@ -118,6 +118,21 @@ fn css_block_recovery_preserves_declarations_and_the_next_rule() {
 }
 
 #[test]
+fn pseudo_elements_preserve_element_branches_in_selector_lists() {
+    let (doc, computed) = styles(
+        "<section id='section'><div id='item'></div></section>",
+        ":root {box-sizing:border-box} *,:after,::before {box-sizing:inherit}
+         #item::before {width:75px} #item,::unknown-pseudo {width:99px}",
+    );
+    let item = by_id(&doc, "item");
+    assert_eq!(computed[item.0].box_sizing, css::BoxSizing::BorderBox);
+    assert_eq!(computed[item.0].width, Length::Auto);
+    assert!(css::matches_selector(&doc, item, "#item, ::after"));
+    assert!(!css::matches_selector(&doc, item, "#item::before"));
+    assert!(!css::matches_selector(&doc, item, "#item:not(::after)"));
+}
+
+#[test]
 fn css_block_recovery_does_not_open_blocks_in_unquoted_urls() {
     // Only test rule discovery; declaration-value parsing is a separate step.
     for value in [
@@ -345,4 +360,119 @@ fn selector_backtracking_and_selector_list_expansion_are_bounded() {
     );
     assert!(rules.len() < 300);
     assert!(!rules.is_empty());
+}
+
+#[test]
+fn document_styles_keep_host_selectors_in_shared_theme_lists() {
+    let (doc, computed) = styles(
+        "<html><body><p id='sample'>Result</p></body></html>",
+        ":root, :host { --ink: #203040 } :root:not(.dark), :host(:not(.dark)) { --pad: 18px }
+         :host { --ink: red } :host(html) { --pad: 0 }
+         p { color: var(--ink); width: var(--pad) }",
+    );
+    let sample = &computed[by_id(&doc, "sample").0];
+    assert_eq!(sample.color, Color::rgb(32, 48, 64));
+    assert_eq!(sample.width, Length::Px(18.));
+    for invalid in [
+        ":host()",
+        ":host(html,.banner)",
+        ":host(.a .b)",
+        ":host(.a > .b)",
+    ] {
+        assert!(css::parse(&format!(":root, {invalid} {{ color: red }}"), 800.).is_empty());
+    }
+}
+
+#[test]
+fn responsive_width_ranges_handle_minified_reversed_and_chained_boundaries() {
+    let matches = |query: &str, width| {
+        !css::parse(
+            &format!("@media {query} {{ nav {{ display: flex }} }}"),
+            width,
+        )
+        .is_empty()
+    };
+    for query in [
+        "(width>=816px)",
+        "(51em<=width)",
+        "(width = 816px)",
+        "(800px < width <= 816px)",
+        "(816px >= width > 800px)",
+        "(width>=800px) and (width<=816px)",
+    ] {
+        assert!(matches(query, 816.), "{query}");
+    }
+    for query in [
+        "(width>816px)",
+        "(816px < width)",
+        "(width < = 820px)",
+        "(width<=100%)",
+        "(min-width:30%)",
+        "(80px<width=816px)",
+        "(80px<width>=700px)",
+        "(width<820px<900px)",
+        "(width < width)",
+        "(width < 900px > 600px)",
+        "(height <= 816px)",
+    ] {
+        assert!(!matches(query, 816.), "{query}");
+    }
+    assert!(matches("(width<=816px)", 815.99));
+    assert!(!matches("(width<=816px)", 816.01));
+}
+
+#[test]
+fn large_theme_computes_all_variables_and_inherits_computed_values() {
+    let mut sheet = String::from(":root, :host {");
+    for i in 0..900 {
+        sheet.push_str(&format!("--theme-{i}:{i}px;"));
+    }
+    sheet.push_str("--result-width:var(--theme-899);}");
+    sheet.push_str("main {--theme-899:1px;--local:var(--result-width)} p {width:var(--local)}");
+    let (doc, computed) = styles(
+        "<html><body><main><p id='sample'></p></main></body></html>",
+        &sheet,
+    );
+    let sample = &computed[by_id(&doc, "sample").0];
+    assert_eq!(sample.width, Length::Px(899.));
+    for i in 0..899 {
+        assert_eq!(
+            sample.custom_property(&format!("--theme-{i}")),
+            Some(format!("{i}px").as_str())
+        );
+    }
+    assert_eq!(sample.custom_property("--theme-899"), Some("1px"));
+}
+
+#[test]
+fn over_limit_theme_admits_new_names_in_stable_declaration_order() {
+    let mut sheet = String::from(":root{");
+    for i in 0..2050 {
+        sheet.push_str(&format!("--t{i}:{i}px;"));
+    }
+    sheet.push_str("}p{--t0:7px; width:var(--t0)}");
+    let (doc, computed) = styles("<html><body><p id='sample'></p></body></html>", &sheet);
+    let sample = &computed[by_id(&doc, "sample").0];
+    assert_eq!(sample.width, Length::Px(7.));
+    assert_eq!(sample.custom_property("--t2047"), Some("2047px"));
+    assert_eq!(sample.custom_property("--t2048"), None);
+}
+
+#[test]
+fn list_marker_shorthand_respects_wide_keywords_and_invalid_values() {
+    use css::MarkerType;
+    let (doc, computed) = styles(
+        "<ol><li id='first'></li><li id='second'></li><li id='third'></li><li id='fourth'></li></ol>",
+        "ol { list-style: none } #first { list-style-type: inherit } #second { list-style: initial }
+         #third { list-style: none outside square; list-style-type: unknown }
+         #fourth { list-style: outside; list-style: circle decimal }"
+    );
+    for (id, marker) in [
+        ("first", MarkerType::None),
+        ("second", MarkerType::Disc),
+        ("third", MarkerType::Square),
+        ("fourth", MarkerType::Disc),
+    ] {
+        assert_eq!(computed[by_id(&doc, id).0].marker, marker, "{id}");
+    }
 }

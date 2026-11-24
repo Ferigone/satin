@@ -2005,8 +2005,12 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
+        .chain(css::CORNER_OUTLINE_LONGHANDS)
+        .chain(css::CORNER_OUTLINE_SHORTHANDS)
         .chain(&[
             ("cssFloat", "float"),
+            ("listStyle", "list-style"),
+            ("listStyleType", "list-style-type"),
             ("opacity", "opacity"),
             ("paddingLeft", "padding-left"),
         ])

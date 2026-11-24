@@ -173,12 +173,42 @@ impl Length {
 pub enum Display {
     None,
     Block,
+    ListItem,
     Inline,
     InlineBlock,
     Flex,
     InlineFlex,
     Grid,
     InlineGrid,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerType {
+    None,
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+}
+impl MarkerType {
+    fn parse(v: &str) -> Option<Self> {
+        Some(match v {
+            "none" => Self::None,
+            "disc" => Self::Disc,
+            "circle" => Self::Circle,
+            "square" => Self::Square,
+            "decimal" => Self::Decimal,
+            _ => return None,
+        })
+    }
+    pub(crate) fn as_css(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Disc => "disc",
+            Self::Circle => "circle",
+            Self::Square => "square",
+            Self::Decimal => "decimal",
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Float {
@@ -348,6 +378,7 @@ pub enum GridAutoFlow {
 #[derive(Clone, Debug)]
 pub struct Style {
     pub display: Display,
+    pub marker: MarkerType,
     pub float: Float,
     pub clear: Clear,
     pub position: Position,
@@ -381,6 +412,12 @@ pub struct Style {
     pub border_width: [f32; 4],
     pub border_visible: [bool; 4],
     pub border_colors: [Option<Color>; 4],
+    /// Horizontal and vertical radii, clockwise from the top-left corner.
+    pub border_radii: Option<Arc<[[Length; 2]; 4]>>,
+    pub outline_width: f32,
+    pub outline_visible: bool,
+    pub outline_color: Option<Color>,
+    pub outline_offset: f32,
     pub width: Length,
     pub height: Length,
     pub min_width: Length,
@@ -424,6 +461,7 @@ impl Default for Style {
         static DEFAULT_FAMILIES: OnceLock<Arc<[FontFamily]>> = OnceLock::new();
         Self {
             display: Display::Inline,
+            marker: MarkerType::Disc,
             float: Float::None,
             clear: Clear::None,
             position: Position::Static,
@@ -457,6 +495,11 @@ impl Default for Style {
             border_width: [3.; 4],
             border_visible: [false; 4],
             border_colors: [None; 4],
+            border_radii: None,
+            outline_width: 3.,
+            outline_visible: false,
+            outline_color: None,
+            outline_offset: 0.,
             width: Length::Auto,
             height: Length::Auto,
             min_width: Length::Auto,
@@ -1265,6 +1308,11 @@ fn parse_rules(
                 selectors.iter().map(|s| compile_selector(s, 0)).collect();
             if let Some(compiled) = compiled {
                 for (selector, compiled) in selectors.into_iter().zip(compiled) {
+                    // Pseudo-elements are valid siblings of element selectors in
+                    // resets, but cannot contribute to the originating element's style.
+                    if compiled.parts.last().is_some_and(|part| part.tests.iter().any(|test| matches!(test, Test::PseudoElement))) {
+                        continue;
+                    }
                     if out.len() >= 8192 {
                         break;
                     }
@@ -1318,9 +1366,7 @@ fn media_allows(source: &str, width: f32) -> bool {
             };
             let expr = q[open + 1..end].trim();
             let valid = if let Some((name, value)) = expr.split_once(':') {
-                let n = length(value)
-                    .filter(|l| !matches!(l, Length::Vh(_)))
-                    .and_then(|l| l.resolve(width, 16.));
+                let n = media_width_length(value, width);
                 match name.trim() {
                     "min-width" => n.is_some_and(|n| width >= n),
                     "max-width" => n.is_some_and(|n| width <= n),
@@ -1330,7 +1376,7 @@ fn media_allows(source: &str, width: f32) -> bool {
                     _ => false,
                 }
             } else {
-                false
+                width_range_matches(expr, width)
             };
             allows &= valid;
             conditions += 1;
@@ -1344,6 +1390,55 @@ fn media_allows(source: &str, width: f32) -> bool {
         }
         allows != negate
     })
+}
+fn media_width_length(value: &str, viewport: f32) -> Option<f32> {
+    // The width feature takes a length, not a percentage. Only the viewport
+    // width is available to this evaluator.
+    length(value.trim())
+        .filter(|l| !matches!(l, Length::Percent(_) | Length::Vh(_)))
+        .and_then(|l| l.resolve(viewport, 16.))
+}
+
+fn width_range_matches(expr: &str, viewport: f32) -> bool {
+    fn split_comparison(expr: &str) -> Option<(&str, &str, &str)> {
+        let i = expr.find(['<', '>', '='])?;
+        let rest = &expr[i..];
+        let size = if rest.starts_with("<=") || rest.starts_with(">=") {
+            2
+        } else {
+            1
+        };
+        Some((expr[..i].trim(), &rest[..size], rest[size..].trim()))
+    }
+    fn compare(a: f32, op: &str, b: f32) -> bool {
+        match op {
+            "<" => a < b,
+            "<=" => a <= b,
+            "=" => a == b,
+            ">=" => a >= b,
+            ">" => a > b,
+            _ => false,
+        }
+    }
+
+    let Some((left, op, rest)) = split_comparison(expr) else {
+        return false;
+    };
+    if let Some((middle, next_op, right)) = split_comparison(rest) {
+        // Chained ranges compare in one direction with the feature in the middle.
+        return middle == "width"
+            && op != "="
+            && op.as_bytes()[0] == next_op.as_bytes()[0]
+            && media_width_length(left, viewport).is_some_and(|lo| compare(lo, op, viewport))
+            && media_width_length(right, viewport)
+                .is_some_and(|hi| compare(viewport, next_op, hi));
+    }
+    if left == "width" {
+        media_width_length(rest, viewport).is_some_and(|n| compare(viewport, op, n))
+    } else {
+        rest == "width"
+            && media_width_length(left, viewport).is_some_and(|n| compare(n, op, viewport))
+    }
 }
 fn first_top_delimiter(source: &str, delimiters: &[u8]) -> Option<(usize, u8)> {
     let (mut round, mut square) = (0u32, 0u32);
@@ -1561,6 +1656,8 @@ enum Test {
         insensitive: bool,
     },
     Root,
+    ShadowHost,
+    PseudoElement,
     Empty,
     Link,
     Checked,
@@ -1709,6 +1806,10 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                     test
                 }
                 b':' => {
+                    let double_colon = bytes.get(i) == Some(&b':');
+                    if double_colon {
+                        i += 1;
+                    }
                     let name = identifier(source, &mut i)?.to_ascii_lowercase();
                     let argument = if bytes.get(i) == Some(&b'(') {
                         let end = matching_close(source, i, b'(', b')')?;
@@ -1718,7 +1819,15 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                     } else {
                         None
                     };
-                    if matches!(name.as_str(), "is" | "not" | "where") {
+                    let legacy_pseudo = matches!(name.as_str(), "before" | "after" | "first-line" | "first-letter");
+                    if double_colon || legacy_pseudo {
+                        let supported_name = legacy_pseudo || matches!(name.as_str(), "marker" | "placeholder" | "selection" | "file-selector-button");
+                        if !supported_name || argument.is_some() || depth != 0 || !trim_boundary(&source[i..]).is_empty() {
+                            return None;
+                        }
+                        specificity.add(Specificity(0, 0, 1));
+                        Test::PseudoElement
+                    } else if matches!(name.as_str(), "is" | "not" | "where") {
                         let arguments = split_top(argument?, b',');
                         let args: Vec<_> = if name == "not" {
                             arguments
@@ -1745,6 +1854,16 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                         specificity.add(Specificity(0, 1, 0));
                         match (name.as_str(), argument) {
                             ("root", None) => Test::Root,
+                            ("host", None) => Test::ShadowHost,
+                            ("host", Some(arg)) => {
+                                // :host() takes one compound selector, including its specificity.
+                                let compound = compile_selector(arg.trim(), depth + 1)?;
+                                if compound.parts.len() != 1 {
+                                    return None;
+                                }
+                                specificity.add(compound.specificity);
+                                Test::ShadowHost
+                            }
                             ("empty", None) => Test::Empty,
                             ("link" | "any-link", None) => Test::Link,
                             ("checked", None) => Test::Checked,
@@ -2118,6 +2237,8 @@ impl Compound {
                 .attr(id, name)
                 .is_some_and(|actual| attribute_matches(actual, value, *op, *insensitive)),
             Test::Root => doc.nodes[id.0].parent.is_some_and(|p| p == doc.root),
+            // The stylesheet is evaluated in the document tree, outside a shadow root.
+            Test::ShadowHost | Test::PseudoElement => false,
             Test::Empty => doc.nodes[id.0]
                 .children
                 .iter()
@@ -2258,6 +2379,7 @@ enum Property {
     FontSize,
     Color,
     Display,
+    ListStyleType,
     Float,
     Clear,
     Background,
@@ -2288,6 +2410,14 @@ enum Property {
     BorderRightColor,
     BorderBottomColor,
     BorderLeftColor,
+    TopLeftRadius,
+    TopRightRadius,
+    BottomRightRadius,
+    BottomLeftRadius,
+    OutlineColor,
+    OutlineWidth,
+    OutlineStyle,
+    OutlineOffset,
     Width,
     Height,
     MinWidth,
@@ -2343,6 +2473,7 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::FontSize,
     Property::Color,
     Property::Display,
+    Property::ListStyleType,
     Property::Float,
     Property::Clear,
     Property::Background,
@@ -2373,6 +2504,14 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::BorderRightColor,
     Property::BorderBottomColor,
     Property::BorderLeftColor,
+    Property::TopLeftRadius,
+    Property::TopRightRadius,
+    Property::BottomRightRadius,
+    Property::BottomLeftRadius,
+    Property::OutlineColor,
+    Property::OutlineWidth,
+    Property::OutlineStyle,
+    Property::OutlineOffset,
     Property::Width,
     Property::Height,
     Property::MinWidth,
@@ -2425,6 +2564,19 @@ const LOGICAL_INLINE_EDGES: [Property; 6] = [
     Property::InsetInlineStart,
     Property::InsetInlineEnd,
 ];
+pub(crate) const CORNER_OUTLINE_LONGHANDS: &[(&str, &str)] = &[
+    ("borderTopLeftRadius", "border-top-left-radius"),
+    ("borderTopRightRadius", "border-top-right-radius"),
+    ("borderBottomRightRadius", "border-bottom-right-radius"),
+    ("borderBottomLeftRadius", "border-bottom-left-radius"),
+    ("outlineColor", "outline-color"),
+    ("outlineStyle", "outline-style"),
+    ("outlineWidth", "outline-width"),
+    ("outlineOffset", "outline-offset"),
+];
+pub(crate) const CORNER_OUTLINE_SHORTHANDS: &[(&str, &str)] =
+    &[("borderRadius", "border-radius"), ("outline", "outline")];
+
 pub(crate) const LOGICAL_BOX_LONGHANDS: &[(&str, &str)] = &[
     ("direction", "direction"),
     ("inlineSize", "inline-size"),
@@ -2483,6 +2635,7 @@ enum Value {
     FontStyle(FontStyle),
     Families(Arc<[FontFamily]>),
     Display(Display),
+    Marker(MarkerType),
     Float(Float),
     Clear(Clear),
     Position(Position),
@@ -2490,6 +2643,7 @@ enum Value {
     ZIndex(Option<i32>),
     Transforms(Arc<Vec<TransformOp<SpecifiedLength>>>),
     Origin([SpecifiedLength; 2]),
+    Radius([SpecifiedLength; 2]),
     Sizing(BoxSizing),
     Direction(FlexDirection),
     Align(Align),
@@ -2790,30 +2944,31 @@ impl Stylesheet {
             usize::MAX,
         );
         if !custom.is_empty() {
-            let mut raw = (*parent.custom).clone();
-            for (name, (decl, _)) in custom {
-                match decl.value.trim() {
-                    value if value.eq_ignore_ascii_case("initial") => {
-                        raw.remove(name);
-                    }
-                    value
-                        if value.eq_ignore_ascii_case("inherit")
-                            || value.eq_ignore_ascii_case("unset") =>
-                    {
-                        if let Some(v) = parent.custom.get(name) {
-                            raw.insert(name.into(), v.clone());
-                        } else {
-                            raw.remove(name);
-                        }
-                    }
-                    _ => {
-                        if raw.len() < 256 || raw.contains_key(name) {
-                            raw.insert(name.into(), Arc::from(decl.value.as_str()));
-                        }
-                    }
+            // Inherited custom properties are already computed. Resolve only local
+            // declarations; unrelated inherited variables keep their shared strings.
+            let mut inherited = (*parent.custom).clone();
+            let mut raw = HashMap::new();
+            let mut ordered: Vec<_> = custom.into_iter().collect();
+            ordered.sort_unstable_by_key(|(_, (_, priority))| *priority);
+            for (name, (decl, _)) in ordered {
+                let value = decl.value.trim();
+                if value.eq_ignore_ascii_case("inherit") || value.eq_ignore_ascii_case("unset") {
+                    continue;
+                }
+                let key = inherited.remove_entry(name).map(|(key, _)| key);
+                if value.eq_ignore_ascii_case("initial") {
+                    continue;
+                }
+                // Large design systems commonly have several hundred theme tokens.
+                // Keep resource use bounded and over-limit admission deterministic.
+                if raw.len() + inherited.len() < 2048 {
+                    raw.insert(
+                        key.unwrap_or_else(|| name.into()),
+                        Arc::from(decl.value.as_str()),
+                    );
                 }
             }
-            style.custom = Arc::new(compute_custom(raw));
+            style.custom = Arc::new(compute_custom(raw, inherited));
         }
         if let Some(winner) = winners[Property::Direction as usize] {
             style.rtl = match winner.value(&style.custom).as_ref() {
@@ -2915,14 +3070,18 @@ impl Stylesheet {
         let borders = style.borders();
         style.border = borders.into_iter().fold(0., f32::max);
         style.border_color = style.border_colors[0].unwrap_or(style.color);
-        if doc.namespace(id) == crate::dom::Namespace::Html
-            && doc.tag(id) == "input"
-            && doc
-                .attr(id, "type")
-                .is_some_and(|kind| kind.eq_ignore_ascii_case("hidden"))
-        {
-            // HTML's non-rendered hidden input state is a UA-important rule.
-            style.display = Display::None;
+        if doc.namespace(id) == crate::dom::Namespace::Html {
+            // These HTML rendering rules have UA-important precedence.
+            let hidden = match doc.tag(id) {
+                "noscript" => doc.scripting_enabled,
+                "input" => doc
+                    .attr(id, "type")
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("hidden")),
+                _ => false,
+            };
+            if hidden {
+                style.display = Display::None;
+            }
         }
         style
     }
@@ -3012,6 +3171,7 @@ fn inherited(property: Property) -> bool {
             | Property::TextAlign
             | Property::LineHeight
             | Property::BreakWords
+            | Property::ListStyleType
     )
 }
 fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
@@ -3093,7 +3253,6 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
             | "aside"
             | "ul"
             | "ol"
-            | "li"
             | "h1"
             | "h2"
             | "h3"
@@ -3117,6 +3276,9 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
             | "address"
     ) {
         style.display = Display::Block;
+    }
+    if tag == "li" {
+        style.display = Display::ListItem;
     }
     if matches!(
         tag,
@@ -3167,6 +3329,11 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
         style.mono = true;
     }
     if matches!(tag, "ul" | "ol") {
+        style.marker = if tag == "ol" {
+            MarkerType::Decimal
+        } else {
+            MarkerType::Disc
+        };
         style.padding[3] = Length::Px(40.);
     }
     if matches!(tag, "blockquote" | "figure") {
@@ -3193,6 +3360,7 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
         FontSize => s.font_size = from.font_size,
         Color => s.color = from.color,
         Display => s.display = from.display,
+        ListStyleType => s.marker = from.marker,
         Float => s.float = from.float,
         Clear => s.clear = from.clear,
         Position => s.position = from.position,
@@ -3249,6 +3417,22 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
             let i = p as usize - BorderTopColor as usize;
             s.border_colors[i] = from.border_colors[i]
         }
+        TopLeftRadius | TopRightRadius | BottomRightRadius | BottomLeftRadius => {
+            let i = p as usize - TopLeftRadius as usize;
+            if from.border_radii.is_some() || s.border_radii.is_some() {
+                let target = s
+                    .border_radii
+                    .get_or_insert_with(|| Arc::new([[Length::Px(0.); 2]; 4]));
+                Arc::make_mut(target)[i] = from
+                    .border_radii
+                    .as_ref()
+                    .map_or([Length::Px(0.); 2], |r| r[i]);
+            }
+        }
+        OutlineWidth => s.outline_width = from.outline_width,
+        OutlineStyle => s.outline_visible = from.outline_visible,
+        OutlineColor => s.outline_color = from.outline_color,
+        OutlineOffset => s.outline_offset = from.outline_offset,
         Width => s.width = from.width,
         Height => s.height = from.height,
         MinWidth => s.min_width = from.min_width,
@@ -3313,6 +3497,7 @@ fn apply_value(
         (Color, Value::Color(color)) => s.color = color.unwrap_or(parent.color),
         (Background, Value::Color(color)) => s.background = Some(color.unwrap_or(s.color)),
         (Display, Value::Display(v)) => s.display = *v,
+        (ListStyleType, Value::Marker(v)) => s.marker = *v,
         (Float, Value::Float(v)) => s.float = *v,
         (Clear, Value::Clear(v)) => s.clear = *v,
         (Position, Value::Position(v)) => s.position = *v,
@@ -3331,6 +3516,23 @@ fn apply_value(
                     .collect(),
             )
         }
+        (
+            TopLeftRadius | TopRightRadius | BottomRightRadius | BottomLeftRadius,
+            Value::Radius(v),
+        ) => {
+            let target = s
+                .border_radii
+                .get_or_insert_with(|| Arc::new([[Length::Px(0.); 2]; 4]));
+            Arc::make_mut(target)[p as usize - TopLeftRadius as usize] = v.map(|v| l(&v));
+        }
+        (OutlineWidth, Value::Length(v)) => {
+            s.outline_width = l(v).resolve(0., font).unwrap_or(0.).max(0.)
+        }
+        (OutlineOffset, Value::Length(v)) => {
+            s.outline_offset = l(v).resolve(0., font).unwrap_or(0.)
+        }
+        (OutlineStyle, Value::Bool(v)) => s.outline_visible = *v,
+        (OutlineColor, Value::Color(v)) => s.outline_color = *v,
         (TransformOrigin, Value::Origin(v)) => s.transform_origin = v.map(|v| l(&v)),
         (Bold, Value::FontWeight(v)) => {
             s.font_weight = *v;
@@ -3453,6 +3655,7 @@ fn targets(name: &str) -> Vec<Property> {
         "color" => vec![Color],
         "background" | "background-color" => vec![Background],
         "display" => vec![Display],
+        "list-style" | "list-style-type" => vec![ListStyleType],
         "float" => vec![Float],
         "clear" => vec![Clear],
         "font-size" => vec![FontSize],
@@ -3515,6 +3718,21 @@ fn targets(name: &str) -> Vec<Property> {
             BorderBottomColor,
             BorderLeftColor,
         ],
+        "border-radius" => vec![
+            TopLeftRadius,
+            TopRightRadius,
+            BottomRightRadius,
+            BottomLeftRadius,
+        ],
+        "border-top-left-radius" => vec![TopLeftRadius],
+        "border-top-right-radius" => vec![TopRightRadius],
+        "border-bottom-right-radius" => vec![BottomRightRadius],
+        "border-bottom-left-radius" => vec![BottomLeftRadius],
+        "outline" => vec![OutlineWidth, OutlineStyle, OutlineColor],
+        "outline-width" => vec![OutlineWidth],
+        "outline-style" => vec![OutlineStyle],
+        "outline-color" => vec![OutlineColor],
+        "outline-offset" => vec![OutlineOffset],
         "border-top" => vec![BorderTopWidth, BorderTopStyle, BorderTopColor],
         "border-right" => vec![BorderRightWidth, BorderRightStyle, BorderRightColor],
         "border-bottom" => vec![BorderBottomWidth, BorderBottomStyle, BorderBottomColor],
@@ -3717,6 +3935,68 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
             })
             .collect();
     }
+    if name == "border-radius" {
+        let axes = split_top(value, b'/');
+        let parse_axis = |text: &str| {
+            let tokens = whitespace_tokens(text);
+            let corners = match tokens.as_slice() {
+                [a] => [a, a, a, a],
+                [a, b] => [a, b, a, b],
+                [a, b, c] => [a, b, c, b],
+                [a, b, c, d] => [a, b, c, d],
+                _ => return None,
+            };
+            let [a, b, c, d] = corners.map(|v| nonnegative_length(v, false));
+            Some([a?, b?, c?, d?])
+        };
+        let Some(horizontal) = axes.first().and_then(|v| parse_axis(v)) else {
+            return vec![];
+        };
+        let vertical = match axes.as_slice() {
+            [_] => horizontal,
+            [_, values] => match parse_axis(values) {
+                Some(v) => v,
+                None => return vec![],
+            },
+            _ => return vec![],
+        };
+        return properties
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| (p, Value::Radius([horizontal[i], vertical[i]])))
+            .collect();
+    }
+    if name == "list-style" {
+        if value.is_empty() {
+            return vec![];
+        }
+        let mut kind = None;
+        let mut outside = false;
+        let mut none_count = 0;
+        for token in whitespace_tokens(&lower) {
+            match token {
+                "outside" if !outside => outside = true,
+                "none" => none_count += 1,
+                _ if kind.is_none() => {
+                    let Some(marker) = MarkerType::parse(token) else {
+                        return vec![];
+                    };
+                    kind = Some(marker);
+                }
+                _ => return vec![],
+            }
+        }
+        // One 'none' may stand for the image; when alone it also clears the type.
+        if none_count > 2 || (none_count > 1 && kind.is_some()) {
+            return vec![];
+        }
+        let marker = kind.unwrap_or(if none_count > 0 {
+            MarkerType::None
+        } else {
+            MarkerType::Disc
+        });
+        return vec![(Property::ListStyleType, Value::Marker(marker))];
+    }
     if matches!(name, "grid-row" | "grid-column" | "grid-area") {
         let components = split_top(value, b'/');
         if components.len() > properties.len() {
@@ -3815,7 +4095,7 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
     }
     if matches!(
         name,
-        "border" | "border-top" | "border-right" | "border-bottom" | "border-left"
+        "border" | "border-top" | "border-right" | "border-bottom" | "border-left" | "outline"
     ) {
         let (mut width, mut style, mut color) = (None, None, None);
         for token in tokens {
@@ -3823,7 +4103,14 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
                 if width.replace(v).is_some() {
                     return vec![];
                 }
-            } else if let Some(v) = parse_value(Property::BorderTopStyle, token) {
+            } else if let Some(v) = parse_value(
+                if name == "outline" {
+                    Property::OutlineStyle
+                } else {
+                    Property::BorderTopStyle
+                },
+                token,
+            ) {
                 if style.replace(v).is_some() {
                     return vec![];
                 }
@@ -3843,7 +4130,8 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
             .map(|p| {
                 let v = if matches!(
                     p,
-                    Property::BorderTopWidth
+                    Property::OutlineWidth
+                        | Property::BorderTopWidth
                         | Property::BorderRightWidth
                         | Property::BorderBottomWidth
                         | Property::BorderLeftWidth
@@ -3853,7 +4141,8 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
                         .unwrap_or(Value::Length(Length::Px(3.).into()))
                 } else if matches!(
                     p,
-                    Property::BorderTopStyle
+                    Property::OutlineStyle
+                        | Property::BorderTopStyle
                         | Property::BorderRightStyle
                         | Property::BorderBottomStyle
                         | Property::BorderLeftStyle
@@ -4035,6 +4324,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
     let lower = trim_boundary(value).to_ascii_lowercase();
     let v = lower.as_str();
     match p {
+        ListStyleType => MarkerType::parse(v).map(Value::Marker),
         Direction => Some(Value::Bool(match v {
             "ltr" => false,
             "rtl" => true,
@@ -4069,7 +4359,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
         Transform => parse_transform(v).map(|v| Value::Transforms(Arc::new(v))),
         TransformOrigin => parse_transform_origin(v).map(Value::Origin),
         Color | Background | BorderTopColor | BorderRightColor | BorderBottomColor
-        | BorderLeftColor => {
+        | BorderLeftColor | OutlineColor => {
             if v == "currentcolor" {
                 Some(Value::Color(None))
             } else if let Some(c) = color(value) {
@@ -4116,7 +4406,8 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
         })),
         Display => Some(Value::Display(match v {
             "none" => crate::css::Display::None,
-            "block" | "list-item" | "table" => crate::css::Display::Block,
+            "block" | "table" => crate::css::Display::Block,
+            "list-item" => crate::css::Display::ListItem,
             "inline" => crate::css::Display::Inline,
             "inline-block" => crate::css::Display::InlineBlock,
             "flex" => crate::css::Display::Flex,
@@ -4213,7 +4504,27 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
         PaddingTop | PaddingRight | PaddingBottom | PaddingLeft => {
             nonnegative_length(v, false).map(Value::Length)
         }
-        BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth => {
+        TopLeftRadius | TopRightRadius | BottomRightRadius | BottomLeftRadius => {
+            let tokens = whitespace_tokens(v);
+            let (x, y) = match tokens.as_slice() {
+                [x] => (x, x),
+                [x, y] => (x, y),
+                _ => return None,
+            };
+            Some(Value::Radius([
+                nonnegative_length(x, false)?,
+                nonnegative_length(y, false)?,
+            ]))
+        }
+        OutlineOffset => specified_length(v)
+            .filter(|l| !l.has_percent() && !matches!(l, SpecifiedLength::Plain(Length::Auto)))
+            .map(Value::Length),
+        OutlineStyle => Some(Value::Bool(match v {
+            "solid" => true,
+            "none" => false,
+            _ => return None,
+        })),
+        BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth | OutlineWidth => {
             let l = match v {
                 "thin" => Length::Px(1.).into(),
                 "medium" => Length::Px(3.).into(),
@@ -4737,7 +5048,10 @@ fn resolve_variables(
         custom.get(name).map(|value| value.to_string())
     })
 }
-fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str>> {
+fn compute_custom(
+    raw: HashMap<Arc<str>, Arc<str>>,
+    mut cache: HashMap<Arc<str>, Arc<str>>,
+) -> HashMap<Arc<str>, Arc<str>> {
     use std::collections::HashSet;
     // Dependencies inside a fallback participate in cycles even when the first
     // argument currently resolves. Resolve the graph before doing substitution.
@@ -4776,7 +5090,7 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
             invalid.extend(stack[index..].iter().cloned());
             return;
         }
-        if visited.contains(name) {
+        if !graph.contains_key(name) || visited.contains(name) {
             return;
         }
         if stack.len() >= 32 {
@@ -4798,6 +5112,7 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
         cache: &mut HashMap<Arc<str>, Arc<str>>,
         invalid: &mut HashSet<Arc<str>>,
         stack: &mut Vec<Arc<str>>,
+        byte_budget: &mut usize,
     ) -> Option<Arc<str>> {
         if invalid.contains(name) {
             return None;
@@ -4814,12 +5129,13 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
         }
         let value = raw.get(name)?;
         if !contains_variable(value) {
+            *byte_budget = byte_budget.checked_sub(value.len())?;
             cache.insert(name.into(), value.clone());
             return Some(value.clone());
         }
         stack.push(name.into());
         let resolved = substitute_variables(value, stack.len(), &mut |n| {
-            resolve_name(n, raw, cache, invalid, stack).map(|value| value.to_string())
+            resolve_name(n, raw, cache, invalid, stack, byte_budget).map(|value| value.to_string())
         });
         stack.pop();
         if invalid.contains(name) {
@@ -4832,11 +5148,15 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
             invalid.insert(name.into());
             return None;
         }
+        let Some(remaining) = byte_budget.checked_sub(resolved.len()) else {
+            invalid.insert(name.into());
+            return None;
+        };
+        *byte_budget = remaining;
         let resolved = Arc::<str>::from(resolved);
         cache.insert(name.into(), resolved.clone());
         Some(resolved)
     }
-    let mut cache = HashMap::new();
     let mut invalid = HashSet::new();
     let graph: HashMap<_, _> = raw
         .iter()
@@ -4848,9 +5168,22 @@ fn compute_custom(raw: HashMap<Arc<str>, Arc<str>>) -> HashMap<Arc<str>, Arc<str
     }
     let mut names: Vec<_> = raw.keys().collect();
     names.sort();
+    // A repeated var() can expand a small theme into many large strings. Retain
+    // the previous 16 MiB worst-case value budget while admitting more names.
+    let inherited_bytes: usize = cache.values().map(|value| value.len()).sum();
+    let mut byte_budget = (16 * 1024 * 1024_usize).saturating_sub(inherited_bytes);
     for name in names {
-        resolve_name(name, &raw, &mut cache, &mut invalid, &mut vec![]);
+        resolve_name(
+            name,
+            &raw,
+            &mut cache,
+            &mut invalid,
+            &mut vec![],
+            &mut byte_budget,
+        );
     }
-    cache.retain(|name, _| !invalid.contains(name));
+    for name in invalid {
+        cache.remove(&name);
+    }
     cache
 }

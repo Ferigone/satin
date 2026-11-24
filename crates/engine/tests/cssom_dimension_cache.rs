@@ -78,3 +78,30 @@ fn equal_final_inline_writes_keep_the_dimension_cache_current() {
         &runtime.layout_for_viewport(runtime.viewport()).unwrap()
     ));
 }
+
+#[test]
+fn geometry_of_a_large_linked_stylesheet_is_readable_but_reflows_share_task_fuel() {
+    let mut page = LoadedPage::from_html(
+        "https://example.test/",
+        "<!doctype html><link rel=stylesheet href=bundle.css><main id=box></main>",
+    );
+    let link = page.document.html_elements("link").next().unwrap();
+    let sheet: Arc<str> = format!("/*{}*/main{{width:123px}}", " ".repeat(1280 * 1024)).into();
+    page.linked_stylesheets.insert(link, sheet.clone());
+    page.stylesheets = Arc::new(vec![sheet]);
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(
+        runtime
+            .eval("var box=document.getElementById('box'); box.getBoundingClientRect().width")
+            .unwrap(),
+        Value::Number(123.)
+    );
+    let error = runtime
+        .eval("for(var i=0;i<32;i++){box.style.height=(i+1)+'px'; box.getBoundingClientRect();}")
+        .unwrap_err();
+    assert!(error.to_string().contains("Native work budget exhausted"));
+    assert_eq!(
+        runtime.eval("box.offsetWidth").unwrap(),
+        Value::Number(123.)
+    );
+}
