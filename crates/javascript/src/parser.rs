@@ -912,9 +912,9 @@ impl Parser {
     }
     #[inline(always)]
     fn for_body(&mut self, asynchronous: bool) -> Result<Stmt, JsError> {
-        // A for body admits Statement, not a lexical declaration. In sloppy
-        // code `let` can be an expression, but `let [` cannot start one here.
-        if self.at("let") {
+        // Leave `let:` to the ordinary label parser. Otherwise `let` may start
+        // a sloppy expression statement, but `let [` is forbidden here.
+        if self.at("let") && !self.label_ahead() {
             if self
                 .lookahead(1)
                 .is_some_and(|t| t.kind == TokenKind::Punct("["))
