@@ -2,11 +2,17 @@ use super::{BoxMetrics, Builder, Constraints, Line, NodeId, to_content};
 use crate::css::Display;
 use std::sync::Arc;
 
+const SCAN_BLOCK: usize = 16;
+
 /// Exclusions in the current block formatting context's layout coordinates.
 #[derive(Default)]
 pub(super) struct FloatContext {
     boxes: Vec<Placed>,
     bottom: [Option<f32>; 2],
+    // Level n summarizes completed, aligned spans of SCAN_BLOCK * 2^n boxes.
+    // Keep the boxes for queries that go back up (e.g. after placing a float
+    // below the current line). Bottoms need not be ordered, even though tops are.
+    block_bottoms: Vec<Vec<f32>>,
 }
 
 struct Placed {
@@ -42,24 +48,51 @@ impl FloatContext {
         if self.bottom.into_iter().flatten().all(|bottom| bottom <= y) {
             return Some(slot);
         }
-        for f in &self.boxes {
-            *work = work.checked_sub(1)?;
-            if f.top > y {
-                // Float tops never go backwards in source order.
+        let mut start = 0;
+        let complete = self.boxes.len() / SCAN_BLOCK;
+        'blocks: while start < self.boxes.len() {
+            // Float tops never go backwards in source order.
+            if self.boxes[start].top > y {
+                *work = work.checked_sub(1)?;
                 break;
             }
-            if f.bottom <= y {
-                continue;
+            let block = start / SCAN_BLOCK;
+            if block < complete {
+                // Try the largest completed span starting here, then its
+                // successively smaller left halves. Charge every probe.
+                let mut level = block.trailing_zeros().min((complete - block).ilog2());
+                loop {
+                    *work = work.checked_sub(1)?;
+                    if self.block_bottoms[level as usize][block >> level] <= y {
+                        start += SCAN_BLOCK << level;
+                        continue 'blocks;
+                    }
+                    if level == 0 {
+                        break;
+                    }
+                    level -= 1;
+                }
             }
-            if (!f.right_side && f.right <= slot.left) || (f.right_side && f.left >= slot.right) {
-                continue;
+            let end = (start + SCAN_BLOCK).min(self.boxes.len());
+            for f in &self.boxes[start..end] {
+                *work = work.checked_sub(1)?;
+                if f.top > y {
+                    return Some(slot);
+                }
+                if f.bottom <= y
+                    || (!f.right_side && f.right <= slot.left)
+                    || (f.right_side && f.left >= slot.right)
+                {
+                    continue;
+                }
+                if f.right_side {
+                    slot.right = slot.right.min(f.left);
+                } else {
+                    slot.left = slot.left.max(f.right);
+                }
+                slot.next_bottom = Some(slot.next_bottom.map_or(f.bottom, |v| v.min(f.bottom)));
             }
-            if f.right_side {
-                slot.right = slot.right.min(f.left);
-            } else {
-                slot.left = slot.left.max(f.right);
-            }
-            slot.next_bottom = Some(slot.next_bottom.map_or(f.bottom, |v| v.min(f.bottom)));
+            start = end;
         }
         Some(slot)
     }
@@ -68,6 +101,33 @@ impl FloatContext {
         let bottom = &mut self.bottom[f.right_side as usize];
         *bottom = Some(bottom.map_or(f.bottom, |value| value.max(f.bottom)));
         self.boxes.push(f);
+        let len = self.boxes.len();
+        if !len.is_multiple_of(SCAN_BLOCK) {
+            return;
+        }
+        // A non-comparable bottom must not make a block look expired.
+        let merge = |a: f32, b: f32| {
+            if a.is_nan() || b.is_nan() {
+                f32::NAN
+            } else {
+                a.max(b)
+            }
+        };
+        let mut bottom = self.boxes[len - SCAN_BLOCK..]
+            .iter()
+            .map(|f| f.bottom)
+            .fold(f32::NEG_INFINITY, merge);
+        for level in 0.. {
+            if level == self.block_bottoms.len() {
+                self.block_bottoms.push(Vec::new());
+            }
+            let blocks = &mut self.block_bottoms[level];
+            blocks.push(bottom);
+            if !blocks.len().is_multiple_of(2) {
+                break;
+            }
+            bottom = merge(blocks[blocks.len() - 2], bottom);
+        }
     }
 }
 
