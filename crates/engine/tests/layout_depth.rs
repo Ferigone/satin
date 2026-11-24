@@ -1,5 +1,6 @@
+use rust_browser_engine::dom::Attributes;
 use rust_browser_engine::{Fonts, Layout, LoadedPage, dom::NodeKind};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 #[test]
 fn parser_budget_depth_is_safe_on_one_mib_stack() {
@@ -27,7 +28,7 @@ fn parser_budget_depth_is_safe_on_one_mib_stack() {
                 parent,
                 NodeKind::Element {
                     tag: "div".into(),
-                    attrs: BTreeMap::from([("style".into(), style.into())]),
+                    attrs: Attributes::from([("style".into(), style.into())]),
                 },
             );
             first.get_or_insert(parent);
@@ -36,7 +37,7 @@ fn parser_budget_depth_is_safe_on_one_mib_stack() {
             parent,
             NodeKind::Element {
                 tag: "a".into(),
-                attrs: BTreeMap::from([("href".into(), "/deep".into())]),
+                attrs: Attributes::from([("href".into(), "/deep".into())]),
             },
         );
         doc.append(anchor, NodeKind::Text("Deep visible content".into()));

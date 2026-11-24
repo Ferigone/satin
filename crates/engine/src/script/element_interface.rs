@@ -12,6 +12,42 @@ pub(super) fn install(
     let node_constructor = webidl::interface(vm, node.clone(), "Node", 0, |_, _, _, _| {
         Err(JsError::type_error("Illegal Node constructor"))
     })?;
+    let attr_state = state.clone();
+    let attr_errors = errors.clone();
+    webidl::operation(
+        vm,
+        element.clone(),
+        "toggleAttribute",
+        1,
+        move |vm, this, args| {
+            let id = super::element(&attr_state, &this)?;
+            webidl::required(args, 1, "Element.toggleAttribute")?;
+            let mut name = super::text(vm, args[0].clone())?;
+            vm.charge_work(name.len())?;
+            if !super::valid_attribute_name(&name) {
+                return Err(attr_errors.exception(
+                    vm,
+                    "InvalidCharacterError",
+                    "Invalid attribute name",
+                ));
+            }
+            let present = {
+                let state = attr_state.borrow();
+                if state.document.html_element_in_html_document(id) {
+                    name.make_ascii_lowercase();
+                }
+                state.document.attr(id, &name).is_some()
+            };
+            let desired = args
+                .get(1)
+                .filter(|value| !value.is_undefined())
+                .map_or(!present, Value::is_truthy);
+            if present != desired {
+                super::set_attribute(vm, &attr_state, id, &name, desired.then(String::new))?;
+            }
+            Ok(desired.into())
+        },
+    )?;
     let element_constructor = webidl::interface(vm, element, "Element", 0, |_, _, _, _| {
         Err(JsError::type_error("Illegal Element constructor"))
     })?;

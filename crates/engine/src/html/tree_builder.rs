@@ -598,11 +598,7 @@ impl Tree {
                     node: id,
                     parent,
                     before,
-                    attributes: tag
-                        .merge_attribute_order
-                        .iter()
-                        .map(|name| (name.clone(), tag.attrs[name].clone()))
-                        .collect(),
+                    attributes: tag.attrs.clone().into_iter().collect(),
                 });
                 self.push(id);
             }
@@ -1169,8 +1165,8 @@ impl Tree {
         }
         if let Some(sink) = &mut self.mutation_sink {
             for name in tag
-                .merge_attribute_order
-                .iter()
+                .attrs
+                .keys()
                 .filter(|name| self.doc.attr(id, name).is_none())
             {
                 sink(

@@ -127,8 +127,9 @@ fn adjacent_grid_text_and_comment_separators_create_one_anonymous_item() {
 
 #[test]
 fn deep_and_remeasured_grid_layout_is_bounded_on_one_mib_stack() {
+    use rust_browser_engine::dom::Attributes;
     use rust_browser_engine::dom::NodeKind;
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::sync::Arc;
     let fonts = Fonts::new().unwrap();
     let mut page = LoadedPage::from_html("about:grid", "<!doctype html><body style='margin:0'>");
     let body = page.document.elements("body").next().unwrap();
@@ -139,7 +140,7 @@ fn deep_and_remeasured_grid_layout_is_bounded_on_one_mib_stack() {
             parent,
             NodeKind::Element {
                 tag: "div".into(),
-                attrs: BTreeMap::from([(
+                attrs: Attributes::from([(
                     "style".into(),
                     "display:grid;grid-template-columns:1fr".into(),
                 )]),
@@ -150,7 +151,7 @@ fn deep_and_remeasured_grid_layout_is_bounded_on_one_mib_stack() {
         parent,
         NodeKind::Element {
             tag: "a".into(),
-            attrs: BTreeMap::from([("href".into(), "about:deep".into())]),
+            attrs: Attributes::from([("href".into(), "about:deep".into())]),
         },
     );
     doc.append(anchor, NodeKind::Text("Deep grid content".into()));

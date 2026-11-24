@@ -24,7 +24,6 @@ pub(super) fn adjust(tag: &Tag, namespace: Namespace) -> Tag {
     Tag {
         name: name.into(),
         attrs,
-        merge_attribute_order: Vec::new(),
         self_closing: tag.self_closing,
     }
 }

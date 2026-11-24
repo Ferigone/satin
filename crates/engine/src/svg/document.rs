@@ -3,7 +3,8 @@
 //! HTML or fetching entity/stylesheet resources.
 use super::{MAX_SVG_DEPTH, MAX_SVG_NODES};
 use crate::dom::{AttributeNamespace, Document, Namespace, NodeId, NodeKind};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::dom::Attributes;
+use std::collections::BTreeSet;
 
 pub const MAX_SVG_DOCUMENT_SOURCE: usize = 4 * 1024 * 1024;
 pub const MAX_SVG_DOCUMENT_STRINGS: usize = 8 * 1024 * 1024;
@@ -184,8 +185,8 @@ impl Parser<'_> {
         self.retain(result.len())?;
         Ok(result)
     }
-    fn attributes(&mut self, terminator: &str) -> Result<BTreeMap<String, String>> {
-        let mut attrs = BTreeMap::new();
+    fn attributes(&mut self, terminator: &str) -> Result<Attributes> {
+        let mut attrs = Attributes::new();
         loop {
             let start = self.offset;
             self.ws();

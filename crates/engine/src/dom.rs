@@ -43,12 +43,15 @@ impl AttributeNamespace {
     }
 }
 
+/// Element attributes in DOM attribute-list order. Replacing a value keeps its position.
+pub type Attributes = indexmap::IndexMap<String, String>;
+
 #[derive(Clone, Debug)]
 pub enum NodeKind {
     Document,
     Element {
         tag: String,
-        attrs: BTreeMap<String, String>,
+        attrs: Attributes,
     },
     Text(String),
     Comment(String),

@@ -383,6 +383,13 @@ fn changed_bytes(state: &State, removed: usize, added: usize) -> Result<usize, J
         Ok(next)
     }
 }
+fn valid_attribute_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.bytes().any(|byte| {
+            matches!(byte, b' ' | b'\t' | b'\n' | 12 | b'\r' | 0 | b'/' | b'=' | b'>')
+        })
+}
+
 fn set_attribute(
     vm: &mut Vm,
     state: &Shared,
@@ -390,11 +397,7 @@ fn set_attribute(
     key: &str,
     value: Option<String>,
 ) -> Result<(), JsError> {
-    if key.is_empty()
-        || key.chars().any(|c| {
-            c.is_ascii_whitespace() || matches!(c, '\0' | '/' | '>' | '<' | '=' | '\'' | '"')
-        })
-    {
+    if !valid_attribute_name(key) {
         return Err(JsError::type_error("Invalid attribute name"));
     }
     let host = state;
@@ -447,7 +450,7 @@ fn set_attribute(
         if let Some(value) = value {
             attrs.insert(key.clone(), value);
         } else {
-            attrs.remove(&key);
+            attrs.shift_remove(&key);
         }
         let removed_namespace = state.document.attr(id, &key).is_none()
             && state
@@ -1867,6 +1870,26 @@ fn install_node(
             } else {
                 name.into()
             })
+        })?;
+    }
+    for name in ["hasAttributes", "getAttributeNames"] {
+        let state = state.clone();
+        webidl::operation(vm, element_prototype.clone(), name, 0, move |vm, this, _| {
+            let id = element(&state, &this)?;
+            let state = state.borrow();
+            let NodeKind::Element { attrs, .. } = &state.document.nodes[id.0].kind else {
+                unreachable!("element receiver was checked")
+            };
+            if name == "hasAttributes" {
+                return Ok((!attrs.is_empty()).into());
+            }
+            vm.charge_work(attrs.len())?;
+            let mut names = Vec::with_capacity(attrs.len());
+            for name in attrs.keys() {
+                vm.charge_work(name.len())?;
+                names.push(Value::from(name.as_str()));
+            }
+            Ok(vm.new_array(&names))
         })?;
     }
     for name in [

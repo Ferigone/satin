@@ -670,3 +670,64 @@ fn import_node_reads_the_source_frame_arena_and_keeps_executed_scripts_inert() {
     runtime.snapshot(&mut page);
     arena(&page.document);
 }
+
+#[test]
+fn attribute_names_follow_source_and_mutation_order_across_template_imports() {
+    let (_, mut runtime) = realm("<!doctype html><main></main>");
+    let actual = runtime.eval(r##"
+        (() => {
+            const template = document.createElement('template');
+            template.innerHTML = '<a Z=first a=1 z=duplicate b=2></a><svg><g viewBox="1" xlink:href="#x"/></svg>';
+            const f = document.importNode(template.content, true);
+            const a = f.firstChild, empty = document.createElement('aside'), g = f.lastChild.firstChild;
+            const names = a.getAttributeNames();
+            a.setAttribute('a', 'updated');
+            const afterSet = a.getAttributeNames();
+            a.removeAttribute('z'); a.setAttribute('Z', 'last');
+            let brand = '';
+            try { Element.prototype.hasAttributes.call(template.content); } catch (e) { brand = e.name; }
+            return [names, afterSet, a.getAttributeNames(), a.cloneNode().getAttributeNames(),
+                    template.content.firstChild.getAttribute('z'), g.getAttributeNames(),
+                    a.hasAttributes(), empty.hasAttributes(), empty.getAttributeNames().length, brand].join('|');
+        })()
+    "##).unwrap();
+    assert_eq!(
+        actual,
+        Value::from("z,a,b|z,a,b|a,b,z|a,b,z|first|viewBox,xlink:href|true|false|0|TypeError")
+    );
+}
+
+#[test]
+fn toggle_attribute_returns_presence_and_only_delivers_actual_mutations() {
+    let (_, mut runtime) = realm("<!doctype html><body></body>");
+    let actual = runtime.eval(r#"
+        (() => {
+            const changes = [];
+            class Panel extends HTMLElement {
+                static get observedAttributes() { return ['visible']; }
+                attributeChangedCallback(name, before, after) { changes.push([name,before,after]); }
+            }
+            customElements.define('x-toggle-test', Panel);
+            const p = document.createElement('x-toggle-test');
+            const added = p.toggleAttribute('VISIBLE', true);
+            p.setAttribute('visible','kept');
+            const kept = p.toggleAttribute('visible', true) && p.getAttribute('visible') === 'kept';
+            const removed = p.toggleAttribute('visible');
+            const missing = p.toggleAttribute('visible', false);
+            const again = p.toggleAttribute('visible', undefined);
+            const xml = new Document().createElement('Item');
+            xml.toggleAttribute('MixedCase');
+            let invalid = '';
+            try { p.toggleAttribute('bad name'); } catch (e) { invalid = e.name; }
+            return [added,kept,removed,missing,again,p.getAttribute('visible') === '',
+                    JSON.stringify(changes),xml.hasAttribute('MixedCase'),xml.hasAttribute('mixedcase'),
+                    p.toggleAttribute('@click'),invalid].join('|');
+        })()
+    "#).unwrap();
+    assert_eq!(
+        actual,
+        Value::from(
+            r#"true|true|false|false|true|true|[["visible",null,""],["visible","","kept"],["visible","kept",null],["visible",null,""]]|true|false|true|InvalidCharacterError"#
+        )
+    );
+}
