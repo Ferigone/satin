@@ -40,6 +40,9 @@ pub(crate) const USER_AGENT: &str = concat!(
     " (independent Rust engine; development alpha)"
 );
 const DOCUMENT_LIMIT: usize = 8 * 1024 * 1024;
+// Do not turn every small HTTP/decompression frame into a UI event. A
+// partially filled batch is delivered immediately when the socket goes idle.
+const NAVIGATION_BATCH_BYTES: usize = 128 * 1024;
 const ENCODING_WAIT: Duration = Duration::from_millis(100);
 const RESOURCE_LIMIT: usize = 4 * 1024 * 1024;
 const DECODED_IMAGES_LIMIT: usize = 64 * 1024 * 1024;
@@ -839,8 +842,10 @@ impl Loader {
                 .await
                 .map_err(interrupted_navigation)??;
         }
-        loop {
-            let chunk = if let Some(rest) = rest.take() {
+        let mut batch = Vec::new();
+        let mut eof = false;
+        while !eof {
+            let first = if let Some(rest) = rest.take() {
                 Some(rest)
             } else {
                 control
@@ -849,19 +854,53 @@ impl Loader {
                     .map_err(interrupted_navigation)?
                     .map_err(error_chain)?
             };
-            let Some(chunk) = chunk else {
+            let Some(mut chunk) = first else {
                 break;
             };
-            total = total.saturating_add(chunk.len());
-            if total > limit {
-                return Err(format!("Document exceeds the {limit}-byte limit"));
+            batch.clear();
+            let mut read_error = None;
+            loop {
+                control.check().map_err(interrupted_navigation)?;
+                let take = chunk.len().min(NAVIGATION_BATCH_BYTES - batch.len());
+                total = total.saturating_add(take);
+                if total > limit {
+                    return Err(format!("Document exceeds the {limit}-byte limit"));
+                }
+                batch.extend_from_slice(&chunk[..take]);
+                if take < chunk.len() {
+                    rest = Some(chunk.slice(take..));
+                    break;
+                }
+                if batch.len() == NAVIGATION_BATCH_BYTES {
+                    break;
+                }
+                // Poll only ready input. Waiting to fill a batch would stall
+                // progressive pages whose server pauses between writes.
+                match tokio::select! {
+                    biased;
+                    next = response.chunk() => next,
+                    () = ready(()) => break,
+                } {
+                    Ok(Some(next)) => chunk = next,
+                    Ok(None) => {
+                        eof = true;
+                        break;
+                    }
+                    Err(error) => {
+                        read_error = Some(error);
+                        break;
+                    }
+                }
             }
-            for bytes in chunk.chunks(16 * 1024) {
-                let text = decode_navigation_chunk(&mut decoder, bytes, false)?;
+            if !batch.is_empty() {
+                let text = decode_navigation_chunk(&mut decoder, &batch, false)?;
                 control
-                    .wait(send(NavigationPart::Text(text, bytes.len())))
+                    .wait(send(NavigationPart::Text(text, batch.len())))
                     .await
                     .map_err(interrupted_navigation)??;
+            }
+            if let Some(error) = read_error {
+                return Err(error_chain(error));
             }
         }
         let tail = decode_navigation_chunk(&mut decoder, &[], true)?;
