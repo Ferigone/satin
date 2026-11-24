@@ -33,7 +33,6 @@ fn wrap(vm: &mut Vm, value: Value) -> Result<Value, JsError> {
             "Only primitives and callables can cross a ShadowRealm boundary",
         ));
     }
-    let target_realm = vm.callable_realm(id).map_err(boundary_error)?;
     let length = if vm
         .own_descriptor_key(id, &"length".into())
         .map_err(boundary_error)?
@@ -58,6 +57,7 @@ fn wrap(vm: &mut Vm, value: Value) -> Result<Value, JsError> {
     };
     vm.reserve_allocation(512)?;
     let wrapper = vm.new_native_function("", move |vm, this, args| {
+        let target_realm = vm.callable_realm(id).map_err(boundary_error)?;
         let result = vm
             .with_realm(target_realm, |vm| {
                 vm.reserve_allocation(std::mem::size_of_val(args))?;
@@ -140,6 +140,7 @@ fn import_value(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsErr
             Value::Undefined,
         )
     })?;
+    let export_name = Value::String(name.clone());
     let success = vm.new_native_function("", move |vm, _, args| {
         let namespace = arg(args, 0);
         let key = crate::PropertyKey::String(name.clone());
@@ -157,6 +158,7 @@ fn import_value(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsErr
         wrap(vm, value)
     });
     vm.set_host_slot(success.clone(), 0, this)?;
+    vm.set_host_slot(success.clone(), 1, export_name)?;
     let rejected = vm.new_native_function("", |_, _, _| {
         Err(JsError::type_error("ShadowRealm module loading failed"))
     });

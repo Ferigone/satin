@@ -79,3 +79,23 @@ fn shadow_realm_subclass_falls_back_to_new_targets_realm() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn revoking_a_wrapped_callable_precedes_argument_observation() {
+    let mut vm = Vm::new();
+    let calls = vm
+        .eval(
+            r#"
+        const r = new ShadowRealm();
+        const f = r.evaluate("var target = Proxy.revocable(() => 1, {}); target.proxy");
+        r.evaluate("target.revoke()");
+        let calls = 0;
+        function argument() {}
+        Object.defineProperty(argument, "name", {get() { calls++; return "x" }});
+        try { f(argument); } catch(e) { if (!(e instanceof TypeError)) throw e }
+        calls;
+    "#,
+        )
+        .unwrap();
+    assert_eq!(calls, 0.into());
+}

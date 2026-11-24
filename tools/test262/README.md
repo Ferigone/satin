@@ -32,7 +32,7 @@ Dynamic import, top-level await, and ShadowRealm cases receive their original re
 
 Upstream `doneprintHandle.js` supplies `$DONE` to asynchronous tests. The worker drains a shared FIFO queue for Promise reactions, thenable assimilation, queued microtasks, and async function resumes. Source and checkpoint share one execution budget.
 
-The worker observes the first argument to `print` as required by Test262. Passing requires one `Test262:AsyncTestComplete` and zero `Test262:AsyncTestFailure:` markers. Extra completions or failure markers fail the test, even after the diagnostic log fills. An empty queue without a completion marker yields `async_incomplete`.
+The worker observes the first argument to `print` as required by Test262. Passing requires one `Test262:AsyncTestComplete` and zero `Test262:AsyncTestFailure:` markers. Extra completions or failure markers fail the test, even after the diagnostic log fills. With an empty queue and no pending finite atomic timeout, absence of the completion marker yields `async_incomplete`.
 
 After the checkpoint, the worker checks unhandled rejections against the rooted original `Test262Error` prototype chain. In an async test, an unhandled rejection with that prototype fails the test, including one that follows `$DONE()`. Synchronous variants record all unhandled rejections as diagnostics. Async variants record other rejection reasons as diagnostics. A handler added before the checkpoint removes the source Promise from the unhandled list.
 
