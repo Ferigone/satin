@@ -544,7 +544,7 @@ impl Layout {
     }
 
     pub(crate) fn scroll_work(&self) -> Option<usize> {
-        self.scroll_flow.as_ref().map(|flow| flow.work())
+        self.scroll_flow.as_ref().map(|flow| flow.replay_work)
     }
 
     pub fn link_at(&self, x: f32, y: f32) -> Option<&str> {

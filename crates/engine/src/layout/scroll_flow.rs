@@ -11,6 +11,7 @@ pub(crate) struct ScrollFlow {
     anchors: HashMap<String, f32>,
     link_cache: positioning::LinkCache,
     limited: bool,
+    pub(super) replay_work: usize,
     positioned: Option<PositionedFlow>,
 }
 
@@ -47,6 +48,7 @@ impl ScrollFlow {
             anchors: b.anchors.clone(),
             link_cache: b.link_cache.borrow().clone(),
             limited: b.limited,
+            replay_work: Self::replay_work(b),
             positioned: (!b.positioned.is_empty()).then(|| PositionedFlow {
                 queue: b.positioned.clone(),
                 intrinsic: b.intrinsic.clone(),
@@ -60,11 +62,38 @@ impl ScrollFlow {
         }
     }
 
-    pub(crate) fn work(&self) -> usize {
-        self.styles
+    // A script can force multiple visual updates in the same task. Count
+    // retained glyphs copied by DrawCommand::clone and the visible text that
+    // may re-enter the positioned formatter. This estimate is invariant until
+    // the document changes and requires no traversal on subsequent frames.
+    fn replay_work(b: &Builder<'_>) -> usize {
+        let mut work = b
+            .styles
             .len()
-            .saturating_add(self.commands.len())
-            .saturating_add(self.elements.len())
+            .saturating_add(b.elements.len())
+            .saturating_add(b.commands.len());
+        for command in b.commands.iter() {
+            if let DrawCommand::Text { run, .. } = command {
+                work = work.saturating_add(run.glyphs.len());
+            }
+        }
+        if !b.positioned.is_empty() {
+            for image in b.page.svg_images.values() {
+                work = work.saturating_add(image.retained_bytes());
+            }
+            let mut stack: Vec<_> = b.positioned.iter().map(|item| item.node).collect();
+            while let Some(id) = stack.pop() {
+                if b.styles[id.0].display == Display::None {
+                    continue;
+                }
+                let node = &b.page.document.nodes[id.0];
+                if let NodeKind::Text(text) = &node.kind {
+                    work = work.saturating_add(text.len());
+                }
+                stack.extend(node.children.iter().copied());
+            }
+        }
+        work
     }
 
     pub(crate) fn at_scroll(
@@ -93,5 +122,29 @@ impl ScrollFlow {
             b.work_remaining = p.work_remaining;
         }
         b.finish_frame(self.background, offsets, observe)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_replay_charges_visible_positioned_text() {
+        let text = "word ".repeat(64);
+        let page = LoadedPage::from_html(
+            "https://scroll.test/",
+            &format!(
+                "<main style='height:900px'></main><aside style='position:fixed;top:0'>{text}</aside>"
+            ),
+        );
+        let layout = Layout::for_scrolling(
+            &page,
+            &Fonts::new().unwrap(),
+            Viewport::default(),
+            &HashMap::new(),
+            None,
+        );
+        assert!(layout.scroll_work().unwrap() >= text.len());
     }
 }
