@@ -740,7 +740,7 @@ fn xhr_headers_body_and_eof_have_separate_tasks_and_microtask_checkpoints() {
             if (state > 1) {
                 // Each real task needs 600k work units, which fits by
                 // itself but two stages must not share that budget.
-                'x'.repeat(300000);
+                'x'.repeat(600000);
                 Promise.resolve().then(function() {
                     trace.push('M' + state + '@' + xhr.readyState);
                 });
@@ -780,11 +780,11 @@ fn xhr_done_and_load_callbacks_still_share_one_fuel_budget() {
         var xhr = new XMLHttpRequest(), trace = [];
         xhr.onreadystatechange = function() {
             if (xhr.readyState === 4) {
-                'x'.repeat(300000);
+                'x'.repeat(600000);
                 trace.push('done');
             }
         };
-        xhr.onload = function() { 'x'.repeat(300000); trace.push('unexpected load'); };
+        xhr.onload = function() { 'x'.repeat(600000); trace.push('unexpected load'); };
         xhr.onloadend = function() { trace.push('unexpected end'); };
         xhr.open('GET', '/end');
         xhr.send();

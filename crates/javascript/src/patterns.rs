@@ -2,7 +2,7 @@
 use crate::{
     ErrorKind, JsError, PropertyKey, Value, Vm,
     bytecode::{Code, PatternCode, pattern_names},
-    heap::{Binding, EnvId, EnvKind, Environment, Property, PropertyKind},
+    heap::{Binding, EnvId, EnvKind, Environment},
     parser::VarKind,
     vm::Reference,
 };
@@ -108,37 +108,23 @@ impl Vm {
             && !code.param_names.contains(&arguments_name)
             && (code.parameter_expressions || !body_shadows_arguments);
         if arguments_needed {
-            let arguments = self.try_new_array(args)?;
-            let callee = if code.mapped_arguments {
-                Property {
-                    kind: PropertyKind::Data {
-                        value: self.heap.environment(env).function.clone().unwrap(),
-                        writable: true,
-                    },
-                    enumerable: false,
-                    configurable: true,
-                }
-            } else {
-                let poison = self.realm.throw_type_error.map(Value::Object);
-                Property {
-                    kind: PropertyKind::Accessor {
-                        get: poison.clone(),
-                        set: poison,
-                    },
-                    enumerable: false,
-                    configurable: false,
-                }
-            };
-            self.define_key(arguments.clone(), "callee".into(), callee)?;
+            self.reserve_allocation(std::mem::size_of_val(args))?;
+            let mut captured = args.to_vec().into_boxed_slice();
+            for &index in &code.mapped_indices {
+                if let Some(value) = captured.get_mut(index) { *value = Value::Undefined; }
+            }
+            for value in captured.iter() { self.account_value(value.clone())?; }
+            self.heap.environment_mut(env).pending_arguments = Some(captured);
             self.reserve_binding(&arguments_name)?;
             self.heap.environment_mut(env).bindings.insert(
-                arguments_name,
+                arguments_name.clone(),
                 Binding {
-                    value: arguments,
+                    value: Value::Undefined,
                     mutable: true,
                     initialized: true,
                     lexical: code.parameter_expressions,
                     strict_immutable: true,
+                    deletable: false,
                 },
             );
         }
@@ -167,6 +153,9 @@ impl Vm {
             .heap
             .allocate_env(Environment::new(Some(env), EnvKind::Function, None));
         for name in &code.body.scope.vars {
+            if name == &arguments_name && self.heap.environment(env).pending_arguments.is_some() {
+                self.materialize_arguments(env)?;
+            }
             if let Some(mut binding) = self.heap.environment(env).bindings.get(name).cloned() {
                 binding.lexical = false;
                 self.reserve_binding(name)?;
@@ -197,6 +186,7 @@ impl Vm {
                         initialized: false,
                         lexical,
                         strict_immutable: true,
+                        deletable: false,
                     },
                 );
             }
@@ -214,6 +204,10 @@ impl Vm {
         }
         match pattern {
             PatternCode::Name(name) => self.resolve(env, name).map(Some),
+            PatternCode::CallTarget(call) => {
+                self.expression_value(call, env)?;
+                Err(JsError::new(ErrorKind::ReferenceError, "Cannot assign to a call result"))
+            }
             PatternCode::Target(object, key) => {
                 let object = self.expression_value(object, env)?;
                 let key = self.expression_value(key, env)?;
@@ -300,7 +294,8 @@ impl Vm {
                     Ok(())
                 }
             },
-            PatternCode::Target(..)
+            PatternCode::CallTarget(_)
+            | PatternCode::Target(..)
             | PatternCode::PrivateTarget(..)
             | PatternCode::SuperTarget(_) => {
                 let reference = match reference {

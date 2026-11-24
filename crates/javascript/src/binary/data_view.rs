@@ -105,6 +105,7 @@ pub(super) fn install(vm: &mut Vm) {
         });
         method(vm, prototype.clone(), set, 2, move |vm, this, args| {
             let view = receiver(vm, &this)?;
+            vm.require_writable_buffer(view.buffer)?;
             let offset = to_index(vm, &arg(args, 0))?;
             let bits = element.coerce_bits(vm, &arg(args, 1))?;
             let range = access_range(vm, view, offset, element.width())?;

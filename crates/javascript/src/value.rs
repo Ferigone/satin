@@ -31,6 +31,11 @@ enum StringStorage {
 pub struct JsString(Rc<StringStorage>);
 
 impl JsString {
+    /// An exactly filled Vec transfers its allocation to the flat boxed slice.
+    /// Short strings are copied into inline storage.
+    pub(crate) fn adopts_buffer(length: usize, capacity: usize) -> bool {
+        length > INLINE_UNITS && length == capacity
+    }
     pub fn from_utf16(units: impl Into<Vec<u16>>) -> Self {
         let units = units.into();
         if units.len() <= INLINE_UNITS {
@@ -121,7 +126,7 @@ impl JsString {
             _ => 0,
         }
     }
-    fn copy_units(&self, out: &mut Vec<u16>) {
+    pub(crate) fn copy_units(&self, out: &mut Vec<u16>) {
         if let StringStorage::Appended {
             prefix,
             suffix,
@@ -209,6 +214,19 @@ pub struct ObjectId {
     pub(crate) heap_id: u64,
     pub(crate) index: u32,
     pub(crate) generation: u32,
+}
+impl ObjectId {
+    // Heap identities occupy the low 63 bits. The Annex B brand is immutable
+    // and travels with the handle, so ToBoolean does not require a heap lookup.
+    pub(crate) const HTML_DDA: u64 = 1 << 63;
+
+    pub(crate) fn is_html_dda(self) -> bool {
+        self.heap_id & Self::HTML_DDA != 0
+    }
+
+    pub(crate) fn belongs_to(self, heap: u64) -> bool {
+        self.heap_id & !Self::HTML_DDA == heap
+    }
 }
 #[derive(Debug)]
 pub(crate) struct SymbolData {
@@ -331,7 +349,8 @@ impl Value {
             Self::Number(n) => *n != 0.0 && !n.is_nan(),
             Self::BigInt(value) => !value.is_zero(),
             Self::String(s) => !s.is_empty(),
-            Self::Object(_) | Self::Symbol(_) => true,
+            Self::Object(id) => !id.is_html_dda(),
+            Self::Symbol(_) => true,
         }
     }
 }

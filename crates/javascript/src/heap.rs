@@ -41,8 +41,16 @@ impl Property {
     }
 }
 pub(crate) enum ObjectKind {
+    DeferredTemporal,
+    InitializingTemporal,
     Ordinary,
+    Arguments {
+        environment: Option<EnvId>,
+        mapped: BTreeMap<u32, JsString>,
+    },
     RawJson(JsString),
+    Proxy(crate::proxy::Proxy),
+    Intl,
     Array {
         length: u32,
         length_writable: bool,
@@ -53,6 +61,7 @@ pub(crate) enum ObjectKind {
         referrer: Option<crate::dynamic_import::SourceReferrer>,
     },
     Native {
+        initial_name: JsString,
         callback: NativeCallback,
         construct: Option<NativeConstruct>,
         // A native callback has no lexical environment to trace automatically.
@@ -66,17 +75,24 @@ pub(crate) enum ObjectKind {
     Boxed(Value),
     Date(f64),
     ArrayBuffer(crate::binary::Buffer),
+    SharedArrayBuffer(ObjectId),
     TypedArray(crate::binary::TypedArray),
     DataView(crate::binary::View),
-    RegExp(Rc<crate::regexp::Program>),
+    RegExp(Rc<crate::regexp::Program>, crate::regexp::Origin),
     RegExpStringIterator(crate::regexp::StringIterator),
-    Error(ErrorKind),
+    Error(ErrorKind, JsString),
     Promise(crate::promise::PromiseData),
     PromiseFunction(crate::promise::PromiseFunction, EnvId),
     Iterator(crate::iterator::IteratorData),
+    DisposableStack {
+        asynchronous: bool,
+        disposed: bool,
+    },
     Collection(Box<crate::collections::CollectionData>),
     CollectionIterator(crate::collections::CollectionIterator),
     WeakCollection(Box<crate::collections::weak::WeakData>),
+    WeakRef(Option<Value>),
+    FinalizationRegistry(Box<crate::collections::weak_ref::Registry>),
     PromiseAggregate(crate::promise::AggregateData),
     Generator(crate::generator::GeneratorState),
     AsyncGenerator(crate::generator::AsyncGenerator),
@@ -189,7 +205,7 @@ pub(crate) fn array_index(key: &JsString) -> Option<u32> {
     if n == u32::MAX { None } else { Some(n) }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub(crate) struct EnvId(pub ObjectId);
 #[derive(Clone)]
 pub(crate) struct Binding {
@@ -199,12 +215,29 @@ pub(crate) struct Binding {
     pub lexical: bool,
     // [[Strict]] of an immutable binding; false for a named function expression.
     pub strict_immutable: bool,
+    pub deletable: bool,
 }
+impl Binding {
+    pub(crate) fn read(&self, key: &JsString) -> Result<Value, JsError> {
+        if self.initialized {
+            Ok(self.value.clone())
+        } else {
+            Err(JsError::new(
+                ErrorKind::ReferenceError,
+                format!("Cannot access '{key}' before initialization"),
+            ))
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum EnvKind {
     Global { binding_object: ObjectId },
+    With { binding_object: ObjectId },
     Function,
     Block,
+    SimpleCatch,
+    SloppyEval,
     // A Console command resolves helper names here and declares script bindings in its parent.
     Inspector,
     Module,
@@ -220,6 +253,7 @@ pub(crate) struct Environment {
     // Only bootstrapped global environments own intrinsic roots.
     realm_intrinsics: Option<Box<RealmIntrinsics>>,
     pub bindings: BTreeMap<JsString, Binding>,
+    pub pending_arguments: Option<Box<[Value]>>,
     pub this: Option<Value>,
     pub this_initialized: bool,
     pub function: Option<Value>,
@@ -231,6 +265,11 @@ pub(crate) struct Environment {
     pub private_names: BTreeMap<JsString, crate::private::PrivateId>,
 }
 impl Environment {
+    pub(crate) fn has_lazy_arguments(&self, key: &JsString) -> bool {
+        self.pending_arguments.is_some()
+            && key.as_utf16().iter().copied().eq("arguments".encode_utf16())
+    }
+
     pub fn new_global(binding_object: ObjectId, global_this: ObjectId) -> Self {
         Self::new(
             None,
@@ -245,6 +284,7 @@ impl Environment {
             kind,
             realm_intrinsics: None,
             bindings: BTreeMap::new(),
+            pending_arguments: None,
             this,
             this_initialized: true,
             function: None,
@@ -342,7 +382,9 @@ impl Default for Heap {
     fn default() -> Self {
         static NEXT_HEAP: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_HEAP
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                (id < ObjectId::HTML_DDA).then(|| id + 1)
+            })
             .expect("heap identifier space exhausted");
         Self {
             id,
@@ -360,7 +402,7 @@ impl Heap {
 
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
         self.estimated_bytes = self.estimated_bytes.saturating_add(cell_bytes(&cell));
-        if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_)))
+        if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
         {
             self.weak_collections += 1;
         }
@@ -389,14 +431,14 @@ impl Heap {
         }
     }
     fn slot(&self, id: ObjectId) -> Option<&Slot> {
-        if id.heap_id != self.id {
+        if !id.belongs_to(self.id) {
             return None;
         }
         let slot = self.slots.get(id.index as usize)?;
         (slot.generation == id.generation).then_some(slot)
     }
     fn slot_mut(&mut self, id: ObjectId) -> Option<&mut Slot> {
-        if id.heap_id != self.id {
+        if !id.belongs_to(self.id) {
             return None;
         }
         let slot = self.slots.get_mut(id.index as usize)?;
@@ -430,7 +472,7 @@ impl Heap {
         second: ObjectId,
     ) -> Result<(&mut Object, &mut Object), JsError> {
         let invalid = || JsError::type_error("Invalid or overlapping object handles");
-        if first.heap_id != self.id || second.heap_id != self.id {
+        if !first.belongs_to(self.id) || !second.belongs_to(self.id) {
             return Err(invalid());
         }
         let [a, b] = self
@@ -512,12 +554,20 @@ impl Heap {
         }
     }
 
-    pub(crate) fn collect(&mut self, mut pending: TraceEdges) -> usize {
+    pub(crate) fn collect(
+        &mut self,
+        mut pending: TraceEdges,
+        conditional_edges: impl Iterator<Item = (ObjectId, ObjectId)>,
+    ) -> (usize, Vec<ObjectId>) {
         let mut symbols = BTreeSet::new();
         let mut weak_owners = Vec::new();
+        let mut cleanup = Vec::new();
         // A conditional edge is either followed immediately or registered
         // once under its unmarked key. Later marks wake the waiting values.
         let mut waiting = BTreeMap::<TraceTarget, Vec<TraceTarget>>::new();
+        for (key, value) in conditional_edges {
+            waiting.entry(TraceTarget::Object(key)).or_default().push(TraceTarget::Object(value));
+        }
         while let Some(target) = pending.pop() {
             match target {
                 TraceTarget::Object(id) => {
@@ -542,6 +592,9 @@ impl Heap {
                             }
                         }
                     }
+                    if let Cell::Object(object) = cell && matches!(object.kind, ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)) {
+                        weak_owners.push(id);
+                    }
                 }
                 TraceTarget::Symbol(symbol) => {
                     if !symbols.insert(symbol) {
@@ -560,13 +613,21 @@ impl Heap {
         // resets any mark bit or frees a slot generation.
         for owner in weak_owners {
             let object = self.object_mut(owner).unwrap();
-            let ObjectKind::WeakCollection(mut data) =
-                std::mem::replace(&mut object.kind, ObjectKind::Ordinary)
-            else {
-                unreachable!("marked weak collection");
-            };
-            data.retain_keys(|key| self.target_marked(key, &symbols));
-            self.object_mut(owner).unwrap().kind = ObjectKind::WeakCollection(data);
+            let mut kind = std::mem::replace(&mut object.kind, ObjectKind::Ordinary);
+            let marked = |key| self.target_marked(key, &symbols);
+            match &mut kind {
+                ObjectKind::WeakCollection(data) => data.retain_keys(marked),
+                ObjectKind::WeakRef(target) => {
+                    if target.as_ref().and_then(TraceTarget::of_value).is_some_and(|key| !marked(key)) {
+                        *target = None;
+                    }
+                }
+                ObjectKind::FinalizationRegistry(registry) => {
+                    if registry.sweep(marked) { cleanup.push(owner); }
+                }
+                _ => unreachable!("marked weak owner"),
+            }
+            self.object_mut(owner).unwrap().kind = kind;
         }
         let before = self.live;
         for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -574,7 +635,7 @@ impl Heap {
                 if slot.marked {
                     slot.marked = false;
                 } else {
-                    if matches!(&slot.cell, Some(Cell::Object(object)) if matches!(object.kind, ObjectKind::WeakCollection(_)))
+                    if matches!(&slot.cell, Some(Cell::Object(object)) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
                     {
                         self.weak_collections -= 1;
                     }
@@ -591,13 +652,13 @@ impl Heap {
             .filter_map(|s| s.cell.as_ref())
             .map(cell_bytes)
             .sum();
-        before - self.live
+        (before - self.live, cleanup)
     }
 
     fn trace_cell(cell: &Cell, pending: &mut TraceEdges) {
         match cell {
             Cell::Environment(env) => {
-                if let EnvKind::Global { binding_object } = env.kind {
+                if let EnvKind::Global { binding_object } | EnvKind::With{binding_object} = env.kind {
                     pending.push(binding_object);
                 }
                 if let Some(intrinsics) = &env.realm_intrinsics {
@@ -619,6 +680,9 @@ impl Heap {
                 pending.extend(env.home_object);
                 pending.extend(env.module);
                 pending.extend(env.aliases.values().map(|(env, _)| env.0));
+                if let Some(args) = &env.pending_arguments {
+                    for value in args.iter() { pending.value(value); }
+                }
                 for b in env.bindings.values() {
                     pending.value(&b.value);
                 }
@@ -650,6 +714,9 @@ impl Heap {
                     ObjectKind::Native {
                         realm_environment, ..
                     } => pending.push(realm_environment.0),
+                    ObjectKind::Proxy(proxy) => {
+                        if let Some((target,handler))=proxy.pair {pending.push(target);pending.push(handler);}
+                    }
                     ObjectKind::Bound { target, this, args } => {
                         pending.value(target);
                         pending.value(this);
@@ -657,7 +724,9 @@ impl Heap {
                             pending.value(v);
                         }
                     }
+                    ObjectKind::Arguments { environment, .. } => pending.extend(environment.map(|env| env.0)),
                     ObjectKind::Boxed(v) => pending.value(v),
+                    ObjectKind::SharedArrayBuffer(backing) => pending.push(*backing),
                     ObjectKind::TypedArray(array) => pending.push(array.view.buffer),
                     ObjectKind::WasmMemory(memory) => pending.push(memory.buffer),
                     ObjectKind::DataView(view) => pending.push(view.buffer),
@@ -674,6 +743,7 @@ impl Heap {
                     ObjectKind::Collection(data) => data.trace(pending),
                     ObjectKind::CollectionIterator(data) => pending.extend(data.target),
                     ObjectKind::PromiseAggregate(data) => data.trace(pending),
+                    ObjectKind::FinalizationRegistry(registry) => registry.trace(pending),
                     ObjectKind::Generator(state) => state.trace(pending),
                     ObjectKind::AsyncGenerator(state) => state.trace(pending),
                     ObjectKind::AsyncFromSyncIterator(state) => state.trace(pending),
@@ -716,8 +786,9 @@ fn cell_bytes(cell: &Cell) -> usize {
             .sum::<usize>()
             .saturating_add(object.order.capacity() * std::mem::size_of::<JsString>())
             .saturating_add(match &object.kind {
+                ObjectKind::Arguments { mapped, .. } => mapped.len() * 96,
                 ObjectKind::ArrayBuffer(buffer) => buffer.retained_bytes(),
-                ObjectKind::RegExp(program) => program.retained_bytes(),
+                ObjectKind::RegExp(program, _) => program.retained_bytes(),
                 ObjectKind::Module(data) => data.extra_bytes(),
                 ObjectKind::WasmModule(module) => module.retained_bytes(),
                 ObjectKind::ModuleNamespace(data) => data.exports.len() * 256,
@@ -728,10 +799,13 @@ fn cell_bytes(cell: &Cell) -> usize {
                     data.reactions.capacity() * std::mem::size_of::<crate::promise::ReactionPair>()
                         + data.extra_bytes()
                 }
+                ObjectKind::FinalizationRegistry(registry) => registry.bytes(),
                 ObjectKind::PromiseAggregate(data) => {
                     data.values.capacity() * std::mem::size_of::<Value>()
+                        + data.keys.capacity() * std::mem::size_of::<crate::PropertyKey>()
                 }
                 ObjectKind::Generator(state) => state.extra_bytes(),
+                ObjectKind::Iterator(state) => state.extra_bytes(),
                 ObjectKind::AsyncGenerator(state) => state.extra_bytes(),
                 _ => 0,
             })
@@ -748,7 +822,7 @@ fn cell_bytes(cell: &Cell) -> usize {
             .saturating_add(object.symbol_order.capacity() * std::mem::size_of::<SymbolId>())
             .saturating_add(object.symbols.len() * 256),
         Cell::Environment(env) => {
-            env.bindings
+            env.pending_arguments.as_deref().map_or(0, std::mem::size_of_val) + env.bindings
                 .keys()
                 .map(|key| 192 + key.len() * 2)
                 .sum::<usize>()

@@ -581,3 +581,35 @@ fn collecting_weak_entries_frees_insertion_budget() {
         3.into()
     );
 }
+
+#[test]
+fn weak_targets_and_pending_cleanup_follow_heap_reachability() {
+    let mut vm = Vm::new();
+    vm.eval(
+        r#"
+        var called = [], token = {}, live = {}, w, sym;
+        var registry = new FinalizationRegistry(value => called.push(value));
+        (function () {
+            let target = {}, weakSymbol = Symbol();
+            w = new WeakRef(target);
+            sym = new WeakRef(weakSymbol);
+            registry.register(target, "object");
+            registry.register(weakSymbol, "symbol", token);
+            registry.register(live, "live");
+            if (w.deref() !== target || sym.deref() !== weakSymbol) throw Error();
+        })()
+    "#,
+    )
+    .unwrap();
+    vm.collect_garbage();
+    assert_eq!(vm.eval("w.deref() === undefined && sym.deref() === undefined && called.length === 0 && registry.unregister(token)").unwrap(), Value::Bool(true));
+    vm.drain_jobs(10).unwrap();
+    assert_eq!(vm.eval("called.join(',')").unwrap(), Value::from("object"));
+    vm.eval("live = undefined").unwrap();
+    vm.collect_garbage();
+    vm.drain_jobs(10).unwrap();
+    assert_eq!(
+        vm.eval("called.join(',')").unwrap(),
+        Value::from("object,live")
+    );
+}

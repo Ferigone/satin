@@ -115,10 +115,7 @@ fn import_expression_throws_before_loading_and_coercion_rejects_the_promise() {
         vm.check_syntax("new import('./x')").unwrap_err().kind,
         ErrorKind::SyntaxError
     );
-    assert_eq!(
-        vm.check_syntax("import('./x', {})").unwrap_err().kind,
-        ErrorKind::UnsupportedFeature
-    );
+    vm.check_syntax("import('./x', {})").unwrap();
 }
 
 #[test]
@@ -189,4 +186,51 @@ fn dynamic_import_settlement_follows_module_completion_order() {
         assert_eq!(vm.eval("order.join(',')").unwrap(), Value::from(expected));
         assert!(vm.take_unhandled_rejections().is_empty());
     }
+}
+
+#[test]
+fn import_options_preserve_evaluation_order_and_reject_attribute_errors() {
+    let mut vm = Vm::new();
+    vm.set_dynamic_import_hook(|vm, request| {
+        vm.call(
+            request.capability.resolve,
+            Value::Undefined,
+            &[Value::from("loaded")],
+        )?;
+        Ok(())
+    });
+    vm.eval(
+        r#"
+        let order = "";
+        const marker = {};
+        const attributes = {
+          get a() { order += "a"; return 1; },
+          get b() { order += "b"; throw marker; }
+        };
+        let reason, loaded;
+        import({toString(){order += "s"; return "x";}},
+               (order += "o", {get with(){order += "w"; return attributes;}}))
+          .catch(e => reason = e);
+        import("x", {with: {}}).then(v => loaded = v);
+    "#,
+    )
+    .unwrap();
+    vm.drain_jobs(100).unwrap();
+    assert_eq!(
+        vm.eval(r#"order === "oswab" && reason === marker && loaded === "loaded""#)
+            .unwrap(),
+        Value::Bool(true)
+    );
+    for source in [
+        "import.defer()",
+        "import.source(...x)",
+        "import.defer('x', {}, 1)",
+    ] {
+        assert_eq!(
+            vm.check_syntax(source).unwrap_err().kind,
+            ErrorKind::SyntaxError
+        );
+    }
+    vm.check_syntax("if (false) import.defer('x', {});")
+        .unwrap();
 }

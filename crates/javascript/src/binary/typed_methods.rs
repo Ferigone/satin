@@ -34,9 +34,13 @@ fn construct(
     ctor: Value,
     args: &[Value],
     minimum: usize,
+    write: bool,
 ) -> Result<(Value, TypedArray), JsError> {
     let result = vm.construct(ctor, args)?;
     let array = receiver(vm, &result)?;
+    if write {
+        vm.require_writable_buffer(array.view.buffer)?;
+    }
     if array.length(vm)? < minimum {
         return Err(JsError::type_error(
             "TypedArray constructor result is too short",
@@ -51,10 +55,11 @@ fn species(
     source: TypedArray,
     args: &[Value],
     minimum: usize,
+    write: bool,
 ) -> Result<(Value, TypedArray), JsError> {
     let fallback = vm.realm.binary.typed_constructors[source.element as usize].unwrap();
     let ctor = species_constructor(vm, this, fallback)?;
-    let (result, array) = construct(vm, ctor, args, minimum)?;
+    let (result, array) = construct(vm, ctor, args, minimum, write)?;
     source.element.check_content_type(array.element)?;
     Ok((result, array))
 }
@@ -104,11 +109,11 @@ fn subarray(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> 
         Value::Undefined,
     ];
     if array.view.bytes.is_none() && end.is_undefined() {
-        return Ok(species(vm, this, array, &params[..2], 0)?.0);
+        return Ok(species(vm, this, array, &params[..2], 0, false)?.0);
     }
     let length = end_index(vm, &end, length)?.saturating_sub(start);
     let params = [params[0].clone(), params[1].clone(), length.into()];
-    Ok(species(vm, this, array, &params, 0)?.0)
+    Ok(species(vm, this, array, &params, 0, false)?.0)
 }
 
 fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
@@ -117,7 +122,7 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let start = clamped_index(vm, &arg(args, 0), length)?;
     let end = end_index(vm, &arg(args, 1), length)?;
     let count = end.saturating_sub(start);
-    let (result, target) = species(vm, this, source, &[count.into()], count)?;
+    let (result, target) = species(vm, this, source, &[count.into()], count, true)?;
     if count == 0 {
         return Ok(result);
     }
@@ -156,6 +161,7 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
 
 fn set(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let target = receiver(vm, &this)?;
+    vm.require_writable_buffer(target.view.buffer)?;
     let offset = vm.to_number(&arg(args, 1))?.trunc();
     if offset < 0.0 {
         return Err(range_error("TypedArray.set offset is negative"));
@@ -228,6 +234,7 @@ fn copy_converted(
 
 fn copy_within(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let array = receiver(vm, &this)?;
+    vm.require_writable_buffer(array.view.buffer)?;
     let length = array.length(vm)?;
     let target = clamped_index(vm, &arg(args, 0), length)?;
     let start = clamped_index(vm, &arg(args, 1), length)?;
@@ -252,6 +259,7 @@ fn copy_within(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsErro
 
 fn fill(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let array = receiver(vm, &this)?;
+    vm.require_writable_buffer(array.view.buffer)?;
     let length = array.length(vm)?;
     let bits = array.element.coerce_bits(vm, &arg(args, 0))?;
     let start = clamped_index(vm, &arg(args, 1), length)?;
@@ -279,6 +287,9 @@ fn fill(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
 
 fn reverse(vm: &mut Vm, this: Value, copy: bool) -> Result<Value, JsError> {
     let array = receiver(vm, &this)?;
+    if !copy {
+        vm.require_writable_buffer(array.view.buffer)?;
+    }
     let range = array.range(vm)?;
     let width = array.element.width();
     let length = range.len() / width;
@@ -350,14 +361,14 @@ fn join(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     })
 }
 
-fn to_locale_string(vm: &mut Vm, this: Value, _: &[Value]) -> Result<Value, JsError> {
+fn to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let array = receiver(vm, &this)?;
     let length = array.length(vm)?;
     join_indexed_properties(
         vm,
         length,
         &",".into(),
-        Some("toLocaleString"),
+        Some(&[arg(args, 0), arg(args, 1)]),
         |vm, index| vm.read_typed_element(array, index),
     )
 }
@@ -426,7 +437,14 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], mode: Visit) -> Result<Value,
     let callback = require_callback(vm, arg(args, 0))?;
     let context = arg(args, 1);
     let output = if matches!(mode, Visit::Map) {
-        Some(species(vm, this.clone(), source, &[length.into()], length)?)
+        Some(species(
+            vm,
+            this.clone(),
+            source,
+            &[length.into()],
+            length,
+            true,
+        )?)
     } else {
         None
     };
@@ -466,7 +484,8 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], mode: Visit) -> Result<Value,
         Visit::Find { index: true, .. } => Ok((-1).into()),
         Visit::Map => Ok(output.unwrap().0),
         Visit::Filter => {
-            let (value, target) = species(vm, this, source, &[kept.len().into()], kept.len())?;
+            let (value, target) =
+                species(vm, this, source, &[kept.len().into()], kept.len(), true)?;
             for (index, source) in kept.iter().enumerate() {
                 vm.tick()?;
                 vm.write_typed_value(target, index, source)?;
@@ -536,7 +555,7 @@ fn from(vm: &mut Vm, ctor: Value, args: &[Value]) -> Result<Value, JsError> {
     let source = vm.coerce_object(source)?;
     let length = vm.get_property(source.clone(), "length")?;
     let length = to_length(vm, &length)?;
-    let (result, target) = construct(vm, ctor, &[length.into()], length)?;
+    let (result, target) = construct(vm, ctor, &[length.into()], length, true)?;
     for index in 0..length {
         vm.tick()?;
         let value = vm.get_property(source.clone(), &index.to_string())?;
@@ -553,7 +572,7 @@ fn create_from_iter(
     context: Value,
 ) -> Result<Value, JsError> {
     let length = values.len();
-    let (result, target) = construct(vm, ctor, &[length.into()], length)?;
+    let (result, target) = construct(vm, ctor, &[length.into()], length, true)?;
     for (index, value) in values.enumerate() {
         vm.tick()?;
         store_mapped(vm, target, index, value, &callback, &context)?;
@@ -583,6 +602,9 @@ fn sort(vm: &mut Vm, this: Value, args: &[Value], copy: bool) -> Result<Value, J
         require_callback(vm, comparator.clone())?;
     }
     let array = receiver(vm, &this)?;
+    if !copy {
+        vm.require_writable_buffer(array.view.buffer)?;
+    }
     let length = array.length(vm)?;
     let (result, target) = if copy {
         same_type(vm, array, length)?

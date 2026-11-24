@@ -1,3 +1,4 @@
+pub(crate) mod annex;
 mod classes;
 mod literals;
 pub(crate) mod modules;
@@ -15,6 +16,12 @@ const MAX_PARSER_DEPTH: usize = 24;
 const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImportPhase {
+    Evaluation,
+    Defer,
+    Source,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum VarKind {
     Var,
@@ -52,6 +59,7 @@ impl FunctionKind {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Function {
+    pub source: std::rc::Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
@@ -59,10 +67,12 @@ pub(crate) struct Function {
     pub kind: FunctionKind,
     pub strict: bool,
     pub self_binding: bool,
+    pub annex_binding: bool,
     pub method: bool,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Class {
+    pub source: std::rc::Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub heritage: Option<Box<Expr>>,
     pub elements: Vec<ClassElement>,
@@ -166,14 +176,14 @@ pub(crate) enum Expr {
     Super,
     NewTarget,
     ImportMeta,
-    DynamicImport(Box<Expr>),
+    DynamicImport(ImportPhase, Box<Expr>, Option<Box<Expr>>),
     Await(Box<Expr>),
     Yield {
         value: Option<Box<Expr>>,
         delegate: bool,
         asynchronous: bool,
     },
-    Class(Class),
+    Class(Box<Class>),
     Array(Vec<Option<Expr>>, bool),
     Object(Vec<ObjectEntry>, bool),
     Destructure(Pattern, Box<Expr>),
@@ -181,7 +191,7 @@ pub(crate) enum Expr {
     Chain(Box<Expr>, Vec<ChainLink>),
     Group(Box<Expr>),
     Spread(Box<Expr>),
-    Function(Function),
+    Function(Box<Function>),
     Member(Box<Expr>, Box<Expr>),
     PrivateMember(Box<Expr>, JsString),
     PrivateIn(JsString, Box<Expr>),
@@ -199,6 +209,7 @@ pub(crate) type LabelId = std::num::NonZeroU32;
 #[derive(Clone, Debug)]
 pub(crate) enum Stmt {
     Empty,
+    EscapedStringStatement(JsString),
     Expression(Expr),
     Block(Vec<Stmt>),
     Variable(VarKind, Vec<(Pattern, Option<Expr>)>),
@@ -207,10 +218,11 @@ pub(crate) enum Stmt {
     DefaultExport(Expr),
     DefaultFunction(Function),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
+    With(Expr, Box<Stmt>),
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
     For(Option<Box<Stmt>>, Option<Expr>, Option<Expr>, Box<Stmt>),
-    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>),
+    ForIn(Option<VarKind>, Pattern, Expr, Box<Stmt>, Option<Box<Expr>>),
     ForOf(Option<VarKind>, Pattern, Expr, Box<Stmt>, bool),
     Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
     Label(LabelId, Vec<JsString>, Box<Stmt>),
@@ -235,17 +247,20 @@ pub(crate) struct EvalContext {
 pub(crate) fn parse(source: &str) -> Result<Vec<Stmt>, JsError> {
     // Function constructor callers reserve the combined wrapped sources before
     // parsing their separate parameter and body goals.
-    parse_script(source, EvalContext::default(), usize::MAX)
+    parse_script(source, EvalContext::default(), usize::MAX, false)
 }
 pub(crate) fn parse_script(
     source: &str,
     context: EvalContext,
     compilation_bytes: usize,
+    inherited_strict: bool,
 ) -> Result<Vec<Stmt>, JsError> {
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
-        lexer: Lexer::new(source, compilation_bytes),
+        lexer: Lexer::new(source, compilation_bytes, true),
         function_depth: 0,
+        legacy_literals: 0,
+        last_end: 0,
         loop_depth: 0,
         switch_depth: 0,
         labels: Vec::new(),
@@ -270,11 +285,16 @@ pub(crate) fn parse_script(
     while !p.is_eof() {
         body.push(p.statement()?);
     }
+    if p.legacy_literals != 0 && (inherited_strict || has_strict_directive(&body)) {
+        return Err(p.error("Legacy literal in strict code"));
+    }
+    annex::mark(&mut body, []);
     Ok(body)
 }
 pub(crate) fn has_strict_directive(body: &[Stmt]) -> bool {
     for stmt in body {
         match stmt {
+            Stmt::EscapedStringStatement(_) => continue,
             Stmt::Expression(Expr::Literal(Value::String(s))) => {
                 if s == &JsString::from("use strict") {
                     return true;
@@ -316,6 +336,8 @@ struct Parser {
     tokens: VecDeque<Token>,
     lexer: Lexer,
     function_depth: usize,
+    legacy_literals: usize,
+    last_end: usize,
     loop_depth: usize,
     switch_depth: usize,
     labels: Vec<ActiveLabel>,
@@ -357,7 +379,8 @@ impl Parser {
     }
 
     fn advance(&mut self, count: usize) {
-        drop(self.tokens.drain(..count));
+        if count != 0 { self.last_end = self.tokens[count - 1].end; }
+        self.legacy_literals += self.tokens.drain(..count).filter(|t| t.legacy_literal).count();
         self.fill();
     }
 
@@ -491,6 +514,7 @@ impl Parser {
         Ok(statement)
     }
     fn statement_inner(&mut self) -> Result<Stmt, JsError> {
+        let start = self.current().start;
         if self.label_ahead() {
             return self.labelled_statement();
         }
@@ -517,71 +541,30 @@ impl Parser {
             return Ok(Stmt::Variable(VarKind::Const, d));
         }
         if self.eat("class") {
-            let class = self.class(true)?;
+            let class = self.class(start, true)?;
             return Ok(Stmt::Class(class.name.clone().unwrap(), class));
         }
         if self.async_function_ahead() {
             self.advance(2);
-            return self.function(true, true).map(Stmt::Function);
+            return self.function(start, true, true).map(Stmt::Function);
         }
         if self.eat("function") {
-            return self.function(false, true).map(Stmt::Function);
+            return self.function(start, false, true).map(Stmt::Function);
         }
         if self.eat("if") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            let yes = Box::new(self.if_clause()?);
-            let no = if self.eat("else") {
-                Some(Box::new(self.if_clause()?))
-            } else {
-                None
-            };
-            return Ok(Stmt::If(test, yes, no));
+            return self.if_statement();
         }
         if self.eat("while") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.loop_depth += 1;
-            let body = self.controlled_statement();
-            self.loop_depth -= 1;
-            return Ok(Stmt::While(test, Box::new(body?)));
+            return self.while_statement();
         }
         if self.eat("do") {
-            self.loop_depth += 1;
-            let body = self.controlled_statement();
-            self.loop_depth -= 1;
-            let body = Box::new(body?);
-            self.expect("while")?;
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.eat(";");
-            return Ok(Stmt::DoWhile(body, test));
+            return self.do_statement();
         }
         if self.eat("for") {
             return self.for_statement();
         }
         if self.eat("return") {
-            if self.function_depth == 0 {
-                return Err(self.error("Return outside a function"));
-            }
-            let expr = if self.at(";") || self.at("}") || self.is_eof() || self.current().newline {
-                None
-            } else {
-                let value = self.expression(1)?;
-                let value = if self.yield_context == KeywordContext::Body
-                    && self.await_context == KeywordContext::Body
-                {
-                    self.checked_expression(Expr::Await(Box::new(value)))?
-                } else {
-                    value
-                };
-                Some(value)
-            };
-            self.semi()?;
-            return Ok(Stmt::Return(expr));
+            return self.return_statement();
         }
         if self.eat("break") {
             let target = self.jump_target(false)?;
@@ -602,61 +585,10 @@ impl Parser {
             return Ok(Stmt::Throw(expr));
         }
         if self.eat("try") {
-            self.expect("{")?;
-            let body = Box::new(Stmt::Block(self.block_contents()?));
-            let catch = if self.eat("catch") {
-                let binding = if self.eat("(") {
-                    let name = self.binding_pattern()?;
-                    self.expect(")")?;
-                    Some(name)
-                } else {
-                    None
-                };
-                self.expect("{")?;
-                Some((binding, Box::new(Stmt::Block(self.block_contents()?))))
-            } else {
-                None
-            };
-            let finally = if self.eat("finally") {
-                self.expect("{")?;
-                Some(Box::new(Stmt::Block(self.block_contents()?)))
-            } else {
-                None
-            };
-            if catch.is_none() && finally.is_none() {
-                return Err(self.error("Try requires catch or finally"));
-            }
-            return Ok(Stmt::Try(body, catch, finally));
+            return self.try_statement();
         }
         if self.eat("switch") {
-            self.expect("(")?;
-            let test = self.expression(1)?;
-            self.expect(")")?;
-            self.expect("{")?;
-            let mut cases = Vec::new();
-            let mut default = false;
-            self.switch_depth += 1;
-            while !self.eat("}") {
-                let test = if self.eat("case") {
-                    Some(self.expression(1)?)
-                } else if self.eat("default") {
-                    if default {
-                        return Err(self.error("Duplicate default clause"));
-                    }
-                    default = true;
-                    None
-                } else {
-                    return Err(self.error("Expected switch case or default"));
-                };
-                self.expect(":")?;
-                let mut body = Vec::new();
-                while !self.at("case") && !self.at("default") && !self.at("}") {
-                    body.push(self.statement()?);
-                }
-                cases.push((test, body));
-            }
-            self.switch_depth -= 1;
-            return Ok(Stmt::Switch(test, cases));
+            return self.switch_statement();
         }
         if self.eat("debugger") {
             self.semi()?;
@@ -674,16 +606,134 @@ impl Parser {
         {
             return Err(self.error("Module declaration outside module top level"));
         }
-        for unsupported in ["with", "export"] {
-            if self.at(unsupported) {
-                return Err(self.error(format!("'{unsupported}' is not implemented")));
-            }
+        if self.eat("with") {
+            self.expect("(")?;
+            let object = self.expression(1)?;
+            self.expect(")")?;
+            return Ok(Stmt::With(object, Box::new(self.controlled_statement()?)));
         }
+        if self.at("export") {
+            return Err(self.error("An export declaration requires module code"));
+        }
+        let escaped = self.current().escaped_string;
         let e = self.expression(1)?;
         self.semi()?;
+        if escaped && let Expr::Literal(Value::String(value)) = e {
+            return Ok(Stmt::EscapedStringStatement(value));
+        }
         Ok(Stmt::Expression(e))
     }
 
+    fn if_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        let yes = Box::new(self.if_clause()?);
+        let no = if self.eat("else") {
+            Some(Box::new(self.if_clause()?))
+        } else {
+            None
+        };
+        Ok(Stmt::If(test, yes, no))
+    }
+    fn while_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.loop_depth += 1;
+        let body = self.controlled_statement();
+        self.loop_depth -= 1;
+        Ok(Stmt::While(test, Box::new(body?)))
+    }
+    fn do_statement(&mut self) -> Result<Stmt, JsError> {
+        self.loop_depth += 1;
+        let body = self.controlled_statement();
+        self.loop_depth -= 1;
+        let body = Box::new(body?);
+        self.expect("while")?;
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.eat(";");
+        Ok(Stmt::DoWhile(body, test))
+    }
+    fn return_statement(&mut self) -> Result<Stmt, JsError> {
+        if self.function_depth == 0 {
+            return Err(self.error("Return outside a function"));
+        }
+        let expr = if self.at(";") || self.at("}") || self.is_eof() || self.current().newline {
+            None
+        } else {
+            let value = self.expression(1)?;
+            let value = if self.yield_context == KeywordContext::Body
+                && self.await_context == KeywordContext::Body
+            {
+                self.checked_expression(Expr::Await(Box::new(value)))?
+            } else {
+                value
+            };
+            Some(value)
+        };
+        self.semi()?;
+        Ok(Stmt::Return(expr))
+    }
+    fn try_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("{")?;
+        let body = Box::new(Stmt::Block(self.block_contents()?));
+        let catch = if self.eat("catch") {
+            let binding = if self.eat("(") {
+                let name = self.binding_pattern()?;
+                self.expect(")")?;
+                Some(name)
+            } else {
+                None
+            };
+            self.expect("{")?;
+            Some((binding, Box::new(Stmt::Block(self.block_contents()?))))
+        } else {
+            None
+        };
+        let finally = if self.eat("finally") {
+            self.expect("{")?;
+            Some(Box::new(Stmt::Block(self.block_contents()?)))
+        } else {
+            None
+        };
+        if catch.is_none() && finally.is_none() {
+            return Err(self.error("Try requires catch or finally"));
+        }
+        Ok(Stmt::Try(body, catch, finally))
+    }
+    fn switch_statement(&mut self) -> Result<Stmt, JsError> {
+        self.expect("(")?;
+        let test = self.expression(1)?;
+        self.expect(")")?;
+        self.expect("{")?;
+        let mut cases = Vec::new();
+        let mut default = false;
+        self.switch_depth += 1;
+        while !self.eat("}") {
+            let test = if self.eat("case") {
+                Some(self.expression(1)?)
+            } else if self.eat("default") {
+                if default {
+                    return Err(self.error("Duplicate default clause"));
+                }
+                default = true;
+                None
+            } else {
+                return Err(self.error("Expected switch case or default"));
+            };
+            self.expect(":")?;
+            let mut body = Vec::new();
+            while !self.at("case") && !self.at("default") && !self.at("}") {
+                body.push(self.statement()?);
+            }
+            cases.push((test, body));
+        }
+        self.switch_depth -= 1;
+        Ok(Stmt::Switch(test, cases))
+    }
     fn label_ahead(&self) -> bool {
         matches!(
             self.current().kind,
@@ -890,11 +940,15 @@ impl Parser {
             if enumerate && asynchronous {
                 return Err(self.error("for await requires of"));
             }
+            let mut initializer = None;
             let (kind, target) = match init.map(|stmt| *stmt) {
                 Some(Stmt::Variable(kind, mut declarations))
-                    if declarations.len() == 1 && declarations[0].1.is_none() =>
+                    if declarations.len() == 1 && (declarations[0].1.is_none() ||
+                        (enumerate && kind == VarKind::Var && matches!(declarations[0].0, Pattern::Name(_)))) =>
                 {
-                    (Some(kind), declarations.remove(0).0)
+                    let (target, value) = declarations.remove(0);
+                    initializer = value.map(Box::new);
+                    (Some(kind), target)
                 }
                 Some(Stmt::Expression(target))
                     if (enumerate || !disallowed_of_target)
@@ -902,7 +956,12 @@ impl Parser {
                             || matches!(target, Expr::Array(..) | Expr::Object(..))) =>
                 {
                     // Bare array and object literals must also parse as assignment patterns.
-                    (None, self.pattern(target, false)?)
+                    let pattern = if call_assignment_target(&target) {
+                        Pattern::Target(Box::new(target))
+                    } else {
+                        self.pattern(target, false)?
+                    };
+                    (None, pattern)
                 }
                 Some(Stmt::Expression(_)) => {
                     return Err(self.error("Invalid iteration assignment target"));
@@ -918,7 +977,7 @@ impl Parser {
             self.loop_depth -= 1;
             let body = Box::new(body?);
             return Ok(if enumerate {
-                Stmt::ForIn(kind, target, source, body)
+                Stmt::ForIn(kind, target, source, body, initializer)
             } else {
                 Stmt::ForOf(kind, target, source, body, asynchronous)
             });
@@ -952,7 +1011,7 @@ impl Parser {
             (false, false) => FunctionKind::Ordinary,
         }
     }
-    fn function(&mut self, is_async: bool, require_name: bool) -> Result<Function, JsError> {
+    fn function(&mut self, start: usize, is_async: bool, require_name: bool) -> Result<Function, JsError> {
         let kind = self.function_kind(is_async);
         let old_counts = (self.await_count, self.yield_count);
         let name = if !self.at("(") {
@@ -989,7 +1048,7 @@ impl Parser {
         let result = (|| {
             self.expect("(")?;
             let params = self.parameters()?;
-            let mut f = self.function_body(name, params, false, kind)?;
+            let mut f = self.function_body(start, name, params, false, kind)?;
             f.self_binding = !require_name && f.name.is_some();
             Ok(f)
         })();
@@ -1007,11 +1066,13 @@ impl Parser {
     }
     fn function_body(
         &mut self,
+        start: usize,
         name: Option<JsString>,
         params: Vec<Parameter>,
         arrow: bool,
         kind: FunctionKind,
     ) -> Result<Function, JsError> {
+        let legacy_before = self.legacy_literals;
         let old_loop = self.loop_depth;
         let old_switch = self.switch_depth;
         let old_labels = std::mem::take(&mut self.labels);
@@ -1047,8 +1108,15 @@ impl Parser {
         self.await_count = old_await_count;
         self.yield_context = old_yield_context;
         self.yield_count = old_yield_count;
-        let body = result?;
+        let mut body = result?;
         let strict = has_strict_directive(&body);
+        if strict && self.legacy_literals != legacy_before {
+            return Err(self.error("Legacy literal in strict function"));
+        }
+        if !strict {
+            let excluded = params.iter().flat_map(|p| bound_names(&p.pattern)).chain([JsString::from("arguments")]);
+            annex::mark(&mut body, excluded);
+        }
         if strict && !params.iter().all(simple_parameter) {
             return Err(self.error("Use strict directive with a non-simple parameter list"));
         }
@@ -1063,6 +1131,7 @@ impl Parser {
             }
         }
         Ok(Function {
+            source: self.lexer.span(start, self.last_end),
             name,
             params,
             body,
@@ -1070,6 +1139,7 @@ impl Parser {
             kind,
             strict,
             self_binding: false,
+            annex_binding: false,
             method: false,
         })
     }
@@ -1109,6 +1179,7 @@ impl Parser {
 
     fn arrow_from_cover(
         &mut self,
+        start: usize,
         parts: Vec<Expr>,
         trailing: bool,
         is_async: bool,
@@ -1153,8 +1224,8 @@ impl Parser {
         } else {
             FunctionKind::Ordinary
         };
-        let function = self.function_body(None, params, true, kind)?;
-        let arrow = self.checked_expression(Expr::Function(function))?;
+        let function = self.function_body(start, None, params, true, kind)?;
+        let arrow = self.checked_expression(Expr::Function(Box::new(function)))?;
         // An arrow is an AssignmentExpression, so a bare arrow can start
         // a comma expression but cannot take a binary or postfix operator.
         if allow_comma && self.at(",") {
@@ -1327,6 +1398,7 @@ impl Parser {
         min: u8,
         stop_before_simple_assignment: bool,
     ) -> Result<Expr, JsError> {
+        let start = self.current().start;
         let async_prefix =
             min <= 2 && self.at("async") && self.lookahead(1).is_some_and(|next| !next.newline);
         let async_word_arrow = async_prefix && self.identifier_arrow_at(1);
@@ -1337,6 +1409,7 @@ impl Parser {
             let name = self.name()?;
             self.expect("=>")?;
             return self.arrow_from_cover(
+                start,
                 vec![Expr::Identifier(name)],
                 false,
                 async_word_arrow,
@@ -1373,7 +1446,7 @@ impl Parser {
                     return Err(self.error("await is not allowed in arrow parameters"));
                 }
                 self.advance(1);
-                return self.arrow_from_cover(parts, trailing, async_parens, min == 1);
+                return self.arrow_from_cover(start, parts, trailing, async_parens, min == 1);
             }
             let primary = if async_parens {
                 Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
@@ -1425,9 +1498,9 @@ impl Parser {
             if simple_assignment && stop_before_simple_assignment {
                 break;
             }
-            if op == "**" && matches!(left, Expr::Await(_)) {
+            if op == "**" && matches!(left, Expr::Await(_) | Expr::Unary(..)) {
                 return Err(
-                    self.error("Await on the left side of exponentiation requires parentheses")
+                    self.error("A unary expression on the left side of exponentiation requires parentheses")
                 );
             }
             self.advance(1);
@@ -1576,7 +1649,7 @@ impl Parser {
         }
         for op in ["!", "~", "+", "-", "typeof", "void", "delete", "++", "--"] {
             if self.eat(op) {
-                let e = self.expression(14)?;
+                let e = self.expression(15)?;
                 if matches!(op, "++" | "--") {
                     if !assignable(&e) {
                         return Err(self.error("Invalid update target"));
@@ -1589,28 +1662,29 @@ impl Parser {
                 return self.checked_expression(Expr::Unary(op, Box::new(e)));
             }
         }
-        let e = if self.eat("new") {
+        let mut constructors = 0;
+        let mut e = loop {
+            if !self.eat("new") { break self.primary()?; }
             if self.eat(".") {
                 self.expect("target")?;
                 if !self.new_target {
                     return Err(self.error("new.target outside a function"));
                 }
-                return self.postfix(Expr::NewTarget, true);
+                break Expr::NewTarget;
             }
-            let primary = self.primary()?;
-            if matches!(primary, Expr::DynamicImport(_)) {
-                return Err(self.error("A dynamic import call cannot follow new"));
+            constructors += 1;
+            if constructors > MAX_AST_DEPTH {
+                return Err(self.error("Constructor nesting limit exceeded"));
             }
-            let constructor = self.postfix(primary, false)?;
-            let args = if self.eat("(") {
-                self.arguments()?
-            } else {
-                Vec::new()
-            };
-            self.checked_expression(Expr::New(Box::new(constructor), args))?
-        } else {
-            self.primary()?
         };
+        if constructors > 0 && matches!(e, Expr::DynamicImport(..)) {
+            return Err(self.error("A dynamic import call cannot follow new"));
+        }
+        for _ in 0..constructors {
+            let constructor = self.postfix(e, false)?;
+            let args = if self.eat("(") { self.arguments()? } else { Vec::new() };
+            e = self.checked_expression(Expr::New(Box::new(constructor), args))?;
+        }
         self.finish_unary(e)
     }
     fn finish_unary(&mut self, primary: Expr) -> Result<Expr, JsError> {
@@ -1782,6 +1856,7 @@ impl Parser {
         result
     }
     fn primary_inner(&mut self) -> Result<Expr, JsError> {
+        let start = self.current().start;
         if self.at("yield") && self.yield_context != KeywordContext::None {
             return Err(self.error(
                 "yield is only allowed here as an assignment expression in a generator body",
@@ -1798,6 +1873,7 @@ impl Parser {
                 error.column = Some(slash.column);
                 error
             })?;
+            self.last_end = self.lexer.position();
             self.tokens.clear();
             self.fill();
             return Ok(Expr::RegExp(program));
@@ -1807,7 +1883,7 @@ impl Parser {
             return Err(self.error("Unexpected '...' in an expression"));
         }
         if self.eat("class") {
-            return self.class(false).map(Expr::Class);
+            return self.class(start, false).map(|class| Expr::Class(Box::new(class)));
         }
         if self.eat("super") {
             if !self.super_property && !self.super_call {
@@ -1822,21 +1898,25 @@ impl Parser {
             return Ok(Expr::Super);
         }
         if self.eat("import") {
-            if self.eat("(") {
-                if self.at("...") {
-                    return Err(self.error("Dynamic import does not accept spread arguments"));
-                }
-                let specifier = self.expression_in(2)?;
-                if self.eat(",") && !self.at(")") {
-                    return Err(self.error("Dynamic import options are not implemented"));
-                }
-                self.expect(")")?;
-                return self.checked_expression(Expr::DynamicImport(Box::new(specifier)));
-            }
-            if self.at(".") && self.lookahead(1).is_some_and(|token| {
-                matches!(&token.kind, TokenKind::Word(phase) if phase == "defer" || phase == "source")
+            let phase = if self.at(".") && self.lookahead(1).is_some_and(|token| {
+                matches!(&token.kind, TokenKind::Word(name) if name == "defer" || name == "source")
             }) {
-                return Err(self.error("Deferred and source-phase dynamic imports are not implemented"));
+                self.expect(".")?;
+                if self.eat("defer") { Some(ImportPhase::Defer) }
+                else { self.expect("source")?; Some(ImportPhase::Source) }
+            } else if self.at("(") { Some(ImportPhase::Evaluation) } else { None };
+            if let Some(phase) = phase {
+                self.expect("(")?;
+                let specifier = Box::new(self.expression_in(2)?);
+                let options = if self.eat(",") && !self.at(")") {
+                    let options = self.expression_in(2)?;
+                    self.eat(",");
+                    Some(Box::new(options))
+                } else {
+                    None
+                };
+                self.expect(")")?;
+                return self.checked_expression(Expr::DynamicImport(phase, specifier, options));
             }
             if !self.module_goal {
                 return Err(self.error("import.meta outside a module"));
@@ -1861,12 +1941,12 @@ impl Parser {
         }
         if self.async_function_ahead() {
             self.advance(2);
-            let function = self.function(true, false)?;
-            return self.checked_expression(Expr::Function(function));
+            let function = self.function(start, true, false)?;
+            return self.checked_expression(Expr::Function(Box::new(function)));
         }
         if self.eat("function") {
-            let function = self.function(false, false)?;
-            return self.checked_expression(Expr::Function(function));
+            let function = self.function(start, false, false)?;
+            return self.checked_expression(Expr::Function(Box::new(function)));
         }
         if self.eat("this") {
             return Ok(Expr::This);
@@ -2019,6 +2099,10 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Expression(a), child_depth));
                     pending.push((Ast::Expression(b), child_depth));
                 }
+                Expr::DynamicImport(_, value, options) => {
+                    pending.push((Ast::Expression(value), child_depth));
+                    pending.extend(options.iter().map(|e| (Ast::Expression(e), child_depth)));
+                }
                 Expr::Sequence(terms) => {
                     pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
@@ -2031,7 +2115,6 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 | Expr::Spread(e)
                 | Expr::Group(e)
                 | Expr::Await(e)
-                | Expr::DynamicImport(e)
                 | Expr::PrivateMember(e, _)
                 | Expr::PrivateIn(_, e) => pending.push((Ast::Expression(e), child_depth)),
                 Expr::Yield { value, .. } => {
@@ -2044,7 +2127,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 }
             },
             Ast::Statement(statement) => match statement {
-                Stmt::Empty | Stmt::Break(_) | Stmt::Continue(_) => {}
+                Stmt::Empty | Stmt::EscapedStringStatement(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
                 Stmt::Label(_, _, item) => pending.push((Ast::Statement(item), child_depth)),
                 Stmt::Class(_, class) => push_class_ast(class, child_depth, &mut pending),
                 Stmt::DefaultExport(value) => pending.push((Ast::Expression(value), child_depth)),
@@ -2079,11 +2162,14 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Statement(yes), child_depth));
                     pending.extend(no.iter().map(|s| (Ast::Statement(s), child_depth)));
                 }
-                Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
+                Stmt::With(test, body) | Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
                     pending.push((Ast::Expression(test), child_depth));
                     pending.push((Ast::Statement(body), child_depth));
                 }
-                Stmt::ForIn(_, pattern, test, body) | Stmt::ForOf(_, pattern, test, body, _) => {
+                Stmt::ForIn(_, pattern, test, body, _) | Stmt::ForOf(_, pattern, test, body, _) => {
+                    if let Stmt::ForIn(_, _, _, _, Some(initializer)) = statement {
+                        pending.push((Ast::Expression(initializer), child_depth));
+                    }
                     pending.push((Ast::Pattern(pattern), child_depth));
                     pending.push((Ast::Expression(test), child_depth));
                     pending.push((Ast::Statement(body), child_depth));
@@ -2121,10 +2207,16 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
     true
 }
 
+pub(crate) fn call_assignment_target(mut e: &Expr) -> bool {
+    while let Expr::Group(inner) = e { e = inner; }
+    matches!(e, Expr::Call(callee, _) if !matches!(callee.as_ref(), Expr::Super))
+}
+
 fn assignable(e: &Expr) -> bool {
     match e {
         Expr::Identifier(_) | Expr::Member(..) | Expr::PrivateMember(..) => true,
         Expr::Group(e) => assignable(e),
+        _ if call_assignment_target(e) => true,
         _ => false,
     }
 }

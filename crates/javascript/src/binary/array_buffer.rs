@@ -52,6 +52,7 @@ impl Vm {
         length: Value,
         fixed: bool,
     ) -> Result<Value, JsError> {
+        self.require_unshared(id)?;
         let length = if length.is_undefined() {
             self.buffer_data(id)?.bytes.as_ref().map_or(0, Vec::len)
         } else {
@@ -59,6 +60,9 @@ impl Vm {
         };
         let buffer = self.buffer_data(id)?;
         let bytes = buffer.bytes.as_ref().ok_or_else(type_error)?;
+        if buffer.immutable {
+            return Err(JsError::type_error("Cannot transfer immutable ArrayBuffer"));
+        }
         if buffer.wasm {
             return Err(JsError::type_error("Cannot transfer a WebAssembly buffer"));
         }
@@ -121,7 +125,7 @@ pub(super) fn install(vm: &mut Vm) {
             .into())
     });
     species_getter(vm, constructor);
-    let getters: [BufferGetter; 4] = [
+    let getters: [BufferGetter; 5] = [
         ("byteLength", "get byteLength", |buffer| {
             buffer.bytes.as_ref().map_or(0, Vec::len).into()
         }),
@@ -135,6 +139,9 @@ pub(super) fn install(vm: &mut Vm) {
         ("resizable", "get resizable", |buffer| {
             buffer.maximum.is_some().into()
         }),
+        ("immutable", "get immutable", |buffer| {
+            buffer.immutable.into()
+        }),
         ("detached", "get detached", |buffer| {
             buffer.bytes.is_none().into()
         }),
@@ -147,12 +154,14 @@ pub(super) fn install(vm: &mut Vm) {
             name,
             move |vm, this, _| {
                 let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+                vm.require_unshared(id)?;
                 Ok(read(vm.buffer_data(id)?))
             },
         );
     }
     method(vm, prototype.clone(), "resize", 1, |vm, this, args| {
         let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+        vm.require_unshared(id)?;
         let maximum = vm
             .buffer_data(id)?
             .maximum
@@ -169,6 +178,7 @@ pub(super) fn install(vm: &mut Vm) {
     });
     method(vm, prototype.clone(), "slice", 2, move |vm, this, args| {
         let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
+        vm.require_unshared(id)?;
         let length = vm
             .buffer_data(id)?
             .bytes
@@ -186,6 +196,8 @@ pub(super) fn install(vm: &mut Vm) {
         let create = species_constructor(vm, this, default_constructor)?;
         let result = vm.construct(create, &[count.into()])?;
         let destination = kind_id(vm, &result, "Invalid ArrayBuffer species result")?;
+        vm.require_unshared(destination)?;
+        vm.require_writable_buffer(destination)?;
         if id == destination
             || vm
                 .buffer_data(destination)?
@@ -209,11 +221,53 @@ pub(super) fn install(vm: &mut Vm) {
         }
         Ok(result)
     });
-    for (name, fixed) in [("transfer", false), ("transferToFixedLength", true)] {
+    method(
+        vm,
+        prototype.clone(),
+        "sliceToImmutable",
+        2,
+        move |vm, this, args| {
+            let source = kind_id(vm, &this, "Expected an ArrayBuffer")?;
+            vm.require_unshared(source)?;
+            let length = vm
+                .buffer_data(source)?
+                .bytes
+                .as_ref()
+                .ok_or_else(type_error)?
+                .len();
+            let start = clamped_index(vm, &arg(args, 0), length)?;
+            let end = if arg(args, 1).is_undefined() {
+                length
+            } else {
+                clamped_index(vm, &arg(args, 1), length)?
+            };
+            let current = vm
+                .buffer_data(source)?
+                .bytes
+                .as_ref()
+                .ok_or_else(type_error)?
+                .len();
+            if end > current {
+                return Err(range_error("ArrayBuffer shrank below the requested slice"));
+            }
+            let bytes = vm.copy_binary_range(source, start.min(end)..end)?;
+            let result = vm.create_buffer(bytes, None, intrinsic)?;
+            vm.buffer_data_mut(result.as_object().unwrap())?.immutable = true;
+            Ok(result)
+        },
+    );
+    for (name, fixed) in [
+        ("transfer", false),
+        ("transferToFixedLength", true),
+        ("transferToImmutable", true),
+    ] {
         method(vm, prototype.clone(), name, 0, move |vm, this, args| {
             let id = kind_id(vm, &this, "ArrayBuffer receiver must be an object")?;
-            vm.buffer_data(id)?;
-            vm.transfer_buffer(id, arg(args, 0), fixed)
+            let result = vm.transfer_buffer(id, arg(args, 0), fixed)?;
+            if name == "transferToImmutable" {
+                vm.buffer_data_mut(result.as_object().unwrap())?.immutable = true;
+            }
+            Ok(result)
         });
     }
     tag(vm, prototype, "ArrayBuffer");

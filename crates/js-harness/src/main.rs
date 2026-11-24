@@ -14,7 +14,7 @@ use std::{
     collections::BTreeMap,
     io::{self, BufRead, Write},
     rc::Rc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const PROTOCOL_LIMIT: usize = 16 * 1024 * 1024;
@@ -33,6 +33,7 @@ struct Request {
     #[serde(default)]
     async_test: bool,
     max_instructions: Option<u64>,
+    timeout_ms: Option<u64>,
     #[serde(default)]
     module_goal: bool,
     #[serde(default)]
@@ -83,7 +84,26 @@ fn value_json(value: &Value) -> Json {
     }
 }
 
-fn install_test262_host(vm: &mut Vm, identifier: String) -> Result<(), JsError> {
+fn install_test262_host(
+    vm: &mut Vm,
+    identifier: String,
+    messages: Rc<RefCell<Vec<String>>>,
+    printed_status: Rc<RefCell<AsyncStatus>>,
+) -> Result<Value, JsError> {
+    let next_identifier = identifier.clone();
+    let child_messages = messages.clone();
+    let child_status = printed_status.clone();
+    let create = vm.new_native_function("createRealm", move |vm, _, _| {
+        let (realm, _) = vm.new_realm()?;
+        vm.with_realm(realm, |vm| {
+            install_test262_host(
+                vm,
+                next_identifier.clone(),
+                child_messages.clone(),
+                child_status.clone(),
+            )
+        })
+    });
     let host = vm.new_object();
     let eval_script = vm.new_native_function("evalScript", move |vm, _, args| {
         let Some(Value::String(source)) = args.first() else {
@@ -120,27 +140,16 @@ fn install_test262_host(vm: &mut Vm, identifier: String) -> Result<(), JsError> 
     vm.define_data_property(host.clone(), "evalScript", eval_script, true, true, true)?;
     vm.define_data_property(host.clone(), "detachArrayBuffer", detach, true, true, true)?;
     vm.define_data_property(host.clone(), "global", vm.global(), true, true, true)?;
+    vm.define_data_property(host.clone(), "createRealm", create, true, true, true)?;
+    let html_dda = vm.new_html_dda(|_, _, args| {
+        Ok(if args.is_empty() || args[0].as_string().is_some_and(|s| s.is_empty()) {
+            Value::Null
+        } else {
+            Value::Undefined
+        })
+    });
+    vm.define_data_property(host.clone(), "IsHTMLDDA", html_dda, true, true, true)?;
     missing_host::install(vm, &host)?;
-    vm.define_data_property(vm.global(), "$262", host, true, false, true)
-}
-
-fn execute(request: Request) -> Json {
-    let start = Instant::now();
-    let limits = VmLimits {
-        max_instructions: request
-            .max_instructions
-            .unwrap_or(1_000_000)
-            .clamp(1, 100_000_000),
-        ..VmLimits::default()
-    };
-    let mut vm = Vm::with_limits(limits);
-    if let Err(error) = install_test262_host(&mut vm, request.id.clone()) {
-        return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
-    }
-    let logs = Rc::new(RefCell::new(Vec::<String>::new()));
-    let messages = logs.clone();
-    let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
-    let printed_status = async_status.clone();
     let print = vm.new_native_function("print", move |vm, _, args| {
         // INTERPRETING.md specifies print's first argument. Keep protocol
         // observations even after the diagnostic log's capacity is exhausted.
@@ -167,7 +176,31 @@ fn execute(request: Request) -> Json {
         }
         Ok(Value::Undefined)
     });
-    if let Err(error) = vm.define_data_property(vm.global(), "print", print, true, false, true) {
+    vm.define_data_property(vm.global(), "print", print, true, false, true)?;
+    vm.define_data_property(vm.global(), "$262", host.clone(), true, false, true)?;
+    Ok(host)
+}
+
+fn execute(request: Request) -> Json {
+    let start = Instant::now();
+    let deadline = start
+        + Duration::from_millis(request.timeout_ms.unwrap_or(3000).min(i32::MAX as u64));
+    let limits = VmLimits {
+        max_instructions: request
+            .max_instructions
+            .unwrap_or(1_000_000)
+            .clamp(1, 100_000_000),
+        ..VmLimits::default()
+    };
+    let mut vm = Vm::with_limits(limits);
+    let logs = Rc::new(RefCell::new(Vec::<String>::new()));
+    let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
+    if let Err(error) = install_test262_host(
+        &mut vm,
+        request.id.clone(),
+        logs.clone(),
+        async_status.clone(),
+    ) {
         return json!({"id":request.id,"outcome":"error","phase":"host","error":error_json(&error)});
     }
     let original_for_import = request
@@ -195,7 +228,14 @@ fn execute(request: Request) -> Json {
                     .iter()
                     .map(|request| request.specifier.as_utf16())
                     .collect();
-                json!({"id":request.id,"outcome":"ok","phase":"parse","module_requests":specifiers})
+                let kinds: Vec<_> = requests.iter().map(|r| match r.module_type() {
+                    Ok(rust_browser_javascript::ModuleType::JavaScript) => "javascript",
+                    Ok(rust_browser_javascript::ModuleType::Json) => "json",
+                    Ok(rust_browser_javascript::ModuleType::Text) => "text",
+                    Ok(rust_browser_javascript::ModuleType::Bytes) => "bytes",
+                    Err(_) => "unsupported",
+                }).collect();
+                json!({"id":request.id,"outcome":"ok","phase":"parse","module_requests":specifiers,"module_types":kinds})
             } else {
                 json!({"id":request.id,"outcome":"ok","phase":"parse"})
             }
@@ -229,6 +269,7 @@ fn execute(request: Request) -> Json {
                     &mut vm,
                     module,
                     &request.id,
+                    &source,
                     request.module_files,
                     request.module_edges,
                 ) {
@@ -270,10 +311,20 @@ fn execute(request: Request) -> Json {
                             continue;
                         }
                         if let Some(module) = module {
-                            match vm.module_evaluation_result(module)? {
-                                Some(result) => result?,
-                                None => module_pending = true,
+                            module_pending = match vm.module_evaluation_result(module)? {
+                                Some(result) => { result?; false },
+                                None => true,
+                            };
+                        }
+                        let awaiting_async = request.async_test && async_status.borrow().complete == 0
+                            && async_status.borrow().failure.is_none();
+                        if (module_pending || awaiting_async) && let Some(next) = vm.next_atomic_wait_deadline() {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                return Err(JsError::new(ErrorKind::ExecutionLimit, "Worker deadline exceeded while waiting for an atomic timeout"));
                             }
+                            std::thread::sleep(next.min(deadline).saturating_duration_since(now));
+                            continue;
                         }
                         let reasons=vm.take_unhandled_rejections();unhandled_count=reasons.len();
                         if request.async_test && let Some(prototype)=assertion_root.and_then(|root|vm.root_value(root)) {
@@ -381,6 +432,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             parse_only: args[0] == "--check-file",
             async_test: false,
             max_instructions: None,
+            timeout_ms: None,
             module_goal: false,
             module_files: vec![],
             module_edges: vec![],
@@ -419,6 +471,7 @@ mod tests {
             parse_only: false,
             async_test,
             max_instructions: Some(100000),
+            timeout_ms: None,
             module_goal: false,
             module_files: vec![],
             module_edges: vec![],
@@ -451,6 +504,28 @@ mod tests {
         assert_eq!(result["value"], value_json(&Value::from("undefined")));
     }
     #[test]
+    fn reflect_construct_uses_the_new_targets_original_realm_intrinsics() {
+        let result = request(
+            r#"
+            const other = $262.createRealm();
+            const target = other.evalScript("(function C(){})");
+            target.prototype = null;
+            const original = other.global.Array.prototype;
+            other.global.Array = function Replacement() {};
+            for (const T of [target, new Proxy(target, {}), target.bind(null)]) {
+                const value = Reflect.construct(Array, [], T);
+                if (Object.getPrototypeOf(value) !== original) throw "foreign prototype lost";
+            }
+            const sentinel = {};
+            target.prototype = sentinel;
+            if (Object.getPrototypeOf(Reflect.construct(Array, [], target)) !== sentinel)
+                throw "explicit prototype lost";
+        "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+    }
+    #[test]
     fn eval_script_preserves_phase_and_text_and_shares_the_execution_budget() {
         let result = request(r#"$262.evalScript("let =");"#, false);
         assert_eq!(result["phase"], "runtime", "{result}");
@@ -474,8 +549,27 @@ mod tests {
         assert_eq!(result["outcome"], "ok", "{result}");
     }
     #[test]
+    fn created_realms_preserve_identity_globals_errors_and_nested_hosts() {
+        let result = request(
+            r#"
+            let child = $262.createRealm(), other = child.createRealm();
+            if (child.evalScript("globalThis") !== child.global) throw "global";
+            let arr = child.evalScript("var data = []; data");
+            if (arr !== child.global.data || !(arr instanceof child.global.Array) ||
+                arr instanceof Array || other.global.Array === child.global.Array)
+                throw "identity";
+            try { child.evalScript("null.x"); throw "missing error" }
+            catch (e) { if (!(e instanceof child.global.TypeError)) throw "wrong realm" }
+            child.evalScript("print('from child')");
+        "#,
+            false,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+        assert_eq!(result["logs"][0], "from child");
+    }
+    #[test]
     fn unknown_host_operations_expose_no_dummy_result_and_cannot_be_caught() {
-        for property in ["createRealm", "agent", "gc", "AbstractModuleSource"] {
+        for property in ["agent.start", "gc", "AbstractModuleSource"] {
             let result = request(
                 &format!("try {{ typeof $262.{property}; }} catch (e) {{ 42; }}"),
                 false,
@@ -484,7 +578,7 @@ mod tests {
             assert_eq!(result["error"]["kind"], "UnsupportedFeature", "{result}");
             assert_eq!(
                 result["error"]["unsupported_host"],
-                format!("$262.{property}")
+                format!("$262.{}", property.split('.').next().unwrap())
             );
         }
         let result = request("if (false) $262.createRealm(); 42;", false);
@@ -493,7 +587,10 @@ mod tests {
     #[test]
     fn unsupported_setup_host_is_distinct_from_an_upstream_setup_exception() {
         for (setup, expected) in [
-            ("$262.agent.getReport.bind($262.agent);", json!("$262.agent")),
+            (
+                "$262.agent.getReport();",
+                json!("$262.agent"),
+            ),
             ("throw new TypeError('$262.agent');", Json::Null),
         ] {
             let result = execute(
@@ -523,6 +620,22 @@ mod tests {
         assert_eq!(result["error"]["kind"], "AsyncTestFailure");
     }
     #[test]
+    fn idle_worker_resumes_finite_atomic_waits() {
+        let result = request(
+            r#"
+                const a = new Int32Array(new SharedArrayBuffer(4));
+                const start = $262.agent.monotonicNow();
+                Atomics.waitAsync(a, 0, 0, 3).value.then(v => {
+                    if (v === "timed-out" && $262.agent.monotonicNow() >= start)
+                        print("Test262:AsyncTestComplete");
+                });
+            "#,
+            true,
+        );
+        assert_eq!(result["outcome"], "ok", "{result}");
+        assert_eq!(result["async_completions"], 1);
+    }
+    #[test]
     fn completion_does_not_mask_later_failure_or_missing_completion() {
         let result = request(
             "print('Test262:AsyncTestComplete');Promise.resolve().then(function(){print('Test262:AsyncTestFailure:Error: later');});",
@@ -546,6 +659,7 @@ mod tests {
                 parse_only: false,
                 async_test: true,
                 max_instructions: Some(100000),
+                timeout_ms: None,
                 module_goal: false,
                 module_files: vec![],
                 module_edges: vec![],
@@ -573,7 +687,7 @@ mod tests {
             id:"synchronous sentinel".into(),
             source:"var sentinel=new Test262Error('iterator abrupt completion');Promise.reject(sentinel);".into(),
             setup:vec![Setup{name:"sta contract".into(),source:"function Test262Error(message){this.message=message;}".into()}],
-            strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
+            strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),timeout_ms:None,module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
         });
         assert_eq!(result["outcome"], "ok");
         assert_eq!(result["unhandled_rejections"], 1);
@@ -589,11 +703,13 @@ mod tests {
                 parse_only: false,
                 async_test: false,
                 max_instructions: Some(100_000),
+                timeout_ms: None,
                 module_goal: true,
                 dynamic_files: None,
                 link_only,
                 module_files: if fixtures {
                     vec![ModuleFile {
+                        bytes: None,
                         identifier: "test/dep.js".into(),
                         source: "export let n=4;export function inc(){n++;}".into(),
                     }]
@@ -627,6 +743,16 @@ mod tests {
         assert_eq!(result["error"]["kind"], "TypeError");
     }
 
+    #[test]
+    fn failed_module_resolution_rejects_the_import_promise() {
+        let result = execute(serde_json::from_value(json!({
+            "id": "test/main.js#module",
+            "source": "for (const name of ['', 'bare', './missing.js']) { let error; try { await import(name) } catch(e) { error = e } if (!(error instanceof TypeError)) throw 'expected TypeError'; }",
+            "module_goal": true,
+            "dynamic_files": [],
+        })).unwrap());
+        assert_eq!(result["outcome"], "ok", "{result}");
+    }
     #[test]
     fn dynamic_fixture_jobs_can_finish_top_level_await_and_share_module_identity() {
         let result = execute(serde_json::from_value(json!({

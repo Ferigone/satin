@@ -20,7 +20,7 @@ use crate::{
     network::CredentialsMode,
 };
 use font_loads::{FontKey, FontLoads};
-use module_graph::{ModuleGraph, ModuleKey, Readiness};
+use module_graph::{ModuleGraph, ModuleKey, ModuleSource, Readiness};
 use module_tasks::ModuleTasks;
 pub(super) use parser_host::ParserHost;
 use parser_host::{Discovery, ScriptTag, Source, Step, resource_request};
@@ -1226,11 +1226,12 @@ impl DocumentSession {
                 }
             }
             Consumer::Module(key, credentials) => match result {
-                Ok(DocumentResource {
-                    url,
-                    body: ResourceBody::Text(source),
-                    ..
-                }) => {
+                Ok(DocumentResource { url, body, .. }) => {
+                    let source = match body {
+                        ResourceBody::Text(source) => ModuleSource::JavaScript(source),
+                        ResourceBody::ModuleBytes(bytes) => ModuleSource::Typed(bytes),
+                        _ => return Err("Unexpected module payload".into()),
+                    };
                     accepted = true;
                     let realm = runtime.as_mut().expect("module fetch has a realm");
                     self.modules.parsed_response(
@@ -1244,7 +1245,6 @@ impl DocumentSession {
                     );
                 }
                 Err(error) => self.modules.fail(key, error),
-                _ => return Err("Unexpected module payload".into()),
             },
             Consumer::Sheet { node, media } => {
                 if let Ok(DocumentResource {

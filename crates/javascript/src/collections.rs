@@ -8,8 +8,10 @@ use crate::{
 use std::{collections::BTreeMap, rc::Rc};
 
 mod map;
+pub(crate) use map::group_by;
 mod set;
 pub(crate) mod weak;
+pub(crate) mod weak_ref;
 
 // Each index has its own partially filled root node. Beyond the roots, the
 // per-entry estimate covers both keys, values, tree edges and node overhead.
@@ -590,4 +592,5 @@ pub(crate) fn install(vm: &mut Vm) {
     install_collection(vm, Kind::Map);
     install_collection(vm, Kind::Set);
     weak::install(vm);
+    weak_ref::install(vm);
 }

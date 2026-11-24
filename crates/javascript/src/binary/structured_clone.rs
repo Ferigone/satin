@@ -14,20 +14,34 @@ impl Vm {
         &mut self,
         source: ObjectId,
     ) -> Result<Value, StructuredCloneError> {
-        let (len, maximum) = self.clone_buffer_layout(source)?;
+        if let ObjectKind::SharedArrayBuffer(backing) = self.heap.object(source)?.kind {
+            let proto =
+                self.realm
+                    .binary
+                    .shared_array_buffer
+                    .ok_or(StructuredCloneError::DataClone(
+                        "Shared memory is unavailable in this realm",
+                    ))?;
+            return Ok(self.allocate_constructed(ObjectKind::SharedArrayBuffer(backing), proto)?);
+        }
+        let (len, maximum, immutable) = self.clone_buffer_layout(source)?;
         self.check_binary_allocation(len, 1)?;
         let bytes = self.copy_binary_range(source, 0..len)?;
-        Ok(self.materialize_clone_buffer(bytes, maximum)?)
+        Ok(self.materialize_clone_buffer(bytes, maximum, immutable)?)
     }
 
     pub(crate) fn clone_buffer_layout(
         &self,
         source: ObjectId,
-    ) -> Result<(usize, Option<usize>), StructuredCloneError> {
+    ) -> Result<(usize, Option<usize>, bool), StructuredCloneError> {
+        self.require_unshared(source).map_err(|_| {
+            StructuredCloneError::DataClone("Shared memory cannot cross this host agent boundary")
+        })?;
         let buffer = self.buffer_data(source)?;
         Ok((
             buffer.bytes.as_ref().ok_or(detached())?.len(),
             buffer.maximum,
+            buffer.immutable,
         ))
     }
 
@@ -35,8 +49,11 @@ impl Vm {
         &mut self,
         bytes: Vec<u8>,
         maximum: Option<usize>,
+        immutable: bool,
     ) -> Result<Value, JsError> {
-        self.create_buffer(bytes, maximum, self.array_buffer_prototype())
+        let result = self.create_buffer(bytes, maximum, self.array_buffer_prototype())?;
+        self.buffer_data_mut(result.as_object().unwrap())?.immutable = immutable;
+        Ok(result)
     }
 
     pub(crate) fn clone_view_layout(
@@ -101,6 +118,7 @@ impl Vm {
                     bytes: None,
                     maximum: None,
                     wasm: false,
+                    immutable: false,
                 }),
                 self.array_buffer_prototype(),
             )?
@@ -119,7 +137,14 @@ impl Vm {
         &self,
         source: ObjectId,
     ) -> Result<usize, StructuredCloneError> {
+        self.require_unshared(source)
+            .map_err(|_| StructuredCloneError::DataClone("Shared buffers cannot be transferred"))?;
         let buffer = self.buffer_data(source)?;
+        if buffer.immutable {
+            return Err(StructuredCloneError::DataClone(
+                "Immutable buffer cannot be transferred",
+            ));
+        }
         if buffer.wasm {
             return Err(StructuredCloneError::DataClone(
                 "WebAssembly buffers cannot be transferred",
@@ -138,6 +163,7 @@ impl Vm {
             bytes: Some(bytes),
             maximum,
             wasm: false,
+            immutable: false,
         };
     }
 

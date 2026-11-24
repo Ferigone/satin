@@ -222,7 +222,9 @@ fn module_early_errors_and_unsupported_productions_are_distinct() {
     let mut vm = Vm::new();
     vm.check_module_syntax("let item; for await ([item] of []) {}")
         .unwrap();
+    vm.check_module_syntax("import './m' with {type:'json'};").unwrap();
     for source in [
+        "import './m' with {type:'json', 'type':'text'};",
         "export {missing};",
         "export let n;export {n};",
         "function f(){} function f(){}",
@@ -239,8 +241,6 @@ fn module_early_errors_and_unsupported_productions_are_distinct() {
     }
     for source in [
         "let item; for await ([item = await 1] of []) {}",
-        "import('./m', {});",
-        "import './m' with {type:'json'};",
         "import source m from './m';",
     ] {
         assert_eq!(
@@ -510,4 +510,22 @@ fn clearing_a_queued_resume_records_module_failure() {
             .kind,
         ErrorKind::ExecutionLimit
     );
+}
+
+#[test]
+fn typed_module_requests_preserve_distinct_instances_and_raw_bytes() {
+    use rust_browser_javascript::ModuleType;
+    let mut vm = Vm::new();
+    let bytes = [0xef, 0xbb, 0xbf, 0xff];
+    let raw = vm.parse_module_bytes(&bytes, "shared", ModuleType::Bytes).unwrap();
+    let text = vm.parse_module_bytes(&bytes, "shared", ModuleType::Text).unwrap();
+    let main = vm.parse_module(r"import b from 'shared' with {type:'bytes'}; import t from 'shared' with {type:'text'}; export const ok = b[0] === 239 && b[3] === 255 && b.buffer.immutable && t === '\uFFFD';", "main").unwrap();
+    vm.link_module_with_requests(main, |_, _, request| match request.module_type()? {
+        ModuleType::Text => Ok(text),
+        ModuleType::Bytes => Ok(raw),
+        _ => unreachable!(),
+    }).unwrap();
+    vm.evaluate_module(main).unwrap();
+    let ns = vm.module_namespace(main).unwrap();
+    assert_eq!(vm.get_property(ns, "ok").unwrap(), Value::Bool(true));
 }

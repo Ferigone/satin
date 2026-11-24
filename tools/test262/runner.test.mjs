@@ -12,6 +12,17 @@ test('YAML metadata supports multiline descriptions, includes and both default v
   assert.deepEqual(variants(metadata('/*---\nflags: [onlyStrict]\n---*/')), ['strict']);
 });
 
+test('metadata reads CR, CRLF and LF fixtures without changing script source', () => {
+  for (const newline of ['\r', '\r\n', '\n']) {
+    const source = ['/*---', 'description: |', '  one', '  two',
+      'includes: [nativeFunctionMatcher.js]', '---*/', 'var a = 1;'].join(newline);
+    const meta = metadata(source);
+    assert.equal(meta.description.trimEnd(), 'one\ntwo');
+    assert.deepEqual(meta.includes, ['nativeFunctionMatcher.js']);
+    assert.deepEqual(variants(meta), ['sloppy', 'strict']);
+  }
+});
+
 test('a harness error cannot satisfy a negative runtime test', () => {
   const meta = { negative: { phase: 'runtime', type: 'TypeError' } };
   assert.equal(classify(meta, { outcome: 'error', phase: 'setup', error: { kind: 'TypeError' } }).status, 'harness_error');
@@ -49,8 +60,8 @@ test('an encountered host gap stays non-passing, including during upstream setup
 });
 
 test('preflight labels only the explicit unsupported Test262 host requirements', () => {
-  assert.match(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), /\$262\.IsHTMLDDA/);
-  assert.match(unsupportedReason({ flags: ['CanBlockIsFalse'] }, 'sloppy'), /CanBlockIsFalse/);
+  assert.equal(unsupportedReason({ flags: [], features: ['IsHTMLDDA'] }, 'sloppy'), null);
+  assert.equal(unsupportedReason({ flags: ['CanBlockIsFalse'] }, 'sloppy'), null);
   assert.match(unsupportedReason({ flags: ['CanBlockIsTrue'] }, 'sloppy'), /CanBlockIsTrue/);
   assert.equal(unsupportedReason({
     flags: ['CanBlockIsNotARealFlag'],
@@ -84,5 +95,5 @@ test('module fixture paths use exact UTF-16 specifiers and stay inside the pinne
   assert.equal(moduleFixturePath('test/language/module/main.js', units('./dep_FIXTURE.js')), 'test/language/module/dep_FIXTURE.js');
   assert.equal(moduleFixturePath('test/module.js', units('./𝌆.js')), 'test/𝌆.js');
   assert.throws(() => moduleFixturePath('test/module.js', units('./../other.js')), error => error.status === 'harness_error');
-  assert.throws(() => moduleFixturePath('test/module.js', units('./m.json')), error => error.status === 'unsupported');
+  assert.equal(moduleFixturePath('test/module.js', units('./m.json')), 'test/m.json');
 });

@@ -18,7 +18,7 @@ The runner prepares sloppy and strict variants according to the `noStrict`, `onl
 
 `$262.evalScript` executes a classic script in the current realm's global environment, using the caller's remaining task budget. It returns the script completion or propagates the script's exception. The UTF-8 parser does not yet accept source text containing isolated UTF-16 surrogates.
 
-Accessing `$262.createRealm`, `$262.agent`, `$262.gc`, or `$262.AbstractModuleSource` records the missing facility as `unsupported`, whether reached by the test or by its setup. The worker aborts the variant rather than returning a dummy value or a catchable JS error. Other upstream setup failures remain `harness_error`. Separate realms need their own globals and intrinsics in a shared, GC-aware JS heap; `evalScript` is not a substitute for `createRealm`.
+`$262.createRealm()` creates a separate global and intrinsics in the same Satin heap. Its host supports nested realms, script evaluation and printing. The main agent exposes a monotonic clock. Operations that require another agent, and access to `$262.gc` or `$262.AbstractModuleSource`, record the missing facility as `unsupported` when encountered during setup or evaluation. The worker aborts the variant rather than returning a dummy value or a catchable JS error. Other upstream setup failures remain `harness_error`.
 
 ## Modules
 
@@ -26,25 +26,27 @@ Module variants use the separate strict module grammar. The parser supplies impo
 
 Negative resolution tests require the expected error class during linking. Host setup, missing fixtures, and entry syntax errors get separate outcomes. Negative runtime tests execute the linked graph. Top-level await suspends module execution until the relevant Promise jobs run. A graph still suspended after the queue drains receives `async_incomplete`.
 
-Dynamic import and top-level await cases supply the original relative `_FIXTURE.js` files. The worker resolves a dynamic request when it runs and shares the module record for each file. A dynamic fixture set is limited to 1,023 files and 4 MiB of source. A static graph is limited to 1,023 fixtures, 16,384 edges, and 8 MiB of source. Source-phase and deferred imports, import attributes, JSON modules, external URLs, and agent hosts remain unsupported.
+Dynamic import, top-level await, and ShadowRealm cases receive their original relative fixture blobs. The worker resolves each request in its originating realm and caches module records by realm, file, and module type. A dynamic fixture set is limited to 1,023 files and 4 MiB of source. A static graph is limited to 1,023 fixtures, 16,384 edges, and 8 MiB of source. The parser accepts dynamic import options and source/defer call syntax. Evaluation-phase imports support JavaScript and synthetic JSON, text, and immutable byte modules. A JavaScript module rejects a source-phase import with SyntaxError. Deferred evaluation, hosts backed by separate module-source records, external URLs and agent hosts remain open.
 
 ## Asynchronous tests
 
 Upstream `doneprintHandle.js` supplies `$DONE` to asynchronous tests. The worker drains a shared FIFO queue for Promise reactions, thenable assimilation, queued microtasks, and async function resumes. Source and checkpoint share one execution budget.
 
-The worker observes the first argument to `print` as required by Test262. Passing requires one `Test262:AsyncTestComplete` and zero `Test262:AsyncTestFailure:` markers. Extra completions or failure markers fail the test, even after the diagnostic log fills. An empty queue without a completion marker yields `async_incomplete`.
+The worker observes the first argument to `print` as required by Test262. Passing requires one `Test262:AsyncTestComplete` and zero `Test262:AsyncTestFailure:` markers. Extra completions or failure markers fail the test, even after the diagnostic log fills. With an empty queue and no pending finite atomic timeout, absence of the completion marker yields `async_incomplete`.
 
 After the checkpoint, the worker checks unhandled rejections against the rooted original `Test262Error` prototype chain. In an async test, an unhandled rejection with that prototype fails the test, including one that follows `$DONE()`. Synchronous variants record all unhandled rejections as diagnostics. Async variants record other rejection reasons as diagnostics. A handler added before the checkpoint removes the source Promise from the unhandled list.
 
 Timers and external worker or agent hosts are unsupported. Unsupported language constructs receive `unsupported`. An upstream harness execution error receives `harness_error`.
 
-Variants explicitly tagged `IsHTMLDDA` or requiring `CanBlockIsTrue`/`CanBlockIsFalse` are counted as `unsupported` without substituting `undefined` or guessing an agent mode. They remain in the selected denominator. The runner does not skip variants just because they declare arbitrary language features.
+The worker provides a callable `$262.IsHTMLDDA` object with the Annex B truthiness, equality and `typeof` semantics. The worker runs as a non-blocking agent. It executes `CanBlockIsFalse` variants and records `CanBlockIsTrue` as unsupported. Finite `Atomics.waitAsync` deadlines can resume a pending asynchronous test or module within the configured wall-clock limit. All variants remain in the selected denominator. The runner does not skip variants just because they declare arbitrary language features.
 
 ## Reports and limits
 
 The report records the pinned revision, worker and runner SHA-256, selection, results per variant, and configured timeout and instruction limits. Pass rates apply to the selected paths. Exit code 1 indicates at least one non-passing result. Exit code 2 indicates a configuration or runner failure.
 
 Repeat `--path` to select paths relative to the Test262 `test` directory. Use `--limit` and `--offset` to select a subset. The default `--timeout-ms` is 3,000 and the default `--instructions` is 1,000,000. `_FIXTURE` files are excluded from directory selections and cannot be requested as standalone tests.
+
+At the pinned revision, 441 generated Unicode property-escape files construct strings covering every code point from U+0000 through U+10FFFF. In both modes, the inputs together span 1,114,112 code points and 2,162,688 UTF-16 code units per file. The upstream range loops execute at least 1,112,858 iterations per file. With this interpreter's scalar loop execution and the one-million-instruction profile, the 882 variants exceed the budget during input construction or subsequent checks. Each remains in the denominator. [Upstream helper](https://github.com/tc39/test262/blob/48221d7c1f7745dc13e420a2e850a248c0b2afb4/harness/regExpUtils.js) · [ASCII property test](https://github.com/tc39/test262/blob/48221d7c1f7745dc13e420a2e850a248c0b2afb4/test/built-ins/RegExp/property-escapes/generated/ASCII.js)
 
 To measure the entire pinned suite, use `--path .` with the default offset and no limit. With the release worker and checkout prepared as above, run
 

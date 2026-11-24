@@ -1,7 +1,7 @@
 //! Native promise records and a single traced FIFO queue for ECMAScript jobs and
 //! browser queueMicrotask callbacks. No JavaScript references hide in Rust closures.
 use crate::{
-    ErrorKind, JsError, JsString, ObjectId, Value, Vm,
+    ErrorKind, JsError, JsString, ObjectId, PropertyKey, Value, Vm,
     async_iterator::Continuation as AsyncIteratorContinuation,
     builtins::{method, replace_construct},
     execution::AsyncExecution,
@@ -32,10 +32,13 @@ pub(crate) struct PromiseData {
 pub(crate) enum AggregateKind {
     All,
     AllSettled,
+    AllKeyed,
+    AllSettledKeyed,
     Any,
 }
 pub(crate) struct AggregateData {
     pub values: Vec<Value>,
+    pub keys: Vec<PropertyKey>,
     kind: AggregateKind,
     remaining: usize,
     capability: PromiseCapability,
@@ -43,12 +46,22 @@ pub(crate) struct AggregateData {
 impl AggregateData {
     pub(crate) fn trace(&self, out: &mut TraceEdges) {
         self.capability.visit(|v| out.value(v));
+        for key in &self.keys {
+            if let PropertyKey::Symbol(symbol) = key {
+                out.symbol(symbol);
+            }
+        }
         for value in &self.values {
             out.value(value);
         }
     }
     pub(crate) fn strings(&self, out: &mut Vec<JsString>) {
         self.capability.visit(|v| string(v, out));
+        for key in &self.keys {
+            if let PropertyKey::String(name) = key {
+                out.push(name.clone());
+            }
+        }
         for value in &self.values {
             string(value, out);
         }
@@ -100,6 +113,7 @@ pub(crate) enum PromiseFunction {
     },
 }
 pub(crate) enum Job {
+    CleanupRegistry(ObjectId),
     Microtask(Value),
     Call {
         callback: Value,
@@ -296,6 +310,7 @@ impl Job {
     }
     fn visit(&self, mut f: impl FnMut(&Value)) {
         match self {
+            Self::CleanupRegistry(id) => f(&Value::Object(*id)),
             Self::Microtask(callback) => f(callback),
             Self::Call {
                 callback,
@@ -449,6 +464,7 @@ impl Vm {
     }
     pub fn has_pending_jobs(&self) -> bool {
         !self.jobs.is_empty()
+            || self.next_atomic_wait_deadline().is_some_and(|time| std::time::Instant::now() >= time)
     }
     pub fn pending_job_count(&self) -> usize {
         self.jobs.len()
@@ -544,6 +560,7 @@ impl Vm {
             let mut count = 0;
             while count < max_jobs {
                 vm.tick()?;
+                vm.poll_atomic_timeouts()?;
                 let Some(job) = vm.jobs.pop_front() else {
                     break;
                 };
@@ -552,6 +569,29 @@ impl Vm {
             }
             Ok(count)
         })
+    }
+    pub(crate) fn schedule_registry_cleanup(&mut self, registries: Vec<ObjectId>) {
+        if registries.is_empty() {
+            return;
+        }
+        let already_queued: std::collections::BTreeSet<_> = self
+            .jobs
+            .iter()
+            .filter_map(|job| {
+                if let Job::CleanupRegistry(id) = job {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in registries {
+            if !already_queued.contains(&id) && self.enqueue_job(Job::CleanupRegistry(id)).is_err()
+            {
+                // The registration stays pending. A later collection retries it.
+                break;
+            }
+        }
     }
     fn enqueue_job(&mut self, job: Job) -> Result<(), JsError> {
         if self.jobs.len() >= self.limits.max_pending_jobs {
@@ -887,6 +927,7 @@ impl Vm {
 
     fn run_job(&mut self, job: Job) -> Result<(), JsError> {
         match job {
+            Job::CleanupRegistry(id) => self.cleanup_registry(id)?,
             Job::Microtask(callback) => {
                 self.invoke(callback, Value::Undefined, &[])?;
             }
@@ -959,7 +1000,7 @@ impl Vm {
                 argument,
                 rejected,
             } => {
-                self.finish_async_module(module, argument, rejected)?;
+                self.with_function_realm(module.0, |vm| vm.finish_async_module(module, argument, rejected))?;
             }
             Job::DynamicImport {
                 module,
@@ -967,12 +1008,15 @@ impl Vm {
                 argument,
                 rejected,
             } => {
-                if rejected {
-                    self.invoke(capability.reject, Value::Undefined, &[argument])?;
-                } else {
-                    let namespace = self.module_namespace(module)?;
-                    self.invoke(capability.resolve, Value::Undefined, &[namespace])?;
-                }
+                self.with_function_realm(module.0, |vm| {
+                    if rejected {
+                        vm.invoke(capability.reject, Value::Undefined, &[argument])?;
+                    } else {
+                        let namespace = vm.module_namespace(module)?;
+                        vm.invoke(capability.resolve, Value::Undefined, &[namespace])?;
+                    }
+                    Ok(())
+                })?;
             }
             Job::Thenable {
                 promise,
@@ -1009,7 +1053,10 @@ impl Vm {
                     ObjectKind::PromiseAggregate(data) => data.kind,
                     _ => unreachable!(),
                 };
-                let value = if kind == AggregateKind::AllSettled {
+                let value = if matches!(
+                    kind,
+                    AggregateKind::AllSettled | AggregateKind::AllSettledKeyed
+                ) {
                     self.ensure_allocation(1024)?;
                     let result = self.new_object();
                     self.define_data_property(
@@ -1099,7 +1146,7 @@ impl Vm {
                         .as_object()
                         .and_then(|id| self.heap.object(id).ok())
                         .and_then(|o| {
-                            if let ObjectKind::Error(kind) = o.kind {
+                            if let ObjectKind::Error(kind, _) = o.kind {
                                 Some(kind)
                             } else {
                                 None
@@ -1127,10 +1174,7 @@ impl Vm {
         let list = self.try_new_array(errors)?;
         self.ensure_allocation(1024)?;
         let prototype = self.realm.error_prototypes[&ErrorKind::AggregateError];
-        let result = Value::Object(self.heap.allocate(Cell::Object(Object::new(
-            ObjectKind::Error(ErrorKind::AggregateError),
-            Some(prototype),
-        ))));
+        let result = self.allocate_error(ErrorKind::AggregateError, prototype)?;
         self.define_data_property(result.clone(), "errors", list, true, false, true)?;
         Ok(result)
     }
@@ -1141,14 +1185,30 @@ impl Vm {
         self.ensure_allocation(
             data.values
                 .len()
-                .saturating_mul(std::mem::size_of::<Value>()),
+                .saturating_mul(std::mem::size_of::<Value>())
+                .saturating_add(
+                    data.keys
+                        .len()
+                        .saturating_mul(std::mem::size_of::<PropertyKey>()),
+                ),
         )?;
-        let (kind, values, capability) = (data.kind, data.values.clone(), data.capability.clone());
+        let (kind, keys, values, capability) = (
+            data.kind,
+            data.keys.clone(),
+            data.values.clone(),
+            data.capability.clone(),
+        );
         self.consume_work(values.len())?;
-        let (function, result) = if kind == AggregateKind::Any {
-            (capability.reject, self.aggregate_error_values(&values)?)
-        } else {
-            (capability.resolve, self.try_new_array(&values)?)
+        let (function, result) = match kind {
+            AggregateKind::Any => (capability.reject, self.aggregate_error_values(&values)?),
+            AggregateKind::AllKeyed | AggregateKind::AllSettledKeyed => {
+                let result = self.new_object_with_prototype(Value::Null)?;
+                for (key, value) in keys.into_iter().zip(values) {
+                    self.define_data_property_key(result.clone(), key, value, true, true, true)?;
+                }
+                (capability.resolve, result)
+            }
+            _ => (capability.resolve, self.try_new_array(&values)?),
         };
         self.invoke(function, Value::Undefined, &[result])
     }
@@ -1166,12 +1226,24 @@ impl Vm {
                     "Promise resolve property is not callable",
                 ));
             }
-            let mut iterator = self.get_iterator(input)?;
+            let mut source = if matches!(
+                kind,
+                Some(AggregateKind::AllKeyed | AggregateKind::AllSettledKeyed)
+            ) {
+                let object = input.as_object().ok_or_else(|| {
+                    JsError::type_error("Keyed promise combinators require an object")
+                })?;
+                let keys = self.own_property_keys(input.clone())?;
+                CombineSource::Properties(object, keys.into_iter())
+            } else {
+                CombineSource::Iterable(self.get_iterator(input)?)
+            };
             let state = if let Some(kind) = kind {
                 self.ensure_allocation(512)?;
                 Some(self.heap.allocate(Cell::Object(Object::new(
                     ObjectKind::PromiseAggregate(AggregateData {
                         values: Vec::new(),
+                        keys: Vec::new(),
                         kind,
                         remaining: 1,
                         capability: capability.clone(),
@@ -1183,7 +1255,7 @@ impl Vm {
             };
             let performed = (|| {
                 let mut index = 0usize;
-                while let Some(value) = self.iterator_step(&mut iterator)? {
+                while let Some((key, value)) = source.next(self)? {
                     if index >= self.limits.max_array_length as usize {
                         return Err(JsError::new(
                             ErrorKind::ExecutionLimit,
@@ -1191,12 +1263,20 @@ impl Vm {
                         ));
                     }
                     if let Some(state) = state {
-                        self.reserve_allocation(std::mem::size_of::<Value>() * 2)?;
+                        let key_bytes = if key.is_some() {
+                            std::mem::size_of::<PropertyKey>() * 2
+                        } else {
+                            0
+                        };
+                        self.reserve_allocation(std::mem::size_of::<Value>() * 2 + key_bytes)?;
                         let ObjectKind::PromiseAggregate(data) =
                             &mut self.heap.object_mut(state)?.kind
                         else {
                             unreachable!()
                         };
+                        if let Some(key) = key {
+                            data.keys.push(key);
+                        }
                         data.values.push(Value::Undefined);
                     }
                     let promise = self.invoke(resolve.clone(), constructor.clone(), &[value])?;
@@ -1214,13 +1294,13 @@ impl Vm {
                             )
                         };
                         let handlers = match kind.unwrap() {
-                            AggregateKind::All => {
+                            AggregateKind::All | AggregateKind::AllKeyed => {
                                 (make(self, false, already)?, capability.reject.clone())
                             }
                             AggregateKind::Any => {
                                 (capability.resolve.clone(), make(self, true, already)?)
                             }
-                            AggregateKind::AllSettled => (
+                            AggregateKind::AllSettled | AggregateKind::AllSettledKeyed => (
                                 make(self, false, already.clone())?,
                                 make(self, true, already)?,
                             ),
@@ -1251,8 +1331,11 @@ impl Vm {
                 }
                 Ok(Value::Undefined)
             })();
-            if performed.is_err() && !iterator.done {
-                self.iterator_close(&mut iterator, performed)
+            if let CombineSource::Iterable(iterator) = &mut source
+                && performed.is_err()
+                && !iterator.done
+            {
+                self.iterator_close(iterator, performed)
             } else {
                 performed
             }
@@ -1262,6 +1345,29 @@ impl Vm {
             self.invoke(capability.reject, Value::Undefined, &[reason])?;
         }
         Ok(capability.promise)
+    }
+}
+
+enum CombineSource {
+    Iterable(crate::iterator::IteratorRecord),
+    Properties(ObjectId, std::vec::IntoIter<PropertyKey>),
+}
+
+impl CombineSource {
+    fn next(&mut self, vm: &mut Vm) -> Result<Option<(Option<PropertyKey>, Value)>, JsError> {
+        match self {
+            Self::Iterable(record) => Ok(vm.iterator_step(record)?.map(|value| (None, value))),
+            Self::Properties(object, keys) => {
+                for key in keys {
+                    vm.tick()?;
+                    if vm.own_enumerability(*object, &key)? == Some(true) {
+                        let value = vm.get_property_key(Value::Object(*object), key.clone())?;
+                        return Ok(Some((Some(key), value)));
+                    }
+                }
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1347,10 +1453,7 @@ fn self_aggregate_constructor(
 ) -> Result<Value, JsError> {
     // Message and cause are observed before iteration, as required by AggregateError.
     vm.ensure_allocation(1024)?;
-    let result = Value::Object(vm.heap.allocate(Cell::Object(Object::new(
-        ObjectKind::Error(ErrorKind::AggregateError),
-        Some(prototype),
-    ))));
+    let result = vm.allocate_error(ErrorKind::AggregateError, prototype)?;
     if !arg(args, 1).is_undefined() {
         let message = vm.to_string(&arg(args, 1))?;
         vm.define_data_property(
@@ -1552,6 +1655,8 @@ pub(crate) fn install(vm: &mut Vm) {
         ("race", None),
         ("allSettled", Some(AggregateKind::AllSettled)),
         ("any", Some(AggregateKind::Any)),
+        ("allKeyed", Some(AggregateKind::AllKeyed)),
+        ("allSettledKeyed", Some(AggregateKind::AllSettledKeyed)),
     ] {
         method(vm, constructor.clone(), name, 1, move |vm, this, args| {
             vm.promise_combine(this, arg(args, 0), kind)

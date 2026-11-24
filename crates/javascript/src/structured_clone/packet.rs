@@ -66,6 +66,7 @@ enum PacketRecord {
     ArrayBuffer {
         bytes: Vec<u8>,
         maximum: Option<usize>,
+        immutable: bool,
     },
     View {
         buffer: usize,
@@ -292,7 +293,11 @@ impl Encoder<'_> {
             // ArrayBuffers that are absent from the message still detach. When
             // no receiver reference exists, their backing need not be queued.
             if let Some(&target) = self.seen.get(&source) {
-                self.records[target] = PacketRecord::ArrayBuffer { bytes, maximum };
+                self.records[target] = PacketRecord::ArrayBuffer {
+                    bytes,
+                    maximum,
+                    immutable: false,
+                };
             }
         }
     }
@@ -373,9 +378,10 @@ impl Encoder<'_> {
             return Ok(PacketRecord::ArrayBuffer {
                 bytes: Vec::new(),
                 maximum: None,
+                immutable: false,
             });
         }
-        let (length, maximum) = self.vm.clone_buffer_layout(source)?;
+        let (length, maximum, immutable) = self.vm.clone_buffer_layout(source)?;
         self.budget.check(backing_bytes(length))?;
         let bytes = self
             .vm
@@ -383,7 +389,11 @@ impl Encoder<'_> {
             .expect("validated ArrayBuffer backing store");
         self.budget
             .reserve(self.vm, backing_bytes(bytes.capacity()))?;
-        Ok(PacketRecord::ArrayBuffer { bytes, maximum })
+        Ok(PacketRecord::ArrayBuffer {
+            bytes,
+            maximum,
+            immutable,
+        })
     }
 
     fn record_properties(
@@ -426,9 +436,11 @@ fn decode(vm: &mut Vm, mut packet: StructuredClonePacket) -> Result<Value, JsErr
         vm.tick()?;
         let object = match record {
             PacketRecord::Properties { array_length, .. } => new_record(vm, *array_length)?,
-            PacketRecord::ArrayBuffer { bytes, maximum } => {
-                vm.materialize_clone_buffer(std::mem::take(bytes), *maximum)?
-            }
+            PacketRecord::ArrayBuffer {
+                bytes,
+                maximum,
+                immutable,
+            } => vm.materialize_clone_buffer(std::mem::take(bytes), *maximum, *immutable)?,
             PacketRecord::View { buffer, layout } => {
                 let buffer = objects[*buffer]
                     .as_object()

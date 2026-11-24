@@ -20,6 +20,7 @@ pub(crate) enum PatternCode {
     Target(Rc<Chunk>, Rc<Chunk>),
     PrivateTarget(Rc<Chunk>, JsString),
     SuperTarget(Rc<Chunk>),
+    CallTarget(Rc<Chunk>),
     Array(Vec<Option<Rc<PatternCode>>>, Option<Rc<PatternCode>>),
     Object(Vec<(Rc<Chunk>, Rc<PatternCode>)>, Option<Rc<PatternCode>>),
     Default {
@@ -40,7 +41,7 @@ pub(crate) fn pattern_names(pattern: &PatternCode) -> Vec<JsString> {
             PatternCode::Name(name) => out.push(name.clone()),
             PatternCode::Target(..)
             | PatternCode::PrivateTarget(..)
-            | PatternCode::SuperTarget(_) => {}
+            | PatternCode::SuperTarget(_) | PatternCode::CallTarget(_) => {}
             PatternCode::Array(items, rest) => {
                 pending.extend(rest.iter().map(Rc::as_ref));
                 pending.extend(items.iter().rev().flatten().map(Rc::as_ref));
@@ -59,6 +60,7 @@ pub(crate) fn pattern_names(pattern: &PatternCode) -> Vec<JsString> {
 pub(crate) struct ScopePlan {
     pub lexical: Vec<(JsString, bool)>,
     pub vars: Vec<JsString>,
+    pub annex_vars: Vec<JsString>,
     pub functions: Vec<(JsString, Rc<Code>, bool)>,
 }
 #[derive(Clone, Debug, Default)]
@@ -76,11 +78,13 @@ impl Chunk {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Code {
+    pub source: Rc<crate::lexer::SourceSpan>,
     pub name: Option<JsString>,
     pub params: Vec<ParameterCode>,
     pub param_names: Vec<JsString>,
     pub parameter_expressions: bool,
     pub mapped_arguments: bool,
+    pub mapped_indices: Vec<usize>,
     pub length: usize,
     pub body: Rc<Chunk>,
     pub strict: bool,
@@ -105,10 +109,12 @@ pub(crate) enum Op {
     Push(Value),
     RegExp(Rc<crate::regexp::Program>),
     Name(JsString),
+    LoadName(JsString),
     This,
     NewTarget,
+    CopyAnnexFunction(JsString),
     ImportMeta,
-    DynamicImport,
+    DynamicImport(crate::parser::ImportPhase),
     Await,
     Yield {
         delegate: bool,
@@ -123,6 +129,7 @@ pub(crate) enum Op {
     PrivateIn(JsString),
     Get,
     NormalizeReference,
+    InvalidCallAssignment,
     Set,
     Delete,
     Update {
@@ -165,6 +172,7 @@ pub(crate) enum Op {
     Initialize(VarKind, Rc<PatternCode>, Option<Rc<Chunk>>),
     Block(Rc<Chunk>),
     Label(LabelId, Rc<Chunk>),
+    With(Rc<Chunk>, Rc<Chunk>),
     Branch(Rc<Chunk>, Rc<Chunk>, Option<Rc<Chunk>>),
     While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
@@ -195,7 +203,7 @@ pub(crate) enum Op {
     Break(Option<LabelId>),
     Continue(Option<LabelId>),
     Throw(Rc<Chunk>),
-    Switch(Rc<Chunk>, Vec<(Option<Rc<Chunk>>, Rc<Chunk>)>, ScopePlan),
+    Switch(Rc<Chunk>, Vec<(Option<Rc<Chunk>>, Rc<Chunk>)>, Box<ScopePlan>),
     Try(
         Rc<Chunk>,
         Option<(Option<Rc<PatternCode>>, Rc<Chunk>)>,
@@ -229,7 +237,8 @@ impl Op {
                     || yes.can_suspend
                     || no.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
-            Self::While(test, body, _)
+            Self::With(test, body)
+            | Self::While(test, body, _)
             | Self::DoWhile(body, test, _)
             | Self::ForOf(_, _, test, body, false, _)
             | Self::ForIn(_, _, test, body, _) => test.can_suspend || body.can_suspend,
@@ -276,7 +285,7 @@ pub(crate) fn compile_eval(
     context: parser::EvalContext,
     compilation_bytes: usize,
 ) -> Result<Rc<Chunk>, JsError> {
-    let body = parser::parse_script(source, context, compilation_bytes)?;
+    let body = parser::parse_script(source, context, compilation_bytes, inherited_strict)?;
     let strict = inherited_strict || parser::has_strict_directive(&body);
     block(&body, true, strict)
 }
@@ -306,12 +315,18 @@ pub(crate) fn compile_dynamic_function(
     };
     let mut function = body_function.clone();
     function.params = parameter_function.params.clone();
+    function.source = crate::lexer::SourceSpan::generated(&format!("{head} anonymous({parameters}\n) {{\n{body}\n}}"));
+    if !function.strict {
+        let excluded = function.params.iter().flat_map(|p| bound_names(&p.pattern)).chain([JsString::from("arguments")]);
+        parser::annex::mark(&mut function.body, excluded);
+    }
     compile_function(&function, false)
 }
 /// Conservative retained bytecode size; shared chunks/functions are counted once.
 pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc<Chunk>>) -> usize {
     let mut functions = roots;
     let mut seen_functions = BTreeSet::new();
+    let mut seen_sources = BTreeSet::new();
     let mut seen_chunks = BTreeSet::new();
     let mut bytes = 0usize;
     loop {
@@ -319,12 +334,15 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
             if !seen_functions.insert(Rc::as_ptr(&code) as usize) {
                 continue;
             }
+            let (address, size) = code.source.storage();
+            if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
             bytes = bytes.saturating_add(
                 256 + code
                     .param_names
                     .iter()
                     .map(|p| 64 + p.len() * 2)
                     .sum::<usize>()
+                    + code.mapped_indices.capacity() * std::mem::size_of::<usize>()
                     + code.name.as_ref().map_or(0, |s| s.len() * 2),
             );
             chunks.push(code.body.clone());
@@ -350,7 +368,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 + chunk
                     .scope
                     .vars
-                    .iter()
+                    .iter().chain(&chunk.scope.annex_vars)
                     .map(|k| 64 + k.len() * 2)
                     .sum::<usize>(),
         );
@@ -358,7 +376,9 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
         for op in &chunk.ops {
             match op {
                 Op::Push(Value::String(s))
+                | Op::CopyAnnexFunction(s)
                 | Op::Name(s)
+                | Op::LoadName(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
                 | Op::InferName(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
@@ -380,6 +400,8 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 Op::TemplateAppend(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
                 Op::Function(code) => functions.push(code.clone()),
                 Op::Class(class, name) => {
+                    let (address, size) = class.source.storage();
+                    if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
                     if let ClassName::Binding(name) = name {
                         bytes = bytes.saturating_add(name.len() * 2 + 64);
                     }
@@ -401,7 +423,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     chunks.push(b.clone());
                     chunks.extend(c.iter().cloned());
                 }
-                Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
+                Op::With(a, b) | Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
                     chunks.push(a.clone());
                     chunks.push(b.clone());
                 }
@@ -556,6 +578,7 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
                 require_non_suspending(expression(object, strict)?, "a destructuring target")?,
                 name.clone(),
             ),
+            e if !strict && crate::parser::call_assignment_target(e) => PatternCode::CallTarget(require_non_suspending(expression(e, strict)?, "an iteration target")?),
             _ => return Err(syntax("Invalid assignment target")),
         },
         Pattern::Default(target, value) => PatternCode::Default {
@@ -569,29 +592,32 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
                 "a destructuring default",
             )?,
         },
-        Pattern::Array(items, rest) => PatternCode::Array(
-            items
-                .iter()
-                .map(|p| p.as_ref().map(|p| compile_pattern(p, strict)).transpose())
-                .collect::<Result<_, _>>()?,
-            rest.as_ref()
-                .map(|p| compile_pattern(p, strict))
-                .transpose()?,
-        ),
-        Pattern::Object(properties, rest) => PatternCode::Object(
-            properties
-                .iter()
-                .map(|(key, p, _)| {
-                    Ok((
-                        require_non_suspending(expression(key, strict)?, "a destructuring key")?,
-                        compile_pattern(p, strict)?,
-                    ))
-                })
-                .collect::<Result<_, JsError>>()?,
-            rest.as_ref()
-                .map(|p| compile_pattern(p, strict))
-                .transpose()?,
-        ),
+        Pattern::Array(items, rest) => {
+            let mut elements = Vec::with_capacity(items.len());
+            for item in items {
+                elements.push(match item {
+                    Some(item) => Some(compile_pattern(item, strict)?),
+                    None => None,
+                });
+            }
+            let rest = match rest {
+                Some(rest) => Some(compile_pattern(rest, strict)?),
+                None => None,
+            };
+            PatternCode::Array(elements, rest)
+        }
+        Pattern::Object(properties, rest) => {
+            let mut entries = Vec::with_capacity(properties.len());
+            for (key, pattern, _) in properties {
+                let key = require_non_suspending(expression(key, strict)?, "a destructuring key")?;
+                entries.push((key, compile_pattern(pattern, strict)?));
+            }
+            let rest = match rest {
+                Some(rest) => Some(compile_pattern(rest, strict)?),
+                None => None,
+            };
+            PatternCode::Object(entries, rest)
+        }
     }))
 }
 fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>) -> usize {
@@ -609,7 +635,7 @@ fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>)
                 chunks.push(object.clone());
                 bytes = bytes.saturating_add(name.len() * 2);
             }
-            PatternCode::SuperTarget(key) => chunks.push(key.clone()),
+            PatternCode::SuperTarget(key) | PatternCode::CallTarget(key) => chunks.push(key.clone()),
             PatternCode::Default { target, value, .. } => {
                 pending.push(target);
                 chunks.push(value.clone());
@@ -639,10 +665,25 @@ fn block_scope(
     module_scope: bool,
 ) -> Result<Rc<Chunk>, JsError> {
     let mut chunk = Chunk {
+        scope: scope_plan(stmts, function_scope, strict, module_scope)?,
         strict,
         ..Chunk::default()
     };
+    for stmt in stmts {
+        statement(stmt, &mut chunk.ops, strict)?;
+    }
+    Ok(chunk.finish())
+}
+
+fn scope_plan(
+    stmts: &[Stmt],
+    function_scope: bool,
+    strict: bool,
+    module_scope: bool,
+) -> Result<ScopePlan, JsError> {
+    let mut scope = ScopePlan::default();
     let mut lexical = BTreeSet::new();
+    let mut ordinary_block_functions = BTreeSet::new();
     let mut vars = BTreeSet::new();
     collect_vars(stmts, &mut vars);
     for stmt in stmts {
@@ -656,48 +697,47 @@ fn block_scope(
                     if !lexical.insert(name.clone()) {
                         return Err(syntax(format!("Duplicate lexical binding '{name}'")));
                     }
-                    chunk
-                        .scope
-                        .lexical
-                        .push((name.clone(), *kind != VarKind::Const));
+                    scope.lexical.push((name.clone(), *kind != VarKind::Const));
                 }
             }
             Stmt::Class(name, _) => {
                 if !lexical.insert(name.clone()) {
                     return Err(syntax("Duplicate class binding"));
                 }
-                chunk.scope.lexical.push((name.clone(), true));
+                scope.lexical.push((name.clone(), true));
             }
             Stmt::DefaultExport(_) => {
                 if !lexical.insert("*default*".into()) {
                     return Err(syntax("Duplicate default export"));
                 }
-                chunk.scope.lexical.push(("*default*".into(), false));
+                scope.lexical.push(("*default*".into(), false));
             }
             Stmt::DefaultFunction(f) => {
                 let name: JsString = "*default*".into();
                 if !lexical.insert(name.clone()) {
                     return Err(syntax("Duplicate default export"));
                 }
-                chunk.scope.lexical.push((name.clone(), true));
-                chunk
-                    .scope
+                scope.lexical.push((name.clone(), true));
+                scope
                     .functions
                     .push((name, compile_function(f, true)?, false));
             }
             Stmt::Function(f) => {
                 let name = f.name.clone().unwrap();
                 let variable_function = function_scope && !module_scope;
-                if !variable_function && !lexical.insert(name.clone()) {
-                    return Err(syntax(format!("Duplicate lexical binding '{name}'")));
-                }
                 if variable_function {
                     vars.insert(name.clone());
-                } else {
-                    chunk.scope.lexical.push((name.clone(), true));
+                } else if lexical.insert(name.clone()) {
+                    if !strict && f.kind == FunctionKind::Ordinary {
+                        ordinary_block_functions.insert(name.clone());
+                    }
+                    scope.lexical.push((name.clone(), true));
+                } else if f.kind != FunctionKind::Ordinary
+                    || !ordinary_block_functions.contains(&name)
+                {
+                    return Err(syntax(format!("Duplicate lexical binding '{name}'")));
                 }
-                chunk
-                    .scope
+                scope
                     .functions
                     .push((name, compile_function(f, strict)?, variable_function));
             }
@@ -712,12 +752,14 @@ fn block_scope(
         }
     }
     if function_scope {
-        chunk.scope.vars = vars.into_iter().collect();
+        if !strict {
+            let mut names = BTreeSet::new();
+            collect_declarations(stmts, &mut names, true);
+            scope.annex_vars = names.into_iter().collect();
+        }
+        scope.vars = vars.into_iter().collect();
     }
-    for stmt in stmts {
-        statement(stmt, &mut chunk.ops, strict)?;
-    }
-    Ok(chunk.finish())
+    Ok(scope)
 }
 fn parameter_expressions(pattern: &Pattern) -> bool {
     let mut pending = vec![pattern];
@@ -769,7 +811,16 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
             return Err(syntax("Invalid strict-mode binding"));
         }
     }
+    let mut mapped_indices = Vec::new();
+    if !strict && simple {
+        let mut seen = BTreeSet::new();
+        for (index, name) in names.iter().enumerate().rev() {
+            if seen.insert(name) { mapped_indices.push(index); }
+        }
+    }
     Ok(Rc::new(Code {
+        mapped_indices,
+        source: f.source.clone(),
         name: f.name.clone(),
         params: f
             .params
@@ -798,45 +849,49 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
     }))
 }
 fn collect_vars(stmts: &[Stmt], out: &mut BTreeSet<JsString>) {
+    collect_declarations(stmts, out, false);
+}
+fn collect_declarations(stmts: &[Stmt], out: &mut BTreeSet<JsString>, annex: bool) {
     for stmt in stmts {
         match stmt {
-            Stmt::Variable(VarKind::Var, d) => {
+            Stmt::Function(f) if annex && f.annex_binding => { out.extend(f.name.iter().cloned()); }
+            Stmt::Variable(VarKind::Var, d) if !annex => {
                 out.extend(d.iter().flat_map(|(pattern, _)| bound_names(pattern)));
             }
-            Stmt::Block(body) => collect_vars(body, out),
+            Stmt::Block(body) => collect_declarations(body, out, annex),
             Stmt::If(_, yes, no) => {
-                collect_vars(std::slice::from_ref(&**yes), out);
+                collect_declarations(std::slice::from_ref(&**yes), out, annex);
                 if let Some(no) = no {
-                    collect_vars(std::slice::from_ref(&**no), out);
+                    collect_declarations(std::slice::from_ref(&**no), out, annex);
                 }
             }
-            Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
-                collect_vars(std::slice::from_ref(&**b), out)
+            Stmt::With(_, b) | Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
+                collect_declarations(std::slice::from_ref(&**b), out, annex)
             }
             Stmt::For(init, _, _, body) => {
                 if let Some(i) = init {
-                    collect_vars(std::slice::from_ref(&**i), out);
+                    collect_declarations(std::slice::from_ref(&**i), out, annex);
                 }
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
             }
-            Stmt::ForIn(k, n, _, body) | Stmt::ForOf(k, n, _, body, _) => {
-                if *k == Some(VarKind::Var) {
+            Stmt::ForIn(k, n, _, body, _) | Stmt::ForOf(k, n, _, body, _) => {
+                if !annex && *k == Some(VarKind::Var) {
                     out.extend(bound_names(n));
                 }
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
             }
             Stmt::Try(body, catch, finally) => {
-                collect_vars(std::slice::from_ref(&**body), out);
+                collect_declarations(std::slice::from_ref(&**body), out, annex);
                 if let Some((_, c)) = catch {
-                    collect_vars(std::slice::from_ref(&**c), out);
+                    collect_declarations(std::slice::from_ref(&**c), out, annex);
                 }
                 if let Some(f) = finally {
-                    collect_vars(std::slice::from_ref(&**f), out);
+                    collect_declarations(std::slice::from_ref(&**f), out, annex);
                 }
             }
             Stmt::Switch(_, cases) => {
                 for (_, body) in cases {
-                    collect_vars(body, out)
+                    collect_declarations(body, out, annex)
                 }
             }
             _ => {}
@@ -911,7 +966,14 @@ fn compile_statement(
     label: Option<LabelId>,
 ) -> Result<(), JsError> {
     match s {
+        Stmt::Function(f) if f.annex_binding && !strict => {
+            out.push(Op::CopyAnnexFunction(f.name.clone().unwrap()));
+        }
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
+        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(
+            &Expr::Literal(Value::String(value.clone())),
+            strict,
+        )?)),
         Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
         Stmt::Class(name, class) => {
             let chunk = Chunk {
@@ -934,52 +996,22 @@ fn compile_statement(
             ));
         }
         Stmt::Block(body) => out.push(Op::Block(block(body, false, strict)?)),
-        Stmt::Label(id, names, item) => {
-            for name in names {
-                check_identifier(name, strict)?;
-            }
-            match item.as_ref() {
-                Stmt::While(..)
-                | Stmt::DoWhile(..)
-                | Stmt::For(..)
-                | Stmt::ForIn(..)
-                | Stmt::ForOf(..) => compile_statement(item, out, strict, Some(*id))?,
-                Stmt::Function(_) if strict => {
-                    return Err(syntax("Labelled function in strict mode"));
-                }
-                Stmt::Function(_) => {}
-                _ => out.push(Op::Label(*id, stmt_chunk(item, strict)?)),
-            }
-        }
-        Stmt::Variable(kind, decls) => {
-            for (pattern, init) in decls {
-                if strict
-                    && bound_names(pattern)
-                        .iter()
-                        .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
-                {
-                    return Err(syntax("Invalid strict-mode binding"));
-                }
-                out.push(Op::Initialize(
-                    *kind,
-                    compile_pattern(pattern, strict)?,
-                    init.as_ref()
-                        .map(|expr| {
-                            if let Pattern::Name(name) = pattern {
-                                named_expression(expr, strict, name)
-                            } else {
-                                expression(expr, strict)
-                            }
-                        })
-                        .transpose()?,
-                ));
-            }
-        }
+        Stmt::Label(id, names, item) => compile_label(*id, names, item, out, strict)?,
+        Stmt::Variable(kind, decls) => compile_variables(*kind, decls, out, strict)?,
         Stmt::If(test, yes, no) => out.push(Op::Branch(
             expression(test, strict)?,
             if_clause(yes, strict)?,
             no.as_ref().map(|s| if_clause(s, strict)).transpose()?,
         )),
+        Stmt::With(object, body) => {
+            if strict {
+                return Err(syntax("with is forbidden in strict mode"));
+            }
+            out.push(Op::With(
+                expression(object, strict)?,
+                stmt_chunk(body, strict)?,
+            ));
+        }
         Stmt::While(test, body) => out.push(Op::While(
             expression(test, strict)?,
             stmt_chunk(body, strict)?,
@@ -990,85 +1022,36 @@ fn compile_statement(
             expression(test, strict)?,
             label,
         )),
-        Stmt::For(initial, test, update, body) => {
-            let lexical: Vec<(JsString, bool)> = match initial.as_deref() {
-                Some(Stmt::Variable(k, d)) if *k != VarKind::Var => d
-                    .iter()
-                    .flat_map(|(p, _)| {
-                        bound_names(p)
-                            .into_iter()
-                            .map(|name| (name, *k != VarKind::Const))
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
-            check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
-            out.push(Op::For {
-                initial: initial
-                    .as_ref()
-                    .map(|s| stmt_chunk(s, strict))
-                    .transpose()?,
-                test: test.as_ref().map(|e| expression(e, strict)).transpose()?,
-                update: update.as_ref().map(|e| expression(e, strict)).transpose()?,
-                body: stmt_chunk(body, strict)?,
-                lexical,
-                label,
-            });
-        }
-        Stmt::ForIn(kind, name, object, body) => {
-            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
-                check_loop_lexical(bound_names(name), body)?;
-            }
-            out.push(Op::ForIn(
-                *kind,
-                compile_pattern(name, strict)?,
-                expression(object, strict)?,
-                stmt_chunk(body, strict)?,
-                label,
-            ));
-        }
-        Stmt::ForOf(kind, name, iterable, body, asynchronous) => {
-            if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
-                check_loop_lexical(bound_names(name), body)?;
-            }
-            if strict
-                && bound_names(name)
-                    .iter()
-                    .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
-            {
-                return Err(syntax("Invalid strict-mode binding"));
-            }
-            out.push(Op::ForOf(
-                *kind,
-                compile_pattern(name, strict)?,
-                expression(iterable, strict)?,
-                stmt_chunk(body, strict)?,
-                *asynchronous,
-                label,
-            ));
-        }
-        Stmt::Switch(test, cases) => {
-            let all: Vec<_> = cases
-                .iter()
-                .flat_map(|(_, body)| body.iter().cloned())
-                .collect();
-            let plan = block(&all, false, strict)?.scope.clone();
-            let mut compiled = Vec::new();
-            for (test, body) in cases {
-                let mut chunk = Chunk {
-                    strict,
-                    ..Chunk::default()
-                };
-                for stmt in body {
-                    statement(stmt, &mut chunk.ops, strict)?;
-                }
-                compiled.push((
-                    test.as_ref().map(|e| expression(e, strict)).transpose()?,
-                    chunk.finish(),
-                ));
-            }
-            out.push(Op::Switch(expression(test, strict)?, compiled, plan));
-        }
+        Stmt::For(initial, test, update, body) => compile_for(
+            initial.as_deref(),
+            test.as_ref(),
+            update.as_ref(),
+            body,
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::ForIn(kind, name, object, body, initializer) => compile_for_in(
+            *kind,
+            name,
+            object,
+            body,
+            initializer.as_deref(),
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::ForOf(kind, name, iterable, body, asynchronous) => compile_for_of(
+            *kind,
+            name,
+            iterable,
+            body,
+            *asynchronous,
+            out,
+            strict,
+            label,
+        )?,
+        Stmt::Switch(test, cases) => compile_switch(test, cases, out, strict)?,
         Stmt::Return(e) => out.push(Op::Return(
             e.as_ref().map(|e| expression(e, strict)).transpose()?,
         )),
@@ -1083,7 +1066,7 @@ fn compile_statement(
                     if let Some(pattern) = n {
                         unique_pattern(pattern)?;
                         if let Stmt::Block(statements) = s.as_ref() {
-                            let scope = block(statements, false, strict)?.scope.clone();
+                            let scope = scope_plan(statements, false, strict, false)?;
                             let names = bound_names(pattern);
                             if scope.lexical.iter().any(|(name, _)| names.contains(name)) {
                                 return Err(syntax(
@@ -1115,6 +1098,195 @@ fn compile_statement(
     }
     Ok(())
 }
+
+fn compile_label(
+    id: LabelId,
+    names: &[JsString],
+    item: &Stmt,
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    for name in names {
+        check_identifier(name, strict)?;
+    }
+    match item {
+        Stmt::While(..) | Stmt::DoWhile(..) | Stmt::For(..) | Stmt::ForIn(..) | Stmt::ForOf(..) => {
+            compile_statement(item, out, strict, Some(id))?
+        }
+        Stmt::Function(_) if strict => {
+            return Err(syntax("Labelled function in strict mode"));
+        }
+        Stmt::Function(_) => {}
+        _ => out.push(Op::Label(id, stmt_chunk(item, strict)?)),
+    }
+    Ok(())
+}
+
+fn compile_variables(
+    kind: VarKind,
+    decls: &[(Pattern, Option<Expr>)],
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    for (pattern, init) in decls {
+        if strict
+            && bound_names(pattern)
+                .iter()
+                .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
+        {
+            return Err(syntax("Invalid strict-mode binding"));
+        }
+        out.push(Op::Initialize(
+            kind,
+            compile_pattern(pattern, strict)?,
+            init.as_ref()
+                .map(|expr| {
+                    if let Pattern::Name(name) = pattern {
+                        named_expression(expr, strict, name)
+                    } else {
+                        expression(expr, strict)
+                    }
+                })
+                .transpose()?,
+        ));
+    }
+    Ok(())
+}
+
+fn compile_for(
+    initial: Option<&Stmt>,
+    test: Option<&Expr>,
+    update: Option<&Expr>,
+    body: &Stmt,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    let lexical: Vec<(JsString, bool)> = match initial {
+        Some(Stmt::Variable(k, d)) if *k != VarKind::Var => d
+            .iter()
+            .flat_map(|(p, _)| {
+                bound_names(p)
+                    .into_iter()
+                    .map(|name| (name, *k != VarKind::Const))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
+    out.push(Op::For {
+        initial: initial.map(|s| stmt_chunk(s, strict)).transpose()?,
+        test: test.map(|e| expression(e, strict)).transpose()?,
+        update: update.map(|e| expression(e, strict)).transpose()?,
+        body: stmt_chunk(body, strict)?,
+        lexical,
+        label,
+    });
+    Ok(())
+}
+
+fn compile_for_in(
+    kind: Option<VarKind>,
+    name: &Pattern,
+    object: &Expr,
+    body: &Stmt,
+    initializer: Option<&Expr>,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    if let Some(initializer) = initializer {
+        if strict {
+            return Err(syntax(
+                "A strict for-in declaration cannot have an initializer",
+            ));
+        }
+        let Pattern::Name(binding) = name else {
+            unreachable!()
+        };
+        out.push(Op::Initialize(
+            VarKind::Var,
+            compile_pattern(name, strict)?,
+            Some(named_expression(initializer, strict, binding)?),
+        ));
+    }
+    if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
+        check_loop_lexical(bound_names(name), body)?;
+    }
+    out.push(Op::ForIn(
+        kind,
+        compile_pattern(name, strict)?,
+        expression(object, strict)?,
+        stmt_chunk(body, strict)?,
+        label,
+    ));
+    Ok(())
+}
+
+fn compile_for_of(
+    kind: Option<VarKind>,
+    name: &Pattern,
+    iterable: &Expr,
+    body: &Stmt,
+    asynchronous: bool,
+    out: &mut Vec<Op>,
+    strict: bool,
+    label: Option<LabelId>,
+) -> Result<(), JsError> {
+    if matches!(kind, Some(VarKind::Let | VarKind::Const)) {
+        check_loop_lexical(bound_names(name), body)?;
+    }
+    if strict
+        && bound_names(name)
+            .iter()
+            .any(|name| matches!(name.to_string_lossy().as_str(), "eval" | "arguments"))
+    {
+        return Err(syntax("Invalid strict-mode binding"));
+    }
+    out.push(Op::ForOf(
+        kind,
+        compile_pattern(name, strict)?,
+        expression(iterable, strict)?,
+        stmt_chunk(body, strict)?,
+        asynchronous,
+        label,
+    ));
+    Ok(())
+}
+
+fn compile_switch(
+    test: &Expr,
+    cases: &[(Option<Expr>, Vec<Stmt>)],
+    out: &mut Vec<Op>,
+    strict: bool,
+) -> Result<(), JsError> {
+    let all: Vec<_> = cases
+        .iter()
+        .flat_map(|(_, body)| body.iter().cloned())
+        .collect();
+    let plan = scope_plan(&all, false, strict, false)?;
+    let mut compiled = Vec::new();
+    for (test, body) in cases {
+        let mut chunk = Chunk {
+            strict,
+            ..Chunk::default()
+        };
+        for stmt in body {
+            statement(stmt, &mut chunk.ops, strict)?;
+        }
+        compiled.push((
+            test.as_ref().map(|e| expression(e, strict)).transpose()?,
+            chunk.finish(),
+        ));
+    }
+    out.push(Op::Switch(
+        expression(test, strict)?,
+        compiled,
+        Box::new(plan),
+    ));
+    Ok(())
+}
+
 enum Emit<'a> {
     Expression(&'a Expr),
     Named(&'a Expr, &'a JsString),
@@ -1282,6 +1454,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::PrivateMember(object, name) => {
                     pending.extend([I(Op::PrivateProperty(name.clone())), E(object)]);
                 }
+                _ if assignment && !strict && crate::parser::call_assignment_target(e) => {
+                    pending.extend([I(Op::InvalidCallAssignment), E(e)]);
+                }
                 _ if assignment => return Err(syntax("Invalid assignment target")),
                 _ => pending.push(E(e)),
             },
@@ -1317,8 +1492,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::RegExp(program) => out.push(Op::RegExp(program.clone())),
                 Expr::Identifier(name) => {
                     check_identifier(name, strict)?;
-                    out.push(Op::Name(name.clone()));
-                    out.push(Op::Get);
+                    out.push(Op::LoadName(name.clone()));
                 }
                 Expr::This => out.push(Op::This),
                 Expr::NewTarget => out.push(Op::NewTarget),
@@ -1484,7 +1658,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     }
                     pending.push(value.as_deref().map_or(I(Op::Push(Value::Undefined)), E));
                 }
-                Expr::DynamicImport(value) => pending.extend([I(Op::DynamicImport), E(value)]),
+                Expr::DynamicImport(phase, value, options) => pending.extend([
+                    I(Op::DynamicImport(*phase)),
+                    options.as_deref().map_or(I(Op::Push(Value::Undefined)), E),
+                    E(value),
+                ]),
                 Expr::Binary(op, left, right) if matches!(*op, "&&" | "||" | "??") => {
                     pending.extend([Emit::ShortCircuit(op, right), E(left)])
                 }
@@ -1493,6 +1671,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 }
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
+                        if crate::parser::call_assignment_target(left) {
+                            return Err(syntax("Invalid logical assignment target"));
+                        }
                         let name = if anonymous(right) {
                             if let Expr::Identifier(name) = left.as_ref() {
                                 Some(name)

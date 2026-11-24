@@ -13,6 +13,9 @@ pub enum ResourceKind {
     Stylesheet,
     ClassicScript,
     ModuleScript,
+    JsonModule,
+    TextModule,
+    BytesModule,
     Image,
     Media,
     Font,
@@ -39,6 +42,7 @@ pub struct DocumentResource {
 
 #[derive(Debug)]
 pub enum ResourceBody {
+    ModuleBytes(Vec<u8>),
     Text(String),
     Image(Arc<image::RgbaImage>),
     Media(Arc<[u8]>),
@@ -159,12 +163,12 @@ impl Loader {
             });
         }
         let limit = match request.kind {
-            ClassicScript | ModuleScript => 1024 * 1024,
+            ClassicScript | ModuleScript | JsonModule | TextModule | BytesModule => 1024 * 1024,
             Media => 16 * 1024 * 1024,
             _ => RESOURCE_LIMIT,
         };
         let cors = request.cors.or(match request.kind {
-            ModuleScript | Font => Some(CredentialsMode::SameOrigin),
+            ModuleScript | JsonModule | TextModule | BytesModule | Font => Some(CredentialsMode::SameOrigin),
             _ => None,
         });
         let integrity = request
@@ -316,20 +320,20 @@ fn decode_resource(
     let mime = MimeType::parse(content_type);
     let essence = mime.as_ref().map_or("", |m| m.essence.as_str());
     let body = match kind {
-        ModuleScript => {
-            if !mime.as_ref().is_some_and(MimeType::javascript) {
+        ModuleScript | JsonModule | TextModule | BytesModule => {
+            if kind == JsonModule && !mime.as_ref().is_some_and(MimeType::json) {
+                return Err(format!("JSON module must have a JSON MIME type (received {essence:?})"));
+            }
+            if kind == ModuleScript && !mime.as_ref().is_some_and(MimeType::javascript) {
                 return Err(format!(
                     "Module must have a JavaScript MIME type (received {essence:?})"
                 ));
             }
-            // Module source is always decoded as UTF-8 independently of
-            // the declared HTTP charset or the document's encoding.
-            ResourceBody::Text(
-                encoding_rs::UTF_8
-                    .decode_with_bom_removal(bytes)
-                    .0
-                    .into_owned(),
-            )
+            if kind == ModuleScript {
+                ResourceBody::Text(encoding_rs::UTF_8.decode_with_bom_removal(bytes).0.into_owned())
+            } else {
+                ResourceBody::ModuleBytes(bytes.to_vec())
+            }
         }
         ClassicScript => {
             if ["audio/", "image/", "video/"]

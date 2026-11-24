@@ -15,9 +15,10 @@ function under(root, path) {
 }
 
 export function metadata(source) {
-  const match = /\/\*---\s*\r?\n([\s\S]*?)\r?\n---\*\//.exec(source);
+  const match = /\/\*---[ \t]*(?:\r\n|[\r\n])([\s\S]*?)(?:\r\n|[\r\n])---\*\//.exec(source);
   if (!match) throw new Error('missing Test262 YAML frontmatter');
-  const parsed = YAML.parse(match[1], { maxAliasCount: 100, uniqueKeys: true });
+  // Some fixtures deliberately use bare CR. Normalize only the YAML excerpt.
+  const parsed = YAML.parse(match[1].replace(/\r\n?/g, '\n'), { maxAliasCount: 100, uniqueKeys: true });
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('frontmatter must be a mapping');
   for (const key of ['flags', 'includes', 'features']) {
     if (parsed[key] !== undefined && (!Array.isArray(parsed[key]) || parsed[key].some(item => typeof item !== 'string'))) {
@@ -47,12 +48,7 @@ export function variants(meta) {
 }
 
 export function unsupportedReason(meta, variant) {
-  // INTERPRETING.md reserves this tag for cases that require the optional
-  // host value. Running them with undefined in its place can silently pass.
-  if (meta.features?.includes('IsHTMLDDA')) return 'optional Test262 host value $262.IsHTMLDDA is not implemented';
-  for (const flag of ['CanBlockIsFalse', 'CanBlockIsTrue']) {
-    if (meta.flags.includes(flag)) return `Test262 agent mode ${flag} is not implemented`;
-  }
+  if (meta.flags.includes('CanBlockIsTrue')) return 'Test262 agent mode CanBlockIsTrue is not implemented';
   if (meta.negative?.phase === 'resolution' && variant !== 'module') return 'resolution phase requires the module flag';
   return null;
 }
@@ -176,7 +172,7 @@ class GitBlobs {
       this.buffer = this.buffer.subarray(end + 1 + length + 1);
       if (blobHash(bytes) !== pending.hash) pending.reject(new Error('Git blob hash mismatch'));
       else {
-        try { pending.resolve(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
+        try { pending.resolve(pending.raw ? bytes : new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
         catch (error) { pending.reject(error); }
       }
     });
@@ -186,10 +182,10 @@ class GitBlobs {
     this.child.stdin.on('error', fail);
     this.child.stderr.resume();
   }
-  read(hash) {
+  read(hash, raw = false) {
     if (this.pending) throw new Error('concurrent Git blob request');
     if (!this.child) this.start();
-    return new Promise((resolve, reject) => { this.pending = { hash, resolve, reject }; this.child.stdin.write(`${hash}\n`); });
+    return new Promise((resolve, reject) => { this.pending = { hash, raw, resolve, reject }; this.child.stdin.write(`${hash}\n`); });
   }
   close() { if (this.child) this.child.stdin.end(); }
 }
@@ -206,10 +202,16 @@ export function moduleFixturePath(referrer, units) {
   if (!path.startsWith('test/')) {
     throw { status: 'harness_error', reason: 'module fixture path escapes the pinned test tree' };
   }
-  if (path.endsWith('.json')) {
-    throw { status: 'unsupported', reason: 'JSON module fixtures are not implemented' };
-  }
   return path;
+}
+
+function fixturePayload(identifier, bytes) {
+  try {
+    const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    return { identifier, source };
+  } catch {
+    return { identifier, bytes: [...bytes] };
+  }
 }
 
 async function moduleGraph(worker, rootPath, request, readCanonical) {
@@ -221,29 +223,40 @@ async function moduleGraph(worker, rootPath, request, readCanonical) {
 
   const files = [];
   const edges = [];
-  const parsed = new Map([[rootPath, root]]);
-  const frames = [{ path: rootPath, requests: root.module_requests, next: 0 }];
+  const parsed = new Set([rootPath]);
+  const supplied = new Set([rootPath]);
+  const linkedEdges = new Set();
+  const frames = [{ path: rootPath, requests: root.module_requests, types: root.module_types, next: 0 }];
   let bytes = Buffer.byteLength(request.source);
   while (frames.length) {
     const frame = frames.at(-1);
     if (!Array.isArray(frame.requests)) throw { status: 'harness_error', reason: 'worker did not return module requests' };
     if (frame.next === frame.requests.length) { frames.pop(); continue; }
     if (edges.length >= 16384) throw { status: 'resource_limit', reason: 'module fixture edge count exceeds 16384' };
+    const kind = frame.types?.[frame.next] ?? 'javascript';
     const specifier = frame.requests[frame.next++];
     const target = moduleFixturePath(frame.path, specifier);
     const identifier = target === rootPath ? request.id : target;
-    edges.push({ referrer: frame.path === rootPath ? request.id : frame.path, specifier, target: identifier });
-    if (parsed.has(target)) continue;
+    const edge = JSON.stringify([frame.path, specifier]);
+    if (!linkedEdges.has(edge)) {
+      linkedEdges.add(edge);
+      edges.push({ referrer: frame.path === rootPath ? request.id : frame.path, specifier, target: identifier });
+    }
+    if (supplied.has(target) && (kind !== 'javascript' || parsed.has(target))) continue;
     if (files.length >= 1023) throw { status: 'resource_limit', reason: 'module fixture count exceeds 1023' };
-    const source = await readCanonical(target);
-    bytes += Buffer.byteLength(source);
-    if (bytes > 8 * 1024 * 1024) throw { status: 'resource_limit', reason: 'module fixture source bytes exceed 8 MiB' };
-    files.push({ identifier, source });
-    const reply = await parse(target, source);
-    parsed.set(target, reply);
+    const source = await readCanonical(target, true);
+    if (!supplied.has(target)) {
+      bytes += Buffer.byteLength(source);
+      if (bytes > 8 * 1024 * 1024) throw { status: 'resource_limit', reason: 'module fixture source bytes exceed 8 MiB' };
+      files.push(fixturePayload(identifier, source));
+      supplied.add(target);
+    }
+    if (kind !== 'javascript') continue;
+    const reply = await parse(target, new TextDecoder("utf-8", { ignoreBOM: true }).decode(source));
+    parsed.add(target);
     // Keep the original fixture in the final request. The link operation must
     // observe its parse failure at the point it resolves that dependency.
-    if (reply.outcome === 'ok') frames.push({ path: target, requests: reply.module_requests, next: 0 });
+    if (reply.outcome === 'ok') frames.push({ path: target, requests: reply.module_requests, types: reply.module_types, next: 0 });
     else break;
   }
   return { module_files: files, module_edges: edges };
@@ -265,11 +278,11 @@ export async function run(options) {
     return [path, description.split(' ')[2]];
   }));
   const blobs = new GitBlobs(root);
-  const readCanonical = async name => {
+  const readCanonical = async (name, raw = false) => {
     const full = resolve(root, name);
     const path = under(root, full);
     if (!hashes.has(path)) throw new Error(`untracked/missing upstream fixture: ${path}`);
-    return blobs.read(hashes.get(path));
+    return blobs.read(hashes.get(path), raw);
   };
   const selected = new Set();
   for (const name of options.paths) {
@@ -305,12 +318,12 @@ export async function run(options) {
       const sources = [];
       let bytes = 0;
       for (const identifier of hashes.keys()) {
-        if (!identifier.startsWith(`${prefix}/`) || !identifier.endsWith('.js') || !identifier.split('/').at(-1).includes('_FIXTURE')) continue;
+        if (!identifier.startsWith(`${prefix}/`) || !identifier.split('/').at(-1).includes('_FIXTURE')) continue;
         if (sources.length === 1023) throw { status: 'resource_limit', reason: 'dynamic fixture count exceeds 1023' };
-        const source = await readCanonical(identifier);
+        const source = await readCanonical(identifier, true);
         bytes += Buffer.byteLength(source);
         if (bytes > 4 * 1024 * 1024) throw { status: 'resource_limit', reason: 'dynamic fixture source bytes exceed 4 MiB' };
-        sources.push({ identifier, source });
+        sources.push(fixturePayload(identifier, source));
       }
       dynamicBundleCache.set(prefix, sources);
     }
@@ -337,7 +350,7 @@ export async function run(options) {
             const names = ['assert.js', 'sta.js', ...(meta.flags.includes('async') ? ['doneprintHandle.js'] : []), ...meta.includes];
             for (const name of names) setup.push(await setupFile(name));
           }
-          const request = { id: `${path}#${variant}`, source, setup, strict: variant === 'strict', parse_only: parseOnly, async_test: meta.flags.includes('async'), max_instructions: options.maxInstructions };
+          const request = { id: `${path}#${variant}`, source, setup, strict: variant === 'strict', parse_only: parseOnly, async_test: meta.flags.includes('async'), max_instructions: options.maxInstructions, timeout_ms: options.timeoutMs };
           if (variant === 'module') {
             request.module_goal = true;
             request.link_only = meta.negative?.phase === 'resolution';
@@ -348,7 +361,7 @@ export async function run(options) {
             if (graph.response) response = graph.response;
             else Object.assign(request, graph);
           }
-          if (!response && !parseOnly && meta.features.some(feature => feature === 'dynamic-import' || feature === 'top-level-await')) {
+          if (!response && !parseOnly && meta.features.some(feature => feature === 'dynamic-import' || feature === 'top-level-await' || feature === 'ShadowRealm')) {
             request.dynamic_files = await dynamicBundle(path);
           }
           response ??= await worker.request(request);
@@ -376,7 +389,7 @@ export async function run(options) {
     counts, totalVariants: results.length,
     // All selected variants stay in the denominator, including missing features and harness failures.
     passFractionSelected: results.length ? (counts.pass ?? 0) / results.length : 0,
-    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await and async completion use VM jobs. Import attributes, additional realms, explicit GC during execution, agent hosts, and external timers remain unsupported.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
+    limitations: ['This is a selected scope, not a full Test262 conformance score.', 'Source-text modules and dynamic imports use pinned relative fixtures. Top-level await and async completion use VM jobs. Explicit GC during execution, agent hosts, and external timers remain unsupported.', 'Upstream harness code, including doneprintHandle.js for async tests, is executed unchanged by the Rust VM.'],
     results,
   };
   const output = resolve(options.output);

@@ -2,7 +2,10 @@ use rust_browser_javascript::{ErrorKind, Value, Vm};
 
 fn small_stack(task: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .name("parser-budget-1mib".into())
+        .name(format!(
+            "parser-budget-1mib:{}",
+            std::thread::current().name().unwrap_or("unnamed")
+        ))
         .stack_size(1024 * 1024)
         .spawn(task)
         .unwrap()
@@ -369,12 +372,7 @@ fn recursive_grammar_and_dynamic_function_share_the_budget() {
         );
         // Unsupported valid syntax must retain its own category; resource guards
         // must never turn it into a SyntaxError that could pass a negative test.
-        assert_eq!(
-            vm.check_syntax("import('./example.js', {})")
-                .unwrap_err()
-                .kind,
-            ErrorKind::UnsupportedFeature
-        );
+        vm.check_syntax("import('./example.js', {})").unwrap();
         assert_eq!(
             vm.check_syntax("var = ;").unwrap_err().kind,
             ErrorKind::SyntaxError

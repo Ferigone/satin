@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use crate::{ErrorKind, JsBigInt, JsError, JsString};
 
 const BIGINT_SOURCE_WORK: usize = 8_388_608;
@@ -29,7 +30,11 @@ pub(crate) struct Token {
     pub line: usize,
     pub column: usize,
     pub newline: bool,
+    pub start: usize,
+    pub end: usize,
     pub error: Option<Box<JsError>>,
+    pub legacy_literal: bool,
+    pub escaped_string: bool,
     slash: Option<Box<SlashPosition>>,
 }
 #[derive(Clone, Debug)]
@@ -38,8 +43,29 @@ struct SlashPosition {
     templates: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SourceSpan {
+    buffer: Rc<[char]>,
+    range: std::ops::Range<usize>,
+}
+impl SourceSpan {
+    pub fn chars(&self) -> &[char] { &self.buffer[self.range.clone()] }
+    pub fn storage(&self) -> (usize, usize) {
+        (self.buffer.as_ptr() as usize, std::mem::size_of_val(&*self.buffer))
+    }
+    pub fn generated(text: &str) -> Rc<Self> {
+        let buffer: Rc<[char]> = text.chars().collect();
+        let range = 0..buffer.len();
+        Rc::new(Self { buffer, range })
+    }
+}
+
 pub(crate) struct Lexer {
-    chars: Vec<char>,
+    chars: Rc<[char]>,
+    script_goal: bool,
+    before_first_token: bool,
+    legacy_literal: bool,
+    escaped_string: bool,
     pos: usize,
     line: usize,
     column: usize,
@@ -49,9 +75,13 @@ pub(crate) struct Lexer {
     compilation_bytes: usize,
 }
 impl Lexer {
-    pub(crate) fn new(source: &str, compilation_bytes: usize) -> Self {
+    pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
         Self {
             chars: source.chars().collect(),
+            script_goal,
+            before_first_token: true,
+            legacy_literal: false,
+            escaped_string: false,
             pos: 0,
             line: 1,
             column: 1,
@@ -61,6 +91,11 @@ impl Lexer {
             compilation_bytes,
         }
     }
+
+    pub fn span(&self, start: usize, end: usize) -> Rc<SourceSpan> {
+        Rc::new(SourceSpan { buffer: self.chars.clone(), range: start..end })
+    }
+    pub fn position(&self) -> usize { self.pos }
 
     fn peek(&self, n: usize) -> Option<char> {
         self.chars.get(self.pos + n).copied()
@@ -103,6 +138,8 @@ impl Lexer {
         let trivia = self
             .reserve_compilation_bytes(COMPILATION_BYTES_PER_TOKEN)
             .and_then(|()| self.skip_trivia());
+        self.before_first_token = false;
+        let start = self.pos;
         let line = self.line;
         let column = self.column;
         let newline = std::mem::take(&mut self.newline);
@@ -117,22 +154,32 @@ impl Lexer {
             Err(error) => (TokenKind::Invalid, Some(Box::new(error))),
         };
         Token {
+            start,
+            end: self.pos,
             kind,
             line,
             column,
             newline,
             error,
             slash,
+            legacy_literal: std::mem::take(&mut self.legacy_literal),
+            escaped_string: std::mem::take(&mut self.escaped_string),
         }
     }
 
     fn skip_trivia(&mut self) -> Result<(), JsError> {
+        let initial_line = self.line;
         while let Some(c) = self.peek(0) {
-            if c.is_whitespace() || c == '\u{feff}' {
+            if (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}' {
                 self.bump();
                 continue;
             }
-            if c == '/' && self.peek(1) == Some('/') {
+            let prefix = &self.chars[self.pos..];
+            let html_comment = self.script_goal && (prefix.starts_with(&['<', '!', '-', '-']) ||
+                ((self.before_first_token || self.line != initial_line) && prefix.starts_with(&['-', '-', '>'])));
+            if (c == '/' && self.peek(1) == Some('/'))
+                || (self.pos == 0 && prefix.starts_with(&['#', '!'])) || html_comment {
+
                 while self
                     .peek(0)
                     .is_some_and(|x| !matches!(x, '\r' | '\n' | '\u{2028}' | '\u{2029}'))
@@ -218,7 +265,10 @@ impl Lexer {
                         break;
                     }
                 }
-                let punct = found.ok_or_else(|| self.error(format!("Unsupported token {c:?}")))?;
+                let punct = found.ok_or_else(|| {
+                    if c == '@' { self.error("Unsupported decorator syntax") }
+                    else { self.error(format!("Invalid token {c:?}")) }
+                })?;
                 for _ in punct.chars() {
                     self.bump();
                 }
@@ -411,7 +461,7 @@ impl Lexer {
             if c == quote {
                 return Ok(JsString::from_utf16(units));
             }
-            if matches!(c, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+            if matches!(c, '\r' | '\n') {
                 return Err(self.error("Line terminator in string literal"));
             }
             if c != '\\' {
@@ -419,6 +469,7 @@ impl Lexer {
                 units.extend_from_slice(c.encode_utf16(&mut buf));
                 continue;
             }
+            self.escaped_string = true;
             let escape = self
                 .bump()
                 .ok_or_else(|| self.error("Unterminated string escape"))?;
@@ -429,11 +480,21 @@ impl Lexer {
                 'b' => units.push(8),
                 'f' => units.push(12),
                 'v' => units.push(11),
-                '0' => {
-                    if self.peek(0).is_some_and(|x| x.is_ascii_digit()) {
-                        return Err(self.error("Legacy octal escapes are unsupported"));
+                '0' if !self.peek(0).is_some_and(|c| c.is_ascii_digit()) => units.push(0),
+                '0'..='7' => {
+                    self.legacy_literal = true;
+                    let mut value = escape.to_digit(8).unwrap() as u16;
+                    let following = if value < 4 { 2 } else { 1 };
+                    for _ in 0..following {
+                        let Some(digit) = self.peek(0).and_then(|c| c.to_digit(8)) else { break };
+                        self.bump();
+                        value = value * 8 + digit as u16;
                     }
-                    units.push(0);
+                    units.push(value);
+                }
+                '8' | '9' => {
+                    self.legacy_literal = true;
+                    units.push(escape as u16);
                 }
                 'x' => units.push(self.hex(2)? as u16),
                 'u' => {
@@ -470,7 +531,6 @@ impl Lexer {
                     }
                 }
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {}
-                '1'..='9' => return Err(self.error("Legacy octal escapes are unsupported")),
                 other => {
                     let mut buf = [0; 2];
                     units.extend_from_slice(other.encode_utf16(&mut buf));
@@ -513,6 +573,18 @@ impl Lexer {
                 return Err(self.error("Decimal BigInt literals cannot have leading zeroes"));
             }
             return self.bigint(start, 10);
+        }
+        if leading_zero {
+            self.legacy_literal = true;
+            let digits = &self.chars[start..self.pos];
+            if digits.contains(&'_') {
+                return Err(self.error("Numeric separator after a leading zero"));
+            }
+            if digits.iter().all(|c| c.is_digit(8)) {
+                self.number_suffix()?;
+                let value = digits.iter().fold(0.0, |n, c| n * 8.0 + f64::from(c.to_digit(8).unwrap()));
+                return Ok(TokenKind::Number(value));
+            }
         }
         if self.peek(0) == Some('.') {
             self.bump();

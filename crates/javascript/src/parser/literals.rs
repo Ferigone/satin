@@ -178,6 +178,7 @@ impl Parser {
         if self.eat("...") {
             return Ok(Entry::Value(Slot::SpreadProperty));
         }
+        let method_start = self.current().start;
         let is_async = self.async_method_ahead();
         if is_async {
             self.advance(1);
@@ -218,12 +219,13 @@ impl Parser {
         }
         if let Some(method) = method {
             let function = self.method_function(
+                method_start,
                 if computed { None } else { literal_key },
                 false,
                 function_kind,
                 method,
             )?;
-            let value = self.checked_expression(Expr::Function(function))?;
+            let value = self.checked_expression(Expr::Function(Box::new(function)))?;
             return Ok(Entry::Ready(property.with_value(
                 value,
                 false,

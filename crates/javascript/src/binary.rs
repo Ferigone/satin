@@ -3,9 +3,12 @@ mod array_buffer;
 mod data_view;
 mod element;
 mod host_views;
+mod shared;
+pub(crate) mod waiters;
 mod structured_clone;
 mod typed_array;
 mod typed_methods;
+mod uint8_codec;
 
 use crate::{
     ErrorKind, JsError, ObjectId, PropertyKey, Value, Vm,
@@ -17,6 +20,8 @@ use std::{ops::Range, rc::Rc};
 pub(crate) use structured_clone::ViewLayout;
 pub(crate) use typed_array::{NumericIndex, TypedDescriptor, numeric_index};
 
+pub(crate) use element::f16_round;
+
 const CELL_BYTES: usize = 384;
 const MAX_INDEX: f64 = 9_007_199_254_740_991.0;
 const MAX_BUFFER_BYTES: usize = u32::MAX as usize;
@@ -24,6 +29,7 @@ const MAX_BUFFER_BYTES: usize = u32::MAX as usize;
 #[derive(Default)]
 pub(crate) struct Intrinsics {
     array_buffer: Option<ObjectId>,
+    shared_array_buffer: Option<ObjectId>,
     data_view: Option<ObjectId>,
     typed: [Option<ObjectId>; Element::COUNT],
     typed_constructors: [Option<ObjectId>; Element::COUNT],
@@ -33,6 +39,7 @@ pub(crate) struct Buffer {
     bytes: Option<Vec<u8>>,
     maximum: Option<usize>,
     wasm: bool,
+    immutable: bool,
 }
 
 impl Buffer {
@@ -129,14 +136,40 @@ impl Vm {
         self.consume_work(bytes.div_ceil(64))
     }
 
+    fn backing_id(&self, id: ObjectId) -> Result<ObjectId, JsError> {
+        match self.heap.object(id)?.kind {
+            ObjectKind::ArrayBuffer(_) => Ok(id),
+            ObjectKind::SharedArrayBuffer(backing) => Ok(backing),
+            _ => Err(JsError::type_error("Expected a binary buffer")),
+        }
+    }
+    fn require_unshared(&self, id: ObjectId) -> Result<(), JsError> {
+        if matches!(self.heap.object(id)?.kind, ObjectKind::ArrayBuffer(_)) {
+            Ok(())
+        } else {
+            Err(JsError::type_error("Expected an unshared ArrayBuffer"))
+        }
+    }
     fn buffer_data(&self, id: ObjectId) -> Result<&Buffer, JsError> {
+        let id = self.backing_id(id)?;
         match &self.heap.object(id)?.kind {
             ObjectKind::ArrayBuffer(data) => Ok(data),
             _ => Err(JsError::type_error("Receiver is not an ArrayBuffer")),
         }
     }
 
+    pub(crate) fn buffer_is_immutable(&self, id: ObjectId) -> Result<bool, JsError> {
+        Ok(self.buffer_data(id)?.immutable)
+    }
+    fn require_writable_buffer(&self, id: ObjectId) -> Result<(), JsError> {
+        if self.buffer_is_immutable(id)? {
+            return Err(JsError::type_error("ArrayBuffer is immutable"));
+        }
+        Ok(())
+    }
     fn buffer_data_mut(&mut self, id: ObjectId) -> Result<&mut Buffer, JsError> {
+        self.require_writable_buffer(id)?;
+        let id = self.backing_id(id)?;
         match &mut self.heap.object_mut(id)?.kind {
             ObjectKind::ArrayBuffer(data) => Ok(data),
             _ => Err(JsError::type_error("Receiver is not an ArrayBuffer")),
@@ -170,6 +203,7 @@ impl Vm {
                 bytes: Some(bytes),
                 maximum,
                 wasm: false,
+                immutable: false,
             }),
             prototype,
         )
@@ -259,6 +293,7 @@ impl Vm {
             bytes: Some(bytes),
             maximum: None,
             wasm: true,
+            immutable: false,
         };
         Ok(replacement)
     }
@@ -282,6 +317,13 @@ impl Vm {
     /// Moves host bytes into a native Uint8Array with its own ArrayBuffer.
     pub fn new_uint8_array(&mut self, bytes: Vec<u8>) -> Result<Value, JsError> {
         self.new_binary_view(bytes, Element::Uint8)
+    }
+
+    pub(crate) fn new_immutable_uint8_array(&mut self, bytes: &[u8]) -> Result<Value, JsError> {
+        let array = self.new_uint8_array_with(bytes.len(), |output| output.copy_from_slice(bytes))?;
+        let buffer = self.array_data(array.as_object().unwrap())?.view.buffer;
+        self.buffer_data_mut(buffer)?.immutable = true;
+        Ok(array)
     }
 
     fn new_binary_view(&mut self, bytes: Vec<u8>, element: Element) -> Result<Value, JsError> {
@@ -396,6 +438,7 @@ impl Vm {
     /// Detaches an ArrayBuffer and releases its bytes. A view itself cannot be detached.
     pub fn detach_array_buffer(&mut self, value: &Value) -> Result<(), JsError> {
         let id = kind_id(self, value, "Expected an ArrayBuffer to detach")?;
+        self.require_unshared(id)?;
         let buffer = self.buffer_data_mut(id)?;
         if buffer.wasm {
             return Err(JsError::type_error("Cannot detach a WebAssembly buffer"));
@@ -416,6 +459,7 @@ impl Vm {
             ObjectKind::DataView(view) => (view.buffer, Some(view)),
             _ => return Err(JsError::type_error("Expected a BufferSource")),
         };
+        self.require_unshared(buffer)?;
         let data = self.buffer_data(buffer)?;
         if data.maximum.is_some() {
             return Err(JsError::type_error("Resizable BufferSource is not allowed"));
@@ -439,6 +483,7 @@ impl Vm {
         if array.element != Element::Uint8 {
             return Err(JsError::type_error("Expected a Uint8Array"));
         }
+        self.require_unshared(array.view.buffer)?;
         if self.buffer_data(array.view.buffer)?.maximum.is_some() {
             return Err(JsError::type_error("Resizable Uint8Array is not allowed"));
         }
@@ -495,6 +540,9 @@ impl Vm {
         target: ObjectId,
         offset: usize,
     ) -> Result<(), JsError> {
+        self.require_writable_buffer(target)?;
+        let source = self.backing_id(source)?;
+        let target = self.backing_id(target)?;
         self.binary_work(range.len())?;
         let end = offset.checked_add(range.len()).ok_or_else(type_error)?;
         if source == target {
@@ -607,5 +655,7 @@ fn tag(vm: &mut Vm, object: Value, text: &str) {
 pub(crate) fn install(vm: &mut Vm) {
     array_buffer::install(vm);
     typed_array::install(vm);
+    uint8_codec::install(vm);
     data_view::install(vm);
+    shared::install(vm);
 }

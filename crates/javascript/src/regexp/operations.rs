@@ -430,8 +430,11 @@ fn replace(vm: &mut Vm, regexp: Value, args: &[Value]) -> Result<Value, JsError>
         && let Some(program) = super::runtime::plain_exec_program(vm, &regexp)
         && program.flags == flags
         && let Some(search) = super::bulk::Search::new(vm, &program)?
-        && let Some(value) = search.replace(vm, &input, template, global)?
+        && let Some((value, matched)) = search.replace(vm, &input, template, global)?
     {
+        if let Some(span) = matched {
+            super::legacy::record_bulk(vm, &regexp, &input, &program, span)?;
+        }
         // A global intrinsic loop starts at zero and ends with a failed exec
         // resetting lastIndex to zero. No callback can observe its intermediate values.
         return Ok(value);

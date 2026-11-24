@@ -15,6 +15,7 @@ pub(super) enum Resume {
     Label,
     Initialize,
     Select,
+    WithObject,
     BranchBody,
     Return,
     Throw,
@@ -138,6 +139,7 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
         Op::Initialize(_, _, Some(value)) => Advance::child(value, env, Resume::Initialize),
         Op::Block(body) => Advance::child(body, new_scope(vm, env)?, Resume::Pass),
         Op::Label(_, body) => Advance::child(body, env, Resume::Label),
+        Op::With(test, _) => Advance::child(test, env, Resume::WithObject),
         Op::Branch(test, ..) => Advance::child(test, env, Resume::Select),
         Op::While(..) => LoopState::new(env).test(vm, op)?,
         Op::DoWhile(..) => LoopState::new(env).body(vm, op)?,
@@ -158,6 +160,7 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
                             initialized: false,
                             lexical: true,
                             strict_immutable: true,
+                            deletable: false,
                         },
                     );
                 }
@@ -196,6 +199,7 @@ pub(super) fn after_child(
         && matches!(
             resume,
             Resume::Initialize
+                | Resume::WithObject
                 | Resume::Select
                 | Resume::Return
                 | Resume::Throw
@@ -227,6 +231,13 @@ pub(super) fn after_child(
                 None,
             )?;
             Ok(Advance::normal(None))
+        }
+        Resume::WithObject => {
+            let Op::With(_, body) = op else {
+                unreachable!()
+            };
+            let scope = vm.with_scope(env, expression(completed)?)?;
+            Ok(Advance::child(body, scope, Resume::BranchBody))
         }
         Resume::Select => {
             let Op::Branch(_, yes, no) = op else {
@@ -605,6 +616,9 @@ fn catch_scope(
     error: &JsError,
 ) -> Result<EnvId, JsError> {
     let scope = new_scope(vm, env)?;
+    if matches!(pattern, Some(PatternCode::Name(_))) {
+        vm.heap.environment_mut(scope).kind = EnvKind::SimpleCatch;
+    }
     if let Some(pattern) = pattern {
         let value = if let Some(value) = &error.thrown {
             value.clone()

@@ -708,7 +708,7 @@ mod tests {
             var child = document.querySelector('iframe').contentWindow, errors = [];
             child.document.open();
             child.onerror = function (message) { errors.push(message); return true; };
-            child.document.write('<script>new RegExp("(?:".repeat(200) + "hello" + ")".repeat(200));</script>');
+            child.document.write('<script>new RegExp("(?:a".repeat(200) + "hello" + ")".repeat(200));</script>');
             child.document.write('<script>"x".repeat(67108865);</script>');
             child.document.write('<script>this.finished = true;</script>');
             errors.join("|") + "|" + child.finished;
@@ -734,7 +734,7 @@ mod tests {
                 return true;
             };
             child.finish = function () { observed += 'next'; };
-            d.write('<script>try { new RegExp("", "v"); } catch (e) { finish(); }</script>');
+            d.write('<script>try { eval(String.fromCharCode(39, 55296, 39)); } catch (e) { finish(); }</script>');
             d.write('<script>finish()</script>');
             observed;
         "#).unwrap();

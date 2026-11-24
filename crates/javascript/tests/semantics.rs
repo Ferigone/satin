@@ -74,12 +74,7 @@ fn early_errors_without_execution() {
         vm.check_syntax("return 1").unwrap_err().kind,
         ErrorKind::SyntaxError
     );
-    assert_eq!(
-        vm.check_syntax("import('./example.js', {})")
-            .unwrap_err()
-            .kind,
-        ErrorKind::UnsupportedFeature
-    );
+    vm.check_syntax("import('./example.js', {})").unwrap();
 }
 #[test]
 fn per_iteration_closure_environments() {
@@ -546,10 +541,7 @@ fn unsupported_grammar_cannot_pass_negative_syntax_tests() {
     let mut vm = Vm::new();
     vm.check_syntax("async function g(){for await ([target] of source){}}")
         .unwrap();
-    for source in [
-        "async function g(){for await ([target = await 1] of source){}}",
-        "import('./module.js', {})",
-    ] {
+    for source in ["async function g(){for await ([target = await 1] of source){}}"] {
         assert_eq!(
             vm.check_syntax(source).unwrap_err().kind,
             ErrorKind::UnsupportedFeature,
@@ -596,7 +588,10 @@ fn compilation_budget_charges_syntax_density_and_retains_large_literals() {
     // These statements are cheap to execute but expensive to represent in
     // parser/bytecode buffers. Reject them during compilation.
     let dense = ";".repeat(20_000);
-    assert_eq!(bounded.check_syntax(&dense).unwrap_err().kind, ErrorKind::HeapLimit);
+    assert_eq!(
+        bounded.check_syntax(&dense).unwrap_err().kind,
+        ErrorKind::HeapLimit
+    );
     assert_eq!(bounded.eval("1 + 2").unwrap(), Value::from(3));
 }
 
@@ -841,4 +836,84 @@ fn only_sloppy_if_clauses_allow_a_direct_ordinary_function() {
         vm.eval("if(false) function f() {} else function g() {}")
             .is_ok()
     );
+}
+
+#[test]
+fn with_environment_tracks_live_properties_unscopables_and_suspended_frames() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        var x=1, box={x:2, method(){return this}};
+        var seen, receiver;
+        with(box) { seen=()=>x; receiver=method(); }
+        function* gen(){with(box){yield x; yield x}}
+        var iter=gen(), first=iter.next().value;
+        box[Symbol.unscopables]={x:true};
+        first===2 && seen()===1 && receiver===box && iter.next().value===1
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        vm.check_syntax("'use strict'; with({}){}")
+            .unwrap_err()
+            .kind,
+        ErrorKind::SyntaxError
+    );
+}
+
+#[test]
+fn block_functions_copy_the_current_lexical_value_to_the_variable_scope() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        function probe(param) {
+            let before = f;
+            { function f() {}; f = 3; }
+            { function param() {}; }
+            try { throw null } catch (f) { { function f(){return 4} } }
+            return before === undefined && f() === 4 && param === 7;
+        }
+        probe(7)
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn callable_source_preserves_comments_and_ignores_overridden_names() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        const fn = ( x /* in */ ) => /pattern/u;
+        Object.defineProperty(fn, "name", { get(){ throw "name getter called"; } });
+        const C = class /* keep */ { static method /* keep */ () {} };
+        fn.toString() === "( x /* in */ ) => /pattern/u" &&
+            C.toString() === "class /* keep */ { static method /* keep */ () {} }" &&
+            C.method.toString() === "method /* keep */ () {}"
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn mapped_arguments_survive_collection_and_disconnect_on_redefinition() {
+    let mut vm = Vm::new();
+    vm.eval("function capture(x, x) { x = 3; return [() => arguments, () => x, v => x = v]; } var api = capture(1, 2);").unwrap();
+    vm.collect_garbage();
+    assert_eq!(vm.eval(r#"
+        const args = api[0]();
+        if (Object.getPrototypeOf(args) !== Object.prototype || Array.isArray(args)) throw 1;
+        if (args[0] !== 1 || args[1] !== 3) throw 2;
+        args[1] = 4;
+        if (api[1]() !== 4) throw 3;
+        api[2](5);
+        Object.defineProperty(args, "1", {writable:false});
+        api[2](6);
+        args[1] === 5 && Object.getOwnPropertyDescriptor(args, "1").value === 5
+    "#).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn deleted_eval_binding_is_recreated_by_an_already_resolved_sloppy_assignment() {
+    number("function f(){eval('var q'); q = (delete q, 42); return q;} f()", 42.0);
+    string("function f(){eval('var q'); return (()=>{'use strict'; try {q = evalSloppy();} catch(e){return e.name;}})(); function evalSloppy(){eval('delete q');return 42;}} f()", "ReferenceError");
 }

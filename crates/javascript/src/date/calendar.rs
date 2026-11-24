@@ -12,7 +12,7 @@ pub(super) const MONTHS: [&str; 12] = [
 pub(super) const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 #[derive(Clone, Copy)]
-pub(super) struct CivilTime {
+pub(crate) struct CivilTime {
     pub year: i64,
     pub month: u32,
     pub day: u32,
@@ -102,7 +102,7 @@ pub(super) fn make_full_year(year: f64) -> f64 {
     }
 }
 
-pub(super) fn make_date(fields: [f64; 7]) -> f64 {
+pub(crate) fn make_date(fields: [f64; 7]) -> f64 {
     let [year, month, day, hour, minute, second, millisecond] = fields;
     if !fields.into_iter().all(f64::is_finite) {
         return f64::NAN;
@@ -153,4 +153,20 @@ mod tests {
         }
         assert_eq!(time_clip(-0.9).to_bits(), 0);
     }
+}
+
+// TZif future rules recur on the proleptic Gregorian 400-year cycle. Map
+// them into Jiff's civil range while leaving all recorded history intact.
+// Before the earliest civil instant, the first offset extends indefinitely.
+pub(crate) fn project_timestamp(second: i64, fraction: i32) -> (jiff::Timestamp, i64) {
+    use jiff::Timestamp;
+    const GREGORIAN_CYCLE: i64 = 146_097 * 86_400;
+    const START_2400: i64 = 13_569_465_600;
+    let shift = if second >= START_2400 + GREGORIAN_CYCLE {
+        ((second - START_2400) / GREGORIAN_CYCLE) * GREGORIAN_CYCLE
+    } else {
+        0
+    };
+    let instant = Timestamp::new(second - shift, fraction).unwrap_or(Timestamp::MIN);
+    (instant, shift)
 }

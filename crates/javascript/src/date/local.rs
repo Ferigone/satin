@@ -11,7 +11,6 @@ pub(super) fn to_utc(wall: f64) -> f64 {
     Zone::system().utc_from_wall(wall as i64) as f64
 }
 
-#[cfg(any(windows, test))]
 fn resolve_wall(
     wall: i64,
     offsets: impl IntoIterator<Item = i64>,
@@ -232,20 +231,37 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    pub(in crate::date) struct Zone;
+    use super::{DAY_MS, resolve_wall};
+    use crate::date::calendar::project_timestamp;
+    use jiff::{Timestamp, tz::TimeZone};
+
+    pub(in crate::date) struct Zone(TimeZone);
+
+    fn stamp(ms: i64) -> Timestamp {
+        project_timestamp(
+            ms.div_euclid(1000),
+            (ms.rem_euclid(1000) * 1_000_000) as i32,
+        )
+        .0
+    }
 
     impl Zone {
         pub fn system() -> Self {
-            Self
+            Self(TimeZone::system())
         }
-        pub fn offset_at(&self, _: i64) -> i64 {
-            0
+        pub fn offset_at(&self, ms: i64) -> i64 {
+            i64::from(self.0.to_offset(stamp(ms)).seconds()) * 1000
         }
-        pub fn utc_from_wall(&self, time: i64) -> i64 {
-            time
+        pub fn utc_from_wall(&self, wall: i64) -> i64 {
+            let offsets = [
+                self.offset_at(wall - DAY_MS),
+                self.offset_at(wall),
+                self.offset_at(wall + DAY_MS),
+            ];
+            resolve_wall(wall, offsets, |ms| self.offset_at(ms))
         }
-        pub fn name_at(&self, _: i64, _: i64) -> String {
-            "UTC".to_owned()
+        pub fn name_at(&self, ms: i64, _: i64) -> String {
+            self.0.to_offset_info(stamp(ms)).abbreviation().to_owned()
         }
     }
 }

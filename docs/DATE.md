@@ -8,7 +8,7 @@
 
 Windows provides the current time zone and year-specific daylight saving rules. During a repeated hour, the constructor and local methods choose the earlier instant. During a skipped hour, they use the offset before the transition. A Windows test covers both cases using Eastern Standard Time rules in isolation. [Win32 time zone conversion](https://learn.microsoft.com/windows/win32/api/timezoneapi/nf-timezoneapi-systemtimetotzspecificlocaltimeex)
 
-Windows time zone data determines the accuracy and coverage of historical offsets. Outside the year range 1602–30826, conversion uses an equivalent year with the same weekdays and leap-year status. Other platforms currently use UTC. The `toLocale*` methods use the engine's basic text format. `Intl.DateTimeFormat` support and `Temporal` integration remain open.
+Windows time zone data determines the accuracy and coverage of historical offsets. Outside the year range 1602–30826, conversion uses an equivalent year with the same weekdays and leap-year status. Other platforms currently use UTC. The `toLocaleString`, `toLocaleDateString` and `toLocaleTimeString` methods format valid dates with the engine’s ICU-backed `Intl.DateTimeFormat` implementation. They accept locale and time-zone options. An invalid date returns `Invalid Date`.
 
 ## Verification
 

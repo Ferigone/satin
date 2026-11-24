@@ -1,4 +1,5 @@
-use super::{Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit, syntax, unsupported};
+use super::sets::{Operation, Set};
+use super::{Flags, MAX_CAPTURES, MAX_PATTERN_DEPTH, limit, syntax};
 use crate::{JsError, JsString};
 use std::ops::Range;
 
@@ -14,6 +15,7 @@ pub(super) enum Member {
     Point(u32),
     Range(u32, u32),
     Shorthand(Shorthand, bool),
+    Property(super::property::Property, bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +36,7 @@ pub(super) enum Expr {
     Sequence(Vec<Expr>),
     Choice(Vec<Expr>),
     Character(Member),
+    UnicodeSet(Set),
     Class {
         members: Vec<Member>,
         negated: bool,
@@ -64,6 +67,7 @@ pub(super) enum Expr {
 pub(super) struct Pattern {
     pub(super) body: Expr,
     pub(super) captures: usize,
+    pub(super) wrapping_captures: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
 
@@ -87,6 +91,7 @@ struct Parser<'a> {
 
 #[derive(Clone, Debug)]
 enum Escape {
+    Emoji(u8),
     Character(Member),
     Assertion(Assertion),
     Number(usize),
@@ -104,16 +109,21 @@ enum Group {
 }
 
 pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
-    let (total_captures, has_named) = count_captures(units);
+    let Groups {
+        total_captures,
+        has_named,
+        body,
+        wrapping_captures,
+    } = scan_groups(units, flags.has(Flags::UNICODE_SETS));
     if total_captures > MAX_CAPTURES {
         return Err(limit("Regular expression capture limit exceeded"));
     }
     let mut parser = Parser {
-        units,
+        units: &units[body],
         at: 0,
         flags,
         total_captures,
-        next_capture: 0,
+        next_capture: wrapping_captures,
         has_named,
         names: Vec::new(),
         references: Vec::new(),
@@ -132,6 +142,7 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
     Ok(Pattern {
         body,
         captures: total_captures,
+        wrapping_captures,
         names: parser
             .names
             .into_iter()
@@ -145,19 +156,40 @@ pub(super) fn parse(units: &[u16], flags: Flags) -> Result<Pattern, JsError> {
     })
 }
 
-/// Decimal escapes can refer to capture groups that have not been parsed yet.
-fn count_captures(units: &[u16]) -> (usize, bool) {
+struct Groups {
+    total_captures: usize,
+    has_named: bool,
+    body: Range<usize>,
+    wrapping_captures: usize,
+}
+
+// Count forward references while recognizing groups that enclose the entire
+// pattern. Those groups share one span, so compiling their open/close ops in
+// a loop avoids building or recursively dropping a chain of identical nodes.
+fn scan_groups(units: &[u16], nested_classes: bool) -> Groups {
     let mut at = 0;
-    let mut inside = false;
+    let mut brackets = 0usize;
+    let mut depth = 0usize;
+    let mut wrappers: Vec<(usize, usize)> = Vec::new();
     let mut captures = 0;
     let mut named = false;
     while let Some(&unit) = units.get(at) {
         match ascii(unit) {
             Some(b'\\') => at += 1,
-            Some(b'[') => inside = true,
-            Some(b']') => inside = false,
-            Some(b'(') if !inside => {
-                if units.get(at + 1).copied().and_then(ascii) != Some(b'?') {
+            Some(b'[') if nested_classes || brackets == 0 => brackets += 1,
+            Some(b']') => brackets = brackets.saturating_sub(1),
+            Some(b'(') if brackets == 0 => {
+                depth += 1;
+                let plain_capture = units.get(at + 1).copied().and_then(ascii) != Some(b'?');
+                let (previous_end, previous_captures) = wrappers.last().copied().unwrap_or((0, 0));
+                if at == previous_end {
+                    if plain_capture {
+                        wrappers.push((at + 1, previous_captures + 1));
+                    } else if units.get(at + 2) == Some(&u16::from(b':')) {
+                        wrappers.push((at + 3, previous_captures));
+                    }
+                }
+                if plain_capture {
                     captures += 1;
                 } else if units.get(at + 2).copied().and_then(ascii) == Some(b'<')
                     && !matches!(
@@ -169,11 +201,29 @@ fn count_captures(units: &[u16]) -> (usize, bool) {
                     named = true;
                 }
             }
+            Some(b')') if brackets == 0 => {
+                if depth == 0 {
+                    wrappers.clear();
+                }
+                depth = depth.saturating_sub(1);
+                if at + depth + 1 != units.len() {
+                    wrappers.truncate(depth);
+                }
+            }
             _ => {}
         }
         at += 1;
     }
-    (captures, named)
+    if depth != 0 {
+        wrappers.clear();
+    }
+    let (start, wrapping_captures) = wrappers.last().copied().unwrap_or((0, 0));
+    Groups {
+        total_captures: captures,
+        has_named: named,
+        body: start..units.len() - wrappers.len(),
+        wrapping_captures,
+    }
 }
 
 fn ascii(unit: u16) -> Option<u8> {
@@ -273,10 +323,14 @@ impl Parser<'_> {
                 Ok(Expr::Any)
             }
             Some(b'(') => self.group(depth),
+            Some(b'[') if self.flags.has(Flags::UNICODE_SETS) => {
+                Ok(Expr::UnicodeSet(self.unicode_set(depth + 1)?))
+            }
             Some(b'[') => self.class(),
             Some(b'\\') => {
                 self.at += 1;
                 Ok(match self.escape(false)? {
+                    Escape::Emoji(mask) => Expr::UnicodeSet(Set::Emoji(mask)),
                     Escape::Character(member) => Expr::Character(member),
                     Escape::Assertion(assertion) => Expr::Assert(assertion),
                     Escape::Number(number) => Expr::BackReference(BackReference::Number(number)),
@@ -520,6 +574,126 @@ impl Parser<'_> {
         Ok(Some(quantity))
     }
 
+    fn set_operator(&self) -> Option<Operation> {
+        let pair = self.units.get(self.at..self.at + 2)?;
+        match pair {
+            [38, 38] => Some(Operation::Intersection),
+            [45, 45] => Some(Operation::Difference),
+            _ => None,
+        }
+    }
+
+    fn unicode_set(&mut self, depth: usize) -> Result<Set, JsError> {
+        if depth > MAX_PATTERN_DEPTH {
+            return Err(limit("Regular expression nesting limit exceeded"));
+        }
+        self.at += 1;
+        let complement = self.eat(b'^');
+        let mut sets = Vec::new();
+        let mut operator = None;
+        let mut allow_operation = true;
+        while !self.eat(b']') {
+            let (mut operand, point) = self.set_operand(depth)?;
+            if self.byte() == Some(b'-') && self.set_operator().is_none() {
+                self.at += 1;
+                let first =
+                    point.ok_or_else(|| syntax("A range begins with a class-set character"))?;
+                let last = self.set_character()?;
+                if first > last || operator.is_some() {
+                    return Err(syntax("Invalid Unicode set range"));
+                }
+                operand = Set::Character(Member::Range(first, last));
+                allow_operation = false;
+            }
+            sets.push(operand);
+            if let Some(next) = self.set_operator() {
+                if !allow_operation
+                    || (operator.is_none() && sets.len() != 1)
+                    || operator.is_some_and(|op| op != next)
+                {
+                    return Err(syntax(
+                        "Mixed Unicode set operations require nested classes",
+                    ));
+                }
+                self.at += 2;
+                if self.byte() == Some(b']')
+                    || matches!(next, Operation::Intersection) && self.byte() == Some(b'&')
+                {
+                    return Err(syntax("Expected a Unicode set operand"));
+                }
+                operator = Some(next);
+            } else if operator.is_some() && self.byte() != Some(b']') {
+                return Err(syntax("Expected a Unicode set operator"));
+            }
+        }
+        let set = if sets.len() == 1 {
+            sets.pop().unwrap()
+        } else {
+            Set::Operation(operator.unwrap_or(Operation::Union), sets)
+        };
+        if complement {
+            if set.may_contain_strings() {
+                return Err(syntax("Cannot complement a Unicode set of strings"));
+            }
+            Ok(Set::Complement(Box::new(set)))
+        } else {
+            Ok(set)
+        }
+    }
+
+    fn set_operand(&mut self, depth: usize) -> Result<(Set, Option<u32>), JsError> {
+        if self.byte() == Some(b'[') {
+            return Ok((self.unicode_set(depth + 1)?, None));
+        }
+        if self.eat(b'\\') {
+            if self.eat(b'q') {
+                if !self.eat(b'{') {
+                    return Err(syntax("Expected string disjunction"));
+                }
+                let mut strings = Vec::new();
+                loop {
+                    let mut string = Vec::new();
+                    while !matches!(self.byte(), Some(b'|' | b'}')) {
+                        string.push(self.set_character()?);
+                    }
+                    strings.push(string);
+                    if self.eat(b'}') {
+                        break;
+                    }
+                    self.at += 1;
+                }
+                return Ok((Set::Strings(strings), None));
+            }
+            return match self.escape(true)? {
+                Escape::Character(Member::Point(c)) => {
+                    Ok((Set::Character(Member::Point(c)), Some(c)))
+                }
+                Escape::Character(member) => Ok((Set::Character(member), None)),
+                Escape::Emoji(mask) => Ok((Set::Emoji(mask), None)),
+                _ => Err(syntax("Invalid Unicode set operand")),
+            };
+        }
+        let point = self.set_character()?;
+        Ok((Set::Character(Member::Point(point)), Some(point)))
+    }
+
+    fn set_character(&mut self) -> Result<u32, JsError> {
+        if self.eat(b'\\') {
+            return match self.escape(true)? {
+                Escape::Character(Member::Point(point)) => Ok(point),
+                _ => Err(syntax("Expected a Unicode set character")),
+            };
+        }
+        if let Some(ch) = self.byte()
+            && (b"()[]{}/-|".contains(&ch)
+                || set_punctuator(ch) && self.units.get(self.at + 1) == Some(&u16::from(ch)))
+        {
+            return Err(syntax("Reserved punctuation in Unicode set"));
+        }
+        self.point(true)
+            .ok_or_else(|| syntax("Unterminated Unicode set"))
+    }
+
     fn class(&mut self) -> Result<Expr, JsError> {
         self.at += 1;
         let negated = self.eat(b'^');
@@ -674,7 +848,36 @@ impl Parser<'_> {
                 Ok(Escape::Name(name))
             }
             Some(b'p' | b'P') if unicode => {
-                Err(unsupported("Unicode property escapes are unsupported"))
+                if !self.eat(b'{') {
+                    return Err(syntax("Expected a Unicode property name in braces"));
+                }
+                let start = self.at;
+                while self
+                    .byte()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'='))
+                {
+                    self.at += 1;
+                }
+                let end = self.at;
+                if !self.eat(b'}') {
+                    return Err(syntax("Invalid Unicode property escape"));
+                }
+                let name =
+                    String::from_utf16(&self.units[start..end]).expect("ASCII property name");
+                if self.flags.has(Flags::UNICODE_SETS)
+                    && let Some(prop) = super::sets::emoji_property(&name)
+                {
+                    if ch == Some(b'P') {
+                        return Err(syntax("Cannot complement a Unicode property of strings"));
+                    }
+                    return Ok(Escape::Emoji(prop));
+                }
+                let property = super::property::Property::parse(&name)
+                    .ok_or_else(|| syntax("Unknown Unicode property name or value"))?;
+                Ok(Escape::Character(Member::Property(
+                    property,
+                    ch == Some(b'P'),
+                )))
             }
             Some(b'0'..=b'9') => {
                 self.at = start;
@@ -685,6 +888,11 @@ impl Parser<'_> {
                 | b'}' | b'|' | b'/',
             ) => character(point),
             Some(b'-') if inside_class => character(point),
+            Some(ch)
+                if inside_class && self.flags.has(Flags::UNICODE_SETS) && set_punctuator(ch) =>
+            {
+                character(point)
+            }
             _ if !unicode => character(point),
             _ => Err(syntax("Invalid regular expression identity escape")),
         }
@@ -718,6 +926,10 @@ impl Parser<'_> {
         }
         Ok(Escape::Character(Member::Point(value)))
     }
+}
+
+fn set_punctuator(ch: u8) -> bool {
+    b"!#$%&*+,.:;<=>?@^`~".contains(&ch)
 }
 
 fn decimal(digits: &[u16]) -> Option<usize> {

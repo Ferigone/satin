@@ -1,6 +1,6 @@
 //! ECMAScript Date, with an internal UTC millisecond value and host-local
 //! timezone rules at the civil-time boundary.
-mod calendar;
+pub(crate) mod calendar;
 mod local;
 mod parse;
 
@@ -418,12 +418,16 @@ pub(crate) fn install(vm: &mut Vm) {
         ("toString", LocalFormat::Full),
         ("toDateString", LocalFormat::Date),
         ("toTimeString", LocalFormat::Time),
-        ("toLocaleString", LocalFormat::Full),
-        ("toLocaleDateString", LocalFormat::Date),
-        ("toLocaleTimeString", LocalFormat::Time),
     ] {
         method(vm, prototype.clone(), name, 0, move |vm, this, _| {
             Ok(local_string(receiver(vm, &this)?.1, format))
+        });
+    }
+    for name in ["toLocaleString", "toLocaleDateString", "toLocaleTimeString"] {
+        method(vm, prototype.clone(), name, 0, move |vm, this, args| {
+            let millis = receiver(vm, &this)?.1;
+            if millis.is_nan() { return Ok("Invalid Date".into()); }
+            crate::intl::format_date(vm, args, millis, name)
         });
     }
 }

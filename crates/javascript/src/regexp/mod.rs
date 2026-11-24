@@ -1,10 +1,14 @@
 //! Independent ECMAScript regular-expression compiler and matcher.
 mod bulk;
 mod case;
+mod legacy;
 mod operations;
+pub(crate) use legacy::Origin;
 mod pattern;
 mod program;
+mod property;
 mod runtime;
+mod sets;
 
 use crate::{ErrorKind, JsError, JsString};
 use std::rc::Rc;
@@ -52,12 +56,10 @@ impl Flags {
             }
             flags.0 |= bit;
         }
-        if flags.has(Self::UNICODE_SETS) {
-            return Err(if flags.has(Self::UNICODE) {
-                syntax("Regular expression flags u and v are mutually exclusive")
-            } else {
-                unsupported("Unicode-set regular expressions (flag v) are unsupported")
-            });
+        if flags.has(Self::UNICODE_SETS) && flags.has(Self::UNICODE) {
+            return Err(syntax(
+                "Regular expression flags u and v are mutually exclusive",
+            ));
         }
         Ok(flags)
     }
@@ -65,7 +67,7 @@ impl Flags {
         self.0 & flag != 0
     }
     fn unicode(self) -> bool {
-        self.has(Self::UNICODE)
+        self.has(Self::UNICODE | Self::UNICODE_SETS)
     }
     fn with_modifiers(self, add: u8, remove: u8) -> Self {
         Self((self.0 | add) & !remove)
@@ -87,9 +89,6 @@ pub(crate) fn literal_flag_character(ch: char) -> bool {
 
 fn syntax(message: impl Into<String>) -> JsError {
     JsError::new(ErrorKind::SyntaxError, message)
-}
-fn unsupported(message: impl Into<String>) -> JsError {
-    JsError::new(ErrorKind::UnsupportedFeature, message)
 }
 fn limit(message: impl Into<String>) -> JsError {
     JsError::new(ErrorKind::ExecutionLimit, message)

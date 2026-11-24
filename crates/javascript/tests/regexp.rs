@@ -69,15 +69,39 @@ fn regex_literal_syntax_is_checked_even_in_dead_code() {
         assert_eq!(error.kind, ErrorKind::SyntaxError, "{source}: {error}");
         assert!(error.line.is_some(), "{source}: {error}");
     }
-    for source in [r"/\p{Alphabetic}/u", r"/[a&&b]/v"] {
+    vm.check_syntax(r"/\p{Alphabetic}/u").unwrap();
+    vm.check_syntax(r"/[a&&b]/v").unwrap();
+    for source in [
+        r"/[ab&&c]/v",
+        r"/[a&&]/v",
+        r"/[^\q{|x}]/v",
+        r"/[a--b&&c]/v",
+        r"/[a--]/v",
+    ] {
         assert_eq!(
             vm.check_syntax(source).unwrap_err().kind,
-            ErrorKind::UnsupportedFeature
+            ErrorKind::SyntaxError,
+            "{source}"
         );
     }
     assert_eq!(
         vm.eval("new RegExp('a','gg')").unwrap_err().kind,
         ErrorKind::SyntaxError
+    );
+}
+
+#[test]
+fn unicode_sets_use_longest_strings_and_backtrack_in_both_directions() {
+    expect(
+        r#"
+        const match = /[\q{a|ab|abc}]/v.exec("abc");
+        [match[0], /^[\q{a|ab}]b$/v.test("ab"),
+         /(?<=[\q{xy|y}])z/v.test("xyz"),
+         /^[\p{RGI_Emoji}&&\q{🇵🇱|no}]$/v.test("🇵🇱"),
+         /^[\P{Lowercase_Letter}]$/iv.test("A"),
+         /^[\q{|abc}]x$/v.test("x")].join("|")
+    "#,
+        "abc|true|true|true|false|true".into(),
     );
 }
 
@@ -328,7 +352,10 @@ fn parsing_matching_and_dropping_a_pattern_on_a_one_mib_stack() {
             let mut vm = Vm::new();
             let supported = format!("/{0}a{1}/.test('a')", "(?:".repeat(32), ")+".repeat(32));
             assert_eq!(vm.eval(&supported).unwrap(), true.into());
-            let too_deep = format!("/{0}a{1}/", "(".repeat(64), ")".repeat(64));
+            let flat_captures =
+                format!("/{0}a{1}/.exec('a')[200]", "(".repeat(200), ")".repeat(200));
+            assert_eq!(vm.eval(&flat_captures).unwrap(), "a".into());
+            let too_deep = format!("/{0}a{1}/", "(".repeat(64), ")+".repeat(64));
             assert_eq!(
                 vm.check_syntax(&too_deep).unwrap_err().kind,
                 ErrorKind::ExecutionLimit
@@ -429,6 +456,35 @@ fn large_regexp_does_not_bypass_custom_exec_utf16_or_capture_replacements() {
 }
 
 #[test]
+fn legacy_regexp_statics_observe_bulk_matches_and_subclass_invalidation() {
+    let mut vm = Vm::with_limits(VmLimits {
+        buffer_units_per_instruction: 256,
+        ..VmLimits::default()
+    });
+    let text = format!("{}axbcy", ".".repeat(4096));
+    vm.set_global("text", text.as_str().into()).unwrap();
+    let result = vm
+        .eval(
+            r#"
+        /(a)x/.test(text);
+        let first = RegExp.lastMatch + RegExp.$1;
+        text.replace(/(a|b)(x|c)/g, "!");
+        RegExp.input = { toString() { return "new"; } };
+        let parts = [first, RegExp.$_, RegExp.lastMatch, RegExp.$1, RegExp.lastParen,
+                     RegExp.leftContext.slice(-2), RegExp.rightContext];
+        class Derived extends RegExp {}
+        new Derived("z").test("z");
+        try { RegExp.$1; } catch(e) { parts.push(e instanceof TypeError); }
+        RegExp.input = "restored";
+        parts.push(RegExp.$_);
+        parts.join("|")
+    "#,
+        )
+        .unwrap();
+    assert_eq!(result, "axa|new|bc|b|c|ax|y|true|restored".into());
+}
+
+#[test]
 fn large_regexp_speculative_scans_still_consume_the_vm_work_budget() {
     let mut vm = Vm::with_limits(VmLimits {
         buffer_units_per_instruction: 256,
@@ -439,4 +495,21 @@ fn large_regexp_speculative_scans_still_consume_the_vm_work_budget() {
         .unwrap();
     let result = vm.eval("input.replace(/a*b|a/g, 'x')");
     assert_eq!(result.unwrap_err().kind, ErrorKind::ExecutionLimit);
+}
+
+#[test]
+fn unicode_properties_match_categories_scripts_and_closed_complements() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        /\p{gc=Lu}/u.test('Ł') && /[\p{Script=Greek}]/u.test('Ω') &&
+        /\p{scx=Hira}/u.test('ー') && /\p{ASCII}/u.test('x') &&
+        /\P{Lowercase_Letter}/iu.test('k') && !/\p{L}/u.test('3') &&
+        (()=>{try{new RegExp('\\p{letter}','u')}catch(e){return e instanceof SyntaxError}})()
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
 }

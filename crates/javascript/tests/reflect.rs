@@ -70,3 +70,33 @@ fn reflect_has_an_own_to_string_tag() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn proxy_traps_preserve_receivers_target_invariants_and_revocation() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        const key = Symbol();
+        const target = { get who() { return this; }, [key]: 7 };
+        const log = [];
+        const proxy = new Proxy(target, {
+            get(t,k,r) { log.push(k); return Reflect.get(t,k,r); }
+        });
+        const child = Object.create(proxy);
+        const pair = Proxy.revocable([], {});
+        let ok = child.who === child && proxy[key] === 7 && log[1] === key &&
+                 Array.isArray(pair.proxy);
+        Object.defineProperty(target, "locked", {value: 4});
+        try { new Proxy(target, { get() {return 5;} }).locked; ok=false; }
+        catch(e) { ok = ok && e instanceof TypeError; }
+        pair.revoke(); pair.revoke();
+        try { Array.isArray(pair.proxy); ok=false; }
+        catch(e) { ok = ok && e instanceof TypeError; }
+        ok
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}

@@ -260,6 +260,7 @@ fn async_function_intrinsics_compile_bodies_and_preserve_subclass_prototypes() {
 #[test]
 fn unreferenced_suspended_executions_are_collected() {
     let mut vm = Vm::new();
+    vm.collect_garbage();
     let before = vm.heap_cell_count();
     vm.eval("(async ()=>{var payload={k:42}; await new Promise(()=>{}); return payload;})();")
         .unwrap();

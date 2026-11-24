@@ -30,6 +30,8 @@ struct Request {
     from_module: Option<ModuleId>,
     base: Arc<Url>,
     specifier: String,
+    phase: rust_browser_javascript::ImportPhase,
+    kind: rust_browser_javascript::ModuleType,
     capability: PromiseCapability,
     roots: [RootId; 2],
 }
@@ -82,7 +84,9 @@ impl ModuleTasks {
                 .unwrap_or(CredentialsMode::SameOrigin);
             let result = graph
                 .resolve_specifier(&request.specifier, &request.base)
-                .and_then(|url| graph.external(url, client, credentials, None, resources));
+                .and_then(|url| {
+                    graph.external_typed(url, client, credentials, None, resources, request.kind)
+                });
             self.waiting.push(Queued {
                 request,
                 graph: result,
@@ -229,8 +233,10 @@ fn start_import(
 ) {
     let state = realm.state.clone();
     let registered = module_context(realm, |vm| {
-        graph.link(vm, module)?;
-        vm.settle_import_after_evaluation(module, request.capability.clone())
+        if request.phase != rust_browser_javascript::ImportPhase::Source {
+            graph.link(vm, module)?;
+        }
+        vm.settle_source_text_import(module, request.phase, request.capability.clone())
     });
     if let Err(error) = registered {
         reject_import(realm, request, error);
@@ -306,6 +312,8 @@ fn capture(vm: &mut Vm, host: &Shared, request: DynamicImportRequest) -> Result<
     ];
     pending.queued.push(Request {
         from_module: request.referrer_module,
+        phase: request.phase,
+        kind: request.module_type,
         base: Arc::new(base),
         specifier,
         capability,

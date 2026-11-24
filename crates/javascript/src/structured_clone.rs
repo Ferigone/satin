@@ -302,8 +302,8 @@ impl Cloner<'_, '_> {
                     .date
                     .expect("initialized Date prototype"),
             )?,
-            ObjectKind::RegExp(program) => crate::regexp::literal(self.vm, program.clone())?,
-            ObjectKind::ArrayBuffer(_) => self.vm.clone_buffer_bytes(source)?,
+            ObjectKind::RegExp(program, _) => crate::regexp::literal(self.vm, program.clone())?,
+            ObjectKind::ArrayBuffer(_) | ObjectKind::SharedArrayBuffer(_) => self.vm.clone_buffer_bytes(source)?,
             ObjectKind::TypedArray(_) | ObjectKind::DataView(_) => {
                 let (buffer, layout) = self.vm.clone_view_layout(source)?;
                 let target_buffer = if let Some(&copy) = self.copies.get(&buffer) {
@@ -324,7 +324,7 @@ impl Cloner<'_, '_> {
                 })?;
                 target
             }
-            ObjectKind::Error(_) => self.copy_error(source)?,
+            ObjectKind::Error(..) => self.copy_error(source)?,
             _ => {
                 return Err(StructuredCloneError::DataClone(
                     "Value is not structured-cloneable",
@@ -400,9 +400,8 @@ impl Cloner<'_, '_> {
             .own_data(source, "message")?
             .map(|value| self.vm.to_string(&value))
             .transpose()?;
-        let target = self
-            .vm
-            .allocate_constructed(ObjectKind::Error(kind), prototype)?;
+        let ObjectKind::Error(_, trace) = &self.vm.heap.object(source)?.kind else { unreachable!() };
+        let target = self.vm.allocate_constructed(ObjectKind::Error(kind, trace.clone()), prototype)?;
         if let Some(message) = message {
             self.vm.define_data_property(
                 target.clone(),

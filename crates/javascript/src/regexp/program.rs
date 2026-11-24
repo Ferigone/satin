@@ -13,7 +13,7 @@ pub(crate) struct Program {
     pub(super) source: JsString,
     pub(super) flags: Flags,
     code: Vec<Op>,
-    captures: usize,
+    pub(super) captures: usize,
     repeats: usize,
     pub(super) first_ascii: u128,
     bytes: usize,
@@ -24,6 +24,7 @@ pub(crate) struct Program {
 enum Op {
     Match,
     Character(Member, Flags),
+    UnicodeSet(Box<super::sets::Set>, Option<usize>, Flags),
     Class(Vec<Member>, bool, Flags, Option<Box<u128>>),
     Any(Flags),
     Assert(Assertion, Flags),
@@ -74,7 +75,13 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         repeats: 0,
         names: &pattern.names,
     };
+    compiler
+        .code
+        .extend((0..pattern.wrapping_captures).map(Op::OpenCapture));
     compiler.emit(pattern.body, flags, false);
+    compiler
+        .code
+        .extend((0..pattern.wrapping_captures).rev().map(Op::CloseCapture));
     compiler.code.push(Op::Match);
     specialize_disjoint_class_repeats(&mut compiler.code);
     let mut program = Program {
@@ -231,6 +238,10 @@ impl Compiler<'_> {
                     self.code[jump] = Op::Jump(end);
                 }
             }
+            Expr::UnicodeSet(set) => {
+                let max = set.may_contain_strings().then(|| set.max_length());
+                self.code.push(Op::UnicodeSet(Box::new(set), max, flags));
+            }
             Expr::Character(ch) => self.code.push(Op::Character(ch, flags)),
             Expr::Class { members, negated } => {
                 // A single member already needs at most one test.
@@ -374,6 +385,7 @@ impl Program {
                 .code
                 .iter()
                 .map(|op| match op {
+                    Op::UnicodeSet(set, _, _) => size_of::<super::sets::Set>() + set.storage(),
                     Op::Class(members, _, _, ascii) => {
                         members.capacity() * size_of::<Member>()
                             + ascii.as_ref().map_or(0, |_| size_of::<u128>())
@@ -470,6 +482,7 @@ impl Matcher<'_> {
                     self.read(*flags, |ch| Ok(member_matches(*member, ch, *flags)))?
                 }
                 Op::Class(..) => self.read_class(vm, op)?,
+                Op::UnicodeSet(set, max, flags) => self.read_set(vm, set, *max, *flags)?,
                 Op::Any(flags) => self.read(*flags, |ch| {
                     Ok(flags.has(Flags::DOT_ALL) || !line_terminator(ch))
                 })?,
@@ -617,6 +630,59 @@ impl Matcher<'_> {
             && test(point)?
         {
             self.cursor = cursor;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn read_set(
+        &mut self,
+        vm: &mut Vm,
+        set: &super::sets::Set,
+        max: Option<usize>,
+        flags: Flags,
+    ) -> Result<bool, JsError> {
+        let Some(max) = max else {
+            return self.read(flags, |p| set.contains(vm, &[p], flags));
+        };
+        let mut cursor = self.cursor;
+        let mut matched = None;
+        let max = max.min(if self.behind {
+            cursor
+        } else {
+            self.input.len() - cursor
+        });
+        vm.ensure_allocation(max.saturating_mul(4))?;
+        let mut points = Vec::with_capacity(max);
+        loop {
+            // Lookbehind consumes the text backwards; class strings stay in
+            // their original order when testing membership.
+            if self.behind {
+                vm.consume_work(points.len())?;
+                points.reverse();
+            }
+            if set.contains(vm, &points, flags)? {
+                if let Some(previous) = matched {
+                    self.cursor = previous;
+                    self.choice(vm, self.pc)?;
+                }
+                matched = Some(cursor);
+            }
+            if self.behind {
+                points.reverse();
+            }
+            if points.len() == max {
+                break;
+            }
+            let Some((next, after)) = point(self.input, cursor, self.behind, true) else {
+                break;
+            };
+            points.push(next);
+            cursor = after;
+        }
+        if let Some(end) = matched {
+            self.cursor = end;
             Ok(true)
         } else {
             Ok(false)
@@ -872,10 +938,22 @@ fn word(ch: u32, flags: Flags) -> bool {
             && case::equivalents(ch, true).any(ascii_word)
 }
 
-fn member_matches(member: Member, actual: u32, flags: Flags) -> bool {
+pub(super) fn member_matches(member: Member, actual: u32, flags: Flags) -> bool {
     let (first, last) = match member {
         Member::Point(point) => (point, point),
         Member::Range(first, last) => (first, last),
+        Member::Property(property, negated) => {
+            if flags.has(Flags::UNICODE_SETS) {
+                let matches = property.contains(actual)
+                    || flags.has(Flags::IGNORE_CASE)
+                        && case::equivalents(actual, true).any(|p| property.contains(p));
+                return matches != negated;
+            }
+            // In Unicode mode the complement is taken before case closure.
+            let in_set = |point| property.contains(point) != negated;
+            return in_set(actual)
+                || flags.has(Flags::IGNORE_CASE) && case::equivalents(actual, true).any(in_set);
+        }
         Member::Shorthand(shorthand, negated) => {
             let matches = match shorthand {
                 Shorthand::Digit => (48..=57).contains(&actual),

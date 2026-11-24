@@ -68,6 +68,9 @@ impl Vm {
                         return Ok(Value::Undefined);
                     };
                     self.consume_work(1)?;
+                    if self.proxy(id) {
+                        return self.proxy_get(id, &PropertyKey::Symbol(symbol), receiver);
+                    }
                     let object = self.heap.object(id)?;
                     let property = object.symbols.get(&symbol).cloned();
                     current = object.prototype;
@@ -131,6 +134,14 @@ impl Vm {
                 break;
             };
             self.consume_work(1)?;
+            if self.proxy(id) {
+                let ok = self.proxy_set(id, key, value, receiver)?;
+                return if !ok && strict {
+                    Err(JsError::type_error("Proxy rejected assignment"))
+                } else {
+                    Ok(())
+                };
+            }
             let object = self.heap.object(id)?;
             if matches!(object.kind, ObjectKind::ModuleNamespace(_)) {
                 return if strict {
@@ -193,6 +204,9 @@ impl Vm {
         id: ObjectId,
         key: &PropertyKey,
     ) -> Result<Option<Property>, JsError> {
+        if self.proxy(id) {
+            return self.proxy_descriptor(id, key);
+        }
         if let PropertyKey::String(name) = key
             && let Some(value) = self.host_indexed_get(id, name)?
         {
@@ -213,10 +227,13 @@ impl Vm {
         self.own_descriptor_without_host(id, key)
     }
     pub(crate) fn own_enumerability(
-        &self,
+        &mut self,
         id: ObjectId,
         key: &PropertyKey,
     ) -> Result<Option<bool>, JsError> {
+        if self.proxy(id) {
+            return Ok(self.proxy_descriptor(id, key)?.map(|p| p.enumerable));
+        }
         if let PropertyKey::String(name) = key
             && (self.host_indexed_has(id, name)? || self.host_named_value(id, name)?.is_some())
         {
@@ -250,6 +267,9 @@ impl Vm {
             let Some(id) = current else {
                 return Ok(false);
             };
+            if self.proxy(id) {
+                return self.proxy_has(id, key);
+            }
             self.consume_work(1)?;
             if self.own_descriptor_key(id, key)?.is_some() {
                 return Ok(true);
@@ -267,6 +287,19 @@ impl Vm {
         key: PropertyKey,
         property: Property,
     ) -> Result<(), JsError> {
+        if let Some(id) = receiver.as_object()
+            && self.proxy(id)
+        {
+            return if self.proxy_define(
+                id,
+                &key,
+                crate::proxy::PartialDescriptor::full(property),
+            )? {
+                Ok(())
+            } else {
+                Err(JsError::type_error("Proxy rejected property definition"))
+            };
+        }
         let PropertyKey::Symbol(symbol) = key else {
             if let PropertyKey::String(key) = key {
                 return self.define_property(receiver, key, property);
@@ -354,6 +387,16 @@ impl Vm {
         key: &PropertyKey,
         strict: bool,
     ) -> Result<bool, JsError> {
+        if let Some(id) = receiver.as_object()
+            && self.proxy(id)
+        {
+            let ok = self.proxy_delete(id, key)?;
+            return if !ok && strict {
+                Err(JsError::type_error("Proxy rejected deletion"))
+            } else {
+                Ok(ok)
+            };
+        }
         if let PropertyKey::String(key) = key {
             return self.delete(receiver, key, strict);
         }
@@ -389,6 +432,9 @@ impl Vm {
     pub fn own_property_keys(&mut self, value: Value) -> Result<Vec<PropertyKey>, JsError> {
         let value = self.coerce_object(value)?;
         let id = value.as_object().unwrap();
+        if self.proxy(id) {
+            return self.proxy_keys(id);
+        }
         let mut keys: Vec<_> = self
             .own_keys(value, false)?
             .into_iter()
@@ -507,7 +553,7 @@ impl Vm {
             .get_property(right, "prototype")?
             .as_object()
             .ok_or_else(|| JsError::type_error("Constructor prototype is not an object"))?;
-        let mut current = self.heap.object(id)?.prototype;
+        let mut current = self.object_prototype_of(id)?;
         for _ in 0..1024 {
             self.tick()?;
             let Some(id) = current else {
@@ -516,7 +562,7 @@ impl Vm {
             if id == prototype {
                 return Ok(Value::Bool(true));
             }
-            current = self.heap.object(id)?.prototype;
+            current = self.object_prototype_of(id)?;
         }
         Err(JsError::new(
             ErrorKind::RangeError,
@@ -537,6 +583,7 @@ impl Vm {
                     return self.heap.object(id).is_ok_and(|o| o.class_data.is_some())
                         || code.constructible();
                 }
+                ObjectKind::Proxy(proxy) => return proxy.constructor,
                 ObjectKind::Native { construct, .. } => return construct.is_some(),
                 ObjectKind::Bound { target, .. } => value = target.clone(),
                 _ => return false,
@@ -550,7 +597,7 @@ impl Vm {
         length: u64,
     ) -> Result<Value, JsError> {
         let mut constructor = Value::Undefined;
-        if self.is_array(&original) {
+        if self.is_array_exotic(&original)? {
             constructor = self.get_property(original, "constructor")?;
             if constructor.as_object().is_some() {
                 constructor = self.get_property_key(constructor, self.well_known_key("species"))?;
@@ -568,7 +615,7 @@ impl Vm {
         }
     }
 }
-fn validate_descriptor(old: &Property, new: &Property) -> Result<(), JsError> {
+pub(crate) fn validate_descriptor(old: &Property, new: &Property) -> Result<(), JsError> {
     if old.configurable {
         return Ok(());
     }
@@ -869,9 +916,7 @@ pub(crate) fn install(vm: &mut Vm) {
     method(vm, reflect.clone(), "getPrototypeOf", 1, |vm, _, args| {
         let id = reflect_target(args)?.as_object().unwrap();
         Ok(vm
-            .heap
-            .object(id)?
-            .prototype
+            .object_prototype_of(id)?
             .map(Value::Object)
             .unwrap_or(Value::Null))
     });
@@ -887,7 +932,7 @@ pub(crate) fn install(vm: &mut Vm) {
     });
     method(vm, reflect.clone(), "isExtensible", 1, |vm, _, args| {
         let id = reflect_target(args)?.as_object().unwrap();
-        Ok(Value::Bool(vm.heap.object(id)?.extensible))
+        Ok(Value::Bool(vm.object_extensible(id)?))
     });
     method(
         vm,
@@ -951,7 +996,7 @@ fn reflect_target(args: &[Value]) -> Result<Value, JsError> {
         .ok_or_else(|| JsError::type_error("Reflect target must be an object"))
 }
 
-fn reflect_arguments(vm: &mut Vm, list: Value) -> Result<Vec<Value>, JsError> {
+pub(crate) fn reflect_arguments(vm: &mut Vm, list: Value) -> Result<Vec<Value>, JsError> {
     if list.as_object().is_none() {
         return Err(JsError::type_error(
             "Reflect argumentsList must be an object",
