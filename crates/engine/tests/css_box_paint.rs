@@ -97,3 +97,43 @@ fn rounded_boxes_and_outlines_paint_at_their_own_edges_without_moving_content() 
         assert_eq!(canvas.pixels[y * 160 + x], color, "pixel ({x},{y})");
     }
 }
+
+#[test]
+fn zero_opacity_hides_all_paint_but_preserves_layout_and_link_hits() {
+    let page = LoadedPage::from_html(
+        "https://paint.test/",
+        r#"<style>
+        body {margin:0;background:lime}
+        section {opacity:0;width:80px;height:40px;background:blue}
+        a {display:block;position:relative;z-index:2;opacity:1;width:32px;height:24px;background:red}
+        aside {width:10px;height:10px;background:black}
+    </style><section><a href="/inside"></a></section><aside></aside>"#,
+    );
+    let mut fonts = Fonts::new().unwrap();
+    let layout = Layout::build(&page, &fonts, 100.);
+    let mut canvas = Canvas::new(100, 60, layout.background);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    let anchor = page.document.html_elements("a").next().unwrap();
+    let rect = layout.rect_for(anchor).unwrap();
+    assert_eq!((rect.width, rect.height), (32., 24.));
+    assert_eq!(layout.element_at(5., 5.), Some(anchor));
+    assert_eq!(layout.link_at(5., 5.), Some("https://paint.test/inside"));
+    assert_eq!(canvas.pixels[5 * 100 + 5], 0x00ff00);
+    assert_eq!(canvas.pixels[35 * 100 + 50], 0x00ff00);
+    assert_eq!(canvas.pixels[45 * 100 + 5], 0x000000);
+}
+
+#[test]
+fn root_opacity_hides_propagated_background_but_body_opacity_preserves_it() {
+    let mut fonts = Fonts::new().unwrap();
+    for (target, expected) in [("html", 0xffffff), ("body", 0xff0000)] {
+        let html = format!(
+            "<style>body{{background:red;margin:0}}{target}{{opacity:0}}b{{display:block;width:20px;height:20px;background:blue}}</style><b></b>"
+        );
+        let page = LoadedPage::from_html("https://paint.test/", &html);
+        let layout = Layout::build(&page, &fonts, 100.);
+        let mut canvas = Canvas::new(100, 60, layout.background);
+        canvas.document(&layout, &mut fonts, 0., 0.);
+        assert_eq!(canvas.pixels[3 * 100 + 3], expected);
+    }
+}

@@ -921,6 +921,7 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 const PROPERTIES: &[(&str, &str)] = &[
     ("display", "display"),
     ("listStyleType", "list-style-type"),
+    ("opacity", "opacity"),
     ("cssFloat", "float"),
     ("clear", "clear"),
     ("position", "position"),
@@ -967,7 +968,7 @@ fn logical_computed_style_prototype(vm: &mut Vm, host: &LayoutHost) -> Result<Va
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(css::CORNER_OUTLINE_LONGHANDS)
+        .chain(css::BOX_PAINT_LONGHANDS)
         .chain(css::CORNER_OUTLINE_SHORTHANDS)
         .chain(&[("listStyle", "list-style")])
     {
@@ -1047,7 +1048,7 @@ fn computed_style(
     vm.define_data_property(
         object.clone(),
         "length",
-        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len() + css::CORNER_OUTLINE_LONGHANDS.len())
+        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len() + css::BOX_PAINT_LONGHANDS.len())
             .into(),
         false,
         false,
@@ -1056,7 +1057,7 @@ fn computed_style(
     for (i, (_, name)) in PROPERTIES
         .iter()
         .chain(css::LOGICAL_BOX_LONGHANDS)
-        .chain(css::CORNER_OUTLINE_LONGHANDS)
+        .chain(css::BOX_PAINT_LONGHANDS)
         .enumerate()
     {
         vm.define_data_property(
@@ -1268,7 +1269,7 @@ impl Layout {
         PROPERTIES
             .iter()
             .chain(css::LOGICAL_BOX_LONGHANDS)
-            .chain(css::CORNER_OUTLINE_LONGHANDS)
+            .chain(css::BOX_PAINT_LONGHANDS)
             .map(|&(_, name)| (name, resolve(name)))
             .collect()
     }
@@ -1308,6 +1309,7 @@ fn resolved_values<'a>(
                 .replace("inlinegrid", "inline-grid")
                 .replace("listitem", "list-item"),
             "list-style-type" => style.marker.as_css().to_owned(),
+            "opacity" => style.opacity.to_string(),
             "list-style" => format!("outside none {}", style.marker.as_css()),
             "float" => style.float.as_css().to_owned(),
             "clear" => style.clear.as_css().to_owned(),
@@ -1329,6 +1331,13 @@ fn resolved_values<'a>(
             | "border-top-right-radius"
             | "border-bottom-right-radius"
             | "border-bottom-left-radius" => computed_radius(style, name),
+            "object-fit" => style.object_fit.as_css().into(),
+            "object-position" => {
+                let [x, y] = style.object_position.map(|v| {
+                    unresolved_percentage(v).unwrap_or_else(|| length(v, 0., style.font_size))
+                });
+                format!("{x} {y}")
+            }
             "outline-color" => color(style.outline_color.unwrap_or(style.color)),
             "outline-style" => if style.outline_visible {
                 "solid"

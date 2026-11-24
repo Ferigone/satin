@@ -176,3 +176,23 @@ fn computed_list_marker_tracks_inline_changes_on_the_list() {
         "#,
     );
 }
+
+#[test]
+fn computed_opacity_clamps_numbers_and_percentages_without_inheriting() {
+    check(
+        r#"
+        var parent = document.createElement("div");
+        var child = document.createElement("div");
+        parent.appendChild(child);
+        document.body.appendChild(parent);
+        var style = getComputedStyle(parent);
+        var initial = style.opacity === "1";
+        parent.style.opacity = "25%";
+        var quarter = style.getPropertyValue("opacity") === "0.25";
+        parent.style.opacity = "-0.1";
+        var zero = style.opacity === "0" && getComputedStyle(child).opacity === "1";
+        parent.style.opacity = "110%";
+        initial && quarter && zero && style.opacity === "1";
+    "#,
+    );
+}

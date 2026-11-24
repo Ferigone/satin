@@ -51,17 +51,20 @@ impl ReflectedLonghand {
         if matches!(self, Self::Float) {
             return None;
         }
-        let end = calc::number_end(value)?;
-        let scale = match &value[end..] {
-            "" => 1.,
-            "%" => 100.,
-            _ => return None,
-        };
-        // CSSOM exposes percentages as numbers and leaves range clamping to
-        // computed values. A canonical number has a leading zero when needed.
-        let alpha = (value[..end].parse::<f64>().ok()? / scale) as f32;
-        alpha.is_finite().then(|| (alpha + 0.).to_string())
+        // A specified value retains its range; computed style clamps to [0, 1].
+        opacity_number(value).map(|alpha| (alpha + 0.).to_string())
     }
+}
+
+pub(super) fn opacity_number(value: &str) -> Option<f32> {
+    let end = calc::number_end(value)?;
+    let scale = match &value[end..] {
+        "" => 1.,
+        "%" => 100.,
+        _ => return None,
+    };
+    let alpha = (value[..end].parse::<f64>().ok()? / scale) as f32;
+    alpha.is_finite().then_some(alpha)
 }
 
 #[derive(Clone, Copy)]

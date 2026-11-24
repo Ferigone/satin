@@ -26,7 +26,7 @@ pub(crate) use geometry::{Contour, FlatPath, Point};
 pub use geometry::{SvgRect, SvgTransform};
 pub(crate) use path::{Writer as PathWriter, parse as parse_path};
 pub(crate) use raster::{DevicePath, device_path, intersection, intervals};
-pub(crate) use scene::{StrokeStyle, stroke};
+pub(crate) use scene::{StrokeStyle, length, stroke};
 use std::collections::BTreeMap;
 pub use style::{FillRule, LineCap, LineJoin, SvgPaint, SvgStyle, parse_paint};
 

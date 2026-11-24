@@ -16,6 +16,7 @@ mod fetch;
 mod file_list;
 mod form_data;
 mod forms;
+pub(crate) use forms::default_placeholder_shown;
 mod frames;
 mod history_api;
 mod image_element;
@@ -817,15 +818,6 @@ impl ScriptRuntime {
         namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
         let node_lists =
             collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        install_selectors(
-            &mut vm,
-            &state,
-            &prototype,
-            &element_prototype,
-            &node_lists,
-            &dom_errors,
-        )?;
-        mutation_observers::install(&mut vm, &state, node_lists)?;
         navigation::install_parser_methods(&mut vm, &state, document.clone())?;
         let file_lists = file_list::FileListHost::install(&mut vm)?;
         let forms = forms::FormHost::install(
@@ -835,6 +827,16 @@ impl ScriptRuntime {
             document.clone(),
             file_lists.clone(),
         )?;
+        install_selectors(
+            &mut vm,
+            &state,
+            &prototype,
+            &element_prototype,
+            &node_lists,
+            &forms,
+            &dom_errors,
+        )?;
+        mutation_observers::install(&mut vm, &state, node_lists)?;
         forms.install_file_inputs(&mut vm, input_prototype)?;
         let cookie_store = page.cookies.clone();
         let cookie_state = state.clone();
@@ -1860,12 +1862,14 @@ fn install_selectors(
     node_prototype: &Value,
     element_prototype: &Value,
     node_lists: &collections::StaticNodeLists,
+    forms: &forms::FormHost,
     errors: &dom_api::Errors,
 ) -> Result<(), JsError> {
     for name in ["querySelector", "querySelectorAll", "matches", "closest"] {
         let state = state.clone();
         let node_lists = node_lists.clone();
         let errors = errors.clone();
+        let forms = forms.clone();
         let element_only = matches!(name, "matches" | "closest");
         let owner = if element_only {
             element_prototype
@@ -1893,14 +1897,16 @@ fn install_selectors(
             let ids = {
                 let state = state.borrow();
                 let doc = &state.document;
+                let placeholder = |node| forms.placeholder_shown(doc, node);
                 match name {
-                    "matches" => return Ok(selectors.matches(doc, id).into()),
+                    "matches" => return Ok(selectors.matches(doc, id, &placeholder).into()),
                     "closest" => std::iter::successors(Some(id), |id| doc.nodes[id.0].parent)
-                        .find(|&id| selectors.matches(doc, id))
+                        .find(|&id| selectors.matches(doc, id, &placeholder))
                         .into_iter()
                         .collect(),
                     _ => {
-                        let matches = descendants(doc, id).filter(|&id| selectors.matches(doc, id));
+                        let matches = descendants(doc, id)
+                            .filter(|&id| selectors.matches(doc, id, &placeholder));
                         if name == "querySelector" {
                             matches.take(1).collect::<Vec<_>>()
                         } else {
@@ -2005,7 +2011,7 @@ fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), Js
     for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
         .iter()
         .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(css::CORNER_OUTLINE_LONGHANDS)
+        .chain(css::BOX_PAINT_LONGHANDS)
         .chain(css::CORNER_OUTLINE_SHORTHANDS)
         .chain(&[
             ("cssFloat", "float"),

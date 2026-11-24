@@ -297,6 +297,11 @@ impl LoadedPage {
         self.stylesheets = Arc::new(sheets);
         self.stylesheet_media = Arc::new(media);
     }
+    pub(crate) fn placeholder_shown(&self, node: NodeId) -> bool {
+        self.form_controls
+            .get(&node)
+            .is_some_and(|state| state.placeholder_shown)
+    }
     pub fn title(&self) -> String {
         let title = self.document.title();
         if title.is_empty() {

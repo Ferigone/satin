@@ -93,6 +93,21 @@ impl SvgImage {
             .or_default()
             .inherit
             .remove("color");
+        // In image mode an SVG without a viewBox uses its root dimensions
+        // as the source coordinate space. The painter maps that space onto
+        // the concrete image box, including independent horizontal/vertical scaling.
+        let image_axis = |name, target: f32| {
+            self.document
+                .attr(self.root, name)
+                .and_then(|value| crate::svg::length(value, f64::from(target)))
+                .filter(|&value| value > 0.)
+                .map_or(target, |value| value as f32)
+        };
+        let (width, height) = if self.document.attr(self.root, "viewBox").is_some() {
+            (width, height)
+        } else {
+            (image_axis("width", width), image_axis("height", height))
+        };
         SvgScene::build(&self.document, self.root, width, height, &overrides)
     }
 }

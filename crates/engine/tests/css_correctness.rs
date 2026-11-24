@@ -464,7 +464,7 @@ fn list_marker_shorthand_respects_wide_keywords_and_invalid_values() {
     let (doc, computed) = styles(
         "<ol><li id='first'></li><li id='second'></li><li id='third'></li><li id='fourth'></li></ol>",
         "ol { list-style: none } #first { list-style-type: inherit } #second { list-style: initial }
-         #third { list-style: none outside square; list-style-type: unknown }
+         #third { list-style: none outside square; list-style-type: 14px }
          #fourth { list-style: outside; list-style: circle decimal }"
     );
     for (id, marker) in [

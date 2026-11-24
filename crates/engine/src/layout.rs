@@ -150,6 +150,35 @@ fn used_radii(rect: Rect, style: &Style) -> [[f32; 2]; 4] {
     radii
 }
 
+fn fitted_object(area: Rect, (w, h): (f32, f32), style: &Style) -> Rect {
+    use css::ObjectFit;
+    if w <= 0. || h <= 0. || area.width <= 0. || area.height <= 0. {
+        return area;
+    }
+    let contain = (area.width / w).min(area.height / h);
+    let (width, height) = match style.object_fit {
+        ObjectFit::Fill => (area.width, area.height),
+        fit => {
+            let scale = match fit {
+                ObjectFit::Contain => contain,
+                ObjectFit::Cover => (area.width / w).max(area.height / h),
+                ObjectFit::ScaleDown => contain.min(1.),
+                _ => 1.,
+            };
+            (w * scale, h * scale)
+        }
+    };
+    let [x, y] = style.object_position;
+    Rect {
+        x: area.x + x.resolve(area.width - width, style.font_size).unwrap_or(0.),
+        y: area.y
+            + y.resolve(area.height - height, style.font_size)
+                .unwrap_or(0.),
+        width,
+        height,
+    }
+}
+
 fn background_command(rect: Rect, style: &Style) -> DrawCommand {
     let color = style.background.unwrap_or(Color(0, 0, 0, 0));
     let radii = used_radii(rect, style);
@@ -399,8 +428,13 @@ impl Layout {
             let n = &page.document.nodes[id.0];
             let parent = n.parent.map_or(0, |p| styles.by_node[p.0]);
             styles.by_node[id.0] = if matches!(n.kind, NodeKind::Element { .. }) {
-                let style =
-                    stylesheet.compute(&page.document, id, &styles.entries[parent], root_font);
+                let style = stylesheet.compute_with_form_state(
+                    &page.document,
+                    id,
+                    &styles.entries[parent],
+                    root_font,
+                    &|node| page.placeholder_shown(node),
+                );
                 styles.entries.push(style);
                 styles.entries.len() - 1
             } else {
@@ -416,6 +450,9 @@ impl Layout {
             .document
             .elements("html")
             .chain(page.document.elements("body"))
+            // A transparent root hides the canvas background, including a background
+            // propagated from the body. Body opacity alone does not hide that background.
+            .take_while(|&id| page.document.tag(id) != "html" || styles[id.0].opacity > 0.)
             .find_map(|id| styles[id.0].background.filter(|c| c.3 > 0))
             .unwrap_or(Color::WHITE);
         let styles: Arc<ComputedStyles> = styles.into();
@@ -2971,9 +3008,6 @@ impl Builder<'_> {
             };
             if self.is_svg_root(id) {
                 self.draw_svg(id, rect);
-            } else if self.is_canvas(id) || self.is_video(id) {
-                self.commands.owner = id;
-                self.commands.push(DrawCommand::Canvas { node: id, rect });
             } else {
                 self.draw_image(id, rect, href.clone());
             }
@@ -3386,38 +3420,59 @@ impl Builder<'_> {
         let document = &self.page.document;
         document.namespace(id) == crate::dom::Namespace::Html && document.tag(id) == "video"
     }
-    fn draw_image(&mut self, id: NodeId, rect: Rect, href: Option<Arc<str>>) {
-        self.commands.owner = id;
-        if let Some(scene) = self.svg_image(id, rect) {
-            self.commands.push(DrawCommand::Svg {
+    fn image_command(&mut self, id: NodeId, area: Rect) -> Option<(DrawCommand, Rect)> {
+        let style = &self.styles[id.0];
+        if self.is_canvas(id) || self.is_video(id) {
+            let intrinsic = if self.is_canvas(id) {
+                let [w, h] = crate::canvas::size(&self.page.document, id);
+                (w as f32, h as f32)
+            } else if let Some(crate::canvas::Frame::Bitmap(frame)) =
+                self.page.canvas_frames.get(id)
+            {
+                (frame.width() as f32, frame.height() as f32)
+            } else {
+                (300., 150.)
+            };
+            let rect = fitted_object(area, intrinsic, style);
+            return Some((DrawCommand::Canvas { node: id, rect }, rect));
+        }
+        let key = self.page.image_asset_key(id)?;
+        if let Some(image) = self.page.images.get(&key) {
+            let rect = fitted_object(area, (image.width() as f32, image.height() as f32), style);
+            return Some((
+                DrawCommand::Image {
+                    rect,
+                    image: image.clone(),
+                },
+                rect,
+            ));
+        }
+        let asset = self.page.svg_images.get(&key)?;
+        let rect = fitted_object(area, asset.intrinsic_size(), style);
+        let scene = self.svg_image(id, rect)?;
+        Some((
+            DrawCommand::Svg {
                 node: id,
                 rect,
                 scene,
                 interactive: false,
-            });
-            if let Some(url) = href {
-                self.links.push(Link {
-                    node: id,
-                    rect,
-                    url: url.into(),
-                });
-            }
-            return;
-        }
-        let d = &self.page.document;
-        let asset = self
-            .page
-            .image_asset_key(id)
-            .and_then(|u| self.page.images.get(&u))
-            .cloned();
-        if let Some(image) = asset {
-            self.commands.push(DrawCommand::Image { rect, image });
+            },
+            rect,
+        ))
+    }
+    fn draw_image(&mut self, id: NodeId, rect: Rect, href: Option<Arc<str>>) {
+        self.commands.owner = id;
+        if let Some((command, object)) = self.image_command(id, rect) {
+            self.commands.push_object(command, rect, object);
         } else {
             self.commands.push(DrawCommand::Rect {
                 rect,
                 color: Color(238, 240, 244, 255),
             });
-            let run = self.shape(d.attr(id, "alt").unwrap_or("obraz"), &self.styles[id.0]);
+            let run = self.shape(
+                self.page.document.attr(id, "alt").unwrap_or("obraz"),
+                &self.styles[id.0],
+            );
             self.commands.push(DrawCommand::Text {
                 x: rect.x + 4.,
                 baseline: rect.y + 18.,
@@ -3571,21 +3626,16 @@ impl Builder<'_> {
                             width,
                             height,
                         };
-                        let asset = self
-                            .page
-                            .image_asset_key(node)
-                            .and_then(|u| self.page.images.get(&u))
-                            .cloned();
-                        let command = if self.is_canvas(node) || self.is_video(node) {
-                            DrawCommand::Canvas { node, rect }
-                        } else if let Some(image) = asset {
-                            DrawCommand::Image { rect, image }
+                        let mut commands = TrackedCommands::default();
+                        commands.owner = node;
+                        if let Some((command, object)) = self.image_command(node, rect) {
+                            commands.push_object(command, rect, object);
                         } else {
-                            DrawCommand::Rect {
+                            commands.push(DrawCommand::Rect {
                                 rect,
                                 color: Color(238, 240, 244, 255),
-                            }
-                        };
+                            });
+                        }
                         let links = href
                             .map(|url| {
                                 vec![Link {
@@ -3596,7 +3646,7 @@ impl Builder<'_> {
                             })
                             .unwrap_or_default();
                         let f = Fragment {
-                            commands: TrackedCommands::single(node, command),
+                            commands,
                             links,
                             elements: vec![ElementBox { node, rect }],
                             width,

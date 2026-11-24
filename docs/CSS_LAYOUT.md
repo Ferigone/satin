@@ -67,3 +67,27 @@ Percentage heights on the root element resolve against the initial containing bl
 ## Other limits at alpha.6
 
 At alpha.6, remaining Grid features included named lines and areas, `grid-template-areas`, `auto-fit`, `auto-fill`, `fit-content()`, subgrid and masonry, baseline alignment, vertical writing modes, fragmentation, and replaced-element sizing with aspect ratios and constraints on both axes. The Grid feature notes describe subsequent additions. CSS Syntax, Selectors, CSSOM, and Flexbox have partial coverage. Parent-child margin collapsing, full bidirectional and Unicode text support, broader font matching, and the CSS Font Loading API remain open at this stage. [Grid](GRID.md) · [CSSOM View](CSSOM_VIEW.md) · [Fonts](FONTS.md)
+
+## Responsive search results in alpha.26
+
+Linked stylesheets may occupy up to 4 MiB each after decompression, within the
+8 MiB document stylesheet budget. CSS width range queries such as
+`(width <= 816px)` respond to viewport changes. Large shared sets of custom
+properties can supply colors and dimensions throughout the document, including
+from the `:root` branch of a `:root, :host` selector list. Resets such as
+`*, :before, :after { box-sizing: inherit }` apply to ordinary elements.
+
+The layout engine measures nested flex rows across their participating children
+and gaps. List marker type follows the cascade. Rounded backgrounds, borders
+and solid outlines follow the element's corner radii. Search fields update
+`:placeholder-shown` as their values change, including after edits and form
+reset. Replaced images honor `object-fit` and `object-position`. External SVGs
+with intrinsic dimensions scale into their image boxes. Fully transparent HTML
+subtrees keep their layout and hit targets while skipping paint. Group
+compositing for fractional HTML opacity remains incomplete.
+
+Using the same captured Brave Search results for `test` in Satin and Chromium,
+the search form measured 672 × 52 CSS pixels at (104, 24) in a 1280-pixel
+viewport. At 390 pixels it measured 308 × 52 at (16, 16). The first result
+started at (103, 127) and (0, 119), respectively. The full result card height
+still differs between engines.
