@@ -1,0 +1,234 @@
+use rust_browser_engine::{
+    LoadedPage,
+    script::{
+        CONSOLE_RECORD_LIMIT, CONSOLE_TEXT_BYTES, ConsoleLevel, ConsoleOrigin, ConsolePhase,
+        ScriptRuntime,
+    },
+};
+use rust_browser_javascript::{ErrorKind, Value};
+
+use ConsoleLevel::{Debug, Error, Info, Log, Warn};
+use ConsoleOrigin::{BrowserReported, ConsoleApi};
+
+#[test]
+fn console_methods_keep_severity_order_and_legacy_text_without_coercion() {
+    let page = LoadedPage::from_html("https://console.test/", "<!doctype html>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+                var calls = 0;
+                var value = {
+                    toString: function () { calls++; },
+                    get message() { calls++; }
+                };
+                value[Symbol.toPrimitive] = function () { calls++; };
+                console.log("log", value, Symbol("hidden"), 42n);
+                console.info("info");
+                console.warn("warn");
+                try { throw "caught only"; } catch (_) { console.error("page error"); }
+                console.debug("debug");
+                calls;
+                "#,
+            )
+            .unwrap(),
+        Value::from(0)
+    );
+    let snapshot = runtime.console_snapshot();
+    assert_eq!(snapshot.dropped, 0);
+    assert!(snapshot.records.iter().all(|record| {
+        record.origin == ConsoleApi
+            && !record.truncated
+            && record.source.is_none()
+            && record.error_kind.is_none()
+            && record.line.is_none()
+            && record.column.is_none()
+    }));
+    assert_eq!(
+        snapshot
+            .records
+            .iter()
+            .map(|record| (record.level, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Log, "log [object] Symbol 42n"),
+            (Info, "info"),
+            (Warn, "warn"),
+            (Error, "page error"),
+            (Debug, "debug")
+        ]
+    );
+    assert_eq!(
+        runtime.diagnostics(),
+        [
+            "log [object] Symbol 42n",
+            "info",
+            "warn",
+            "page error",
+            "debug"
+        ]
+    );
+    assert_eq!(runtime.last_diagnostic().as_deref(), Some("debug"));
+}
+
+#[test]
+fn only_failures_that_reach_the_reporter_are_recorded() {
+    let page = LoadedPage::from_html(
+        "https://console.test/",
+        r#"<!doctype html>
+        <button onclick="throw new TypeError('attribute')">Go</button>
+        <script>
+            var coercions = 0;
+            var reason = {
+                get message() { coercions++; },
+                get name() { coercions++; },
+                toString: function () { coercions++; },
+                [Symbol.toPrimitive]: function () { coercions++; }
+            };
+            try { throw "caught throw"; } catch (_) {}
+            Promise.reject("handled rejection").catch(function () {});
+            Promise.reject(reason);
+            queueMicrotask(function () { throw "microtask"; });
+            throw reason;
+        </script>"#,
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.run_initial(&page);
+    runtime
+        .eval(
+            r#"
+            var button = document.querySelector("button");
+            var continued = false;
+            button.addEventListener("click", function () { throw "DOM listener"; });
+            button.addEventListener("click", function () { continued = true; });
+            var target = new EventTarget();
+            var pageReporterCalls = 0;
+            console.error = function () { pageReporterCalls++; };
+            target.addEventListener("test", function () { throw "direct listener"; });
+            target.dispatchEvent(new Event("test"));
+            "#,
+        )
+        .unwrap();
+    assert!(runtime.click(page.document.elements("button").next().unwrap()));
+    assert_eq!(runtime.eval("continued").unwrap(), Value::Bool(true));
+    assert_eq!(
+        runtime.eval("coercions + pageReporterCalls").unwrap(),
+        Value::from(0)
+    );
+    assert!(runtime.eval("throw 'returned only'").is_err());
+
+    let snapshot = runtime.take_console_snapshot();
+    assert_eq!(snapshot.dropped, 0);
+    assert!(snapshot.records.iter().all(|record| record.level == Error));
+    assert_eq!(
+        snapshot
+            .records
+            .iter()
+            .map(|record| (record.origin, record.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (BrowserReported(ConsolePhase::Microtask), "microtask"),
+            (BrowserReported(ConsolePhase::ClassicScript), "<thrown object>"),
+            (BrowserReported(ConsolePhase::UnhandledPromiseRejection), "object"),
+            (
+                BrowserReported(ConsolePhase::EventTargetListener),
+                "Thrown: direct listener"
+            ),
+            (BrowserReported(ConsolePhase::DomListener), "DOM listener"),
+            (BrowserReported(ConsolePhase::EventHandler), "attribute"),
+        ]
+    );
+    assert_eq!(snapshot.records[1].error_kind, Some(ErrorKind::Thrown));
+    assert!(
+        snapshot.records[1]
+            .source
+            .as_deref()
+            .unwrap()
+            .starts_with("script #")
+    );
+    assert_eq!(snapshot.records[2].error_kind, None);
+    assert_eq!(snapshot.records[3].error_kind, None);
+    assert_eq!(snapshot.records[4].source.as_deref(), Some("click"));
+    assert_eq!(snapshot.records[5].error_kind, Some(ErrorKind::TypeError));
+    assert!(
+        runtime
+            .diagnostics()
+            .contains(&"Unhandled promise rejection: object".to_owned())
+    );
+    assert_eq!(runtime.diagnostics().len(), snapshot.records.len());
+    runtime.pump();
+    assert_eq!(runtime.console_snapshot(), Default::default());
+}
+
+#[test]
+fn syntax_reports_include_known_coordinates_but_loader_diagnostics_stay_legacy() {
+    let page = LoadedPage::from_html(
+        "https://console.test/",
+        "<!doctype html><script async src='missing.js'></script><script>var = 1;</script>\
+         <button onclick='var = 1;'>Go</button>",
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.run_initial(&page);
+    assert!(runtime.click(page.document.elements("button").next().unwrap()));
+    let snapshot = runtime.console_snapshot();
+    assert_eq!(snapshot.records.len(), 2);
+    let record = &snapshot.records[0];
+    assert_eq!(record.origin, BrowserReported(ConsolePhase::ClassicScript));
+    assert_eq!(record.error_kind, Some(ErrorKind::SyntaxError));
+    assert!(record.line.is_some() && record.column.is_some());
+    let record = &snapshot.records[1];
+    assert_eq!(
+        record.origin,
+        BrowserReported(ConsolePhase::EventHandlerCompile)
+    );
+    assert_eq!(record.source.as_deref(), Some("click"));
+    assert_eq!(record.error_kind, Some(ErrorKind::SyntaxError));
+    assert_eq!(runtime.diagnostics().len(), 3);
+}
+
+#[test]
+fn drain_bounds_overflow_and_unicode_without_resetting_diagnostics_or_other_realms() {
+    let page = LoadedPage::from_html("https://console.test/", "<!doctype html>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let other = ScriptRuntime::new(&page).unwrap();
+    let args = ["'x'"; 65].join(",");
+    runtime
+        .eval(&format!(
+            "console.log('🙂'.repeat(3000));\
+             console.log({args});\
+             for (var i = 2; i < {}; i++) console.log(i);\
+             queueMicrotask(function () {{ throw 'overflow'; }});",
+            CONSOLE_RECORD_LIMIT + 3
+        ))
+        .unwrap();
+    runtime.pump();
+    let snapshot = runtime.console_snapshot();
+    assert_eq!(snapshot.records.len(), CONSOLE_RECORD_LIMIT);
+    assert_eq!(snapshot.dropped, 4);
+    assert_eq!(snapshot.records[0].text.len(), CONSOLE_TEXT_BYTES);
+    assert!(snapshot.records[0].text.chars().all(|c| c == '🙂'));
+    assert!(snapshot.records[0].truncated);
+    assert!(snapshot.records[1].truncated);
+    assert_eq!(snapshot.records[1].text.split(' ').count(), 64);
+    assert_eq!(
+        snapshot.records.last().unwrap().text,
+        (CONSOLE_RECORD_LIMIT - 1).to_string()
+    );
+    assert_eq!(other.console_snapshot(), Default::default());
+    let diagnostics = runtime.diagnostics();
+    assert_eq!(diagnostics.len(), 64);
+    assert_eq!(diagnostics[0].chars().count(), 1024);
+    assert_eq!(runtime.take_console_snapshot(), snapshot);
+    assert_eq!(runtime.console_snapshot(), Default::default());
+    runtime
+        .eval("console.warn('after drain'); Promise.reject('new rejection');")
+        .unwrap();
+    runtime.pump();
+    let next = runtime.take_console_snapshot();
+    assert_eq!(next.dropped, 0);
+    assert_eq!(next.records.len(), 2);
+    assert_eq!(next.records[0].text, "after drain");
+    assert_eq!(next.records[1].text, "new rejection");
+    assert_eq!(runtime.diagnostics(), diagnostics);
+}

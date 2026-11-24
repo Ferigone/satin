@@ -4,6 +4,7 @@ mod abort;
 mod blobs;
 mod canvas;
 mod collections;
+mod devtools_console;
 mod dom_api;
 mod element_interface;
 mod event_target;
@@ -29,6 +30,10 @@ mod text_encoding;
 mod url_api;
 mod webidl;
 mod workers;
+pub use devtools_console::{
+    CONSOLE_RECORD_LIMIT, CONSOLE_TEXT_BYTES, ConsoleLevel, ConsoleOrigin, ConsolePhase,
+    ConsoleRecord, ConsoleSnapshot,
+};
 pub use forms::{
     ControlSnapshot, FilePickerRequest, FormKey, FormSubmission, MAX_PICKER_BYTES,
     MAX_PICKER_FILE_BYTES, MAX_PICKER_FILES, OptionSnapshot, SelectedFile,
@@ -46,6 +51,7 @@ use crate::{
     loader::{DocumentPolicy, LoadedPage},
     web_storage::TabStorage,
 };
+use devtools_console::report_error;
 use navigation::{dynamic_scripts, module_tasks};
 use rust_browser_javascript::{ErrorKind, JsError, ObjectId, RootId, Value, Vm};
 use scheduler::schedule_timer;
@@ -54,6 +60,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, time::Instant}
 const NODE_LIMIT: usize = 100_000;
 const DOM_BYTES_LIMIT: usize = 16 * 1024 * 1024;
 const DOM_DEPTH_LIMIT: usize = 256;
+const DIAGNOSTIC_LIMIT: usize = 64;
+const DIAGNOSTIC_CHAR_LIMIT: usize = 2048;
 type Shared = Rc<RefCell<State>>;
 type FormAttributeHook = Rc<dyn Fn(&mut Vm, &Document, NodeId, &str)>;
 type FormCloneHook = Rc<dyn Fn(&mut Vm, &[NodeId], usize) -> Result<(), JsError>>;
@@ -93,6 +101,7 @@ struct State {
     routing: history_api::Routing,
     executed: usize,
     diagnostics: Vec<String>,
+    devtools_console: devtools_console::ConsoleBuffer,
     scheduler: scheduler::Scheduler,
     dom_bytes: usize,
     form_attribute_hook: Option<FormAttributeHook>,
@@ -182,24 +191,14 @@ fn element(state: &Shared, this: &Value) -> Result<NodeId, JsError> {
         Err(JsError::type_error("Expected an Element receiver"))
     }
 }
+// Also used for loader/policy/worker notices, so text here alone is not
+// evidence of a browser-reported error in the document realm.
 fn diagnostic(state: &Shared, message: String) {
     let mut state = state.borrow_mut();
-    if state.diagnostics.len() < 64 {
-        state.diagnostics.push(message.chars().take(2048).collect());
-    }
-}
-fn console_preview(value: &Value, units: usize) -> String {
-    match value {
-        Value::String(value) => {
-            String::from_utf16_lossy(&value.as_utf16()[..value.len().min(units)])
-        }
-        Value::Number(value) => value.to_string(),
-        Value::BigInt(value) => format!("{value:?}"),
-        Value::Bool(value) => value.to_string(),
-        Value::Undefined => "undefined".into(),
-        Value::Null => "null".into(),
-        Value::Object(_) => "[object]".into(),
-        Value::Symbol(_) => "Symbol".into(),
+    if state.diagnostics.len() < DIAGNOSTIC_LIMIT {
+        state
+            .diagnostics
+            .push(message.chars().take(DIAGNOSTIC_CHAR_LIMIT).collect());
     }
 }
 fn handler_target(state: &State, target: Option<NodeId>, event: &str) -> Option<NodeId> {
@@ -628,6 +627,7 @@ impl ScriptRuntime {
             routing: history_api::Routing::new(history),
             executed: 0,
             diagnostics: vec![],
+            devtools_console: Default::default(),
             scheduler: scheduler::Scheduler::new(started),
             dom_bytes,
             form_attribute_hook: None,
@@ -649,29 +649,7 @@ impl ScriptRuntime {
             vm.set_global(name, window.clone())?;
         }
         navigator::install(&mut vm, &window)?;
-        let console = vm.new_object();
-        for name in ["log", "info", "warn", "error", "debug"] {
-            let state = state.clone();
-            method(&mut vm, console.clone(), name, move |_, _, args| {
-                if state.borrow().diagnostics.len() >= 64 {
-                    return Ok(Value::Undefined);
-                }
-                let mut message = String::new();
-                for value in args.iter().take(64) {
-                    let remaining = 2048usize.saturating_sub(message.len());
-                    if remaining == 0 {
-                        break;
-                    }
-                    if !message.is_empty() {
-                        message.push(' ');
-                    }
-                    message.push_str(&console_preview(value, remaining));
-                }
-                diagnostic(&state, message);
-                Ok(Value::Undefined)
-            })?;
-        }
-        vm.set_global("console", console)?;
+        let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
         for name in ["body", "head", "documentElement"] {
             let state = state.clone();
@@ -817,6 +795,7 @@ impl ScriptRuntime {
         url_api::install(&mut vm)?;
         text_encoding::install(&mut vm)?;
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
+        devtools_console::install_public_error(&mut vm, &state, console)?;
         element_interface::install(&mut vm, prototype, element_prototype)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;
@@ -946,7 +925,16 @@ impl ScriptRuntime {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
             }
-            diagnostic(&self.state, format!("{name}: {error}"));
+            // The VM referrer can be a base URL rather than the script's
+            // location. Use the known script node, not a guessed URL.
+            let source = format!("script #{}", node.0);
+            report_error(
+                &self.state,
+                ConsolePhase::ClassicScript,
+                Some(&source),
+                &error,
+                || format!("{name}: {error}"),
+            );
         }
         report_unhandled(&mut self.vm, &self.state);
         self.vm.collect_garbage();
@@ -966,7 +954,9 @@ impl ScriptRuntime {
                 Ok(allowed)
             })
             .unwrap_or_else(|error| {
-                diagnostic(&state, error.to_string());
+                report_error(&state, ConsolePhase::HostTask, Some("click"), &error, || {
+                    error.to_string()
+                });
                 false
             });
         report_unhandled(&mut self.vm, &self.state);
@@ -983,7 +973,9 @@ impl ScriptRuntime {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
             }
-            diagnostic(&self.state, format!("{kind}: {error}"));
+            report_error(&self.state, ConsolePhase::HostTask, Some(kind), &error, || {
+                format!("{kind}: {error}")
+            });
         }
     }
     /// HTML chooses the activation target before dispatch. Its href may be
@@ -1026,6 +1018,15 @@ impl ScriptRuntime {
     }
     pub fn last_diagnostic(&self) -> Option<String> {
         self.state.borrow().diagnostics.last().cloned()
+    }
+    /// Inspect pending structured records without consuming them.
+    pub fn console_snapshot(&self) -> ConsoleSnapshot {
+        self.state.borrow().devtools_console.snapshot()
+    }
+    /// Drain pending records and reset the structured drop count. This does not
+    /// touch `diagnostics()` or the VM. A fresh document runtime starts empty.
+    pub fn take_console_snapshot(&self) -> ConsoleSnapshot {
+        self.state.borrow_mut().devtools_console.take_snapshot()
     }
     pub fn executed_scripts(&self) -> usize {
         self.state.borrow().executed
@@ -1185,7 +1186,9 @@ impl ScriptRuntime {
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
         if let Err(error) = self.vm.with_task(|vm| drain_microtask_queue(vm, &state)) {
-            diagnostic(&state, error.to_string());
+            report_error(&state, ConsolePhase::Microtask, None, &error, || {
+                error.to_string()
+            });
         }
     }
     pub fn has_pending_image_decodes(&self) -> bool {
@@ -1252,7 +1255,13 @@ impl ScriptRuntime {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
-                        diagnostic(&state, error.to_string());
+                        report_error(
+                            &state,
+                            ConsolePhase::HostTask,
+                            Some("Worker event delivery"),
+                            &error,
+                            || error.to_string(),
+                        );
                         break;
                     }
                 }
@@ -1272,7 +1281,13 @@ impl ScriptRuntime {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
-                        diagnostic(&state, error.to_string());
+                        report_error(
+                            &state,
+                            ConsolePhase::HostTask,
+                            Some("MessagePort event delivery"),
+                            &error,
+                            || error.to_string(),
+                        );
                         break;
                     }
                 }
@@ -1292,7 +1307,13 @@ impl ScriptRuntime {
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(error) => {
-                        diagnostic(&state, error.to_string());
+                        report_error(
+                            &state,
+                            ConsolePhase::HostTask,
+                            Some("storage event delivery"),
+                            &error,
+                            || error.to_string(),
+                        );
                         break;
                     }
                 }
@@ -1301,7 +1322,13 @@ impl ScriptRuntime {
         if self.state.borrow().routing.has_events() {
             let state = self.state.clone();
             if let Err(error) = self.vm.with_task(|vm| history_api::run_events(vm, &state)) {
-                diagnostic(&state, error.to_string());
+                report_error(
+                    &state,
+                    ConsolePhase::HostTask,
+                    Some("history event delivery"),
+                    &error,
+                    || error.to_string(),
+                );
             }
         }
         if self.layout.take_resize() {
@@ -1315,7 +1342,9 @@ impl ScriptRuntime {
                 dispatch_checked(vm, &state, target, "scroll", bubbles, false, &[])?;
                 drain_microtask_queue(vm, &state)
             }) {
-                diagnostic(&state, error.to_string());
+                report_error(&state, ConsolePhase::HostTask, Some("scroll"), &error, || {
+                    error.to_string()
+                });
                 break;
             }
         }
@@ -1362,19 +1391,7 @@ fn link_reference(document: &Document, id: NodeId) -> Option<&str> {
 
 fn report_unhandled(vm: &mut Vm, state: &Shared) {
     for value in vm.take_unhandled_rejections() {
-        let message = match value {
-            Value::String(value) => {
-                String::from_utf16_lossy(&value.as_utf16()[..value.len().min(2048)])
-            }
-            Value::Number(value) => value.to_string(),
-            Value::BigInt(value) => format!("{value:?}"),
-            Value::Bool(value) => value.to_string(),
-            Value::Undefined => "undefined".into(),
-            Value::Null => "null".into(),
-            Value::Object(_) => "object".into(),
-            Value::Symbol(_) => "Symbol".into(),
-        };
-        diagnostic(state, format!("Unhandled promise rejection: {message}"));
+        devtools_console::report_rejection(state, &value);
     }
 }
 
@@ -1514,7 +1531,9 @@ fn drain_microtask_jobs(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
                 mutation_observers::discard_jobs(vm, state);
                 return Err(error);
             }
-            Err(error) => diagnostic(state, error.to_string()),
+            Err(error) => report_error(state, ConsolePhase::Microtask, None, &error, || {
+                error.to_string()
+            }),
         }
     }
     if mutation_observers::discard_jobs(vm, state) > 0 {
@@ -2077,7 +2096,13 @@ fn install_event_handler_list(vm: &mut Vm, state: &Shared, object: Value, proper
                         if fatal(&error) {
                             return Err(error);
                         }
-                        diagnostic(&get_state, error.to_string());
+                        report_error(
+                            &get_state,
+                            ConsolePhase::EventHandlerCompile,
+                            Some(&get_name),
+                            &error,
+                            || error.to_string(),
+                        );
                         Ok(Value::Null)
                     }
                 }
@@ -2205,7 +2230,9 @@ fn dispatch_prepared(
             };
             info.current(vm, &event, this.clone(), phase)?;
             info.invoke(vm, &this, &event, capture, |_, error| {
-                diagnostic(state, format!("{kind}: {error}"));
+                report_error(state, ConsolePhase::DomListener, Some(&kind), error, || {
+                    format!("{kind}: {error}")
+                });
                 Ok(())
             })?;
             if !capture && !info.immediate.get() {
@@ -2226,7 +2253,13 @@ fn dispatch_prepared(
                                 if fatal(&error) {
                                     return Err(error);
                                 }
-                                diagnostic(state, format!("on{kind}: {error}"));
+                                report_error(
+                                    state,
+                                    ConsolePhase::EventHandlerCompile,
+                                    Some(&kind),
+                                    &error,
+                                    || format!("on{kind}: {error}"),
+                                );
                                 None
                             }
                         }
@@ -2241,7 +2274,13 @@ fn dispatch_prepared(
                             if fatal(&error) {
                                 return Err(error);
                             }
-                            diagnostic(state, format!("on{kind}: {error}"));
+                            report_error(
+                                state,
+                                ConsolePhase::EventHandler,
+                                Some(&kind),
+                                &error,
+                                || format!("on{kind}: {error}"),
+                            );
                         }
                         _ => {}
                     }
