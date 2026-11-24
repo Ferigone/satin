@@ -1,5 +1,5 @@
 use super::{
-    Expr, FunctionKind, JsError, JsString, KeywordContext, MAX_AST_DEPTH, MAX_PARSER_DEPTH,
+    Expr, FunctionKind, JsError, JsString, KeywordContext, MAX_AST_DEPTH,
     MethodKind, ObjectEntry, Parser, TokenKind, Value, reserved,
 };
 
@@ -87,7 +87,7 @@ impl Parser {
                     return Ok(primary);
                 };
                 literal = parent;
-                let value = self.container_child_tail(primary)?;
+                let value = self.initializer_tail(primary)?;
                 self.push_literal_value(&mut literal, slot, value)?;
             } else {
                 let slot = match &mut literal.items {
@@ -119,7 +119,7 @@ impl Parser {
                     literal = Literal::open(self)?;
                     continue;
                 }
-                let value = self.expression(2)?;
+                let value = self.initializer()?;
                 self.push_literal_value(&mut literal, slot, value)?;
             }
             self.literal_separator(&mut literal)?;
@@ -158,20 +158,6 @@ impl Parser {
             _ => unreachable!("literal slot belongs to its container"),
         }
         Ok(())
-    }
-
-    fn container_child_tail(&mut self, primary: Expr) -> Result<Expr, JsError> {
-        // A leading literal has already passed the prefix portion of parsing.
-        // Its postfix/infix suffix may recurse and still uses the grammar limit.
-        if self.depth >= MAX_PARSER_DEPTH {
-            return Err(self.error("Expression nesting limit exceeded"));
-        }
-        self.depth += 1;
-        let result = self
-            .finish_unary(primary)
-            .and_then(|left| self.expression_tail(2, false, left));
-        self.depth -= 1;
-        self.checked_expression(result?)
     }
 
     fn object_entry(&mut self) -> Result<Entry, JsError> {

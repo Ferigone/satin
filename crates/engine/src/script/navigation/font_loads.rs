@@ -47,11 +47,11 @@ impl FontLoads {
         stylesheet: NodeId,
         source: &str,
         base: Arc<Url>,
-        viewport_width: f32,
+        viewport: (f32, f32),
         client: &Arc<Url>,
         resources: &mut ResourceQueue,
     ) {
-        for (index, rule) in css::font_faces(source, viewport_width)
+        for (index, rule) in css::font_faces_for_viewport(source, viewport)
             .into_iter()
             .enumerate()
         {

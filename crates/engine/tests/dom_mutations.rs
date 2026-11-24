@@ -62,7 +62,7 @@ fn html_mutations_use_real_context_and_preserve_detached_identity() {
     );
     js(
         &mut runtime,
-        "old.parentNode===null && old.textContent==='old'",
+        "old.parentNode===null && old.parentElement===null && old.textContent==='old'",
         true,
     );
     runtime.eval("var first=host.firstChild;first.outerHTML='<span>X</span><!--c--><em>Y</em>';host.insertAdjacentHTML('afterbegin','<u>start</u>');host.insertAdjacentHTML('beforeend','<u>end</u>');").unwrap();
@@ -87,10 +87,18 @@ fn html_mutations_use_real_context_and_preserve_detached_identity() {
 fn fragments_flatten_without_losing_wrapper_identity_or_order() {
     let (mut page, mut runtime) =
         realm("<!doctype html><main id=host><b id=a>A</b><b id=b>B</b><b id=c>C</b></main>");
-    runtime.eval("var host=document.getElementById('host');var a=document.getElementById('a');var b=document.getElementById('b');var c=document.getElementById('c');var f=document.createDocumentFragment();f.appendChild(a);f.appendChild(c);var returned=host.insertBefore(f,b);").unwrap();
+    runtime.eval("var host=document.getElementById('host');var a=document.getElementById('a');var b=document.getElementById('b');var c=document.getElementById('c');var f=document.createDocumentFragment();f.appendChild(a);f.appendChild(c);").unwrap();
     js(
         &mut runtime,
-        "returned===f && f.firstChild===null && f.nodeType===11 && f.nodeName==='#document-fragment' && f.ownerDocument===document",
+        "a.parentNode===f && a.parentElement===null && document.documentElement.parentElement===null",
+        true,
+    );
+    runtime
+        .eval("var returned=host.insertBefore(f,b);")
+        .unwrap();
+    js(
+        &mut runtime,
+        "returned===f && a.parentElement===host && f.firstChild===null && f.nodeType===11 && f.nodeName==='#document-fragment' && f.ownerDocument===document",
         true,
     );
     js(
@@ -483,4 +491,75 @@ fn domexception_construction_required_arguments_and_xml_name_validation() {
             true,
         );
     }
+}
+
+#[test]
+fn class_list_tracks_attribute_edits_and_validates_before_mutating() {
+    let (_, mut runtime) = realm("<!doctype html><div id=target class='  a   b a  '></div>");
+    js(
+        &mut runtime,
+        r#"
+        const element = document.getElementById('target');
+        const list = element.classList;
+        list instanceof DOMTokenList && element.classList === list &&
+            list.length === 2 && list.value === '  a   b a  ' && String(list) === list.value &&
+            list[0] === 'a' && list.item(1) === 'b' && list.item(2) === null &&
+            list[2] === undefined && Array.from(list).join(',') === 'a,b' &&
+            !list.contains('a b')
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        const observer = new MutationObserver(() => {});
+        observer.observe(element, { attributes: true, attributeOldValue: true });
+        list.add('b', 'c', 'd');
+        const changes = observer.takeRecords();
+        changes.length === 1 && changes[0].oldValue === '  a   b a  ' &&
+            element.className === 'a b c d' && document.querySelector('.d') === element &&
+            list.replace('a', 'c') && list.value === 'c b d' && list.replace('d', 'c') &&
+            !list.replace('missing', 'x') && list.value === 'c b'
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        list.remove('c', 'missing');
+        list.toggle('b', true) && !list.toggle('absent', false) &&
+            !list.toggle('b') && list.toggle('x', undefined) && element.className === 'x'
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        const errors = [];
+        for (const run of [
+            () => list.add('premature', 'bad token'),
+            () => list.remove('x', ''),
+            () => list.replace('bad token', ''),
+            () => list.toggle('bad\ttoken')
+        ]) {
+            try { run(); } catch (err) { errors.push(err instanceof DOMException && err.name); }
+        }
+        errors.join() === 'InvalidCharacterError,SyntaxError,SyntaxError,InvalidCharacterError' &&
+            list.value === 'x'
+    "#,
+        true,
+    );
+    js(
+        &mut runtime,
+        r#"
+        element.classList = 'first  first second';
+        const forwarded = list.value === 'first  first second' && list.item(1) === 'second';
+        list.value = 'from-list';
+        const reflected = element.getAttribute('class') === 'from-list';
+        element.removeAttribute('class');
+        list.remove('absent');
+        forwarded && reflected && list.length === 0 && !element.hasAttribute('class')
+    "#,
+        true,
+    );
 }

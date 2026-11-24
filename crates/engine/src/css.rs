@@ -4,7 +4,10 @@ mod calc;
 pub(crate) mod canvas_font;
 mod grid;
 mod inspection;
+mod media;
 pub use inspection::InspectorStylesheets;
+use media::media_allows;
+pub(crate) use media::{serialize_media_query_list, stylesheet_media_applies};
 pub(crate) mod inline_style;
 pub(crate) use grid::GRID_TRACK_LIMIT;
 pub use grid::{GridAreas, GridLine, GridTemplate};
@@ -42,6 +45,7 @@ pub enum Length {
     Calc(f32, f32),
     /// The same terms, with a lower bound of zero at used-value time.
     ClampedCalc(f32, f32),
+    FitContent,
     Auto,
 }
 
@@ -164,7 +168,7 @@ impl Length {
                     matches!(self, Self::ClampedCalc(..)),
                 ))
             }
-            Self::Auto => None,
+            Self::FitContent | Self::Auto => None,
         }
     }
 }
@@ -877,7 +881,11 @@ fn stylesheet_block_end(source: &str, open: usize) -> Option<usize> {
     None
 }
 
-pub fn parse(source: &str, viewport: f32) -> Vec<Rule> {
+pub fn parse(source: &str, width: f32) -> Vec<Rule> {
+    parse_for_viewport(source, (width, f32::NAN))
+}
+
+pub(crate) fn parse_for_viewport(source: &str, viewport: (f32, f32)) -> Vec<Rule> {
     let clean = without_comments(source);
     let mut out = vec![];
     // Bound selector-list expansion by bytes as well as rule/declaration count;
@@ -889,8 +897,12 @@ pub fn parse(source: &str, viewport: f32) -> Vec<Rule> {
 
 /// Bounded descriptor parsing; each returned URL belongs to the containing
 /// stylesheet's response URL, which the loader resolves before downloading.
-pub fn font_faces(source: &str, viewport: f32) -> Vec<FontFaceRule> {
-    fn collect(source: &str, viewport: f32, depth: usize, out: &mut Vec<FontFaceRule>) {
+pub fn font_faces(source: &str, width: f32) -> Vec<FontFaceRule> {
+    font_faces_for_viewport(source, (width, f32::NAN))
+}
+
+pub(crate) fn font_faces_for_viewport(source: &str, viewport: (f32, f32)) -> Vec<FontFaceRule> {
+    fn collect(source: &str, viewport: (f32, f32), depth: usize, out: &mut Vec<FontFaceRule>) {
         if depth > 32 || out.len() >= 32 {
             return;
         }
@@ -1292,7 +1304,7 @@ fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
 }
 fn parse_rules(
     source: &str,
-    viewport: f32,
+    viewport: (f32, f32),
     depth: usize,
     out: &mut Vec<Rule>,
     declaration_budget: &mut usize,
@@ -1359,115 +1371,6 @@ fn parse_rules(
             }
         }
         offset = end.saturating_add(1);
-    }
-}
-pub(crate) fn stylesheet_media_applies(source: &str, width: f32) -> bool {
-    source.trim().is_empty()
-        || (source.len() <= 4096
-            && !source.contains(['{', '}', ';'])
-            && media_allows(source, width))
-}
-
-fn media_allows(source: &str, width: f32) -> bool {
-    let source = source.replace('\0', " ");
-    split_top(&source, b',').into_iter().any(|query| {
-        let q = query.trim().to_ascii_lowercase();
-        let (q, negate) = q
-            .strip_prefix("not ")
-            .map_or((q.as_str(), false), |v| (v, true));
-        let q = q.strip_prefix("only ").unwrap_or(q).trim();
-        let mut allows = true;
-        let mut offset = 0;
-        if !q.starts_with('(') {
-            let end = q
-                .find(|c: char| c.is_ascii_whitespace() || c == '(')
-                .unwrap_or(q.len());
-            allows = matches!(&q[..end], "screen" | "all");
-            offset = end;
-        }
-        let mut conditions = 0;
-        while let Some(open) = q[offset..].find('(').map(|n| n + offset) {
-            let between = q[offset..open].trim();
-            if !between.is_empty() && between != "and" {
-                allows = false;
-            }
-            let Some(end) = matching_close(q, open, b'(', b')') else {
-                return false;
-            };
-            let expr = q[open + 1..end].trim();
-            let valid = if let Some((name, value)) = expr.split_once(':') {
-                let n = media_width_length(value, width);
-                match name.trim() {
-                    "min-width" => n.is_some_and(|n| width >= n),
-                    "max-width" => n.is_some_and(|n| width <= n),
-                    "width" => n.is_some_and(|n| (width - n).abs() < 0.01),
-                    "prefers-color-scheme" => value.trim() == "light",
-                    "prefers-reduced-motion" => value.trim() == "no-preference",
-                    _ => false,
-                }
-            } else {
-                width_range_matches(expr, width)
-            };
-            allows &= valid;
-            conditions += 1;
-            offset = end + 1;
-        }
-        if !q[offset..].trim().is_empty() {
-            allows = false;
-        }
-        if q.is_empty() || (conditions == 0 && q.starts_with('(')) {
-            allows = false;
-        }
-        allows != negate
-    })
-}
-fn media_width_length(value: &str, viewport: f32) -> Option<f32> {
-    // The width feature takes a length, not a percentage. Only the viewport
-    // width is available to this evaluator.
-    length(value.trim())
-        .filter(|l| !matches!(l, Length::Percent(_) | Length::Vh(_)))
-        .and_then(|l| l.resolve(viewport, 16.))
-}
-
-fn width_range_matches(expr: &str, viewport: f32) -> bool {
-    fn split_comparison(expr: &str) -> Option<(&str, &str, &str)> {
-        let i = expr.find(['<', '>', '='])?;
-        let rest = &expr[i..];
-        let size = if rest.starts_with("<=") || rest.starts_with(">=") {
-            2
-        } else {
-            1
-        };
-        Some((expr[..i].trim(), &rest[..size], rest[size..].trim()))
-    }
-    fn compare(a: f32, op: &str, b: f32) -> bool {
-        match op {
-            "<" => a < b,
-            "<=" => a <= b,
-            "=" => a == b,
-            ">=" => a >= b,
-            ">" => a > b,
-            _ => false,
-        }
-    }
-
-    let Some((left, op, rest)) = split_comparison(expr) else {
-        return false;
-    };
-    if let Some((middle, next_op, right)) = split_comparison(rest) {
-        // Chained ranges compare in one direction with the feature in the middle.
-        return middle == "width"
-            && op != "="
-            && op.as_bytes()[0] == next_op.as_bytes()[0]
-            && media_width_length(left, viewport).is_some_and(|lo| compare(lo, op, viewport))
-            && media_width_length(right, viewport)
-                .is_some_and(|hi| compare(viewport, next_op, hi));
-    }
-    if left == "width" {
-        media_width_length(rest, viewport).is_some_and(|n| compare(viewport, op, n))
-    } else {
-        rest == "width"
-            && media_width_length(left, viewport).is_some_and(|n| compare(n, op, viewport))
     }
 }
 fn first_top_delimiter(source: &str, delimiters: &[u8]) -> Option<(usize, u8)> {
@@ -2175,14 +2078,25 @@ fn nth_offset(digits: &str, negative: bool) -> Option<i32> {
     let magnitude: i64 = digits.parse().ok()?;
     i32::try_from(if negative { -magnitude } else { magnitude }).ok()
 }
+#[derive(Clone, Copy)]
+pub(crate) enum FormPseudoClass {
+    CheckedInput,
+    PlaceholderShown,
+}
+impl FormPseudoClass {
+    pub(crate) fn matches_markup(self, doc: &Document, node: NodeId) -> bool {
+        match self {
+            Self::CheckedInput => doc.attr(node, "checked").is_some(),
+            Self::PlaceholderShown => crate::script::default_placeholder_shown(doc, node),
+        }
+    }
+}
+
 pub fn matches_selector(doc: &Document, id: NodeId, source: &str) -> bool {
     let clean = without_comments(source);
     split_top(&clean, b',').into_iter().any(|s| {
-        compile_selector(s, 0).is_some_and(|s| {
-            s.matches(doc, id, &|node| {
-                crate::script::default_placeholder_shown(doc, node)
-            })
-        })
+        compile_selector(s, 0)
+            .is_some_and(|s| s.matches(doc, id, &|node, pseudo| pseudo.matches_markup(doc, node)))
     })
 }
 
@@ -2204,17 +2118,22 @@ impl DomSelectorList {
         &self,
         doc: &Document,
         id: NodeId,
-        placeholder: &dyn Fn(NodeId) -> bool,
+        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
     ) -> bool {
         self.0
             .iter()
-            .any(|selector| selector.matches(doc, id, placeholder))
+            .any(|selector| selector.matches(doc, id, form_state))
     }
 }
 
 impl Selector {
-    fn matches(&self, doc: &Document, id: NodeId, placeholder: &dyn Fn(NodeId) -> bool) -> bool {
-        self.matches_part(doc, id, self.parts.len() - 1, &mut 16384, placeholder)
+    fn matches(
+        &self,
+        doc: &Document,
+        id: NodeId,
+        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
+    ) -> bool {
+        self.matches_part(doc, id, self.parts.len() - 1, &mut 16384, form_state)
     }
     fn matches_part(
         &self,
@@ -2222,13 +2141,13 @@ impl Selector {
         id: NodeId,
         index: usize,
         budget: &mut usize,
-        placeholder: &dyn Fn(NodeId) -> bool,
+        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
     ) -> bool {
         if *budget == 0 {
             return false;
         }
         *budget -= 1;
-        if !self.parts[index].matches(doc, id, budget, placeholder) {
+        if !self.parts[index].matches(doc, id, budget, form_state) {
             return false;
         }
         if index == 0 {
@@ -2237,11 +2156,11 @@ impl Selector {
         match self.combinators[index - 1] {
             Combinator::Child => doc.nodes[id.0]
                 .parent
-                .is_some_and(|p| self.matches_part(doc, p, index - 1, budget, placeholder)),
+                .is_some_and(|p| self.matches_part(doc, p, index - 1, budget, form_state)),
             Combinator::Descendant => {
                 let mut parent = doc.nodes[id.0].parent;
                 while let Some(p) = parent {
-                    if self.matches_part(doc, p, index - 1, budget, placeholder) {
+                    if self.matches_part(doc, p, index - 1, budget, form_state) {
                         return true;
                     }
                     parent = doc.nodes[p.0].parent;
@@ -2263,7 +2182,7 @@ impl Selector {
                     if doc.tag(sibling).is_empty() {
                         continue;
                     }
-                    if self.matches_part(doc, sibling, index - 1, budget, placeholder) {
+                    if self.matches_part(doc, sibling, index - 1, budget, form_state) {
                         return true;
                     }
                     if matches!(self.combinators[index - 1], Combinator::Adjacent) {
@@ -2284,7 +2203,7 @@ impl Compound {
         doc: &Document,
         id: NodeId,
         budget: &mut usize,
-        placeholder: &dyn Fn(NodeId) -> bool,
+        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
     ) -> bool {
         let tag = doc.tag(id);
         if tag.is_empty() || self.tag.as_ref().is_some_and(|t| t != tag) {
@@ -2315,10 +2234,19 @@ impl Compound {
                     _ => true,
                 }),
             Test::Link => matches!(tag, "a" | "area") && doc.attr(id, "href").is_some(),
-            Test::PlaceholderShown => placeholder(id),
+            Test::PlaceholderShown => form_state(id, FormPseudoClass::PlaceholderShown),
             Test::Checked => {
-                matches!(tag, "input" | "option")
-                    && (doc.attr(id, "checked").is_some() || doc.attr(id, "selected").is_some())
+                doc.namespace(id) == Namespace::Html
+                    && match tag {
+                        "input" => {
+                            doc.attr(id, "type").is_some_and(|kind| {
+                                kind.eq_ignore_ascii_case("checkbox")
+                                    || kind.eq_ignore_ascii_case("radio")
+                            }) && form_state(id, FormPseudoClass::CheckedInput)
+                        }
+                        "option" => doc.attr(id, "selected").is_some(),
+                        _ => false,
+                    }
             }
             Test::Disabled(disabled) => {
                 matches!(
@@ -2376,11 +2304,11 @@ impl Compound {
             }),
             Test::Any(selectors) => selectors
                 .iter()
-                .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, placeholder)),
+                .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, form_state)),
             Test::Not(selectors) => {
                 let matches = selectors
                     .iter()
-                    .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, placeholder));
+                    .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, form_state));
                 *budget > 0 && !matches
             }
         })
@@ -2937,8 +2865,8 @@ impl Stylesheet {
         count
     }
     pub fn compute(&self, doc: &Document, id: NodeId, parent: &Style, root_font: f32) -> Style {
-        self.compute_with_form_state(doc, id, parent, root_font, &|node| {
-            crate::script::default_placeholder_shown(doc, node)
+        self.compute_with_form_state(doc, id, parent, root_font, &|node, pseudo| {
+            pseudo.matches_markup(doc, node)
         })
     }
     pub(crate) fn compute_with_form_state(
@@ -2947,7 +2875,7 @@ impl Stylesheet {
         id: NodeId,
         parent: &Style,
         root_font: f32,
-        placeholder: &dyn Fn(NodeId) -> bool,
+        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
     ) -> Style {
         let mut style = user_agent_style(doc, id, parent);
         let is_root = doc.nodes[id.0].parent == Some(doc.root);
@@ -2978,7 +2906,7 @@ impl Stylesheet {
         // Candidate processing order is irrelevant: source order is in Priority.
         self.candidates(doc, id, |index| {
             let rule = &self.rules[index];
-            if !rule.selector.matches(doc, id, placeholder) {
+            if !rule.selector.matches(doc, id, form_state) {
                 return;
             }
             if is_svg {
@@ -4652,6 +4580,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 _ => return None,
             }))
         }
+        Width if v == "fit-content" => Some(Value::Length(Length::FitContent.into())),
         Width | Height | MinWidth | MinHeight | MaxWidth | MaxHeight | FlexBasis => {
             if matches!(p, MaxWidth | MaxHeight) {
                 if v == "none" {

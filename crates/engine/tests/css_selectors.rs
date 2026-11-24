@@ -171,3 +171,30 @@ fn stylesheet_fixture(fixture: &str, expected_attributes: &[(&str, &str)]) {
         );
     }
 }
+
+#[test]
+fn checked_input_styles_follow_label_activation_and_radio_group_state() {
+    stylesheet_fixture(
+        r#"<style>#menu { width: 10px } input:checked ~ #menu { width: 80px }</style>
+        <input id=toggle type=checkbox><label for=toggle id=label>Menu</label><aside id=menu></aside>
+        <input id=a type=radio name=g checked><input id=b type=RADIO name=g><input id=txt checked>
+        <p id=result></p><script>
+        var toggle = document.getElementById('toggle'), label = document.getElementById('label');
+        var menu = document.getElementById('menu'), result = document.getElementById('result');
+        function state() {
+            return [toggle.matches(':checked'), toggle.hasAttribute('checked'), getComputedStyle(menu).width].join('/');
+        }
+        var initial = state(); label.click(); var open = state(); label.click();
+        result.setAttribute('data-menu', [initial,open,state()].join('|'));
+        document.getElementById('b').checked = true;
+        result.setAttribute('data-radio', document.querySelectorAll('input:checked').length + '/' + document.querySelector('input:checked').id);
+        </script>"#,
+        &[
+            (
+                "data-menu",
+                "false/false/10px|true/false/80px|false/false/10px",
+            ),
+            ("data-radio", "1/b"),
+        ],
+    );
+}

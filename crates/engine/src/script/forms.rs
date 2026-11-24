@@ -867,8 +867,19 @@ impl FormHost {
         self.mark();
         Ok(())
     }
-    pub(super) fn placeholder_shown(&self, doc: &Document, node: NodeId) -> bool {
-        placeholder_shown(doc, node, self.data.borrow().controls.get(&node))
+    pub(super) fn matches_form_pseudo(
+        &self,
+        doc: &Document,
+        node: NodeId,
+        pseudo: css::FormPseudoClass,
+    ) -> bool {
+        let data = self.data.borrow();
+        match pseudo {
+            css::FormPseudoClass::CheckedInput => checked(doc, &data, node),
+            css::FormPseudoClass::PlaceholderShown => {
+                placeholder_shown(doc, node, data.controls.get(&node))
+            }
+        }
     }
     pub(super) fn focused(&self) -> Option<NodeId> {
         self.data
@@ -2342,6 +2353,9 @@ impl FormHost {
         }
         if !text_editable(&self.dom.borrow().document, id) {
             return Ok(false);
+        }
+        if key == FormKey::Space && !control {
+            return self.insert_text(vm, " ");
         }
         let value = current_value(&self.dom.borrow().document, &self.data.borrow(), id);
         let (start, end, anchor) = {

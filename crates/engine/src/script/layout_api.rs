@@ -98,7 +98,10 @@ impl Data {
                 .stylesheets
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| self.page.stylesheet_applies(*index, self.viewport.width))
+                .filter(|(index, _)| {
+                    self.page
+                        .stylesheet_applies(*index, (self.viewport.width, self.viewport.height))
+                })
                 .map(|(_, sheet)| sheet.len())
                 .sum::<usize>();
             // Charge the first 64 KiB byte-for-byte on every actual reflow.
@@ -1125,6 +1128,9 @@ fn px(n: f32) -> String {
     format!("{}px", if n == 0. { 0. } else { n })
 }
 fn length(v: Length, base: f32, font: f32) -> String {
+    if v == Length::FitContent {
+        return "fit-content".into();
+    }
     v.resolve(base, font)
         .map(px)
         .unwrap_or_else(|| "auto".into())

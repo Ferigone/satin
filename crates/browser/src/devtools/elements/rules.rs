@@ -25,7 +25,9 @@ impl Rules {
             *self = Self::default();
             return;
         };
-        let sheets_changed = self.index.refresh(page, layout.viewport.width);
+        let sheets_changed = self
+            .index
+            .refresh_for_viewport(page, (layout.viewport.width, layout.viewport.height));
         let dom = Arc::downgrade(&page.document);
         if !sheets_changed && self.dom.ptr_eq(&dom) && self.selected == Some(id) {
             return;

@@ -297,10 +297,17 @@ impl LoadedPage {
         self.stylesheets = Arc::new(sheets);
         self.stylesheet_media = Arc::new(media);
     }
-    pub(crate) fn placeholder_shown(&self, node: NodeId) -> bool {
+    pub(crate) fn matches_form_pseudo(
+        &self,
+        node: NodeId,
+        pseudo: crate::css::FormPseudoClass,
+    ) -> bool {
         self.form_controls
             .get(&node)
-            .is_some_and(|state| state.placeholder_shown)
+            .is_some_and(|state| match pseudo {
+                crate::css::FormPseudoClass::CheckedInput => state.checked,
+                crate::css::FormPseudoClass::PlaceholderShown => state.placeholder_shown,
+            })
     }
     pub fn title(&self) -> String {
         let title = self.document.title();

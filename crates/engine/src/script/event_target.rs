@@ -237,7 +237,7 @@ fn remove(vm: &mut Vm, object: &Value, serial: u64) -> Result<(), JsError> {
             )?;
         }
         data.free_slots.borrow_mut().push(removed.slot);
-        update_abort_liveness(vm, object, &data)?;
+        update_listener_liveness(vm, object, &data)?;
     }
     Ok(())
 }
@@ -262,10 +262,10 @@ pub(super) fn clear_listeners(vm: &mut Vm, object: &Value) -> Result<(), JsError
         }
         data.free_slots.borrow_mut().push(listener.slot);
     }
-    update_abort_liveness(vm, object, &data)
+    update_listener_liveness(vm, object, &data)
 }
 
-fn update_abort_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Result<(), JsError> {
+fn update_listener_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Result<(), JsError> {
     let has_listener = data.listeners.borrow().iter().any(|listener| {
         listener
             .kind
@@ -274,6 +274,15 @@ fn update_abort_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> Resu
             .copied()
             .eq("abort".encode_utf16())
     });
+    let listens_for_change = data.listeners.borrow().iter().any(|listener| {
+        listener
+            .kind
+            .as_utf16()
+            .iter()
+            .copied()
+            .eq("change".encode_utf16())
+    });
+    super::media_queries::retain_if_observed(vm, object, listens_for_change);
     abort::keep_for_abort_event(vm, object, has_listener)
 }
 
@@ -570,7 +579,7 @@ fn add(
     if let Some(count) = &data.dom_count {
         count.set(count.get() + 1);
     }
-    update_abort_liveness(vm, &object, &data)
+    update_listener_liveness(vm, &object, &data)
 }
 
 pub(super) fn install_abort_handler(vm: &mut Vm, proto: Value) -> Result<(), JsError> {

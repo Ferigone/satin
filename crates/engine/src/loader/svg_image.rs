@@ -60,7 +60,7 @@ impl SvgImage {
     pub fn scene(&self, width: f32, height: f32) -> SvgScene {
         let mut rules = vec![];
         for sheet in &self.sheets {
-            rules.extend(crate::css::parse(sheet, width));
+            rules.extend(crate::css::parse_for_viewport(sheet, (width, height)));
             if rules.len() > 8192 {
                 rules.truncate(8192);
                 break;

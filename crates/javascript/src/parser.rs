@@ -503,12 +503,25 @@ impl Parser {
         }
     }
     fn statement(&mut self) -> Result<Stmt, JsError> {
-        if self.depth >= MAX_PARSER_DEPTH {
-            return Err(self.error("Parser nesting limit exceeded"));
-        }
-        self.depth += 1;
-        let result = self.statement_inner();
-        self.depth -= 1;
+        // Neither a return nor an expression statement has a statement body.
+        // Its expression charges the recursive grammar edge when needed.
+        let result = if self.eat("return") {
+            self.return_statement()
+        } else if matches!(self.current().kind,
+            TokenKind::Punct("(" | "[" | "!" | "~" | "+" | "-" | "++" | "--" | "/" | "/=")
+                | TokenKind::Number(_) | TokenKind::BigInt(_) | TokenKind::String(_)
+                | TokenKind::Template { head: true, .. })
+        {
+            self.expression_statement()
+        } else {
+            if self.depth >= MAX_PARSER_DEPTH {
+                return Err(self.error("Parser nesting limit exceeded"));
+            }
+            self.depth += 1;
+            let result = self.statement_inner();
+            self.depth -= 1;
+            result
+        };
         let statement = result?;
         self.check_ast(Ast::Statement(&statement))?;
         Ok(statement)
@@ -563,9 +576,6 @@ impl Parser {
         if self.eat("for") {
             return self.for_statement();
         }
-        if self.eat("return") {
-            return self.return_statement();
-        }
         if self.eat("break") {
             let target = self.jump_target(false)?;
             self.semi()?;
@@ -615,6 +625,10 @@ impl Parser {
         if self.at("export") {
             return Err(self.error("An export declaration requires module code"));
         }
+        self.expression_statement()
+    }
+
+    fn expression_statement(&mut self) -> Result<Stmt, JsError> {
         let escaped = self.current().escaped_string;
         let e = self.expression(1)?;
         self.semi()?;
@@ -882,7 +896,7 @@ impl Parser {
                 return Err(self.error("let cannot be a lexical binding name"));
             }
             let init = if self.eat("=") {
-                Some(self.expression(2)?)
+                Some(self.initializer()?)
             } else {
                 None
             };
@@ -1161,7 +1175,11 @@ impl Parser {
         }
         loop {
             let spread = self.eat("...");
-            let value = self.expression_in(2)?;
+            let previous = self.allow_in;
+            self.allow_in = true;
+            let value = self.initializer();
+            self.allow_in = previous;
+            let value = value?;
             parts.push(if spread {
                 self.checked_expression(Expr::Spread(Box::new(value)))?
             } else {
@@ -1183,7 +1201,6 @@ impl Parser {
         parts: Vec<Expr>,
         trailing: bool,
         is_async: bool,
-        allow_comma: bool,
     ) -> Result<Expr, JsError> {
         let count = parts.len();
         let mut params = Vec::with_capacity(count);
@@ -1225,14 +1242,7 @@ impl Parser {
             FunctionKind::Ordinary
         };
         let function = self.function_body(start, None, params, true, kind)?;
-        let arrow = self.checked_expression(Expr::Function(Box::new(function)))?;
-        // An arrow is an AssignmentExpression, so a bare arrow can start
-        // a comma expression but cannot take a binary or postfix operator.
-        if allow_comma && self.at(",") {
-            self.expression_tail(1, false, arrow)
-        } else {
-            Ok(arrow)
-        }
+        self.checked_expression(Expr::Function(Box::new(function)))
     }
 
     fn parameter(&mut self, rest: bool) -> Result<Parameter, JsError> {
@@ -1364,21 +1374,61 @@ impl Parser {
         }
         Ok(pattern)
     }
+    // These leading tokens identify a complete primary expression. Parse
+    // container entries or function bodies directly and keep only their
+    // real recursive grammar edges live while reading an initializer.
     #[inline(always)]
-    fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
-        self.expression_with_assignment_boundary(min, false)
+    fn initializer(&mut self) -> Result<Expr, JsError> {
+        if self.at("[") || self.at("{") {
+            self.literal_initializer()
+        } else if self.at("function") || self.async_function_ahead() {
+            self.function_initializer()
+        } else {
+            self.expression(2)
+        }
     }
-
-    fn expression_with_assignment_boundary(
-        &mut self,
-        min: u8,
-        stop_before_simple_assignment: bool,
-    ) -> Result<Expr, JsError> {
+    fn literal_initializer(&mut self) -> Result<Expr, JsError> {
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let literal = self.container_literal();
+        self.allow_in = previous;
+        self.initializer_tail(literal?)
+    }
+    fn function_initializer(&mut self) -> Result<Expr, JsError> {
+        let start = self.current().start;
+        let is_async = self.eat("async");
+        self.expect("function")?;
+        let previous = self.allow_in;
+        self.allow_in = true;
+        let function = self.function(start, is_async, false);
+        self.allow_in = previous;
+        let primary = self.checked_expression(Expr::Function(Box::new(function?)))?;
+        self.initializer_tail(primary)
+    }
+    fn initializer_tail(&mut self, primary: Expr) -> Result<Expr, JsError> {
+        // The primary expression has already passed the prefix portion of parsing.
+        // Its postfix/infix suffix may recurse and still uses the grammar limit.
         if self.depth >= MAX_PARSER_DEPTH {
             return Err(self.error("Expression nesting limit exceeded"));
         }
         self.depth += 1;
-        let result = self.expression_inner(min, stop_before_simple_assignment);
+        let result = self
+            .finish_unary(primary)
+            .and_then(|left| self.expression_tail(2, left, false));
+        self.depth -= 1;
+        self.checked_expression(result?)
+    }
+
+    fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
+        if self.depth >= MAX_PARSER_DEPTH {
+            return Err(self.error("Expression nesting limit exceeded"));
+        }
+        self.depth += 1;
+        let previous = self.allow_in;
+        let result = self
+            .expression_prefix(min)
+            .and_then(|(left, arrow)| self.expression_tail(min, left, arrow));
+        self.allow_in = previous;
         self.depth -= 1;
         self.checked_expression(result?)
     }
@@ -1393,11 +1443,9 @@ impl Parser {
         self.check_ast(Ast::Expression(&expression))?;
         Ok(expression)
     }
-    fn expression_inner(
-        &mut self,
-        min: u8,
-        stop_before_simple_assignment: bool,
-    ) -> Result<Expr, JsError> {
+    // A bare arrow is an AssignmentExpression. Only a comma can follow it
+    // directly, whereas an arrow inside parentheses can take normal operators.
+    fn expression_prefix(&mut self, min: u8) -> Result<(Expr, bool), JsError> {
         let start = self.current().start;
         let async_prefix =
             min <= 2 && self.at("async") && self.lookahead(1).is_some_and(|next| !next.newline);
@@ -1408,13 +1456,9 @@ impl Parser {
             }
             let name = self.name()?;
             self.expect("=>")?;
-            return self.arrow_from_cover(
-                start,
-                vec![Expr::Identifier(name)],
-                false,
-                async_word_arrow,
-                min == 1,
-            );
+            return self
+                .arrow_from_cover(start, vec![Expr::Identifier(name)], false, async_word_arrow)
+                .map(|arrow| (arrow, true));
         }
 
         let async_parens = async_prefix
@@ -1446,7 +1490,9 @@ impl Parser {
                     return Err(self.error("await is not allowed in arrow parameters"));
                 }
                 self.advance(1);
-                return self.arrow_from_cover(start, parts, trailing, async_parens, min == 1);
+                return self
+                    .arrow_from_cover(start, parts, trailing, async_parens)
+                    .map(|arrow| (arrow, true));
             }
             let primary = if async_parens {
                 Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
@@ -1468,106 +1514,138 @@ impl Parser {
         } else {
             self.unary()?
         };
-        self.expression_tail(min, stop_before_simple_assignment, left)
+        Ok((left, false))
     }
     fn expression_tail(
         &mut self,
-        min: u8,
-        stop_before_simple_assignment: bool,
+        mut min: u8,
         mut left: Expr,
+        mut arrow: bool,
     ) -> Result<Expr, JsError> {
+        enum Pending {
+            Operator {
+                op: &'static str,
+                left: Expr,
+                assignment: bool,
+            },
+            Consequent {
+                test: Expr,
+                allow_in: bool,
+            },
+            Alternate {
+                test: Expr,
+                yes: Expr,
+            },
+            Sequence(Vec<Expr>),
+        }
+        let mut pending = Vec::new();
         loop {
-            if min <= 3 && !matches!(left, Expr::Yield { .. }) && self.eat("?") {
-                let yes = self.expression_in(2)?;
-                self.expect(":")?;
-                let no = self.expression(2)?;
-                left = self.checked_expression(Expr::Conditional(
-                    Box::new(left),
-                    Box::new(yes),
-                    Box::new(no),
-                ))?;
-                continue;
-            }
-            let Some((op, prec, right_assoc)) = self.operator() else {
-                break;
-            };
-            if prec < min || matches!(left, Expr::Yield { .. }) && op != "," {
-                break;
-            }
-            let simple_assignment = op == "=" && assignable(&left);
-            if simple_assignment && stop_before_simple_assignment {
-                break;
-            }
-            if op == "**" && matches!(left, Expr::Await(_) | Expr::Unary(..)) {
-                return Err(
-                    self.error("A unary expression on the left side of exponentiation requires parentheses")
-                );
-            }
-            self.advance(1);
-            if prec == 1 {
-                // Commas separate assignment expressions. Keep the list flat so
-                // its length does not consume AST depth.
-                let mut terms = vec![left];
-                loop {
-                    terms.push(self.expression(2)?);
-                    if !self.eat(",") {
-                        break;
-                    }
-                }
-                return Ok(Expr::Sequence(terms));
-            }
-            if simple_assignment {
-                // A chain of ordinary '=' assignments is right associative.
-                // Scan the targets at one parser depth, then rebuild the usual
-                // bounded assignment tree for reference and name semantics.
-                let mut targets = Vec::new();
-                let mut value = loop {
-                    let right = self.expression_with_assignment_boundary(2, true)?;
-                    if !self.at("=") || !assignable(&right) {
-                        break right;
-                    }
-                    if targets.len() + 2 >= MAX_AST_DEPTH {
-                        return Err(self.error("AST nesting limit exceeded"));
-                    }
-                    targets.push(left);
-                    left = right;
-                    self.advance(1);
-                };
-                for target in targets.into_iter().chain(std::iter::once(left)).rev() {
-                    value = self.checked_expression(Expr::Assign(
-                        "=",
-                        Box::new(target),
-                        Box::new(value),
-                    ))?;
-                }
-                left = value;
-                continue;
-            }
-            let right = self.expression(if right_assoc { prec } else { prec + 1 })?;
-            let mixing = |value: &Expr, operators: &[&str]| matches!(value,Expr::Binary(operator,..)if operators.contains(operator));
-            if (op == "??" && (mixing(&left, &["&&", "||"]) || mixing(&right, &["&&", "||"])))
-                || (matches!(op, "&&" | "||")
-                    && (mixing(&left, &["??"]) || mixing(&right, &["??"])))
+            let assignment_only = arrow || matches!(left, Expr::Yield { .. });
+            let (frame, next_min) = if min <= 3 && !assignment_only && self.eat("?") {
+                let allow_in = self.allow_in;
+                self.allow_in = true;
+                (
+                    Pending::Consequent {
+                        test: left,
+                        allow_in,
+                    },
+                    2,
+                )
+            } else if let Some((op, prec, right_assoc)) = self.operator()
+                && prec >= min
+                && (!assignment_only || op == ",")
             {
-                return Err(self.error(
-                    "Nullish coalescing cannot mix with logical operators without parentheses",
-                ));
-            }
-            left = self.checked_expression(if prec == 2 {
-                if op == "=" && matches!(left, Expr::Array(..) | Expr::Object(..)) {
-                    let pattern = self.pattern(left, false)?;
-                    Expr::Destructure(pattern, Box::new(right))
+                if op == "**" && matches!(left, Expr::Await(_) | Expr::Unary(..)) {
+                    return Err(self.error("A unary expression on the left side of exponentiation requires parentheses"));
+                }
+                self.advance(1);
+                if op == "," {
+                    (Pending::Sequence(vec![left]), 2)
                 } else {
-                    if !assignable(&left) {
-                        return Err(self.error("Invalid assignment target"));
-                    }
-                    Expr::Assign(op, Box::new(left), Box::new(right))
+                    (
+                        Pending::Operator {
+                            op,
+                            left,
+                            assignment: prec == 2,
+                        },
+                        if right_assoc { prec } else { prec + 1 },
+                    )
                 }
             } else {
-                Expr::Binary(op, Box::new(left), Box::new(right))
-            })?;
+                let Some((frame, outer_min)) = pending.pop() else {
+                    return Ok(left);
+                };
+                arrow = false;
+                min = outer_min;
+                match frame {
+                    Pending::Operator {
+                        op,
+                        left: lhs,
+                        assignment,
+                    } => {
+                        left = self.combine_operator(op, lhs, left, assignment)?;
+                        continue;
+                    }
+                    Pending::Consequent { test, allow_in } => {
+                        self.allow_in = allow_in;
+                        self.expect(":")?;
+                        (Pending::Alternate { test, yes: left }, 2)
+                    }
+                    Pending::Alternate { test, yes } => {
+                        left = self.checked_expression(Expr::Conditional(
+                            Box::new(test),
+                            Box::new(yes),
+                            Box::new(left),
+                        ))?;
+                        continue;
+                    }
+                    Pending::Sequence(mut values) => {
+                        values.push(left);
+                        if self.eat(",") {
+                            (Pending::Sequence(values), 2)
+                        } else {
+                            left = self.checked_expression(Expr::Sequence(values))?;
+                            continue;
+                        }
+                    }
+                }
+            };
+            // Every unresolved operator or list contributes a node to the
+            // resulting tree. Parsing its RHS does not recurse on the native stack.
+            if pending.len() + 1 >= MAX_AST_DEPTH {
+                return Err(self.error("AST nesting limit exceeded"));
+            }
+            pending.push((frame, min));
+            min = next_min;
+            (left, arrow) = self.expression_prefix(min)?;
         }
-        Ok(left)
+    }
+    fn combine_operator(
+        &self,
+        op: &'static str,
+        left: Expr,
+        right: Expr,
+        assignment: bool,
+    ) -> Result<Expr, JsError> {
+        let mixing = |value: &Expr, operators: &[&str]| matches!(value,Expr::Binary(operator,..)if operators.contains(operator));
+        if (op == "??" && (mixing(&left, &["&&", "||"]) || mixing(&right, &["&&", "||"])))
+            || (matches!(op, "&&" | "||") && (mixing(&left, &["??"]) || mixing(&right, &["??"])))
+        {
+            return Err(self.error(
+                "Nullish coalescing cannot mix with logical operators without parentheses",
+            ));
+        }
+        let expression = if !assignment {
+            Expr::Binary(op, Box::new(left), Box::new(right))
+        } else if op == "=" && matches!(left, Expr::Array(..) | Expr::Object(..)) {
+            Expr::Destructure(self.pattern(left, false)?, Box::new(right))
+        } else {
+            if !assignable(&left) {
+                return Err(self.error("Invalid assignment target"));
+            }
+            Expr::Assign(op, Box::new(left), Box::new(right))
+        };
+        self.checked_expression(expression)
     }
     fn yield_expression(&mut self) -> Result<Expr, JsError> {
         self.advance(1);
