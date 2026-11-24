@@ -226,6 +226,7 @@ struct Tab {
     history: SessionHistory,
     storage: rust_browser_engine::web_storage::TabStorage,
     history_scroll: Option<HistoryScroll>,
+    reveal_form_focus: Option<(u64, rust_browser_engine::dom::NodeId)>,
     scroll: f32,
     scroll_x: f32,
     nested_scroll: HashMap<rust_browser_engine::dom::NodeId, ScrollOffset>,
@@ -259,6 +260,7 @@ impl Tab {
             history: SessionHistory::new(address),
             storage: rust_browser_engine::web_storage::TabStorage::new(storage),
             history_scroll: None,
+            reveal_form_focus: None,
             scroll: 0.,
             scroll_x: 0.,
             nested_scroll: HashMap::new(),
@@ -279,6 +281,28 @@ impl Tab {
         self.page = Some(Arc::new(page));
         self.layout = None;
         self.displayed_navigation = self.document_navigation;
+    }
+
+    fn queue_form_reveal(&mut self) {
+        self.reveal_form_focus = self
+            .runtime
+            .as_ref()
+            .and_then(ScriptRuntime::focused_control)
+            .map(|node| (self.document_navigation, node));
+    }
+
+    fn reveal_edited_control(&mut self, height: f32) {
+        if let Some((document, node)) = self.reveal_form_focus.take()
+            && document == self.document_navigation
+            && self.runtime.as_ref().and_then(ScriptRuntime::focused_control) == Some(node)
+            && let Some(rect) = self.layout.as_ref().and_then(|layout| layout.rect_for(node))
+        {
+            if rect.y < self.scroll {
+                self.scroll = rect.y;
+            } else if rect.y + rect.height > self.scroll + height {
+                self.scroll = (rect.y + rect.height - height).max(0.);
+            }
+        }
     }
 
     fn inspected_page(&self) -> Option<&LoadedPage> {
@@ -1096,6 +1120,7 @@ impl App {
                 tab.history_scroll = None;
             }
         }
+        tab.reveal_edited_control(height);
         tab.scroll = tab.scroll.clamp(
             0.,
             tab.layout
@@ -1491,7 +1516,9 @@ impl App {
                 if let Err(error) = runtime.insert_form_text(text) {
                     self.status = error.to_string();
                 }
-                self.after_form_interaction();
+                // Input events and their effects are synchronous. Consecutive text edits can
+                // share the next layout for painting and scrolling the control into view.
+                self.publish_form_interaction();
             }
             return;
         }
@@ -3585,28 +3612,15 @@ impl App {
         true
     }
     fn after_form_interaction(&mut self) {
+        self.publish_form_interaction();
+        self.ensure_layout();
+    }
+    fn publish_form_interaction(&mut self) {
         let active = self.active;
         self.sync_runtime(active);
         self.dispatch_forms(active);
         self.dispatch_fetches(active);
-        self.ensure_layout();
-        if let Some(node) = self.tabs[active]
-            .runtime
-            .as_ref()
-            .and_then(ScriptRuntime::focused_control)
-            && let Some(rect) = self.tabs[active]
-                .layout
-                .as_ref()
-                .and_then(|layout| layout.rect_for(node))
-        {
-            let height = self.tab_viewport(active).height;
-            let tab = &mut self.tabs[active];
-            if rect.y < tab.scroll {
-                tab.scroll = rect.y;
-            } else if rect.y + rect.height > tab.scroll + height {
-                tab.scroll = (rect.y + rect.height - height).max(0.);
-            }
-        }
+        self.tabs[active].queue_form_reveal();
         self.set_title();
         self.redraw();
     }
@@ -3889,6 +3903,16 @@ impl ApplicationHandler<()> for App {
         }
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if matches!(
+            event,
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
+        ) && self.tabs.get(self.active).is_some_and(|tab| {
+            tab.runtime.is_some() && tab.layout.is_none()
+        })
+        {
+            // Hit testing can precede the redraw requested by an input handler.
+            self.ensure_layout();
+        }
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
@@ -4322,6 +4346,58 @@ fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod form_frame_tests {
+    use super::*;
+
+    #[test]
+    fn successive_edits_share_layout_and_only_reveal_the_still_focused_control() {
+        let url = "https://forms.test/";
+        let page = LoadedPage::from_html(
+            url,
+            "<style>input{display:block;margin-top:600px}</style><input id=q>",
+        );
+        let field = page
+            .document
+            .connected_nodes()
+            .find(|&id| page.document.tag(id) == "input")
+            .unwrap();
+        let mut tab = Tab::new(1, url.into(), Default::default());
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let viewport = Viewport {
+            width: 360.,
+            height: 200.,
+            ..Default::default()
+        };
+        runtime.focus_control(Some(field)).unwrap();
+        tab.layout = Some(runtime.layout_for_paint(viewport).unwrap());
+        tab.runtime = Some(runtime);
+        for key in ["a", "b"] {
+            tab.runtime.as_mut().unwrap().insert_form_text(key).unwrap();
+            tab.queue_form_reveal();
+            assert!(tab.runtime.as_ref().unwrap().layout_needs_refresh());
+            assert_eq!(tab.scroll, 0.);
+        }
+        let runtime = tab.runtime.as_mut().unwrap();
+        assert_eq!(
+            runtime.eval("document.getElementById('q').value === 'ab'").unwrap(),
+            true.into()
+        );
+        tab.layout = Some(runtime.layout_for_paint(viewport).unwrap());
+        let rect = tab.layout.as_ref().unwrap().rect_for(field).unwrap();
+        tab.reveal_edited_control(viewport.height);
+        assert_eq!(tab.scroll, rect.y + rect.height - viewport.height);
+        tab.scroll = 0.;
+        tab.reveal_edited_control(viewport.height);
+        assert_eq!(tab.scroll, 0.);
+
+        tab.queue_form_reveal();
+        tab.runtime.as_mut().unwrap().focus_control(None).unwrap();
+        tab.reveal_edited_control(viewport.height);
+        assert_eq!(tab.scroll, 0.);
+    }
 }
 
 #[cfg(test)]
