@@ -2675,7 +2675,7 @@ impl Builder<'_> {
         height
     }
     fn replaced_auto_border_width(
-        &self,
+        &mut self,
         id: NodeId,
         available: f32,
         c: Constraints,
