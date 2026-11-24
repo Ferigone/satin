@@ -102,8 +102,9 @@ impl Collection {
                 })
                 .collect(),
             filter => {
-                let html_document = document.node_document(root) == document.root;
-                let quirks = html_document && document.quirks_mode == QuirksMode::Quirks;
+                let html_document = document.is_html_document(document.node_document(root));
+                let quirks = document.node_document(root) == document.root
+                    && document.quirks_mode == QuirksMode::Quirks;
                 let mut matches = Vec::new();
                 let mut pending: Vec<_> = document.nodes[root.0]
                     .children

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 #[path = "dom/mutation.rs"]
 pub(crate) mod mutation;
@@ -89,14 +89,20 @@ pub(crate) struct ShadowTree {
     pub mode: ShadowMode,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DocumentKind {
+    Html,
+    Xml,
+}
+
 #[derive(Clone, Debug)]
 pub struct Document {
     pub nodes: Vec<Node>,
     pub root: NodeId,
     pub truncated: bool,
     pub quirks_mode: QuirksMode,
-    /// Script-created XML documents live in the same arena so adoption preserves node identity.
-    pub(crate) xml_documents: BTreeSet<NodeId>,
+    /// Independent documents live in the same arena so adoption preserves node identity.
+    pub(crate) other_documents: BTreeMap<NodeId, DocumentKind>,
     // Only nodes owned by a document other than the active page need an entry.
     pub(crate) node_documents: BTreeMap<NodeId, NodeId>,
     pub scripting_enabled: bool,
@@ -125,7 +131,7 @@ impl Default for Document {
             root: NodeId(0),
             truncated: false,
             quirks_mode: QuirksMode::NoQuirks,
-            xml_documents: BTreeSet::new(),
+            other_documents: BTreeMap::new(),
             node_documents: BTreeMap::new(),
             scripting_enabled: false,
             template_contents: BTreeMap::new(),
@@ -159,7 +165,11 @@ impl Document {
         })
     }
     pub(crate) fn is_document(&self, node: NodeId) -> bool {
-        node == self.root || self.xml_documents.contains(&node)
+        node == self.root || self.other_documents.contains_key(&node)
+    }
+
+    pub(crate) fn is_html_document(&self, node: NodeId) -> bool {
+        node == self.root || self.other_documents.get(&node) == Some(&DocumentKind::Html)
     }
 
     pub(crate) fn node_document(&self, node: NodeId) -> NodeId {
@@ -171,7 +181,7 @@ impl Document {
     }
 
     pub(crate) fn html_element_in_html_document(&self, id: NodeId) -> bool {
-        self.namespace(id) == Namespace::Html && self.node_document(id) == self.root
+        self.namespace(id) == Namespace::Html && self.is_html_document(self.node_document(id))
     }
 
     /// Adopt a detached subtree, including its shadow tree and template contents.
@@ -299,8 +309,12 @@ impl Document {
     }
 
     pub fn elements(&self, tag: &str) -> impl Iterator<Item = NodeId> + '_ {
+        self.elements_in(self.root, tag)
+    }
+
+    pub(crate) fn elements_in(&self, root: NodeId, tag: &str) -> impl Iterator<Item = NodeId> + '_ {
         let tag = tag.to_owned();
-        let mut pending = vec![self.root];
+        let mut pending = vec![root];
         std::iter::from_fn(move || {
             while let Some(id) = pending.pop() {
                 pending.extend(self.nodes[id.0].children.iter().rev().copied());
@@ -321,8 +335,16 @@ impl Document {
     }
 
     pub fn title(&self) -> String {
-        self.html_elements("title")
-            .next()
+        self.title_in(self.root)
+    }
+
+    pub(crate) fn title_element(&self, root: NodeId) -> Option<NodeId> {
+        self.elements_in(root, "title")
+            .find(|&id| self.namespace(id) == Namespace::Html)
+    }
+
+    pub(crate) fn title_in(&self, root: NodeId) -> String {
+        self.title_element(root)
             .map(|n| {
                 self.text(n)
                     .split(['\t', '\n', '\x0c', '\r', ' '])

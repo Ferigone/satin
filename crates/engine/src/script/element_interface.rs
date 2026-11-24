@@ -71,8 +71,8 @@ pub(super) fn install(
             document_state
                 .borrow_mut()
                 .document
-                .xml_documents
-                .insert(id);
+                .other_documents
+                .insert(id, crate::dom::DocumentKind::Xml);
             super::wrap_new_node(vm, &document_state, id, prototype)
         },
     )?;

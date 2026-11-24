@@ -1,4 +1,4 @@
-//! DOM operations shared by the active page and independent XML documents.
+//! DOM operations shared by the active page and independent documents.
 use super::{
     Shared, arg, descendants, document_base, document_node, document_part_in, getter, method,
     new_detached, text, webidl, wrap,
@@ -50,7 +50,7 @@ pub(super) fn install(
                         Value::Null
                     }
                 }
-                "contentType" => if active {
+                "contentType" => if state.document.is_html_document(root) {
                     "text/html"
                 } else {
                     "application/xml"

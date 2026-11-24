@@ -10,8 +10,9 @@ mod custom_elements;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
-mod dom_api;
 mod document_interface;
+mod dom_api;
+mod dom_implementation;
 mod element_interface;
 mod error_event;
 mod event_target;
@@ -92,6 +93,8 @@ struct State {
     element_prototype: Value,
     html_element_prototype: Value,
     document_prototype: Value,
+    html_document_prototype: Value,
+    doctype_prototype: Value,
     fragment_prototype: Value,
     shadow_prototype: Value,
     iframe_prototype: Value,
@@ -296,6 +299,10 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             }
         } else if state.document.shadow_hosts.contains_key(&id) {
             state.shadow_prototype.clone()
+        } else if state.document.is_html_document(id) {
+            state.html_document_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Doctype { .. }) {
+            state.doctype_prototype.clone()
         } else if state.document.is_document(id) {
             state.document_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Document) {
@@ -661,6 +668,10 @@ impl ScriptRuntime {
         vm.root(prototype.clone());
         let document_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(document_prototype.clone());
+        let html_document_prototype = vm.new_object_with_prototype(document_prototype.clone())?;
+        vm.root(html_document_prototype.clone());
+        let doctype_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(doctype_prototype.clone());
         let fragment_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(fragment_prototype.clone());
         let shadow_prototype = vm.new_object_with_prototype(fragment_prototype.clone())?;
@@ -701,6 +712,8 @@ impl ScriptRuntime {
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
             document_prototype: document_prototype.clone(),
+            html_document_prototype,
+            doctype_prototype,
             fragment_prototype,
             shadow_prototype,
             custom_elements: Rc::default(),
@@ -766,13 +779,15 @@ impl ScriptRuntime {
         let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
         let state_get = state.clone();
-        let get = vm.new_native_function("title", move |_, _, _| {
-            Ok(state_get.borrow().document.title().into())
+        let get = vm.new_native_function("title", move |_, this, _| {
+            let root = document_node(&state_get, &this)?;
+            Ok(state_get.borrow().document.title_in(root).into())
         });
         let state_set = state.clone();
-        let set = vm.new_native_function("title", move |vm, _, args| {
+        let set = vm.new_native_function("title", move |vm, this, args| {
+            let root = document_node(&state_set, &this)?;
             let value = text(vm, arg(args, 0))?;
-            let title = state_set.borrow().document.html_elements("title").next();
+            let title = state_set.borrow().document.title_element(root);
             let id = if let Some(title) = title {
                 title
             } else {
@@ -780,8 +795,7 @@ impl ScriptRuntime {
                 if state.document.nodes.len() >= NODE_LIMIT {
                     return Err(unsupported("DOM node budget exceeded"));
                 }
-                let Some(parent) = document_part(&state.document, "head")
-                else {
+                let Some(parent) = document_part_in(&state.document, root, "head") else {
                     return Ok(Value::Undefined);
                 };
                 state.dom_bytes = changed_bytes(&state, 0, "title".len())?;
@@ -808,7 +822,7 @@ impl ScriptRuntime {
             set_text(vm, &state_set, id, value)?;
             Ok(Value::Undefined)
         });
-        vm.define_accessor(document.clone(), "title", Some(get), Some(set))?;
+        vm.define_accessor(document_prototype.clone(), "title", Some(get), Some(set))?;
         document_interface::install(&mut vm, &state, document_prototype.clone())?;
         let dom_errors = dom_api::install(
             &mut vm,
@@ -871,6 +885,7 @@ impl ScriptRuntime {
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
         devtools_console::install_public_error(&mut vm, &state, console)?;
         element_interface::install(&mut vm, &state, prototype, element_prototype, &dom_errors)?;
+        dom_implementation::install(&mut vm, &state)?;
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;

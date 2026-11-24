@@ -811,6 +811,7 @@ fn context(state: &State, id: NodeId, body_fallback: bool) -> FragmentContext<'_
         }
         current = document.nodes[node.0].parent;
     }
+    let active = document.node_document(id) == document.root;
     FragmentContext {
         tag,
         namespace: document.namespace(id),
@@ -818,8 +819,12 @@ fn context(state: &State, id: NodeId, body_fallback: bool) -> FragmentContext<'_
             NodeKind::Element { attrs, .. } => Some(attrs),
             _ => None,
         },
-        scripting_enabled: document.scripting_enabled,
-        quirks_mode: document.quirks_mode,
+        scripting_enabled: active && document.scripting_enabled,
+        quirks_mode: if active {
+            document.quirks_mode
+        } else {
+            crate::dom::QuirksMode::NoQuirks
+        },
         form_ancestor,
     }
 }
@@ -1633,7 +1638,7 @@ fn install_cloning(
     let create_errors = errors.clone();
     method(vm, document, "createElement", move |vm, this, args| {
         let receiver = super::document_node(&create_state, &this)?;
-        let html = receiver == create_state.borrow().document.root;
+        let html = create_state.borrow().document.is_html_document(receiver);
         if args.is_empty() {
             return Err(JsError::type_error(
                 "createElement requires an element name",
@@ -1680,15 +1685,17 @@ fn install_cloning(
                 .map(|_| staged.commit(&mut state)[0])
         };
         let id = result.map_err(|failure| create_errors.convert(vm, failure))?;
-        if html {
+        if receiver == create_state.borrow().document.root {
             super::custom_elements::created(vm, &create_state, id)
         } else {
             {
                 let mut state = create_state.borrow_mut();
-                state
-                    .document
-                    .namespaces
-                    .insert(id, crate::dom::Namespace::Null);
+                if !html {
+                    state
+                        .document
+                        .namespaces
+                        .insert(id, crate::dom::Namespace::Null);
+                }
                 state.document.adopt(id, receiver);
             }
             wrap(vm, &create_state, Some(id))

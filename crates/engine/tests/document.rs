@@ -78,3 +78,45 @@ fn moving_and_importing_nodes_preserves_document_ownership_and_identity() {
     "#,
     );
 }
+
+#[test]
+fn dom_implementation_creates_independent_html_documents() {
+    check(
+        r#"
+        (() => {
+            const assert = (ok, label) => { if (!ok) throw Error(label); };
+            const impl = document.implementation;
+            assert(impl === document.implementation && impl instanceof DOMImplementation, 'implementation');
+            const d = impl.createHTMLDocument('');
+            assert(d instanceof HTMLDocument && d instanceof Document && d !== document &&
+                   d.implementation !== impl && d.defaultView === null &&
+                   d.contentType === 'text/html' && d.URL === 'about:blank', 'independent HTML document');
+            assert(d.firstChild === d.doctype && d.doctype instanceof DocumentType &&
+                   d.doctype.name === 'html' && d.doctype.publicId === '' && d.doctype.systemId === '' &&
+                   d.documentElement.tagName === 'HTML' && d.head.ownerDocument === d &&
+                   d.body.ownerDocument === d && d.head.firstChild.firstChild.nodeType === 3, 'initial tree');
+            d.body.innerHTML = '<form id="local"></form><form></form>';
+            const f = d.getElementById('local');
+            assert(d.body.childNodes.length === 2 && f === d.querySelector('FORM') &&
+                   f.ownerDocument === d && document.getElementById('local') === null, 'inert HTML parsing');
+            assert(d.createElement('MiXeD').tagName === 'MIXED' &&
+                   d.createElement('form') instanceof HTMLElement, 'HTML element factory');
+            const other = new Document().implementation.createHTMLDocument();
+            assert(other.head.firstChild === null && other.title === '', 'omitted title');
+            d.title = '  <test>    value';
+            assert(d.title === '<test> value' && document.title === 'Live' && other.title === '', 'isolated titles');
+            assert(impl.createHTMLDocument(undefined).head.firstChild === null &&
+                   impl.createHTMLDocument(null).title === 'null', 'optional DOMString title');
+            for (const operation of [() => new DOMImplementation(), () => impl.createHTMLDocument.call({})]) {
+                let type;
+                try { operation(); } catch (err) { type = err.name; }
+                assert(type === 'TypeError', 'receiver and construction');
+            }
+            document.body.appendChild(f);
+            assert(f.ownerDocument === document && d.getElementById('local') === null &&
+                   document.getElementById('local') === f, 'cross-document adoption');
+            return 'ok';
+        })()
+        "#,
+    );
+}
