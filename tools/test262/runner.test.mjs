@@ -12,6 +12,17 @@ test('YAML metadata supports multiline descriptions, includes and both default v
   assert.deepEqual(variants(metadata('/*---\nflags: [onlyStrict]\n---*/')), ['strict']);
 });
 
+test('metadata reads CR, CRLF and LF fixtures without changing script source', () => {
+  for (const newline of ['\r', '\r\n', '\n']) {
+    const source = ['/*---', 'description: |', '  one', '  two',
+      'includes: [nativeFunctionMatcher.js]', '---*/', 'var a = 1;'].join(newline);
+    const meta = metadata(source);
+    assert.equal(meta.description.trimEnd(), 'one\ntwo');
+    assert.deepEqual(meta.includes, ['nativeFunctionMatcher.js']);
+    assert.deepEqual(variants(meta), ['sloppy', 'strict']);
+  }
+});
+
 test('a harness error cannot satisfy a negative runtime test', () => {
   const meta = { negative: { phase: 'runtime', type: 'TypeError' } };
   assert.equal(classify(meta, { outcome: 'error', phase: 'setup', error: { kind: 'TypeError' } }).status, 'harness_error');

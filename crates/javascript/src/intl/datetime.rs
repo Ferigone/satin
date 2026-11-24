@@ -63,6 +63,14 @@ fn zone_name(value:Option<String>)->Result<(String,TimeZone),JsError>{
     Ok((n.to_owned(),zone))
 }
 fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
+    build_with(vm,args,proto,"DateTimeFormat")
+}
+pub(crate) fn format_date(vm:&mut Vm,args:&[Value],millis:f64,method:&str)->ResultValue {
+    let f=build_with(vm,args,prototype(vm,"DateTimeFormat"),method)?;
+    let fmt=slots::<DateFormat>(vm,&f)?;
+    render(vm,fmt.format_local(&fmt.formatter,&fmt.fields,fmt.local_millis(millis as i64))?,false,None)
+}
+fn build_with(vm:&mut Vm,args:&[Value],proto:ObjectId,method:&str)->ResultValue {
     let locs=locale::list(vm,arg(args,0))?;
     let opts=options(vm,arg(args,1),true)?;
     opt(vm,&opts,"localeMatcher",&["lookup","best fit"])?;
@@ -95,7 +103,17 @@ fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
     if let Some(s)=opt(vm,&opts,"timeZoneName",&["short","long","shortOffset","longOffset","shortGeneric","longGeneric"])?{fields.insert("timeZoneName",s);}
     opt(vm,&opts,"formatMatcher",&["basic","best fit"])?;
     let ds=opt(vm,&opts,"dateStyle",STYLES)?;let ts=opt(vm,&opts,"timeStyle",STYLES)?;
-    let use_defaults = ds.is_none() && ts.is_none() && fields.keys().all(|&k| matches!(k, "era" | "timeZoneName"));
+    if (method=="toLocaleTimeString" && ds.is_some()) || (method=="toLocaleDateString" && ts.is_some()) {
+        return Err(JsError::type_error("Date style and time style must match the formatting operation"))
+    }
+    let date_requested=["year","month","day","weekday"].iter().any(|k|fields.contains_key(k));
+    let time_requested=["dayPeriod","hour","minute","second","fractionalSecondDigits"].iter().any(|k|fields.contains_key(k));
+    let needs_defaults = match method {
+        "toLocaleDateString" => !date_requested,
+        "toLocaleTimeString" => !time_requested,
+        _ => !date_requested && !time_requested
+    };
+    let use_defaults = ds.is_none() && ts.is_none() && needs_defaults;
     if ds.is_some()||ts.is_some(){
         if !fields.is_empty(){return Err(JsError::type_error("Date and time styles cannot be combined with components"))}
         if let Some(s)=&ds {
@@ -106,8 +124,9 @@ fn build(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue {
             fields.insert("hour","numeric".into());fields.insert("minute","2-digit".into());
             if s!="short"{fields.insert("second","2-digit".into());}
         }
-    }else if fields.keys().all(|&k|matches!(k,"era"|"timeZoneName")){
-        for key in ["year","month","day"]{fields.insert(key,"numeric".into());}
+    }else if needs_defaults{
+        if method!="toLocaleTimeString" {for key in ["year","month","day"]{fields.insert(key,"numeric".into());}}
+        if method=="toLocaleString"||method=="toLocaleTimeString" {for key in ["hour","minute","second"]{fields.insert(key,"numeric".into());}}
     }
     let formatter = make_formatter(&l, &fields)?;
     let calendar=locale::key(&l,"ca").filter(|s|data::CALENDARS.contains(&s.as_str())).unwrap_or_else(||locale::regional(data::CALENDAR_PREFS,&l).split_whitespace().next().unwrap_or("gregory").into());

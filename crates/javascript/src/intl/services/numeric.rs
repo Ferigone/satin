@@ -118,9 +118,9 @@ fn new_number(vm:&mut Vm,args:&[Value],p:ObjectId)->ResultValue{
     if opt_num.as_deref().is_some_and(|s|!unicode_type(s)){return Err(range("Invalid numbering system"))}
     let ext=locale::key(&l,"nu");let mut resolved:Locale=base(&l).parse().unwrap();
     let def_locale:Locale=resolved.clone();
-    let number=opt_num.as_ref().or(ext.as_ref()).filter(|n|data::NUMBERING.contains(&n.as_str())).cloned().unwrap_or_else(||locale::default_numbering(&def_locale).into());
+    let number=opt_num.as_ref().filter(|n|data::NUMBERING.contains(&n.as_str())).or_else(||ext.as_ref().filter(|n|data::NUMBERING.contains(&n.as_str()))).cloned().unwrap_or_else(||locale::default_numbering(&def_locale).into());
     locale::set_key(&mut l,"nu",&number)?;
-    if ext.as_ref()==Some(&number)&&opt_num.as_ref().is_none_or(|n|n==&number){locale::set_key(&mut resolved,"nu",&number)?}
+    if ext.as_ref()==Some(&number){locale::set_key(&mut resolved,"nu",&number)?}
     let style=opt(vm,&o,"style",&["decimal","percent","currency","unit"])?.unwrap_or_else(||"decimal".into());
     let currency=opt(vm,&o,"currency",&[])?.map(|s|s.to_ascii_uppercase());
     if currency.as_deref().is_some_and(|s|s.len()!=3||!s.bytes().all(|b|b.is_ascii_uppercase())){return Err(range("Invalid currency code"))}
@@ -227,7 +227,7 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
     });
     method(vm,p,"resolvedOptions",0,|vm,this,_|{
         let f=slots::<Plural>(vm,&this)?;let o=vm.new_object();field(vm,&o,"locale",f.locale.as_str())?;field(vm,&o,"type",f.kind.as_str())?;f.digits.resolved(vm,&o)?;
-        let mut cats=f.rules.categories().map(plural_name).collect::<Vec<_>>();cats.sort();
+        let cats = f.rules.categories().map(plural_name);
         let arr=strings(vm,cats)?;field(vm,&o,"pluralCategories",arr)?;f.digits.resolved_round(vm,&o)?;Ok(o)
     });
     let (ctor,p)=class(vm,intl,"NumberFormat",0,true,new_number);supported(vm,&ctor);

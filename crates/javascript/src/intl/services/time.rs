@@ -4,13 +4,14 @@ use icu_experimental::duration::{Duration, DurationFormatter, DurationSign, Vali
 use icu_experimental::relativetime::{RelativeTimeFormatter, options::{Numeric, RelativeTimeFormatterOptions}};
 
 /// Both services use the same ResolveLocale key and locale negotiation.
-fn numbered_locale(vm:&mut Vm,args:&[Value])->Result<(Locale, String, String, Value),JsError>{
-    let(mut l,o)=requested(vm,args,false)?;
+fn numbered_locale(vm:&mut Vm,args:&[Value],coerce:bool)->Result<(Locale, String, String, Value),JsError>{
+    let(mut l,o)=requested(vm,args,coerce)?;
     let opt=opt(vm,&o,"numberingSystem",&[])?;
     if opt.as_deref().is_some_and(|s|!unicode_type(s)){return Err(range("Invalid numbering system"))}
     let ext=locale::key(&l,"nu");let mut tag:Locale=base(&l).parse().unwrap();
-    let number=opt.as_ref().or(ext.as_ref()).filter(|s|data::NUMBERING.contains(&s.as_str())).cloned().unwrap_or_else(||locale::default_numbering(&tag).to_string());
-    if ext.as_ref()==Some(&number)&&opt.as_ref().is_none_or(|n|n==&number){locale::set_key(&mut tag,"nu",&number)?}
+    let selected=opt.as_ref().filter(|s|data::NUMBERING.contains(&s.as_str())).or_else(||ext.as_ref().filter(|s|data::NUMBERING.contains(&s.as_str())));
+    let number=selected.cloned().unwrap_or_else(||locale::default_numbering(&tag).to_string());
+    if ext.as_ref()==Some(&number){locale::set_key(&mut tag,"nu",&number)?}
     locale::set_key(&mut l,"nu",&number)?;
     Ok((l,tag.to_string(),number,o))
 }
@@ -48,7 +49,7 @@ impl TimeParts {
 }
 struct Relative{l:Locale,tag:String,number:String,numeric:String,style:String}
 fn new_relative(vm:&mut Vm,args:&[Value],p:ObjectId)->ResultValue{
-    let(l,tag,number,o)=numbered_locale(vm,args)?;
+    let(l,tag,number,o)=numbered_locale(vm,args,true)?;
     let style=opt(vm,&o,"style",&["long","short","narrow"])?.unwrap_or_else(||"long".into());
     let numeric=opt(vm,&o,"numeric",&["always","auto"])?.unwrap_or_else(||"always".into());
     create(vm,p,Relative{l,tag,number,numeric,style})
@@ -59,6 +60,7 @@ fn relative(vm:&mut Vm,f:&Relative,args:&[Value],parts:bool)->ResultValue{
     let unit=unit.strip_suffix('s').unwrap_or(&unit);
     let mut value=Decimal::try_from_f64(x,FloatPrecision::RoundTrip).map_err(|_|range("Invalid relative time value"))?;
     value.round(-3);value.trim_end();
+    if f.numeric=="auto" && x==0.{value=Decimal::from(0);}
     use RelativeTimeFormatter as F;
     let ctor=match(unit,f.style.as_str()){
         ("second", "long") => F::try_new_long_second,
@@ -96,7 +98,7 @@ fn relative(vm:&mut Vm,f:&Relative,args:&[Value],parts:bool)->ResultValue{
 const UNITS:[&str;10]=["years","months","weeks","days","hours","minutes","seconds","milliseconds","microseconds","nanoseconds"];
 struct DurationFormat{fmt:DurationFormatter,tag:String,number:String,style:String,fields:Vec<(String,String)>,frac:Option<u8>}
 fn new_duration(vm:&mut Vm,args:&[Value],p:ObjectId)->ResultValue{
-    let(l,tag,number,o)=numbered_locale(vm,args)?;
+    let(l,tag,number,o)=numbered_locale(vm,args,false)?;
     let style=opt(vm,&o,"style",&["long","short","narrow","digital"])?.unwrap_or_else(||"short".into());
     let mut opts=DurationFormatterOptions::default();
     opts.base=match style.as_str(){"long"=>BaseStyle::Long,"narrow"=>BaseStyle::Narrow,"digital"=>BaseStyle::Digital,_=>BaseStyle::Short};

@@ -221,7 +221,7 @@ fn reading_high_unsigned_elements_repeatedly_does_not_allocate_heap_values() {
 }
 
 #[test]
-fn locale_fallback_delegates_each_visible_element_and_uses_the_initial_length() {
+fn locale_formatting_delegates_each_visible_element_and_uses_the_initial_length() {
     let mut vm = Vm::new();
     yes(
         &mut vm,
@@ -236,14 +236,16 @@ fn locale_fallback_delegates_each_visible_element_and_uses_the_initial_length() 
         Object.defineProperty(BigInt.prototype, 'toLocaleString', { get: function() {
           calls.push('lookup');
           return function() {
-            calls.push(this.valueOf() === 4n && arguments.length === 0 ? 'invoke' : 'incorrect');
+            const forwarded = arguments.length === 2 && arguments[0] === locales && arguments[1] === options;
+            calls.push(this.valueOf() === 4n && forwarded ? 'invoke' : 'incorrect');
             buffer.resize(8);
             return {toString() { calls.push('string'); return 'value'; }};
           };
         }});
-        const reserved = {valueOf() { throw Error('unexpected conversion'); }};
-        const formatted = values.toLocaleString(reserved, reserved);
-        plain === '1,,,,x' && floats === '1,1.5,0' && object === 'delegated' &&
+        const locales = {valueOf() { throw Error('unexpected conversion'); }};
+        const options = {};
+        const formatted = values.toLocaleString(locales, options);
+        plain === '1,,,,x' && floats === '1,1.5,-0' && object === 'delegated' &&
           formatted === 'value,' && calls.join() === 'lookup,invoke,string'
         "#,
     );

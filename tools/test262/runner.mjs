@@ -15,9 +15,10 @@ function under(root, path) {
 }
 
 export function metadata(source) {
-  const match = /\/\*---\s*\r?\n([\s\S]*?)\r?\n---\*\//.exec(source);
+  const match = /\/\*---[ \t]*(?:\r\n|[\r\n])([\s\S]*?)(?:\r\n|[\r\n])---\*\//.exec(source);
   if (!match) throw new Error('missing Test262 YAML frontmatter');
-  const parsed = YAML.parse(match[1], { maxAliasCount: 100, uniqueKeys: true });
+  // Some fixtures deliberately use bare CR. Normalize only the YAML excerpt.
+  const parsed = YAML.parse(match[1].replace(/\r\n?/g, '\n'), { maxAliasCount: 100, uniqueKeys: true });
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('frontmatter must be a mapping');
   for (const key of ['flags', 'includes', 'features']) {
     if (parsed[key] !== undefined && (!Array.isArray(parsed[key]) || parsed[key].some(item => typeof item !== 'string'))) {

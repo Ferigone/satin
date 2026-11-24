@@ -350,14 +350,14 @@ fn join(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     })
 }
 
-fn to_locale_string(vm: &mut Vm, this: Value, _: &[Value]) -> Result<Value, JsError> {
+fn to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
     let array = receiver(vm, &this)?;
     let length = array.length(vm)?;
     join_indexed_properties(
         vm,
         length,
         &",".into(),
-        Some("toLocaleString"),
+        Some(&[arg(args, 0), arg(args, 1)]),
         |vm, index| vm.read_typed_element(array, index),
     )
 }

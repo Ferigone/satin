@@ -1,6 +1,6 @@
-"""Rebuild the ECMA-402 tables from cldr-core and cldr-bcp47 49.0.0 and IANA TZDB 2026c zone.tab.
+"""Rebuild the ECMA-402 tables from cldr-core and cldr-bcp47 49.0.0 and IANA TZDB 2026c.
 
-Pass a directory containing the two unpacked npm packages and the path to zone.tab.
+Pass a directory containing the two unpacked npm packages and the path to zone.tab next to tzdata.zi.
 """
 from pathlib import Path
 import argparse
@@ -42,6 +42,27 @@ for k,v in bcp('timezone','tz').items():
 for row in args.zones.read_text().splitlines():
  if row.startswith('#') or not row:continue
  reg,_,zone,*_=row.split('\t'); regionzones[reg].add(zones.get(zone.lower(),zone))
+# Time-zone identifiers belong to TZDB. CLDR also lists non-IANA names and
+# can retain old primary names for compatibility. Preserve each country's
+# primary zones and use TZDB links for identifiers such as EST5EDT.
+tzdata = args.zones.with_name('tzdata.zi').read_text().splitlines()
+if tzdata[0] != '# version 2026c':
+    raise ValueError('Expected IANA TZDB 2026c tzdata.zi')
+territorial = {row.split('\t')[2] for row in args.zones.read_text().splitlines() if row and not row.startswith('#')}
+names = {}
+for row in tzdata:
+    fields = row.split()
+    if fields and fields[0] in ('Z', 'L'):
+        identifier = fields[1] if fields[0] == 'Z' else fields[2]
+        primary = zones.get(identifier.lower(), identifier)
+        if primary == 'Etc/Unknown':
+            primary = identifier
+        if fields[0] == 'L' and primary == identifier and identifier not in territorial:
+            primary = zones.get(fields[1].lower(), fields[1])
+        names[identifier.lower()] = (identifier, primary)
+zones = {key: primary for key, (_, primary) in names.items()}
+# A primary already supplies its own correctly cased name in ZONE_ALIASES.
+table('ZONE_LINK_NAMES', {key: name for key, (name, primary) in names.items() if name != primary})
 array('ZONES',zones.values()); table('ZONE_ALIASES',zones);table('REGION_ZONES',{k:' '.join(sorted(v)) for k,v in regionzones.items()})
 week=supp('weekData')
 for k,n in [('firstDay','FIRST_DAY'),('weekendStart','WEEKEND_START'),('weekendEnd','WEEKEND_END')]:

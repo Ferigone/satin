@@ -6,7 +6,16 @@ use std::rc::Rc;
 mod locale;
 mod data;
 mod datetime;
+pub(crate) use datetime::format_date;
 mod services;
+
+/// Resolve the case-preserved IANA identifier and its primary identifier.
+pub(crate) fn named_time_zone(name: &str) -> Option<(&'static str, &'static str)> {
+    let lower = name.to_ascii_lowercase();
+    let primary = locale::table(data::ZONE_ALIASES, &lower)?;
+    let identifier = locale::table(data::ZONE_LINK_NAMES, &lower).unwrap_or(primary);
+    Some((identifier, primary))
+}
 
 pub(super) fn install(vm: &mut Vm) {
     let intl = vm.new_object();

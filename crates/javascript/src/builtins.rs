@@ -375,6 +375,19 @@ fn install_object(vm: &mut Vm) {
             own_property_descriptor_value(vm, target.as_object().unwrap(), &key)
         },
     );
+    method(vm, object.clone(), "getOwnPropertyDescriptors", 1, |vm, _, args| {
+        let target = vm.coerce_object(arg(args, 0))?;
+        let id = target.as_object().unwrap();
+        let result = vm.new_object();
+        for key in vm.own_property_keys(target)? {
+            vm.tick()?;
+            let descriptor = own_property_descriptor_value(vm, id, &key)?;
+            if !descriptor.is_undefined() {
+                vm.define_data_property_key(result.clone(), key, descriptor, true, true, true)?;
+            }
+        }
+        Ok(result)
+    });
     method(vm, object.clone(), "assign", 2, |vm, _, a| {
         let target = vm.coerce_object(arg(a, 0))?;
         for source in a.iter().skip(1) {
@@ -1264,10 +1277,11 @@ fn install_array(vm: &mut Vm) {
             vm.get_property(object.clone(), &index.to_string())
         })
     });
-    method(vm, proto.clone(), "toLocaleString", 0, |vm, this, _| {
+    method(vm, proto.clone(), "toLocaleString", 0, |vm, this, args| {
         let object = vm.coerce_object(this)?;
         let len = length(vm, object.clone())?;
-        join_indexed_properties(vm, len, &",".into(), Some("toLocaleString"), |vm, index| {
+        let locale_args = [arg(args, 0), arg(args, 1)];
+        join_indexed_properties(vm, len, &",".into(), Some(&locale_args), |vm, index| {
             vm.get_property(object.clone(), &index.to_string())
         })
     });
@@ -1523,7 +1537,7 @@ pub(crate) fn join_indexed_properties(
     vm: &mut Vm,
     length: usize,
     separator: &JsString,
-    method: Option<&str>,
+    locale_args: Option<&[Value; 2]>,
     mut get_element: impl FnMut(&mut Vm, usize) -> Result<Value, JsError>,
 ) -> Result<Value, JsError> {
     let mut units = Vec::new();
@@ -1536,9 +1550,9 @@ pub(crate) fn join_indexed_properties(
         if value.is_nullish() {
             continue;
         }
-        if let Some(name) = method {
-            let formatter = vm.get_property(value.clone(), name)?;
-            value = vm.invoke(formatter, value, &[])?;
+        if let Some(args) = locale_args {
+            let formatter = vm.get_property(value.clone(), "toLocaleString")?;
+            value = vm.invoke(formatter, value, args)?;
         }
         let string = vm.to_string(&value)?;
         append_units(vm, &mut units, string.as_utf16())?;
@@ -1972,13 +1986,9 @@ fn install_string(vm: &mut Vm) {
         vm.finish_string(units)
     });
     method(vm, proto.clone(), "normalize", 0, string_normalize);
-    // Satin's non-Intl casing locale uses the Unicode default mappings.
-    // The locale argument positions are reserved by ECMA-262.
     for (name, upper) in [
         ("toLowerCase", false),
         ("toUpperCase", true),
-        ("toLocaleLowerCase", false),
-        ("toLocaleUpperCase", true),
     ] {
         method(vm, proto.clone(), name, 0, move |vm, this, _| {
             string_case(vm, this, upper)

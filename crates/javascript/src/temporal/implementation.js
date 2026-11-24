@@ -1,4 +1,4 @@
-(function(Object, Array, Date, Math, Number, BigInt, String, Symbol, RegExp, RangeError, TypeError, Error, Map, WeakMap, Set, Reflect, Intl, RawDateTimeFormat, calendarFields, calendarYear, openTimeZone, readSlots, writeSlots) {
+(function(Object, Array, Date, Math, Number, BigInt, String, Symbol, RegExp, RangeError, TypeError, Error, Map, WeakMap, Set, Reflect, Intl, RawDateTimeFormat, calendarFields, calendarYear, resolveNamedTimeZone, openTimeZone, readSlots, writeSlots) {
   "use strict";
   function normalizeOptions(options) {
     return void 0 === options ? Object.create(null) : requireObjectLike(options);
@@ -2848,8 +2848,6 @@
   };
 
   const trailingZerosRE = /0+$/;
-  const icuRegExp = /^(AC|AE|AG|AR|AS|BE|BS|CA|CN|CS|CT|EA|EC|IE|IS|JS|MI|NE|NS|PL|PN|PR|PS|SS|VS)T$/;
-  const badCharactersRegExp = /[^\w\/:+-]+/;
   const resolveTimeZoneRecord = memoize(rawId => {
     const upperRawId = rawId.toUpperCase();
     const offsetRecord = (upperRawId => {
@@ -2868,34 +2866,11 @@
         ...offsetRecord
       };
     }
-    const normId = "UTC" === upperRawId ? "UTC" : (rawId => (badCharactersRegExp.test(rawId) && throwRangeError(invalidTimeZone(rawId)),
-    icuRegExp.test(rawId) && throwRangeError("Forbidden ICU TimeZone"), rawId.toLowerCase().split("/").map((part, partI) => (part.length <= 3 || /\d/.test(part)) && !/etc|yap/.test(part) ? part.toUpperCase() : part.replace(/baja|dumont|[a-z]+/g, (a, i) => a.length <= 2 && !partI || "in" === a || "chat" === a ? a.toUpperCase() : a.length > 2 || !i ? capitalize(a).replace(/island|noronha|murdo|rivadavia|urville/, capitalize) : a)).join("/")))(rawId);
-    return queryNamedTimeZoneRecord(normId);
-  });
-  const queryNamedTimeZoneRecord = memoize(normId => {
-    if ("UTC" === normId) {
-      return {
-        kind: "utc",
-        id: normId,
-        m: normId
-      };
-    }
-    const format = (upperNormId = normId.toUpperCase(), new RawDateTimeFormat("en-u-hc-h23", {
-      calendar: "iso8601",
-      timeZone: upperNormId,
-      era: "short",
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-      hour: "numeric",
-      minute: "numeric",
-      second: "numeric"
-    }));
-    var upperNormId;
+    const [id, primary] = resolveNamedTimeZone(rawId);
     return {
-      kind: "named",
-      id: normId,
-      m: format.resolvedOptions().timeZone
+      kind: primary === "UTC" ? "utc" : "named",
+      id,
+      m: primary
     };
   });
   const queryTimeZoneRecord = memoize((normTimeZoneId, record) => "named" === record.kind ? new IntlTimeZone(normTimeZoneId, record.m) : new FixedTimeZone(normTimeZoneId, record.m, "fixed" === record.kind ? record.Z : 0));
@@ -2915,7 +2890,7 @@
     constructor(id, compareKey) {
       this.id = id;
       this.m = compareKey;
-      this.query = openTimeZone(id);
+      this.query = openTimeZone(compareKey);
     }
     B(epochNano) {
       return this.query(epochNanoToSecMod(epochNano)[0]) * nanoInSec;

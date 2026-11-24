@@ -64,7 +64,18 @@ fn new_list(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue{
 struct ListParts{fields:Vec<(&'static str,String)>,current:Option<&'static str>}
 impl fmt::Write for ListParts{
     fn write_str(&mut self,s:&str)->fmt::Result{
-        let k=self.current.unwrap_or("literal");if let Some((key,v))=self.fields.last_mut()&&*key==k&&k=="literal"{v.push_str(s)}else{self.fields.push((k,s.into()))} Ok(())
+        let kind = self.current.unwrap_or("literal");
+        if kind == "literal" {
+            if s.is_empty() {
+                return Ok(());
+            }
+            if let Some(("literal", previous)) = self.fields.last_mut() {
+                previous.push_str(s);
+                return Ok(());
+            }
+        }
+        self.fields.push((kind, s.into()));
+        Ok(())
     }
 }
 impl PartsWrite for ListParts{
@@ -140,6 +151,37 @@ fn install_segmenter(vm:&mut Vm,intl:Value){
         create(vm,prototype(vm,"Segments"),Segments{input,ends,word})
     });
 }
+fn install_string_methods(vm: &mut Vm) {
+    let p=Value::Object(vm.realm.string_prototype);
+    method(vm,p.clone(),"localeCompare",1,|vm,this,args|{
+        if this.is_nullish(){return Err(JsError::type_error("String method requires a receiver"))}
+        let a=vm.to_string(&this)?;let b=vm.to_string(&arg(args,0))?;
+        let coll=new_collator(vm,args.get(1..).unwrap_or_default(),prototype(vm,"Collator"))?;
+        let f=slots::<Collation>(vm,&coll)?; vm.charge_work(a.len()+b.len())?;
+        Ok((f.coll.compare_utf16(a.as_utf16(),b.as_utf16()) as i32).into())
+    });
+    for (name,upper) in [("toLocaleLowerCase",false),("toLocaleUpperCase",true)]{
+        method(vm,p.clone(),name,0,move|vm,this,args|{
+            if this.is_nullish(){return Err(JsError::type_error("String method requires a receiver"))}
+            let s=vm.to_string(&this)?;
+            let locales=locale::list(vm,arg(args,0))?;
+            let locale=locales.first().cloned().unwrap_or_else(||icu_locale::locale!("en-US"));
+            let mapper=icu_casemap::CaseMapper::new();
+            vm.charge_work(s.len())?;
+            let mut result=Vec::with_capacity(s.len());
+            let mut valid=String::new();
+            let flush=|s:&mut String, out:&mut Vec<u16>|{
+                let mapped=if upper{mapper.uppercase_to_string(s,&locale.id)}else{mapper.lowercase_to_string(s,&locale.id)};
+                out.extend(mapped.encode_utf16());s.clear();
+            };
+            for c in char::decode_utf16(s.as_utf16().iter().copied()){
+                match c{Ok(ch)=>valid.push(ch),Err(err)=>{flush(&mut valid,&mut result);result.push(err.unpaired_surrogate());}}
+            }
+            flush(&mut valid,&mut result);
+            vm.finish_string(result)
+        });
+    }
+}
 pub(super) fn install(vm:&mut Vm,intl:Value){
     let (coll,p)=class(vm,intl.clone(),"Collator",0,true,new_collator);supported(vm,&coll);
     accessor(vm,&p,"compare",|vm,this,_|{
@@ -181,6 +223,7 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
             if name=="format"{vm.finish_string(joined)}else{vm.try_new_array(&arr)}
         });
     }
+    install_string_methods(vm);
     install_segmenter(vm,intl.clone());
     display::install(vm,intl.clone());
     time::install(vm,intl.clone());
