@@ -177,3 +177,136 @@ fn block_link_padding_is_clickable() {
     assert_eq!(layout.link_at(235., 2.), Some("https://example.test/next"));
     assert!(layout.link_at(250., 2.).is_none());
 }
+
+#[test]
+fn raw_json_navigation_streams_a_large_minified_value_and_shapes_only_visible_rows() {
+    use rust_browser_engine::{DrawCommand, layout::Viewport};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}/document", listener.local_addr().unwrap());
+    let (first_seen, begin_remaining) = mpsc::channel::<()>();
+    let total = 64 * 1024 * 1024;
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut header = String::new();
+        let mut reader = BufReader::new(&socket);
+        while reader.read_line(&mut header).unwrap() != 0 && !header.ends_with("\r\n\r\n") {}
+        let prefix = b"[\"<script>\",\"";
+        let suffix = b"\",\n\"end\"]";
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/vendor.example+json\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n").unwrap();
+        socket.write_all(prefix).unwrap();
+        begin_remaining
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let block = [b'x'; 32768];
+        let mut left = total - prefix.len() - suffix.len();
+        while left > 0 {
+            let n = left.min(block.len());
+            socket.write_all(&block[..n]).unwrap();
+            left -= n;
+        }
+        socket.write_all(suffix).unwrap();
+    });
+    let loader = Loader::new().unwrap();
+    let mut doc = None;
+    let mut first_seen = Some(first_seen);
+    let mut bytes = 0;
+    let mut eof = false;
+    loader
+        .stream_navigation(
+            &NavigationRequest::get(&address).unwrap(),
+            &AtomicBool::new(false),
+            |part| match part {
+                NavigationPart::Open(opened) => {
+                    doc = Some(DocumentSession::start(*opened).unwrap())
+                }
+                NavigationPart::Text(text, n) => {
+                    let (_, session) = doc.as_mut().unwrap();
+                    session.feed(&text).unwrap();
+                    bytes += n;
+                    if let Some(tx) = first_seen.take() {
+                        tx.send(()).unwrap();
+                    }
+                }
+                NavigationPart::Finish => {
+                    doc.as_mut().unwrap().1.finish_input().unwrap();
+                    eof = true;
+                }
+            },
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert!(eof);
+    assert_eq!(bytes, total);
+    let (page, mut session) = doc.unwrap();
+    let fonts = Fonts::new().unwrap();
+    let viewport = Viewport {
+        width: 400.,
+        height: 95.,
+        ..Default::default()
+    };
+    let mut realm = None;
+    let mut page = page;
+    session.advance(&mut page, &mut realm, viewport).unwrap();
+    assert!(realm.is_none());
+    assert_eq!(page.document.nodes.len(), 1);
+    let first = Layout::build_with_viewport(&page, &fonts, viewport);
+    assert!(first.height > 1_000_000.);
+    assert!(first.commands.len() <= 8);
+    let end = Layout::build_with_viewport(
+        &page,
+        &fonts,
+        Viewport {
+            scroll_y: first.height - viewport.height,
+            ..viewport
+        },
+    );
+    let expected = fonts.shape("\"end\"]", 14., false, false, true);
+    assert!(end.commands.len() <= 8);
+    assert!(end.commands.iter().any(|cmd| matches!(cmd,DrawCommand::Text {run,..} if run.glyphs.iter().map(|g| g.id).eq(expected.glyphs.iter().map(|g| g.id)))));
+}
+
+#[test]
+fn raw_json_size_limit_counts_decompressed_bytes_for_chunked_gzip() {
+    use flate2::{Compression, write::GzEncoder};
+    use rust_browser_engine::network::FETCH_RESPONSE_BODY_LIMIT;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("http://{}/large", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut headers = String::new();
+        while reader.read_line(&mut headers).unwrap() != 0 && !headers.ends_with("\r\n\r\n") {}
+        let mut zip = GzEncoder::new(Vec::new(), Compression::fast());
+        let block = [b' '; 65536];
+        for _ in 0..FETCH_RESPONSE_BODY_LIMIT / block.len() {
+            zip.write_all(&block).unwrap();
+        }
+        zip.write_all(b"0").unwrap();
+        let compressed = zip.finish().unwrap();
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n",compressed.len()).unwrap();
+        stream.write_all(&compressed).unwrap();
+        stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+    });
+    let mut received = 0;
+    let mut finished = false;
+    let result = Loader::new().unwrap().stream_navigation(
+        &NavigationRequest::get(&address).unwrap(),
+        &AtomicBool::new(false),
+        |part| match part {
+            NavigationPart::Text(_, bytes) => received += bytes,
+            NavigationPart::Finish => finished = true,
+            NavigationPart::Open(_) => {}
+        },
+    );
+    server.join().unwrap();
+    assert!(
+        result
+            .unwrap_err()
+            .contains(&FETCH_RESPONSE_BODY_LIMIT.to_string())
+    );
+    assert!(received <= FETCH_RESPONSE_BODY_LIMIT);
+    assert!(!finished);
+}

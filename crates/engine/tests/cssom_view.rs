@@ -173,6 +173,35 @@ fn geometry_charges_displayed_text_and_allows_large_inert_data_blocks() {
 }
 
 #[test]
+fn detached_subtrees_keep_identity_without_paying_for_style_resolution_on_every_slot() {
+    let html = format!(
+        "<!doctype html><div id='old'>{}</div><p id='current' style='height:37px'>Current</p>",
+        "<span></span>".repeat(33_000)
+    );
+    let mut r = runtime(&html);
+    check(
+        &mut r,
+        "var old = document.getElementById('old'), first = old.firstChild; document.body.removeChild(old); document.getElementById('current').offsetHeight === 37 && old.firstChild === first && first.offsetHeight === 0",
+    );
+}
+
+#[test]
+fn a_long_table_can_read_its_height_and_scroll_in_the_same_task() {
+    use std::fmt::Write;
+    let mut html =
+        String::from("<!doctype html><div id='log' style='height:210px;overflow:auto'><table>");
+    for i in 0..3000 {
+        write!(html, "<tbody><tr class='alternate'><td width='20%'><a class='source' href='#case-{i}'>Case {i}</a></td><td>Description of the behavior that this case checks when it executes.</td><td align='right'><span class='failed'><a class='details' href='#case-{i}'>Fail</a></span></td></tr></tbody>").unwrap();
+    }
+    html.push_str("</table></div>");
+    let mut r = runtime(&html);
+    check(
+        &mut r,
+        "var log = document.getElementById('log'), height = log.scrollHeight; log.scrollTop = height; height > 30000",
+    );
+}
+
+#[test]
 fn geometry_uses_border_boxes_but_offsets_ignore_transforms() {
     let mut r = runtime(
         "<!doctype html><style>body{margin:0}#box{width:100px;height:50px;padding:10px;border:2px solid red;margin:5px;transform:scale(2);transform-origin:0 0}</style><div id=box></div>",

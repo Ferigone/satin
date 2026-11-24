@@ -100,6 +100,8 @@ Patterns support alternation, greedy and lazy quantifiers, character classes and
 
 The VM honors overridden `exec`, `Symbol.match`, `Symbol.matchAll`, `Symbol.search`, `Symbol.replace`, `Symbol.split`, and species constructors. String methods include matching, lazy `matchAll`, search, split with captures, and string or callback replacements. RegExp string iterators retain a traced matcher and the input until they finish. `RegExp.escape`, source formatting, and the browser compatibility method `compile` are available.
 
+Large document strings can use a bounded deterministic automaton for boolean tests and literal replacements on ordinary RegExp instances. Satin translates eligible ECMAScript expressions into ASCII character classes and charges each searched or copied span to the VM’s native work budget. Capture substitutions, custom execution methods, unsupported flags, backreferences and lookarounds use the ordinary matcher.
+
 The matcher uses a bounded explicit backtracking stack. Compilation accepts at most 16,384 pattern code units, 256 captures, and 32 levels of nested groups. Matching, capture copying, and substitution use the shared VM work and heap budgets. Backtracking scratch space is capped at 8 MiB. Unicode property escapes and the `v` flag currently raise `UnsupportedFeature`. The Test262 scope and individual status counts are reported separately from the existing language and API scopes.
 
 ## Keyed collections
@@ -191,7 +193,7 @@ directly.
 Headers, Request, Response and readable streams store their JavaScript
 references in traced host slots. Fetch retains capability roots until response
 headers arrive and the stream keeps in-flight read promises alive until they
-settle. The 16 MiB Fetch budget counts shared body backing once. Streams manage
+settle. The 128 MiB retained Fetch budget counts shared body backing once. Each response body is limited to 64 MiB after content decoding. Streams manage
 their separate queue and collection budgets. [Fetch host](../crates/engine/src/script/fetch.rs) ·
 [Readable streams](../crates/engine/src/script/streams.rs) · [Transport](NAVIGATION.md)
 
@@ -211,6 +213,15 @@ Default `VmLimits`:
 | max_string_units | 8 Mi UTF-16 code units per string |
 | max_array_length | 1,000,000 |
 | max_pending_jobs | 4,096 jobs, reactions per pending promise, or unhandled rejection records |
+
+Browser documents and dedicated workers use a 512 MiB aggregate heap allowance,
+up to 524,288 objects and environments, and up to 64 Mi UTF-16 code units per
+string. A scripted top-level document can allocate 524,288 stable DOM node
+identifiers over its lifetime. This includes detached nodes that script can
+retain and reinsert. The HTML parser retains its 100,000-node input limit.
+Accessed `children` and `childNodes` views keep their identity on the owning
+node, with a 64 MiB fixed-view allowance. Other live collection queries share
+a separate 2 MiB allowance. A live query charges for its actual subtree.
 
 Synchronous bytecode execution permits 16 native depth units by default.
 On Windows the VM allows up to 64 when the current thread has at least

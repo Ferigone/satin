@@ -1479,7 +1479,7 @@ pub(crate) fn find_units(
         const CHUNK: usize = 256;
         for (block, units) in haystack[start..].chunks(CHUNK).enumerate() {
             let found = units.iter().position(|candidate| candidate == unit);
-            vm.consume_work(found.map_or(units.len(), |index| index + 1))?;
+            vm.charge_buffer_work(found.map_or(units.len(), |index| index + 1))?;
             if let Some(index) = found {
                 return Ok(Some(start + block * CHUNK + index));
             }

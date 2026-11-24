@@ -9,8 +9,12 @@ name = "rust_browser_javascript"
 path = "src/lib.rs"
 
 [dependencies]
+regex-automata = { version = "=0.4.13", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
 num-bigint = "=0.4.6"
 num-traits = "0.2.19"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_Time"] }

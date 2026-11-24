@@ -1,5 +1,5 @@
 //! The matcher uses an explicit backtrack stack and reversible captures.
-mod prefix;
+pub(super) mod prefix;
 
 use super::{
     Flags, case, limit,
@@ -15,7 +15,7 @@ pub(crate) struct Program {
     code: Vec<Op>,
     captures: usize,
     repeats: usize,
-    first_ascii: u128,
+    pub(super) first_ascii: u128,
     bytes: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }

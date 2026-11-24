@@ -9,7 +9,7 @@ mod transform;
 mod writable;
 
 use super::{abort, arg, fatal, getter, method};
-use crate::network::{FETCH_BODY_LIMIT, FETCH_CHUNK_BYTES, FetchBody, FetchError};
+use crate::network::{FETCH_CHUNK_BYTES, FETCH_RESPONSE_BODY_LIMIT, FetchBody, FetchError};
 use rust_browser_javascript::{JsError, ObjectId, PromiseCapability, RootId, Value, Vm};
 use std::{
     borrow::Cow,
@@ -24,7 +24,7 @@ use std::{
 const MAX_QUEUE: usize = 512;
 const MAX_READS: usize = 64;
 const MAX_TEE_DEPTH: u8 = 24;
-const LIVE_BYTES: usize = 32 * 1024 * 1024;
+const LIVE_BYTES: usize = 2 * FETCH_RESPONSE_BODY_LIMIT;
 const BRANCH_BYTES: usize = 8 * 1024 * 1024;
 const ITEMS: u32 = 0;
 const ERROR: u32 = 1;
@@ -117,6 +117,7 @@ enum Chunk {
 }
 
 struct Collector {
+    max_bytes: usize,
     bytes: Vec<u8>,
     charge: Charge,
     convert: Convert,
@@ -618,6 +619,7 @@ impl StreamHost {
         &self,
         vm: &mut Vm,
         value: Value,
+        max_bytes: usize,
         convert: Convert,
     ) -> Result<Value, JsError> {
         if value.is_nullish() {
@@ -642,6 +644,7 @@ impl StreamHost {
             let mut stream = stream.borrow_mut();
             stream.disturbed = true;
             stream.lock = Lock::Consume(Some(Collector {
+                max_bytes,
                 bytes: Vec::new(),
                 charge: Charge::new(&self.0.buffered),
                 convert,
@@ -866,11 +869,11 @@ impl StreamHost {
                 return self.fail(vm, source, reason);
             }
         };
-        vm.charge_work(bytes.len())?;
+        vm.charge_buffer_work(bytes.len())?;
         {
             let mut source = source.borrow_mut();
             if let Lock::Consume(Some(collector)) = &mut source.lock
-                && collector.bytes.len().saturating_add(bytes.len()) <= FETCH_BODY_LIMIT
+                && collector.bytes.len().saturating_add(bytes.len()) <= collector.max_bytes
                 && collector.charge.add(bytes.len())
             {
                 collector.bytes.extend_from_slice(&bytes);

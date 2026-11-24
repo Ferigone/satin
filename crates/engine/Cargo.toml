@@ -8,8 +8,9 @@ license.workspace = true
 rust-browser-javascript = { path = "../javascript" }
 url = "2.5"
 encoding_rs = "0.8"
+percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "http2", "gzip", "brotli", "deflate"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7"

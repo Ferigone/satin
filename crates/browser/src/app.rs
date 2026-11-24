@@ -208,6 +208,12 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::ShortcutHelp, "Keyboard shortcuts"),
 ];
 
+struct ActiveDownload {
+    id: u64,
+    cancel: CancelSignal,
+    name: String,
+}
+
 struct Tab {
     id: u64,
     url: String,
@@ -230,6 +236,8 @@ struct Tab {
     // The viewport can still paint the previous page until the next response opens.
     displayed_navigation: u64,
     cancel: CancelSignal,
+    download: Option<ActiveDownload>,
+    download_status: String,
 }
 impl Tab {
     fn new(
@@ -260,6 +268,8 @@ impl Tab {
             document_navigation: 0,
             displayed_navigation: 0,
             cancel: CancelSignal::new(),
+            download: None,
+            download_status: String::new(),
         }
     }
 
@@ -399,6 +409,7 @@ pub(crate) fn run(
         last_title_press: None,
         hover: None,
         status: String::new(),
+        download_id: 0,
         scale: 1.,
         clipboard: arboard::Clipboard::new().ok(),
         smoke_output,
@@ -498,6 +509,7 @@ struct App {
     last_title_press: Option<(Instant, f32, f32)>,
     hover: Option<String>,
     status: String,
+    download_id: u64,
     scale: f32,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -1427,6 +1439,9 @@ impl App {
                 if let Some(dock) = &mut self.devtools {
                     dock.close_tab(tab.id);
                 }
+                if let Some(d) = self.tabs[i].download.take() {
+                    d.cancel.cancel();
+                }
                 self.tabs.remove(i);
                 if self.tabs.is_empty() {
                     self.save();
@@ -1576,6 +1591,14 @@ impl App {
     }
 
     fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
+        if key == Key::Named(NamedKey::Escape)
+            && let Some(d) = &self.tabs[self.active].download
+        {
+            d.cancel.cancel();
+            self.tabs[self.active].download_status = "Cancelling download…".into();
+            self.redraw();
+            return;
+        }
         // F12 is window chrome, not a panel, address, or document key. Settings
         // can remain modal above the dock when it opens or closes underneath.
         if let Some(toggle) = shortcuts::devtools_toggle(&key, self.modifiers, repeat) {
@@ -2465,6 +2488,7 @@ impl App {
         if !dock_visible
             && tab.footer_height() == 0.
             && self.status.is_empty()
+            && tab.download_status.is_empty()
             && self.hover.is_none()
             && !tab.loading
         {
@@ -2476,8 +2500,12 @@ impl App {
             NAVIGATION_BAR,
         );
         canvas.fill_rect(scaled_rect(u, 0., height - FOOT, width, 1.), CHROME_LINE);
-        let status = if let Some(link) = &self.hover {
+        let status = if tab.download.is_some() {
+            tab.download_status.clone()
+        } else if let Some(link) = &self.hover {
             link.clone()
+        } else if !tab.download_status.is_empty() {
+            tab.download_status.clone()
         } else if !self.status.is_empty() {
             self.status.clone()
         } else if tab.loading {
@@ -2758,6 +2786,40 @@ impl App {
                 }
             }
             return;
+        }
+        if let Some(SmokeAction::ClickInRow(target)) = self.smoke_actions.front() {
+            let timeout_ms = target.timeout_ms;
+            let found = tab
+                .page
+                .as_ref()
+                .map_or(Ok(None), |page| target.find(&page.document));
+            match found {
+                Ok(None) => {
+                    let deadline = *self
+                        .smoke_wait_deadline
+                        .get_or_insert_with(|| Instant::now() + Duration::from_millis(timeout_ms));
+                    if Instant::now() < deadline {
+                        if matches!(event_loop.control_flow(), ControlFlow::Wait) {
+                            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                        }
+                        return;
+                    }
+                    self.smoke_output = None;
+                    self.smoke_result =
+                        Some(Err("Timed out waiting for the requested row control".into()));
+                    event_loop.exit();
+                    return;
+                }
+                Err(error) => {
+                    self.smoke_output = None;
+                    self.smoke_result = Some(Err(error));
+                    event_loop.exit();
+                    return;
+                }
+                Ok(Some(_)) => {
+                    self.smoke_wait_deadline = None;
+                }
+            }
         }
         if tab.loading
             || self.media.has_pending(tab.id, tab.document_navigation)
@@ -3077,8 +3139,7 @@ impl App {
 
     fn smoke_target(&mut self, name: &str) -> Result<(), String> {
         self.ensure_layout();
-        let height = self.tab_viewport(self.active).height;
-        let tab = &mut self.tabs[self.active];
+        let tab = &self.tabs[self.active];
         let id = tab
             .page
             .as_ref()
@@ -3088,17 +3149,36 @@ impl App {
                     .find(|&id| page.document.attr(id, "id") == Some(name))
             })
             .ok_or_else(|| format!("Smoke target #{name} is missing"))?;
-        let rect = tab
-            .layout
-            .as_ref()
-            .and_then(|layout| layout.rect_for(id))
-            .ok_or_else(|| format!("Smoke target #{name} has no rendered box"))?;
+        self.smoke_click_node(id, &format!("#{name}"), false)
+    }
+
+    fn smoke_click_node(
+        &mut self,
+        id: rust_browser_engine::dom::NodeId,
+        label: &str,
+        check_hit: bool,
+    ) -> Result<(), String> {
+        let height = self.tab_viewport(self.active).height;
+        let tab = &mut self.tabs[self.active];
+        let layout = tab.layout.as_ref().ok_or("Missing native layout")?;
+        let rect = layout
+            .rect_for(id)
+            .ok_or_else(|| format!("Smoke target {label} has no rendered box"))?;
         if rect.y < tab.scroll || rect.y + rect.height > tab.scroll + height {
             tab.scroll = rect.y.max(0.);
         }
+        let x = rect.x + rect.width / 2.;
+        let y = rect.y + rect.height.min(height) / 2.;
+        if check_hit {
+            let document = &tab.page.as_ref().ok_or("Missing native page")?.document;
+            let hit = layout.element_at(x, y);
+            if !std::iter::successors(hit, |n| document.nodes[n.0].parent).any(|n| n == id) {
+                return Err(format!("Smoke target {label} is covered"));
+            }
+        }
         self.mouse = (
-            (rect.x + rect.width / 2. - tab.scroll_x) * tab.zoom,
-            TOP + (rect.y + rect.height.min(height) / 2. - tab.scroll) * tab.zoom,
+            (x - tab.scroll_x) * tab.zoom,
+            TOP + (y - tab.scroll) * tab.zoom,
         );
         self.pointer_inside = true;
         self.set_dock_focus(false);
@@ -3112,6 +3192,17 @@ impl App {
     ) -> Result<(), String> {
         match action {
             SmokeAction::Click { id } => self.smoke_target(&id),
+            SmokeAction::ClickInRow(target) => {
+                self.ensure_layout();
+                let page = self.tabs[self.active]
+                    .page
+                    .as_ref()
+                    .ok_or("Missing native page")?;
+                let node = target
+                    .find(&page.document)?
+                    .ok_or("Smoke row disappeared before click")?;
+                self.smoke_click_node(node, "row control", true)
+            }
             SmokeAction::ClickAt { x, y } => {
                 let window = self.window.as_ref().ok_or("Missing native window")?;
                 let bounds = window.inner_size();
@@ -3185,6 +3276,57 @@ impl App {
             }
         }
     }
+    fn accept_download(
+        &mut self,
+        index: usize,
+        response: crate::jobs::OfferedDownload,
+        from_link: bool,
+    ) {
+        let tab = &mut self.tabs[index];
+        if !from_link {
+            tab.loading = false;
+            // A response sent as an attachment must never acquire an executable document.
+            tab.install_page(LoadedPage::from_html(
+                "about:downloads",
+                "<title>Download</title>",
+            ));
+        }
+        if tab.download.is_some() {
+            tab.download_status =
+                "A download is already running in this tab. Esc cancels it.".into();
+            return;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let path = match crate::downloads::destination(window, &response.response.suggested_name) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                tab.download_status = "Download cancelled".into();
+                return;
+            }
+            Err(e) => {
+                tab.download_status = format!("Could not save the download: {e}");
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        self.download_id += 1;
+        let cancel = self
+            .jobs
+            .save_download(tab.id, self.download_id, path, response);
+        tab.download_status = format!("Downloading {name} · Esc to cancel");
+        tab.download = Some(ActiveDownload {
+            id: self.download_id,
+            cancel,
+            name,
+        });
+    }
+
     fn content_click(&mut self) {
         if self.settings_panel.is_some() || !self.pointer_in(self.window_regions(self.active).page)
         {
@@ -3274,6 +3416,31 @@ impl App {
                 request.context =
                     CookieContext::navigation(initiator.as_ref(), &request.url, "GET");
                 request.initiator = initiator;
+                let doc = self.tabs[self.active].page.as_ref().map(|p| &p.document);
+                let hint = doc.and_then(|doc| {
+                    std::iter::successors(target, |n| doc.nodes.get(n.0).and_then(|v| v.parent))
+                        .find(|&n| matches!(doc.tag(n), "a" | "area"))
+                        .and_then(|n| doc.attr(n, "download"))
+                        .map(str::to_owned)
+                });
+                if let Some(hint) = hint
+                    && matches!(request.url.scheme(), "http" | "https")
+                    && request
+                        .initiator
+                        .as_ref()
+                        .is_some_and(|source| source.origin() == request.url.origin())
+                {
+                    let t = &self.tabs[self.active];
+                    if let Err(e) = self.jobs.submit(Job {
+                        tab: t.id,
+                        navigation: t.navigation,
+                        cancel: t.cancel.clone(),
+                        task: Task::DownloadLink(Box::new(request), hint),
+                    }) {
+                        self.status = e;
+                    }
+                    return;
+                }
                 self.navigate_with_request(url, true, Some(request));
             }
             return;
@@ -3629,6 +3796,34 @@ impl ApplicationHandler<()> for App {
             let Ok(message) = self.incoming.try_recv() else {
                 break;
             };
+            if matches!(
+                message.payload,
+                Payload::DownloadProgress(_) | Payload::DownloadDone(_)
+            ) {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == message.tab)
+                    && let Some(download) =
+                        tab.download.as_ref().filter(|d| d.id == message.navigation)
+                {
+                    match message.payload {
+                        Payload::DownloadProgress(n) => {
+                            tab.download_status = format!(
+                                "Downloading {} · {} bytes · Esc to cancel",
+                                download.name, n
+                            )
+                        }
+                        Payload::DownloadDone(result) => {
+                            tab.download_status = match result {
+                                Ok(n) => format!("Saved {} · {} bytes", download.name, n),
+                                Err(e) => e,
+                            };
+                            tab.download = None;
+                        }
+                        _ => unreachable!(),
+                    }
+                    self.redraw();
+                }
+                continue;
+            }
             let Some(index) = self
                 .tabs
                 .iter()
@@ -3705,6 +3900,12 @@ impl ApplicationHandler<()> for App {
                         continue;
                     }
                 }
+                Payload::DownloadOffer {
+                    response,
+                    from_link,
+                } => self.accept_download(index, response, from_link),
+                Payload::DownloadLinkError(error) => self.tabs[index].download_status = error,
+                Payload::DownloadProgress(_) | Payload::DownloadDone(_) => unreachable!(),
                 Payload::NavigationError(error) => self.fail_page(index, &error),
                 Payload::MediaWake | Payload::WorkerWake => continue,
             }

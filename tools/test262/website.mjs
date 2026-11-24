@@ -102,11 +102,30 @@ function launch(executable, args, timeoutMs) {
   return { child, done };
 }
 
+export function nativeWebsiteActions({ chapter, until, timeoutMs }) {
+  const catalogMs = Math.min(timeoutMs, 120_000);
+  const checkpoint = (name, within_id, condition, timeout_ms = 15_000) =>
+    ({ action: 'checkpoint', name, within_id, ...condition, timeout_ms, diagnose_timeout: true });
+  const select = chapter
+    ? { action: 'click_in_row', within_id: 'chapterSelector', label_class: 'chapterName',
+        label_prefix: `Chapter - ${chapter} (`, control_alt: 'Run', timeout_ms: catalogMs }
+    : { action: 'click', id: 'btnRunAll' };
+  const observation = until === 'complete'
+    ? [checkpoint('run', 'progressbar', { descendant_class: 'text', text: 'Testing complete!' }, timeoutMs)]
+    : [checkpoint('run', 'totalCounter', { positive: true }, timeoutMs), { action: 'click', id: 'btnPause' }];
+  return [
+    { action: 'title', value: title }, { action: 'click', id: 'run' },
+    checkpoint('catalog', 'testsToRun', { positive: true }, catalogMs),
+    select, ...observation, { action: 'click', id: 'results' },
+    checkpoint('results', 'contentContainer', { descendant_class: 'totalCases', positive: true }),
+  ];
+}
+
 async function satin(executable, dir, options, entry) {
-  async function invoke(label, args) {
+  async function invoke(label, args, deadlineMs = Math.max(45_000, options.satinRunMs + 30_000)) {
     const profile = await mkdtemp(resolve(dir, `${label}-profile-`));
-    const command = ['--url', site, '--profile', profile, ...args];
-    const { stdout, stderr, ...process } = await launch(executable, command, Math.max(45_000, options.satinRunMs + 30_000)).done;
+    const command = ['--url', options.siteUrl, '--profile', profile, ...args];
+    const { stdout, stderr, ...process } = await launch(executable, command, deadlineMs).done;
     await writeFile(resolve(dir, `${label}.stdout.txt`), stdout);
     await writeFile(resolve(dir, `${label}.stderr.txt`), stderr);
     let summary = null;
@@ -124,31 +143,43 @@ async function satin(executable, dir, options, entry) {
       return null;
     });
     result.dom = html === null ? null : satinSnapshot(html);
-    result.documentLoaded = result.summary?.title === title && sameDocument(result.summary.url);
+    result.documentLoaded = result.summary?.title === title && sameDocument(result.summary.url, options.siteUrl);
     return result;
+  }
+
+  if (options.native) {
+    const actions = nativeWebsiteActions(options);
+    const actionsPath = resolve(dir, 'native-actions.json');
+    const frame = resolve(dir, 'native.png');
+    entry.actions = actions;
+    await writeFile(actionsPath, JSON.stringify(actions, null, 2) + '\n');
+    const deadline = actions.reduce((total, step) => total + (step.timeout_ms ?? 0), 45_000);
+    const attempt = await invoke('native', ['--smoke-window', frame, '--smoke-actions', actionsPath, '--width', '1280', '--height', '900'], deadline);
+    entry.native = { attempt };
+    entry.firstDiagnostic = satinFirstDiagnostic(attempt);
+    if (attempt.process.code !== 0 || attempt.process.timedOut || attempt.process.spawnError) {
+      entry.firstFailedStage = 'native-capture';
+      entry.error = attempt.stderr.trim() || attempt.process.spawnError || 'Native capture did not finish';
+      return;
+    }
+    const readSnapshot = async name => JSON.parse(await readFile(`${frame}.${name}.json`, 'utf8'));
+    const [png, catalog, run, results] = await Promise.all([
+      readFile(frame), readSnapshot('catalog'), readSnapshot('run'), readSnapshot('results'),
+    ]);
+    const { verifyNativeWebsiteRun } = await import('./native-checkpoint-verify.mjs');
+    Object.assign(entry, verifyNativeWebsiteRun({ ...attempt, png, catalog, run, results },
+      { url: options.siteUrl, chapter: options.chapter, until: options.until }));
+    entry.firstFailedStage = null;
+    return;
   }
 
   entry.load = await headless('load');
   entry.runTab = await headless('run-tab-by-id', 'run');
   entry.runAllById = await headless('run-all-by-id-diagnostic', 'btnRunAll');
-  if (options.native) {
-    const actions = resolve(dir, 'native-actions.json');
-    const steps = [{ action: 'title', value: title }, { action: 'click', id: 'run' }];
-    const saveActions = (path, steps) => writeFile(path, JSON.stringify(steps, null, 2) + '\n');
-    const tabActions = resolve(dir, 'native-tab-actions.json');
-    await saveActions(tabActions, steps);
-    await saveActions(actions, [...steps, { action: 'click', id: 'btnRunAll' }]);
-    entry.native = {};
-    for (const [key, label, path] of [['runTab', 'native-run-tab', tabActions], ['attempt', 'native-controls', actions]]) {
-      entry.native[key] = await invoke(label, [
-        '--smoke-window', resolve(dir, `${label}.png`), '--smoke-actions', path,
-      ]);
-    }
-  }
-  entry.firstFailedStage = satinFailure(entry.load, entry.runTab, entry.native);
+  entry.firstFailedStage = satinFailure(entry.load, entry.runTab);
   entry.firstDiagnostic = satinFirstDiagnostic(entry.load);
   entry.firstResultByIdObserved = entry.runAllById.documentLoaded && count(entry.runAllById.dom?.counters.ran) > 0;
-  entry.websiteRun = 'unverified'; // Native smoke gives no post-sequence DOM checkpoint.
+  entry.websiteRun = 'unverified';
 }
 
 function cdp(socket, observe) {
@@ -177,8 +208,8 @@ function cdp(socket, observe) {
   });
 }
 
-function sameDocument(url) {
-  return typeof url === 'string' && url.split('#')[0] === site;
+function sameDocument(url, expected) {
+  return typeof url === 'string' && url.split('#')[0] === expected;
 }
 
 // Executed in a CDP isolated world. This reads UI state only.
@@ -253,7 +284,7 @@ async function chromium(executable, dir, options, entry) {
   function observe({ method, params }) {
     if (!params) return;
     const { requestId } = params;
-    if (method === 'Network.requestWillBeSent' && params.request.url.startsWith(new URL('.', site).href)) {
+    if (method === 'Network.requestWillBeSent' && params.request.url.startsWith(new URL('.', options.siteUrl).href)) {
       const row = { url: params.request.url, type: params.type, atMs: elapsed() };
       events.network.push(row);
       requests.set(requestId, row);
@@ -298,7 +329,7 @@ async function chromium(executable, dir, options, entry) {
     await Promise.all(['Page', 'Runtime', 'Network', 'Log'].map(domain => cmd(`${domain}.enable`)));
 
     stage = 'document-load';
-    const navigation = await cmd('Page.navigate', { url: site });
+    const navigation = await cmd('Page.navigate', { url: options.siteUrl });
     if (navigation.errorText) throw new Error(navigation.errorText);
     async function evaluate(expression, contextId) {
       const result = await cmd('Runtime.evaluate', { expression, contextId, returnByValue: true });
@@ -306,7 +337,7 @@ async function chromium(executable, dir, options, entry) {
       return result.result.value;
     }
     const loaded = await waitFor(() => evaluate('({url: location.href, ready: document.readyState})').catch(() => null),
-      value => sameDocument(value?.url) && value.ready === 'complete', 30_000);
+      value => sameDocument(value?.url, options.siteUrl) && value.ready === 'complete', 30_000);
     if (!loaded) throw new Error('Live document did not finish loading');
     const { executionContextId } = await cmd('Page.createIsolatedWorld', { frameId: navigation.frameId, worldName: 'legacy-test262-observer' });
     const evaluateHere = expression => evaluate(expression, executionContextId);
@@ -426,12 +457,12 @@ async function chromium(executable, dir, options, entry) {
   }
 }
 
-function parseOptions(argv) {
-  const options = { output: 'target/test262/website', chromium: [], native: false, satinRunMs: 4000 };
+export function parseOptions(argv) {
+  const options = { output: 'target/test262/website', chromium: [], native: false, satinRunMs: 4000, siteUrl: site };
   const keys = {
     '--satin': 'satin', '--output': 'output', '--until': 'until', '--chapter': 'chapter',
     '--timeout-ms': 'timeoutMs', '--satin-run-ms': 'satinRunMs',
-    '--native-chapter-manifest': 'nativeChapterManifest',
+    '--native-chapter-manifest': 'nativeChapterManifest', '--site-url': 'siteUrl',
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -444,19 +475,28 @@ function parseOptions(argv) {
   }
   if (options.nativeChapterManifest) {
     if (options.satin || options.native || options.chromium.length || options.until !== undefined ||
-        options.chapter !== undefined || options.timeoutMs !== undefined || argv.includes('--satin-run-ms')) {
+        options.chapter !== undefined || options.timeoutMs !== undefined || (argv.includes('--satin-run-ms') || argv.includes('--site-url'))) {
       throw new Error('--native-chapter-manifest is read-only and cannot be combined with browser capture options');
     }
     return options;
   }
-  options.until ??= options.chapter ? 'complete' : 'first';
-  options.timeoutMs ??= options.chapter ? 15_000 : 420_000;
-  if (options.chapter && (options.satin || options.until !== 'complete' || !options.chapter.trim())) {
-    throw new Error('--chapter requires Chromium and completion mode');
+  const url = new URL(options.siteUrl);
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.hash) {
+    throw new Error('--site-url must be an HTTP(S) document URL without credentials or a fragment');
   }
+  options.siteUrl = url.href;
+  if (options.chapter !== undefined) {
+    options.chapter = options.chapter.replace(/^json\/([^/]+?)(?:\.json)?$/, '$1');
+    if (!options.chapter.trim() || options.chapter.includes('/')) throw new Error('Expected a chapter name or json/NAME.json');
+  }
+  options.until ??= options.chapter ? 'complete' : 'first';
+  const longRun = options.until === 'complete' && !['harness', 'annexB'].includes(options.chapter);
+  options.timeoutMs ??= longRun ? 21_600_000 : 420_000;
+  if (options.satin && (options.chapter || argv.includes('--until'))) options.native = true;
   if ((!options.satin && !options.chromium.length) || (options.native && !options.satin) ||
       !['first', 'complete'].includes(options.until) ||
-      ![options.timeoutMs, options.satinRunMs].every(ms => Number.isSafeInteger(ms) && ms > 0 && ms <= 1_800_000)) {
+      !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 21_600_000 ||
+      !Number.isSafeInteger(options.satinRunMs) || options.satinRunMs < 1 || options.satinRunMs > 1_800_000) {
     throw new Error('Invalid arguments; see --help');
   }
   return options;
@@ -464,14 +504,14 @@ function parseOptions(argv) {
 
 async function main(argv) {
   if (argv.includes('--help')) {
-    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--until first|complete | --chapter NAME (Chromium only)] [--timeout-ms MS] [--output DIR]');
+    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--chapter NAME|json/NAME.json] [--until first|complete] [--timeout-ms MS] [--site-url URL] [--output DIR]');
     console.log('node tools/test262/website.mjs --native-chapter-manifest MANIFEST_JSON [--output DIR] (read-only coordinator intake)');
     return;
   }
   const options = parseOptions(argv);
   await mkdir(resolve(options.output), { recursive: true });
   const output = await mkdtemp(resolve(options.output, 'run-'));
-  const report = { schema: 1, scope: 'legacy-live-website', url: site, date: new Date().toISOString(), options, runs: {} };
+  const report = { schema: 1, scope: options.siteUrl === site ? 'legacy-live-website' : 'legacy-website-alternate-url', url: options.siteUrl, date: new Date().toISOString(), options, runs: {} };
   if (options.nativeChapterManifest) {
     const manifest = resolve(options.nativeChapterManifest);
     try {
@@ -509,7 +549,7 @@ async function main(argv) {
     runs: Object.fromEntries(Object.entries(report.runs).map(([name, run]) => [name, {
       websiteRun: run.websiteRun, firstFailedStage: run.firstFailedStage, firstDiagnostic: run.firstDiagnostic,
       selection: run.selection,
-      counters: run.snapshots?.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots?.paused?.counters ??
+      counters: run.snapshots?.results?.counters ?? run.snapshots?.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots?.paused?.counters ??
         run.snapshots?.['first-result']?.counters ?? run.load?.dom?.counters,
       error: run.probeError ?? run.error,
     }])),

@@ -53,7 +53,7 @@ node tools/test262/runner.mjs --test262 PATH_TO_TEST262 --worker target/release/
 node tools/test262/summarize.mjs target/test262/full.json
 ```
 
-On Linux, use `target/release/rb-js` for the worker. The 2026-11-24 snapshot used Linux x86_64 with six workers, each running disjoint ranges of up to 1,000 files at the default budgets. VM stack limits vary by platform.
+On Linux, use `target/release/rb-js` for the worker. The 2026-11-24 snapshot used Linux x86_64 with seven workers, each running disjoint ranges of up to 1,000 files at the default budgets. VM stack limits vary by platform.
 
 The summary counts files and variant outcomes overall and by top-level test folder. A file passes when every reported variant passes. An invalid-metadata row counts as a non-passing file and row. For sharded runs, pass all report filenames to the same command. It reads JSON or gzip-compressed JSON, checks that the revision, worker, runner and budgets match, and rejects duplicate variants. Totals cover only the supplied reports.
 

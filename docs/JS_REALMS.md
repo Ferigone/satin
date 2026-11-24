@@ -15,6 +15,16 @@ frame or changing its navigation attributes cancels its timers and
 releases the host root. JavaScript references to its Window or exported
 functions can keep the realm alive.
 
+A script written into a child frame receives a bounded share of the current
+task’s remaining instructions and heap capacity. If it exhausts that share,
+the child’s error handler receives the failure and the parser can continue
+with the following script. Unsupported engine features also reach the child’s
+error handler. The parent and its children still share one overall task budget.
+A window timer and its microtasks can use up to 24 million instruction units
+and have a two-second cooperative deadline. Synchronous child parser scripts
+remain bounded to at most the ordinary per-script limit. After a long timer,
+the scheduler returns to input and rendering before starting another timer.
+
 Frame coverage is limited to initial blank documents. Frame navigation,
 `srcdoc`, sandboxed documents, nested frame loading and the full child
 DOM are still open. Realm handles are valid inside the VM that created

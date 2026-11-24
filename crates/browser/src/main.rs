@@ -2,6 +2,7 @@
 mod app;
 mod devtools;
 mod file_picker;
+mod downloads;
 mod headless;
 mod jobs;
 mod media;

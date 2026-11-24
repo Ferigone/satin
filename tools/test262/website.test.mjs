@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  completeCounters, count, countersConsistent, findChapter, satinFailure, satinFirstDiagnostic, satinSnapshot,
+  completeCounters, count, countersConsistent, findChapter, nativeWebsiteActions, parseOptions, satinFailure, satinFirstDiagnostic, satinSnapshot,
 } from './website.mjs';
 
 const initial = `<a href="#" class="nav-link" id="run">Run</a>
@@ -91,4 +91,54 @@ test('requires all selected tests, not a self-consistent partial or a different 
   const complete = { ...partial, ran: '55', pass: '50' };
   assert.ok(completeCounters(complete, 55));
   assert.ok(!completeCounters(complete, 16436));
+});
+
+test('Satin chapter names and catalog paths select the same hit-tested chapter action', () => {
+  for (const chapter of ['language', 'json/language', 'json/language.json']) {
+    const options = parseOptions(['--satin', 'satin', '--chapter', chapter, '--timeout-ms', '120000']);
+    assert.equal(options.native, true);
+    assert.equal(options.until, 'complete');
+    const steps = nativeWebsiteActions(options);
+    assert.deepEqual(steps.map(item => item.action), ['title', 'click', 'checkpoint', 'click_in_row', 'checkpoint', 'click', 'checkpoint']);
+    assert.deepEqual(steps[3], { action: 'click_in_row', within_id: 'chapterSelector', label_class: 'chapterName',
+      label_prefix: 'Chapter - language (', control_alt: 'Run', timeout_ms: 120000 });
+    assert.equal(steps[4].text, 'Testing complete!');
+    assert.equal(steps[4].timeout_ms, 120000);
+    assert.deepEqual(steps.filter(item => item.action === 'checkpoint').map(item => item.name), ['catalog', 'run', 'results']);
+  }
+  assert.throws(() => parseOptions(['--satin', 'satin', '--chapter', 'json/language/nested']), /chapter name/);
+});
+
+test('large chapter commands allow completion on the default deadline', () => {
+  const options = (...args) => parseOptions(['--satin', 'satin', ...args]);
+  assert.equal(options('--chapter', 'json/language.json').timeoutMs, 21_600_000);
+  assert.equal(options('--chapter', 'built-ins').timeoutMs, 21_600_000);
+  assert.equal(options('--until', 'complete').timeoutMs, 21_600_000);
+  assert.equal(options('--chapter', 'harness').timeoutMs, 420_000);
+  assert.equal(options('--chapter', 'language', '--until', 'first').timeoutMs, 420_000);
+  assert.equal(options('--chapter', 'language', '--timeout-ms', '20000').timeoutMs, 20000);
+});
+
+test('native Run All records the initial catalog, and first mode pauses after a positive counter', () => {
+  const args = ['--satin', 'satin', '--until', 'first', '--site-url', 'http://127.0.0.1:12345/default.html'];
+  const options = parseOptions(args);
+  assert.equal(options.native, true);
+  assert.equal(options.siteUrl, args.at(-1));
+  const steps = nativeWebsiteActions(options);
+  assert.deepEqual(steps.filter(item => item.action === 'click').map(item => item.id), ['run', 'btnRunAll', 'btnPause', 'results']);
+  assert.equal(steps[2].within_id, 'testsToRun');
+  assert.equal(steps[4].within_id, 'totalCounter');
+  assert.equal(steps[4].positive, true);
+  assert.ok(!steps.some(item => item.action === 'click_in_row'));
+  assert.equal(parseOptions(['--satin', 'satin']).native, false);
+});
+
+test('long full-suite budgets apply to execution while startup and Results waits stay bounded', () => {
+  const options = parseOptions(['--satin', 'satin', '--chapter', 'built-ins', '--timeout-ms', '21600000']);
+  const steps = nativeWebsiteActions(options);
+  assert.equal(steps.find(s => s.name === 'catalog').timeout_ms, 120000);
+  assert.equal(steps.find(s => s.action === 'click_in_row').timeout_ms, 120000);
+  assert.equal(steps.find(s => s.name === 'run').timeout_ms, 21600000);
+  assert.equal(steps.find(s => s.name === 'results').timeout_ms, 15000);
+  assert.throws(() => parseOptions(['--satin', 'satin', '--timeout-ms', '21600001']), /Invalid arguments/);
 });

@@ -21,6 +21,23 @@ struct Reserved {
     cost: usize,
 }
 
+impl Reserved {
+    fn acquire(pool: &Rc<Cell<usize>>, cost: usize, limit: usize) -> Result<Self, JsError> {
+        let total = pool.get().saturating_add(cost);
+        if total > limit {
+            return Err(JsError::new(
+                ErrorKind::HeapLimit,
+                "Live Blob storage limit exceeded",
+            ));
+        }
+        pool.set(total);
+        Ok(Self {
+            resident: pool.clone(),
+            cost,
+        })
+    }
+}
+
 impl Drop for Reserved {
     fn drop(&mut self) {
         self.resident.set(self.resident.get() - self.cost);
@@ -36,6 +53,19 @@ struct Storage {
 struct Bytes {
     storage: Rc<Storage>,
     range: Range<usize>,
+}
+
+impl Bytes {
+    fn new(bytes: Vec<u8>, reservation: Reserved) -> Self {
+        let range = 0..bytes.len();
+        Self {
+            storage: Rc::new(Storage {
+                bytes: Arc::new(bytes),
+                _reservation: reservation,
+            }),
+            range,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +96,7 @@ pub(super) struct BlobFactory {
     blob_prototype: RootId,
     file_prototype: RootId,
     resident: Rc<Cell<usize>>,
+    response_resident: Rc<Cell<usize>>,
     scheduler: Rc<OnceCell<Weak<RefCell<State>>>>,
 }
 
@@ -91,31 +122,13 @@ impl BlobFactory {
     }
 
     fn reserve(&self, cost: usize) -> Result<Reserved, JsError> {
-        let total = self.resident.get().saturating_add(cost);
-        if total > LIVE_BYTES {
-            return Err(JsError::new(
-                ErrorKind::HeapLimit,
-                "Live Blob and File data exceeds 32 MiB",
-            ));
-        }
-        self.resident.set(total);
-        Ok(Reserved {
-            resident: self.resident.clone(),
-            cost,
-        })
+        Reserved::acquire(&self.resident, cost, LIVE_BYTES)
     }
 
     fn backing(&self, bytes: Vec<u8>) -> Result<Bytes, JsError> {
         check_size(bytes.len())?;
         let reservation = self.reserve(bytes.capacity() + 128)?;
-        let end = bytes.len();
-        Ok(Bytes {
-            storage: Rc::new(Storage {
-                bytes: Arc::new(bytes),
-                _reservation: reservation,
-            }),
-            range: 0..end,
-        })
+        Ok(Bytes::new(bytes, reservation))
     }
 
     fn new_blob(
@@ -162,7 +175,15 @@ impl BlobFactory {
         mime: &str,
     ) -> Result<Value, JsError> {
         let mime = mime_type(mime)?;
-        self.new_blob(vm, self.backing(bytes)?, mime, None, None)
+        let limit = crate::network::FETCH_RESPONSE_BODY_LIMIT;
+        if bytes.len() > limit {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Response body exceeds 64 MiB",
+            ));
+        }
+        let reservation = Reserved::acquire(&self.response_resident, bytes.capacity(), 2 * limit)?;
+        self.new_blob(vm, Bytes::new(bytes, reservation), mime, None, None)
     }
 
     pub(super) fn file_from_bytes(
@@ -340,13 +361,7 @@ impl BlobFactory {
             }
         }
         debug_assert_eq!(bytes.len(), total);
-        Ok(Bytes {
-            storage: Rc::new(Storage {
-                bytes: Arc::new(bytes),
-                _reservation: reservation,
-            }),
-            range: 0..total,
-        })
+        Ok(Bytes::new(bytes, reservation))
     }
 }
 
@@ -533,6 +548,7 @@ pub(super) fn install(vm: &mut Vm, streams: streams::StreamHost) -> Result<BlobF
         blob_prototype: vm.root(blob_prototype.clone()),
         file_prototype: vm.root(file_prototype.clone()),
         resident: Rc::new(Cell::new(0)),
+        response_resident: Rc::new(Cell::new(0)),
         scheduler: Rc::new(OnceCell::new()),
     };
     let host = factory.clone();

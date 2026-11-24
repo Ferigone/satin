@@ -261,3 +261,45 @@ fn cors_redirect_strips_authorization_taints_origin_and_filters_response_headers
             .contains("\r\norigin: null\r\n")
     );
 }
+
+#[test]
+fn native_fetch_consumers_accept_the_maximum_decoded_body() {
+    let page = LoadedPage::from_html("https://example.test/", "");
+    for method in ["text", "json", "blob", "arrayBuffer"] {
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        runtime
+            .eval(&format!(
+                "var result; fetch('/large').then(r => r.{method}()).then(v => result = v);"
+            ))
+            .unwrap();
+        let id = runtime.take_network_jobs().pop().unwrap().id;
+        let len = rust_browser_engine::network::FETCH_RESPONSE_BODY_LIMIT;
+        let mut bytes = vec![b' '; len];
+        let suffix = br#"{"ok":true}"#;
+        bytes[len - suffix.len()..].copy_from_slice(suffix);
+        let response = WebResponse {
+            url: "https://example.test/large".into(),
+            status: 200,
+            status_text: "OK".into(),
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: Some(std::sync::Arc::new(bytes)),
+            response_type: ResponseType::Basic,
+            redirected: false,
+        };
+        runtime
+            .complete_network(id, Ok(response))
+            .unwrap_or_else(|e| panic!("{method}: {e}"));
+        runtime.pump_with_network_errors().unwrap();
+        let assertion = match method {
+            "text" => "result.length === 67108864 && result.charAt(result.length - 1) === '}'",
+            "json" => "result.ok === true",
+            "blob" => "result.size === 67108864 && result.type === 'application/json'",
+            _ => "result.byteLength === 67108864",
+        };
+        assert_eq!(
+            runtime.eval(assertion).unwrap(),
+            Value::Bool(true),
+            "{method}"
+        );
+    }
+}

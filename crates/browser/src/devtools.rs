@@ -221,6 +221,7 @@ impl Document {
 
         let (kind, id) = match event.key.request {
             Request::Navigate => (RequestKind::Navigation, 0),
+            Request::Download(id) => (RequestKind::Download, id),
             Request::Resource(id) => (RequestKind::Resource, id),
             Request::Fetch(id) => (RequestKind::FetchOrXhr, id),
         };

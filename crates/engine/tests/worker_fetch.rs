@@ -288,3 +288,27 @@ fn termination_cancels_incomplete_worker_body_without_delivering_stale_results()
     assert_eq!(runtime.eval("results.join()").unwrap(), "headers".into());
     server.join().unwrap();
 }
+
+#[test]
+fn worker_fetches_and_parses_json_larger_than_the_standalone_vm_string_limit() {
+    let (listener, origin) = loopback();
+    let length = 9 * 1024 * 1024;
+    let server = std::thread::spawn(move || {
+        let (mut socket, request) = accept(&listener);
+        assert!(request.starts_with("GET /data.json "));
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n\"", length + 2).unwrap();
+        let block = [b'x'; 32 * 1024];
+        for _ in 0..length / block.len() {
+            socket.write_all(&block).unwrap();
+        }
+        socket.write_all(b"\"").unwrap();
+    });
+    let page = LoadedPage::from_html(&format!("{origin}/page"), "<!doctype html>");
+    let src = format!(
+        r#"fetch("{origin}/data.json").then(r => r.json()).then(s => postMessage(s.length)).catch(e => postMessage(e.message));"#
+    );
+    let (mut runtime, wakes) = worker(&page, &src);
+    wait_until(&mut runtime, &wakes, "results.length === 1");
+    assert_eq!(runtime.eval("results[0]").unwrap(), Value::from(length));
+    server.join().unwrap();
+}

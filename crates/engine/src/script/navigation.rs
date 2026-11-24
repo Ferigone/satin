@@ -197,6 +197,7 @@ enum Phase {
 }
 
 pub struct DocumentSession {
+    streaming_json: Option<crate::raw_json::SharedSource>,
     parser: Option<Rc<RefCell<ParserHost>>>,
     script_replaced_input: bool,
     history: crate::history::SessionHistory,
@@ -254,7 +255,10 @@ impl DocumentSession {
         } = opened;
         let client = Arc::new(Url::parse(&page.url).map_err(|e| e.to_string())?);
         history.commit_address((*client).clone());
-        let parser = if !matches!(input, DocumentInput::Prepared) {
+        let streaming_json = if matches!(input, DocumentInput::StreamingJson) {
+            page.raw_json.clone()
+        } else { None };
+        let parser = if matches!(input, DocumentInput::Html(_) | DocumentInput::Streaming) {
             let mut parser = ParserHost::new(client.clone());
             if let DocumentInput::Html(source) = input {
                 parser.stream.feed(&source).map_err(|e| e.to_string())?;
@@ -268,6 +272,7 @@ impl DocumentSession {
         Ok((
             page,
             Self {
+                streaming_json,
                 parser,
                 script_replaced_input: false,
                 history,
@@ -330,6 +335,7 @@ impl DocumentSession {
         self.resources.take(Instant::now())
     }
     pub fn stop(&mut self, page: &mut LoadedPage, mut runtime: Option<&mut ScriptRuntime>) {
+        self.streaming_json = None;
         self.sync_parser_policy(page, runtime.as_deref_mut());
         if let Some(realm) = runtime.as_deref_mut() {
             {
@@ -384,6 +390,11 @@ impl DocumentSession {
         self.resources.retry(load);
     }
     pub fn feed(&mut self, source: &str) -> Result<(), String> {
+        if let Some(json) = &self.streaming_json {
+            json.lock().unwrap().push(source);
+            self.runnable = true;
+            return Ok(());
+        }
         if let Some(parser) = self.parser.as_ref().filter(|_| !self.script_replaced_input) {
             match parser.borrow_mut().stream.feed(source) {
                 Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
@@ -394,6 +405,10 @@ impl DocumentSession {
         Ok(())
     }
     pub fn finish_input(&mut self) -> Result<(), String> {
+        if self.streaming_json.take().is_some() {
+            self.runnable = true;
+            return Ok(());
+        }
         if let Some(parser) = self.parser.as_ref().filter(|_| !self.script_replaced_input) {
             match parser.borrow_mut().stream.finish() {
                 Ok(()) | Err(crate::html::HtmlStreamError::ResourceLimit) => {}
@@ -491,6 +506,10 @@ impl DocumentSession {
         runtime: &mut Option<ScriptRuntime>,
         viewport: Viewport,
     ) -> Result<bool, String> {
+        if self.streaming_json.is_some() {
+            self.runnable = false;
+            return Ok(true);
+        }
         self.adopt_replacement_parser(runtime.as_ref());
         let now = Instant::now();
         let end = now + Duration::from_millis(5);

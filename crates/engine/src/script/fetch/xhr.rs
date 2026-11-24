@@ -224,11 +224,11 @@ fn response_text(vm: &mut Vm, response: &WebResponse, body: &[u8]) -> Result<Val
     if body.is_empty() {
         return Ok("".into());
     }
-    vm.charge_work(body.len())?;
+    vm.charge_buffer_work(body.len())?;
     vm.ensure_string_allocation(body.len())?;
     let encoding = xml_document::fallback_text_encoding(response, body);
     let (text, _, _) = encoding.decode(body);
-    vm.finish_string(text.encode_utf16().collect())
+    vm.finish_buffer_string(text.encode_utf16().collect())
 }
 
 fn content_length(response: &WebResponse) -> usize {

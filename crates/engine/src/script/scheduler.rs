@@ -14,6 +14,8 @@ use std::{
 };
 
 const MAX_TIMERS: usize = 1024;
+const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
+const TIMER_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -586,6 +588,7 @@ fn report_callback(
 }
 
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
+    let yield_at = Instant::now() + FRAME_PERIOD;
     for _ in 0..32 {
         let timer = state.borrow_mut().scheduler.next_timer(Instant::now());
         let Some(timer) = timer else { break };
@@ -593,24 +596,33 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
             let state = state.borrow();
             (state.window.clone(), state.url.to_string())
         };
-        let result = vm.with_task(|vm| {
-            if let Some(owner) = &timer.owner {
-                vm.with_realm(owner.realm, |vm| {
-                    let result = run_timer(vm, &timer, vm.global(), "about:blank");
-                    owner.report_script_error(vm, result)
-                })?;
-            } else {
-                let result = run_timer(vm, &timer, window, &url);
-                report_callback(vm, state, result)?;
-            }
-            drain_microtask_queue(vm, state)
-        });
+        // Exception reporting and the microtask checkpoint use the same fuel
+        // and deadline as the callback. Return to input/rendering after a long turn.
+        let result = vm.with_task_limits(
+            TIMER_TASK_INSTRUCTIONS,
+            Some(Instant::now() + TIMER_TASK_TIMEOUT),
+            |vm| {
+                if let Some(owner) = &timer.owner {
+                    vm.with_realm(owner.realm, |vm| {
+                        let result = run_timer(vm, &timer, vm.global(), "about:blank");
+                        owner.report_script_error(vm, result)
+                    })?;
+                } else {
+                    let result = run_timer(vm, &timer, window, &url);
+                    report_callback(vm, state, result)?;
+                }
+                drain_microtask_queue(vm, state)
+            },
+        );
         state
             .borrow_mut()
             .scheduler
             .complete_timer(vm, timer, result.is_err());
         if let Err(error) = result {
             diagnostic(state, error.to_string());
+            break;
+        }
+        if Instant::now() >= yield_at {
             break;
         }
     }
@@ -642,4 +654,28 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
         }
     }
     Some(timestamp)
+}
+
+#[cfg(test)]
+mod task_limit_tests {
+    use crate::{LoadedPage, script::ScriptRuntime};
+    use rust_browser_javascript::Value;
+
+    #[test]
+    fn only_a_scheduled_timer_gets_the_extended_task_allowance() {
+        let page = LoadedPage::from_html("about:test", "<!doctype html>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let work = runtime.vm.new_native_function("work", |vm, _, _| {
+            vm.charge_work(1_100_000)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("work", work).unwrap();
+        assert!(runtime.eval("work()").is_err());
+        runtime
+            .eval("var done = false; setTimeout(function() { work(); done = true; }, 0)")
+            .unwrap();
+        runtime.pump();
+        assert_eq!(runtime.eval("done").unwrap(), Value::Bool(true));
+        assert!(runtime.eval("work()").is_err());
+    }
 }

@@ -369,7 +369,13 @@ fn load_document(
                     .1
                     .finish_input()?;
             }
-            Payload::NavigationError(error) => return Err(error),
+            Payload::NavigationError(error) | Payload::DownloadLinkError(error) => {
+                return Err(error);
+            }
+            Payload::DownloadOffer { .. } => {
+                return Err("This attachment needs a desktop download destination".into());
+            }
+            Payload::DownloadProgress(_) | Payload::DownloadDone(_) => {}
             Payload::Resource { id, result } => {
                 let (page, session) = document
                     .as_mut()

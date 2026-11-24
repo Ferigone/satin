@@ -12,6 +12,7 @@ use crate::{
 use std::{
     collections::{BTreeMap, VecDeque},
     rc::Rc,
+    time::Instant,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -31,7 +32,7 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
-const MAX_CALL_DEPTH: usize = if cfg!(windows) {
+const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
     DEFAULT_CALL_DEPTH
@@ -53,7 +54,36 @@ fn native_stack_headroom() -> bool {
         let current = std::ptr::addr_of!(low).addr();
         (low..high).contains(&current) && current - low >= 256 * 1024
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // Thread stacks have different reservations, including test and worker threads.
+        // Cache only the bounds. Depth checks sample the current frame on every call.
+        thread_local! {
+            static STACK: Option<(usize, usize)> = {
+                let mut attr = std::mem::MaybeUninit::uninit();
+                let mut base = std::ptr::null_mut();
+                let mut size = 0;
+                // SAFETY: pthread initializes attr on success. The two output pointers
+                // are valid and the attributes are destroyed once, on the same thread.
+                unsafe {
+                    if libc::pthread_getattr_np(libc::pthread_self(), attr.as_mut_ptr()) != 0 {
+                        None
+                    } else {
+                        let result = libc::pthread_attr_getstack(attr.as_ptr(), &mut base, &mut size);
+                        libc::pthread_attr_destroy(attr.as_mut_ptr());
+                        let low = base.addr();
+                        low.checked_add(size).filter(|_| result == 0).map(|high| (low, high))
+                    }
+                }
+            };
+        }
+        let marker = 0u8;
+        let current = std::ptr::addr_of!(marker).addr();
+        STACK.with(|bounds| bounds.is_some_and(|(low, high)| {
+            (low..high).contains(&current) && current - low >= 256 * 1024
+        }))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -67,6 +97,9 @@ pub(crate) fn permits_bytecode_depth(depth: usize) -> bool {
 #[derive(Clone, Debug)]
 pub struct VmLimits {
     pub max_instructions: u64,
+    /// Linear, bounded native buffer work per instruction. Bytecode, callbacks
+    /// and backtracking still pay their normal instruction costs.
+    pub buffer_units_per_instruction: usize,
     pub max_call_depth: usize,
     pub max_heap_objects: usize,
     /// Conservative aggregate allocation allowance, reset to traced live usage by GC.
@@ -80,6 +113,7 @@ impl Default for VmLimits {
     fn default() -> Self {
         Self {
             max_instructions: 1_000_000,
+            buffer_units_per_instruction: 1,
             max_call_depth: MAX_CALL_DEPTH,
             max_heap_objects: 100_000,
             max_heap_bytes: 64 * 1024 * 1024,
@@ -115,6 +149,7 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
+    task_deadline: Option<Instant>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
@@ -210,6 +245,7 @@ impl Vm {
         Self::with_limits(VmLimits::default())
     }
     pub fn with_limits(mut limits: VmLimits) -> Self {
+        limits.buffer_units_per_instruction = limits.buffer_units_per_instruction.clamp(1, 1024);
         // This first interpreter still uses bounded Rust calls for nested chunks.
         // Keep the host stack safe even when an embedder requests a larger limit.
         limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
@@ -229,6 +265,7 @@ impl Vm {
             remaining: limits.max_instructions,
             limits,
             interrupt: None,
+            task_deadline: None,
             active: 0,
             call_depth: 0,
             inspected_calls: None,
@@ -310,6 +347,42 @@ impl Vm {
         self.eval_with_referrer(source, Some(SourceReferrer::Script(identifier)), None)
     }
 
+    /// An embedded parser may synchronously execute a child script while its
+    /// caller is still on the stack. Set aside part of the *existing* task
+    /// instruction and heap headroom so the host can deliver a child resource
+    /// error and resume its caller. Work and live objects remain charged to
+    /// the enclosing task. Host interruption and internal errors propagate.
+    pub fn eval_embedded_script(
+        &mut self,
+        source: &str,
+        identifier: &str,
+    ) -> (Result<Value, JsError>, bool) {
+        if self.active == 0 {
+            return (self.eval_with_identifier(source, identifier), false);
+        }
+        let child_budget = (self.remaining - self.remaining / 4).min(self.limits.max_instructions);
+        let reserved = self.remaining - child_budget;
+        let parent_cells = self.limits.max_heap_objects;
+        let parent_bytes = self.limits.max_heap_bytes;
+        let reserved_cells = parent_cells.saturating_sub(self.heap.live) / 4;
+        let reserved_bytes = parent_bytes.saturating_sub(self.estimated_heap_bytes()) / 4;
+        self.remaining -= reserved;
+        self.limits.max_heap_objects -= reserved_cells;
+        self.limits.max_heap_bytes -= reserved_bytes;
+        let result = self.eval_with_identifier(source, identifier);
+        let used_allowance = result.as_ref().is_err_and(|error| match error.kind {
+            ErrorKind::ExecutionLimit => reserved != 0 && self.remaining == 0,
+            ErrorKind::HeapLimit => reserved_cells != 0 && reserved_bytes != 0,
+            _ => false,
+        });
+        self.remaining += reserved;
+        self.limits.max_heap_objects = parent_cells;
+        self.limits.max_heap_bytes = parent_bytes;
+        let local_exhaustion = used_allowance && self.check_interrupt().is_ok()
+            && self.heap.live < parent_cells && self.ensure_allocation(0).is_ok();
+        (result, local_exhaustion)
+    }
+
     fn eval_with_referrer(
         &mut self,
         source: &str,
@@ -354,13 +427,32 @@ impl Vm {
     where
         F: FnOnce(&mut Vm) -> Result<T, JsError>,
     {
-        if self.active == 0 {
+        self.with_task_limits(self.limits.max_instructions, None, callback)
+    }
+
+    /// A host may give an outer scheduled callback more work with a wall-clock
+    /// deadline. Nested tasks and their microtasks always share the outer limits.
+    pub fn with_task_limits<T, F>(
+        &mut self,
+        instructions: u64,
+        deadline: Option<Instant>,
+        callback: F,
+    ) -> Result<T, JsError>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, JsError>,
+    {
+        let outer = self.active == 0;
+        if outer {
             self.check_interrupt()?;
-            self.remaining = self.limits.max_instructions;
+            self.remaining = instructions;
+            self.task_deadline = deadline;
         }
         self.active += 1;
         let result = callback(self);
         self.active -= 1;
+        if outer {
+            self.task_deadline = None;
+        }
         result
     }
     /// Allow a worker's owning thread to request cooperative termination.
@@ -369,6 +461,15 @@ impl Vm {
     }
 
     fn check_interrupt(&self) -> Result<(), JsError> {
+        if self
+            .task_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Task deadline exceeded",
+            ));
+        }
         if self
             .interrupt
             .as_ref()
@@ -613,13 +714,17 @@ impl Vm {
         }
         Ok(value)
     }
-    pub fn ensure_string_allocation(&self, units: usize) -> Result<(), JsError> {
+    pub(crate) fn check_string_length(&self, units: usize) -> Result<(), JsError> {
         if units > self.limits.max_string_units {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "String code-unit budget exhausted",
             ));
         }
+        Ok(())
+    }
+    pub fn ensure_string_allocation(&self, units: usize) -> Result<(), JsError> {
+        self.check_string_length(units)?;
         // Include both a growing UTF-16 Vec and conversion into Rc storage.
         self.ensure_allocation(units.saturating_mul(6).saturating_add(128))
     }
@@ -1075,6 +1180,11 @@ impl Vm {
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
+    /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
+    /// One nonempty operation always costs at least one instruction.
+    pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
+        self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
+    }
     fn compare_strings(&mut self, a: &JsString, b: &JsString) -> Result<(), JsError> {
         if a.storage_id() != b.storage_id() {
             self.consume_work(a.len().min(b.len()))?;
@@ -1095,6 +1205,15 @@ impl Vm {
     pub fn finish_string(&mut self, units: Vec<u16>) -> Result<Value, JsError> {
         self.ensure_string_allocation(units.len())?;
         self.consume_work(units.len())?;
+        self.checked_string(JsString::from_utf16(units))
+    }
+    /// Transfer a native, bounded data buffer into a JS string. Script
+    /// string builders retain their per-unit costs through `finish_string`.
+    pub fn finish_buffer_string(&mut self, units: Vec<u16>) -> Result<Value, JsError> {
+        self.check_string_length(units.len())?;
+        let peak = units.capacity().saturating_add(units.len()).saturating_mul(2);
+        self.ensure_allocation(peak.saturating_add(128))?;
+        self.charge_buffer_work(units.len())?;
         self.checked_string(JsString::from_utf16(units))
     }
     /// A borrowed slice needs both a Vec copy and the final Rc-storage copy.
@@ -3770,7 +3889,7 @@ impl Vm {
                 self.consume_work(b.len())?;
                 return self.checked_string(a.append(&b));
             }
-            self.consume_work(len)?;
+            self.charge_buffer_work(len)?;
             return self.checked_string(a.concat(&b));
         }
         if matches!(op, "<" | ">" | "<=" | ">=") {
@@ -3978,5 +4097,33 @@ fn parse_number(s: &JsString) -> f64 {
         f64::NAN
     } else {
         s.parse().unwrap_or(f64::NAN)
+    }
+}
+
+#[cfg(test)]
+mod task_limit_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn nested_callbacks_share_fuel_and_deadlines_and_next_tasks_recover() {
+        let mut vm = Vm::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let failure = vm
+            .with_task_limits(100, Some(deadline), |vm| {
+                vm.charge_work(80)?;
+                vm.with_task_limits(150, None, |vm| vm.charge_work(30))
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
+
+        let expired = Instant::now();
+        let failure = vm
+            .with_task_limits(u64::MAX, Some(expired), |vm| {
+                vm.with_task(|vm| vm.eval("while(true){}"))
+            })
+            .unwrap_err();
+        assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
+        assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
     }
 }

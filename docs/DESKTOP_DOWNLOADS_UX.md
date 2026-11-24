@@ -1,8 +1,18 @@
-# Desktop downloads: audit and UI contract
+# Desktop downloads
 
-**Status at `cd96dd68eaa77a4547b711cb5ddac0389c8f3082`:** Satin does not save website downloads. This branch adds an offline row model and tests, not a production panel. It does not change the chrome, menu, keyboard shortcuts, home page, or updater.
+On Windows, following an HTTP(S) attachment or clicking a same-origin link with the HTML `download` attribute opens **Save download**. The suggested filename comes from the response, the link or the final URL. Select a new destination to begin. Satin displays the filename and bytes written at the bottom of the tab. **Esc** cancels an active transfer. Closing its tab or the browser also cancels it. On Linux the desktop build uses the configured `XDG_DOWNLOAD_DIR` or `~/Downloads` and adds a number when a name already exists.
 
-## What exists
+| Where the response goes | Decoded body limit | How Satin handles it |
+| --- | ---: | --- |
+| Fetch or XMLHttpRequest | 64 MiB (67,108,864 bytes) | Counts the decompressed bytes as they arrive. Exceeding the limit fails the response, including for gzip or a body without a declared length. |
+| JSON source opened in a tab | 64 MiB | Streams JSON text into a source buffer and paints the visible rows using a sparse index. Supports `application/json` and JSON media types with a `+json` suffix. |
+| File download | No total byte limit | Writes the original HTTP response directly to a temporary file beside the chosen destination. Each filesystem write is at most 64 KiB. Publishes the completed file without overwriting an existing file. |
+
+A download can exceed 64 MiB even when the file is JSON. The transfer needs sufficient disk space and a working connection. Cancelling or receiving a truncated response discards the partial file. The Windows build sets the Internet zone on the completed download before making it available.
+
+## Earlier design and audit
+
+The following audit describes commit `cd96dd68eaa77a4547b711cb5ddac0389c8f3082`. It records the starting behavior, the offline row model, and proposals for a future downloads panel.
 
 | Surface | Current behavior |
 | --- | --- |

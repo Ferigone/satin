@@ -506,8 +506,9 @@ impl FrameWindow {
                         .borrow_mut()
                         .begin_script(script.node)
                         .map_err(parser_error)?;
-                    let result = vm.eval_with_identifier(&source, "about:blank");
-                    let result = self.report_script_error(vm, result);
+                    let (result, local_exhaustion) =
+                        vm.eval_embedded_script(&source, "about:blank");
+                    let result = self.report_error(vm, result, local_exhaustion);
                     self.parser
                         .borrow_mut()
                         .resume_script(script.node)
@@ -539,8 +540,17 @@ impl FrameWindow {
         vm: &mut Vm,
         result: Result<Value, JsError>,
     ) -> Result<(), JsError> {
+        self.report_error(vm, result, false)
+    }
+
+    fn report_error(
+        &self,
+        vm: &mut Vm,
+        result: Result<Value, JsError>,
+        local_exhaustion: bool,
+    ) -> Result<(), JsError> {
         let Err(error) = result else { return Ok(()) };
-        if fatal(&error) {
+        if fatal(&error) && !local_exhaustion {
             return Err(error);
         }
         if !self.reporting_error.replace(true) {
@@ -549,7 +559,7 @@ impl FrameWindow {
                 let handler = vm
                     .host_slot(&window, ERROR_HANDLER)
                     .expect("frame Window handler slot");
-                if !vm.is_callable(&handler) || error.kind == ErrorKind::UnsupportedFeature {
+                if !vm.is_callable(&handler) {
                     return Ok(false);
                 }
                 let reason = error
@@ -611,7 +621,7 @@ fn parser_error(error: HtmlStreamError) -> JsError {
 #[cfg(test)]
 mod tests {
     use crate::{loader::LoadedPage, script::ScriptRuntime};
-    use rust_browser_javascript::Value;
+    use rust_browser_javascript::{ErrorKind, Value};
 
     #[test]
     fn initial_iframe_writes_classic_scripts_and_calls_parent_functions() {
@@ -648,6 +658,84 @@ mod tests {
             "{:?}",
             runtime.diagnostics()
         );
+    }
+
+    #[test]
+    fn child_script_budget_failure_reaches_its_error_handler_and_the_parent_continues() {
+        let page = LoadedPage::from_html("https://example.test/", "<iframe></iframe>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let value = runtime
+            .eval(
+                r#"
+            var child = document.querySelector('iframe').contentWindow;
+            var d = child.document, finished = 0, problem = '';
+            d.open();
+            child.onerror = function (message) { problem = message; return true; };
+            d.write('<script>while (true);</script>');
+            child.finish = function () { finished++; };
+            d.write('<script>finish()</script>');
+            finished === 1 && problem.indexOf('ExecutionLimit') >= 0;
+        "#,
+            )
+            .unwrap();
+        assert_eq!(value, Value::Bool(true));
+        let heap_error = runtime.eval(r#"
+            problem = '';
+            d.write('<script>var allocations = []; while (true) { allocations.push({}); }</script>');
+            d.write('<script>finish()</script>');
+            finished === 2 && (problem.indexOf('HeapLimit') >= 0 || problem.indexOf('ExecutionLimit') >= 0);
+        "#).unwrap();
+        assert_eq!(heap_error, Value::Bool(true));
+        // Re-entering several scripts cannot replenish the enclosing task.
+        let error = runtime
+            .eval(
+                r#"
+            for (var i = 0; i < 100; i++) d.write('<script>while (true);</script>');
+        "#,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error.kind,
+            ErrorKind::ExecutionLimit | ErrorKind::HeapLimit
+        ));
+    }
+
+    #[test]
+    fn unsupported_child_script_reports_to_window_onerror_before_the_following_script() {
+        let page = LoadedPage::from_html("https://example.test/", "<iframe></iframe>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let value = runtime.eval(r#"
+            var child = document.querySelector('iframe').contentWindow, d = child.document;
+            d.open();
+            var observed = '';
+            child.onerror = function (message, url, line, col, error) {
+                if (message.indexOf('UnsupportedFeature') >= 0 && error.message) observed += 'error ';
+                return true;
+            };
+            child.finish = function () { observed += 'next'; };
+            d.write('<script>try { new RegExp("", "v"); } catch (e) { finish(); }</script>');
+            d.write('<script>finish()</script>');
+            observed;
+        "#).unwrap();
+        assert_eq!(value, Value::from("error next"));
+    }
+
+    #[test]
+    fn discarded_initial_realms_release_their_globals_and_intrinsics() {
+        let page = LoadedPage::from_html("https://example.test/", "<body></body>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        runtime.eval("function cycle() { const f = document.createElement('iframe'); document.body.appendChild(f); const w = f.contentWindow; w.marker = {}; f.remove(); }").unwrap();
+        runtime.vm.collect_garbage();
+        let before = runtime.vm.heap_cell_count();
+        for _ in 0..32 {
+            runtime.eval("cycle()").unwrap();
+            runtime.pump_with_network_errors().unwrap();
+        }
+        runtime.vm.collect_garbage();
+        assert!(runtime.state.borrow().frames.active.is_empty());
+        // The DOM arena retains stable node identities and one wrapper per
+        // created element. Entire per-frame intrinsic graphs must not remain.
+        assert!(runtime.vm.heap_cell_count() <= before + 4 * 32);
     }
 
     #[test]

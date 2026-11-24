@@ -65,6 +65,7 @@ pub struct LoadedPage {
     pub url: String,
     pub base: Url,
     pub document: Arc<Document>,
+    pub(crate) raw_json: Option<crate::raw_json::SharedSource>,
     pub stylesheets: Arc<Vec<Arc<str>>>,
     pub linked_stylesheets: HashMap<NodeId, Arc<str>>,
     pub(crate) stylesheet_media: Arc<Vec<Option<Arc<str>>>>,
@@ -108,6 +109,7 @@ impl LoadedPage {
             url: url.to_string(),
             base: url,
             document: Arc::new(Document::default()),
+            raw_json: None,
             stylesheets: Arc::default(),
             linked_stylesheets: HashMap::new(),
             stylesheet_media: Arc::default(),
@@ -218,6 +220,7 @@ impl LoadedPage {
             url: url.into(),
             base,
             document,
+            raw_json: None,
             stylesheets: Arc::default(),
             linked_stylesheets: HashMap::new(),
             stylesheet_media: Arc::default(),
@@ -389,8 +392,11 @@ pub struct OpenedPage {
 pub(crate) enum DocumentInput {
     Html(String),
     Streaming,
+    StreamingJson,
     Prepared,
 }
+pub mod download;
+pub use download::DownloadResponse;
 pub enum NavigationPart {
     Open(Box<OpenedPage>),
     Text(String, usize),
@@ -518,7 +524,16 @@ impl Loader {
         page.document_policy = main.document_policy;
         page.fetch_loader = Some(self.clone());
         page.connect_policy = main.connect_policy;
-        let input = if svg_mime(&main.content_type) {
+        let input = if mime.as_ref().is_some_and(crate::mime::MimeType::json) {
+            let source = crate::raw_json::RawJson::shared();
+            let bytes = main
+                .bytes
+                .strip_prefix(&[0xef, 0xbb, 0xbf])
+                .unwrap_or(&main.bytes);
+            source.lock().unwrap().push(&String::from_utf8_lossy(bytes));
+            page.raw_json = Some(source);
+            DocumentInput::Prepared
+        } else if svg_mime(&main.content_type) {
             let source = decode_text(&main.bytes, "image/svg+xml; charset=utf-8");
             let svg = LoadedPage::from_svg(&page.url, &source)?;
             page.document = svg.document;
@@ -568,7 +583,7 @@ impl Loader {
     ) -> Result<(), String> {
         let control = RequestControl::legacy(cancel, Instant::now() + NAVIGATION_TIMEOUT);
         self.reactor
-            .block_on(self.stream_controlled(request, &control, |part| {
+            .block_on(self.stream_controlled(request, &control, None, |part| {
                 send(part);
                 ready(Ok(()))
             }))
@@ -586,13 +601,67 @@ impl Loader {
         Fut: Future<Output = Result<(), String>>,
     {
         let control = RequestControl::new(cancel, deadline);
-        self.stream_controlled(request, &control, send).await
+        self.stream_controlled(request, &control, None, send).await
+    }
+
+    /// Honor a same-origin download attribute after redirects, or a server attachment.
+    pub async fn open_download_link(
+        &self,
+        request: &NavigationRequest,
+        hint: &str,
+        cancel: &CancelSignal,
+        deadline: Instant,
+    ) -> Result<DownloadResponse, String> {
+        let control = RequestControl::new(cancel, deadline);
+        if !request.context.top_level_navigation
+            || request.method != "GET"
+            || !matches!(request.url.scheme(), "https" | "http")
+        {
+            return Err("Unsupported download target".into());
+        }
+        let (response, url, _, _, headers_at) =
+            self.fetch_navigation_http(request, &control).await?;
+        let header = download::attachment(response.headers());
+        if header.is_none()
+            && !request
+                .initiator
+                .as_ref()
+                .is_some_and(|source| source.origin() == url.origin())
+        {
+            return Err("A cross-origin download requires an attachment response".into());
+        }
+        Ok(DownloadResponse::new(
+            response,
+            &url,
+            headers_at,
+            header.flatten().as_deref().or(Some(hint)),
+        ))
+    }
+
+    /// Desktop navigation can hand the original authorized response to a disk sink.
+    pub async fn stream_desktop_navigation<F, Fut>(
+        &self,
+        request: &NavigationRequest,
+        cancel: &CancelSignal,
+        deadline: Instant,
+        send: F,
+    ) -> Result<Option<DownloadResponse>, String>
+    where
+        F: FnMut(NavigationPart) -> Fut,
+        Fut: Future<Output = Result<(), String>>,
+    {
+        let control = RequestControl::new(cancel, deadline);
+        let mut response = None;
+        self.stream_controlled(request, &control, Some(&mut response), send)
+            .await?;
+        Ok(response)
     }
 
     async fn stream_controlled<F, Fut>(
         &self,
         request: &NavigationRequest,
         control: &RequestControl<'_>,
+        download: Option<&mut Option<DownloadResponse>>,
         mut send: F,
     ) -> Result<(), String>
     where
@@ -617,18 +686,38 @@ impl Loader {
         }
         let (mut response, url, context, origin_clean, response_start) =
             self.fetch_navigation_http(request, control).await?;
-        if response
-            .content_length()
-            .is_some_and(|len| len > DOCUMENT_LIMIT as u64)
-        {
-            return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
+        if request.context.top_level_navigation {
+            if let Some(name) = download::attachment(response.headers()) {
+                let Some(output) = download else {
+                    return Err(download::NEEDS_DESTINATION.into());
+                };
+                *output = Some(DownloadResponse::new(
+                    response,
+                    &url,
+                    response_start,
+                    name.as_deref(),
+                ));
+                return Ok(());
+            }
         }
         let http_content = HttpContentMetadata::headers(response.headers());
         let content_type = response_content_type(response.headers(), true);
         let document_policy = DocumentPolicy::from_headers(response.headers());
         let connect_policy = ConnectPolicy::from_headers(response.headers());
         let mime = crate::mime::MimeType::parse(&content_type);
-        if mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
+        let raw_json = mime.as_ref().is_some_and(crate::mime::MimeType::json);
+        let limit = if raw_json {
+            crate::network::FETCH_RESPONSE_BODY_LIMIT
+        } else {
+            DOCUMENT_LIMIT
+        };
+        if response
+            .content_length()
+            .is_some_and(|len| len > limit as u64)
+        {
+            return Err(format!("Document exceeds the {limit}-byte limit"));
+        }
+        if !raw_json && mime.as_ref().is_none_or(|mime| mime.essence != "text/html") {
             let status = response.status().as_u16();
             let bytes = control
                 .read_body(response, DOCUMENT_LIMIT)
@@ -663,9 +752,15 @@ impl Loader {
         page.document_policy = document_policy;
         page.fetch_loader = Some(self.clone());
         page.connect_policy = connect_policy;
+        let input = if raw_json {
+            page.raw_json = Some(crate::raw_json::RawJson::shared());
+            DocumentInput::StreamingJson
+        } else {
+            DocumentInput::Streaming
+        };
         let opened = OpenedPage {
             page,
-            input: DocumentInput::Streaming,
+            input,
             started,
             response_start,
             http_status: Some(response.status().as_u16()),
@@ -675,7 +770,7 @@ impl Loader {
             .wait(send(NavigationPart::Open(Box::new(opened))))
             .await
             .map_err(interrupted_navigation)??;
-        let has_transport_encoding = declared_encoding(&content_type).is_some();
+        let has_transport_encoding = raw_json || declared_encoding(&content_type).is_some();
         let sniff = if has_transport_encoding {
             3
         } else {
@@ -712,8 +807,18 @@ impl Loader {
                 break;
             }
         }
-        let (encoding, bom) = text_encoding(&prefix, &content_type);
-        let mut decoder = encoding.new_decoder_without_bom_handling();
+        let (encoding, bom) = if raw_json {
+            (encoding_rs::UTF_8, 0)
+        } else {
+            text_encoding(&prefix, &content_type)
+        };
+        let mut decoder = if raw_json {
+            // A BOM may be split by more than one transport read and arrive
+            // after the encoding-sniff deadline. JSON is always UTF-8.
+            encoding.new_decoder_with_bom_removal()
+        } else {
+            encoding.new_decoder_without_bom_handling()
+        };
         let mut total = prefix.len();
         if !prefix.is_empty() {
             let text = decode_navigation_chunk(&mut decoder, &prefix[bom..], false)?;
@@ -736,8 +841,8 @@ impl Loader {
                 break;
             };
             total = total.saturating_add(chunk.len());
-            if total > DOCUMENT_LIMIT {
-                return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
+            if total > limit {
+                return Err(format!("Document exceeds the {limit}-byte limit"));
             }
             for bytes in chunk.chunks(16 * 1024) {
                 let text = decode_navigation_chunk(&mut decoder, bytes, false)?;
@@ -804,6 +909,12 @@ impl Loader {
         }
         check_cancel(cancel)?;
         let main = self.fetch(request, DOCUMENT_LIMIT, NAVIGATION_TIMEOUT, cancel)?;
+        if crate::mime::MimeType::parse(&main.content_type).is_some_and(|kind| kind.json()) {
+            let mut page = self.opened_response(main, start)?.page;
+            page.stats.elapsed_ms = start.elapsed().as_millis();
+            preview(page.clone());
+            return Ok(page);
+        }
         let source = if svg_mime(&main.content_type) {
             decode_text(&main.bytes, "image/svg+xml; charset=utf-8")
         } else {
@@ -1116,24 +1227,6 @@ impl Loader {
                 continue;
             }
             if request.context.top_level_navigation {
-                // An attachment can contain attacker-controlled HTML served
-                // from the same origin; it must never produce a document.
-                if response
-                    .headers()
-                    .get_all(reqwest::header::CONTENT_DISPOSITION)
-                    .iter()
-                    .any(|value| {
-                        value
-                            .as_bytes()
-                            .split(|&byte| byte == b';')
-                            .next()
-                            .is_some_and(|value| {
-                                value.trim_ascii().eq_ignore_ascii_case(b"attachment")
-                            })
-                    })
-                {
-                    return Err("Ten adres zwraca plik do pobrania. Pobieranie plików jest w przygotowaniu.".into());
-                }
                 if matches!(response.status().as_u16(), 204 | 205) {
                     return Err("Serwer nie zwrócił dokumentu.".into());
                 }
@@ -1169,6 +1262,20 @@ impl Loader {
         control.check().map_err(interrupted_navigation)?;
         let response = match request.url.scheme() {
             "data" => {
+                let json = request.context.top_level_navigation
+                    && limit == DOCUMENT_LIMIT
+                    && request
+                        .url
+                        .path()
+                        .split_once(',')
+                        .is_some_and(|(header, _)| {
+                            crate::mime::MimeType::parse(header).is_some_and(|mime| mime.json())
+                        });
+                let limit = if json {
+                    crate::network::FETCH_RESPONSE_BODY_LIMIT
+                } else {
+                    limit
+                };
                 let data = crate::data_url::process(&request.url, limit)
                     .map_err(|error| error.to_string())?;
                 Response {
@@ -1188,12 +1295,26 @@ impl Loader {
             "http" | "https" => {
                 let (response, final_url, context, origin_clean, response_start) =
                     self.fetch_navigation_http(request, control).await?;
+                if request.context.top_level_navigation
+                    && download::attachment(response.headers()).is_some()
+                {
+                    return Err(download::NEEDS_DESTINATION.into());
+                }
+                let content_type =
+                    response_content_type(response.headers(), request.context.top_level_navigation);
+                let limit = if request.context.top_level_navigation
+                    && limit == DOCUMENT_LIMIT
+                    && crate::mime::MimeType::parse(&content_type).is_some_and(|mime| mime.json())
+                {
+                    crate::network::FETCH_RESPONSE_BODY_LIMIT
+                } else {
+                    limit
+                };
                 if response.content_length().is_some_and(|n| n > limit as u64) {
                     return Err("Dokument przekracza limit rozmiaru wersji alfa".into());
                 }
                 let http_content = HttpContentMetadata::headers(response.headers());
-                let content_type =
-                    response_content_type(response.headers(), request.context.top_level_navigation);
+
                 let connect_policy = if request.context.top_level_navigation {
                     ConnectPolicy::from_headers(response.headers())
                 } else {
@@ -1241,11 +1362,20 @@ impl Loader {
                     .to_file_path()
                     .map_err(|_| "Nieprawidłowy adres pliku")?;
                 let kind = match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+                    ext if ext.eq_ignore_ascii_case("json") => "application/json",
                     "css" => "text/css; charset=utf-8",
                     "js" | "mjs" => "text/javascript; charset=utf-8",
                     "txt" => "text/plain; charset=utf-8",
                     "svg" => "image/svg+xml; charset=utf-8",
                     _ => "text/html",
+                };
+                let limit = if request.context.top_level_navigation
+                    && limit == DOCUMENT_LIMIT
+                    && kind == "application/json"
+                {
+                    crate::network::FETCH_RESPONSE_BODY_LIMIT
+                } else {
+                    limit
                 };
                 let bytes = tokio::task::spawn_blocking(move || read_local_file(&path, limit))
                     .await

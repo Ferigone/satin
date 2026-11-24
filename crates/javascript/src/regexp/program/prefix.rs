@@ -32,7 +32,7 @@ impl Head {
     }
 }
 
-pub(super) fn first_ascii(expr: &Expr, flags: Flags) -> u128 {
+pub(in crate::regexp) fn first_ascii(expr: &Expr, flags: Flags) -> u128 {
     // Unicode-set classes may match strings, including the empty string.
     if flags.has(Flags::UNICODE_SETS) {
         return ALL;
@@ -95,7 +95,11 @@ fn head(expr: &Expr, flags: Flags) -> Head {
 
 /// Exact membership for ASCII code points, or no table if the class requires
 /// case folding, Unicode sets, or an unknown member predicate.
-pub(super) fn class_ascii(members: &[Member], negated: bool, flags: Flags) -> Option<u128> {
+pub(in crate::regexp) fn class_ascii(
+    members: &[Member],
+    negated: bool,
+    flags: Flags,
+) -> Option<u128> {
     if flags.has(Flags::IGNORE_CASE | Flags::UNICODE_SETS) {
         return None;
     }
@@ -105,7 +109,7 @@ pub(super) fn class_ascii(members: &[Member], negated: bool, flags: Flags) -> Op
     Some(if negated { !mask } else { mask })
 }
 
-pub(super) fn ascii_member(member: Member) -> Option<u128> {
+pub(in crate::regexp) fn ascii_member(member: Member) -> Option<u128> {
     let mask = match member {
         Member::Point(point) => range(point, point),
         Member::Range(first, last) => range(first, last),

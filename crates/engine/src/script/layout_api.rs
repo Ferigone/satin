@@ -84,24 +84,35 @@ impl Data {
                     .values()
                     .map(|image| image.retained_bytes())
                     .sum::<usize>();
-            let attributes = document
-                .nodes
-                .iter()
-                .filter_map(|node| match &node.kind {
-                    NodeKind::Element { attrs, .. } => Some(attrs),
-                    _ => None,
-                })
-                .flat_map(|attrs| attrs.iter())
-                .map(|(name, value)| name.len() + value.len())
-                .sum::<usize>();
-            vm.charge_work(
+            // Layout initializes small slot-indexed arrays. Only connected
+            // elements enter the cascade and expose attributes to selectors.
+            // Slot indices are contiguous machine words initialized in bulk.
+            vm.charge_buffer_work(
                 document
                     .nodes
                     .len()
-                    .saturating_mul(32)
-                    .saturating_add(source_work)
-                    .saturating_add(attributes),
+                    .saturating_mul(std::mem::size_of::<usize>()),
             )?;
+            let mut tree_work = 0usize;
+            for id in document.connected_nodes() {
+                tree_work = tree_work.saturating_add(1);
+                if let NodeKind::Element { attrs, .. } = &document.nodes[id.0].kind {
+                    // Style resolution uses the connected element and its parent.
+                    // Ordinary selector comparisons scan bytes; inline declarations
+                    // enter the CSS parser and pay their full source cost.
+                    tree_work = tree_work.saturating_add(4);
+                    for (name, value) in attrs {
+                        let bytes = name.len().saturating_add(value.len());
+                        let cost = if name.eq_ignore_ascii_case("style") {
+                            bytes
+                        } else {
+                            1 + bytes.div_ceil(std::mem::size_of::<usize>())
+                        };
+                        tree_work = tree_work.saturating_add(cost);
+                    }
+                }
+            }
+            vm.charge_work(tree_work.saturating_add(source_work))?;
             return Layout::build_checked_for_viewport(
                 &self.page,
                 fonts,
