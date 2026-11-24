@@ -4141,9 +4141,27 @@ impl Builder<'_> {
             let mut max = 0f32;
             let mut current = 0f32;
             let space = self.shape(" ", s).advance;
+            // Whitespace at block edges is removed when the line is laid out.
+            // Inline wrappers can still share a line with text outside them.
+            let (trim_start, trim_end) = d.nodes[id.0]
+                .parent
+                .filter(|parent| {
+                    self.styles[parent.0].display != Display::Inline
+                        || self.styles[parent.0].float != css::Float::None
+                })
+                .map(|parent| {
+                    let children = &d.nodes[parent.0].children;
+                    (children.first() == Some(&id), children.last() == Some(&id))
+                })
+                .unwrap_or_default();
+            let mut pending_space = false;
             for token in text.split_inclusive(is_css_space) {
                 let word = token.trim_end_matches(is_css_space);
                 if !word.is_empty() {
+                    if pending_space && (!trim_start || current > 0.) {
+                        current += space;
+                    }
+                    pending_space = false;
                     let mut advance = 0.;
                     let mut offset = 0;
                     while offset < word.len() {
@@ -4161,10 +4179,15 @@ impl Builder<'_> {
                     if s.pre && token.ends_with('\n') {
                         max = max.max(current);
                         current = 0.;
-                    } else {
+                    } else if s.pre {
                         current += space;
+                    } else {
+                        pending_space = true;
                     }
                 }
+            }
+            if pending_space && !trim_end && (!trim_start || current > 0.) {
+                current += space;
             }
             max = max.max(current);
             (if s.wrap { min } else { max }, max)
@@ -4217,25 +4240,62 @@ impl Builder<'_> {
                 (min + extra, max + extra)
             } else {
                 let (mut min, mut max, mut current) = (0f32, 0f32, 0f32);
+                let mut float_sides = [false; 2];
+                let mut has_inline_content = false;
                 for &child in &d.nodes[id.0].children {
-                    if self.styles[child.0].position.out_of_flow()
-                        && !matches!(d.nodes[child.0].kind, NodeKind::Text(_))
+                    let cs = &self.styles[child.0];
+                    let text = matches!(d.nodes[child.0].kind, NodeKind::Text(_));
+                    if !text && (cs.position.out_of_flow() || cs.display == Display::None) {
+                        continue;
+                    }
+                    if !cs.pre
+                        && !has_inline_content
+                        && matches!(&d.nodes[child.0].kind, NodeKind::Text(t) if t.chars().all(is_css_space))
                     {
                         continue;
                     }
-                    let (a, b) = self.intrinsic[child.0].unwrap_or((0., 0.));
-                    let cs = &self.styles[child.0];
-                    if matches!(
-                        cs.display,
-                        Display::Block | Display::ListItem | Display::Flex | Display::Grid
-                    ) && !matches!(d.nodes[child.0].kind, NodeKind::Text(_))
+                    let block = !text
+                        && matches!(
+                            cs.display,
+                            Display::Block | Display::ListItem | Display::Flex | Display::Grid
+                        );
+                    let floated = !text && cs.float != css::Float::None;
+                    if (block || floated)
+                        && cs
+                            .clear
+                            .sides(s.rtl)
+                            .iter()
+                            .zip(float_sides)
+                            .any(|(clear, occupied)| *clear && occupied)
                     {
-                        max = max.max(current).max(b);
+                        max = max.max(current);
                         current = 0.;
-                    } else {
-                        current += b;
+                        float_sides = [false; 2];
+                        has_inline_content = false;
                     }
-                    min = min.max(a);
+                    let (a, b) = self.intrinsic[child.0].unwrap_or((0., 0.));
+                    if floated {
+                        // Adjacent floats share a maximum-content line, but can
+                        // wrap separately when sizing to minimum content.
+                        let margins = [cs.margin[1], cs.margin[3]]
+                            .iter()
+                            .filter_map(|edge| edge.resolve_with_basis(None, cs.font_size))
+                            .sum::<f32>();
+                        min = min.max(a + margins);
+                        current += (b + margins).max(0.);
+                        float_sides[usize::from(cs.float.is_right(s.rtl))] = true;
+                    } else {
+                        if block {
+                            max = max.max(current).max(b);
+                            current = 0.;
+                            float_sides = [false; 2];
+                            has_inline_content = false;
+                        } else {
+                            current += b;
+                            has_inline_content |= b > 0.;
+                        }
+                        min = min.max(a);
+                    }
                 }
                 max = max.max(current);
                 (min + extra, max + extra)
