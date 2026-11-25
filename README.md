@@ -35,7 +35,7 @@ Satin’s JavaScript engine passed **100,530 of 103,346 Test262 checks (97.28%)*
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
-Colours show the pass rate within each named suite. The CSS results cover sticky positioning and logical properties with variables. A full CSS Web Platform Tests (WPT) run is still open.
+The CSS tiles show results for the named suites. The static reftest tile compares pages and references rendered by Satin. The [CSS audit](docs/compatibility/css.md) also records live CSSOM results for 823 property names, original WPT JavaScript subtests, and cases outside the runners’ scope.
 
 <details>
 <summary>Exact counts, test scope and reproduction</summary>
@@ -50,7 +50,7 @@ Colours show the pass rate within each named suite. The CSS results cover sticky
 | Staging | 2,528 / 2,791 | 90.58% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
-| All CSS modules | — | Unmeasured | [A full run of the WPT CSS suite is still open](docs/ROADMAP.md) |
+| Static CSS reftests | 1,967 / 6,536 | 30.09% | [Eligible screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md) |
 | HTML tokenizer | 7,028 / 7,036 | 99.89% | [html5lib initial-state variants](crates/engine/data/html5lib/README.md) |
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
@@ -66,8 +66,8 @@ The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising 
 
 | Area | What works in Satin | What remains |
 | --- | --- | --- |
-| Cascade & selectors | Specificity, inheritance, `!important` and custom properties. | Extend the range of upstream selector and cascade cases. [CSS implementation](docs/CSS_LAYOUT.md) |
-| Box model & Flexbox | Wrapping, gaps, ordering and auto margins. A box and Flexbox reference checks 44 coordinates across 11 rectangles. | Broader Flexbox sizing and alignment, including text-dependent layouts. [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
+| Cascade & selectors | Specificity, inheritance, `!important`, custom properties, and relational selectors such as `:has(> input:checked)`. | Extend the range of upstream selector and cascade cases. [CSS implementation](docs/CSS_LAYOUT.md) |
+| Box model & Flexbox | Rows and columns wrap in both directions, including with RTL, gaps and auto margins. A Chromium comparison covers 252 coordinates across 63 rectangles. | Broader Flexbox sizing and alignment, including text-dependent layouts. [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
 | Grid | Named lines and areas, `auto-fill` and `auto-fit`. A geometry comparison covers 580 coordinates across 38 fixtures. | Subgrid, nested intrinsic sizing and resolved track values in CSSOM. [Grid](docs/GRID.md) · [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
 | Flow & writing modes | Floats and clearance in horizontal flow. Logical edges follow each element's text direction. | Vertical writing modes and bidirectional text layout. [Float layout](docs/css-float-layout.md) · [Logical properties](docs/CSS_LAYOUT.md#logical-box-properties) |
 
