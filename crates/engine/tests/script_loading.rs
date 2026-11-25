@@ -19,9 +19,9 @@ struct Server {
 #[test]
 fn fatal_script_or_lifecycle_task_discards_queued_microtasks() {
     for source in [
-        "queueMicrotask(function(){document.title='ran after fatal';});Array(1000001);",
-        "document.addEventListener('DOMContentLoaded',function(){queueMicrotask(function(){document.title='ran after fatal';});Array(1000001);});",
-        "window.onload=function(){queueMicrotask(function(){document.title='ran after fatal';});Array(1000001);};",
+        "queueMicrotask(function(){document.title='ran after fatal';});'x'.repeat(67108865);",
+        "document.addEventListener('DOMContentLoaded',function(){queueMicrotask(function(){document.title='ran after fatal';});'x'.repeat(67108865);});",
+        "window.onload=function(){queueMicrotask(function(){document.title='ran after fatal';});'x'.repeat(67108865);};",
     ] {
         let mut page = LoadedPage::from_html(
             "https://example.test/",

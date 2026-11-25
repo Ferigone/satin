@@ -2701,9 +2701,6 @@ impl Vm {
             Some(prototype),
         )));
         let function = Value::Object(id);
-        if legacy_caller {
-            self.define_data_property(function.clone(), "caller", Value::Null, false, false, false)?;
-        }
         if self_binding {
             self.reserve_binding(&name)?;
             self.heap.environment_mut(environment).bindings.insert(
@@ -2734,6 +2731,9 @@ impl Vm {
             false,
             true,
         )?;
+        if legacy_caller {
+            self.define_data_property(function.clone(), "caller", Value::Null, false, false, false)?;
+        }
         if constructible {
             let prototype = self.new_object();
             self.define_data_property(
