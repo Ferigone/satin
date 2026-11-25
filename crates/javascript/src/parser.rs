@@ -171,6 +171,8 @@ pub(crate) enum ChainLink {
 #[derive(Clone, Debug)]
 pub(crate) enum Expr {
     Literal(Value),
+    // Fold successive string-literal additions in linear space without making a directive.
+    JoinedString(Vec<u16>),
     RegExp(std::rc::Rc<crate::regexp::Program>),
     Identifier(JsString),
     This,
@@ -1705,7 +1707,21 @@ impl Parser {
                 "Nullish coalescing cannot mix with logical operators without parentheses",
             ));
         }
-        let expression = if !assignment {
+        let expression = if op == "+" {
+            match (left, right) {
+                (Expr::Literal(Value::String(a)), Expr::Literal(Value::String(b))) => {
+                    let mut units = Vec::with_capacity(a.len() + b.len());
+                    units.extend_from_slice(a.as_utf16());
+                    units.extend_from_slice(b.as_utf16());
+                    Expr::JoinedString(units)
+                }
+                (Expr::JoinedString(mut units), Expr::Literal(Value::String(b))) => {
+                    units.extend_from_slice(b.as_utf16());
+                    Expr::JoinedString(units)
+                }
+                (left, right) => Expr::Binary(op, Box::new(left), Box::new(right)),
+            }
+        } else if !assignment {
             Expr::Binary(op, Box::new(left), Box::new(right))
         } else if op == "=" && matches!(left, Expr::Array(..) | Expr::Object(..)) {
             Expr::Destructure(self.pattern(left, false)?, Box::new(right))
@@ -2255,6 +2271,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
             },
             Ast::Expression(expression) => match expression {
                 Expr::Literal(_)
+                | Expr::JoinedString(_)
                 | Expr::RegExp(_)
                 | Expr::Identifier(_)
                 | Expr::This

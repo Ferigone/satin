@@ -1,6 +1,7 @@
 //! A process boundary for conformance tests. Every request gets a fresh Rust VM.
 //! Node/Python orchestrators must never evaluate the test source themselves.
 mod dynamic_host;
+mod legacy;
 mod missing_host;
 mod module_host;
 
@@ -28,6 +29,8 @@ struct Request {
     setup: Vec<Setup>,
     #[serde(default)]
     strict: bool,
+    #[serde(default)]
+    legacy_website: bool,
     #[serde(default)]
     parse_only: bool,
     #[serde(default)]
@@ -192,6 +195,9 @@ fn execute(request: Request) -> Json {
             .clamp(1, 100_000_000),
         ..VmLimits::default()
     };
+    if request.legacy_website {
+        return legacy::execute(request, limits);
+    }
     let mut vm = Vm::with_limits(limits);
     let logs = Rc::new(RefCell::new(Vec::<String>::new()));
     let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
@@ -429,6 +435,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             source: std::fs::read_to_string(&args[1])?,
             setup: vec![],
             strict: false,
+            legacy_website: false,
             parse_only: args[0] == "--check-file",
             async_test: false,
             max_instructions: None,
@@ -468,6 +475,7 @@ mod tests {
             source: source.into(),
             setup: vec![],
             strict: false,
+            legacy_website: false,
             parse_only: false,
             async_test,
             max_instructions: Some(100000),
@@ -656,6 +664,7 @@ mod tests {
                     source: "function Test262Error(message){this.message=message;}".into(),
                 }],
                 strict: false,
+                legacy_website: false,
                 parse_only: false,
                 async_test: true,
                 max_instructions: Some(100000),
@@ -687,6 +696,7 @@ mod tests {
             id:"synchronous sentinel".into(),
             source:"var sentinel=new Test262Error('iterator abrupt completion');Promise.reject(sentinel);".into(),
             setup:vec![Setup{name:"sta contract".into(),source:"function Test262Error(message){this.message=message;}".into()}],
+            legacy_website: false,
             strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),timeout_ms:None,module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
         });
         assert_eq!(result["outcome"], "ok");
@@ -700,6 +710,7 @@ mod tests {
                 source: source.into(),
                 setup: vec![],
                 strict: false,
+                legacy_website: false,
                 parse_only: false,
                 async_test: false,
                 max_instructions: Some(100_000),

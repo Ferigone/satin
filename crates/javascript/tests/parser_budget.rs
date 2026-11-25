@@ -604,3 +604,11 @@ fn large_strict_scripts_validate_unused_functions_and_preserve_closures() {
         assert_eq!(vm.eval(&valid).unwrap(), Value::Bool(true));
     });
 }
+
+#[test]
+fn long_string_literal_sums_preserve_utf16_and_do_not_form_directive_prologues() {
+    let mut vm = Vm::new();
+    let parts = std::iter::repeat_n(r#"'\ud800'"#, 1024).collect::<Vec<_>>().join("+");
+    let source = format!("var s = {parts}; function f() {{ 'use '+'strict'; return this; }} s.length === 1024 && s.charCodeAt(1023) === 55296 && f() === globalThis && ('a' + '2' * 3) === 'a6'");
+    assert_eq!(vm.eval(&source).unwrap(), Value::Bool(true));
+}

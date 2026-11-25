@@ -28,6 +28,8 @@ Synchronous bytecode uses bounded Rust calls for nested chunks. A body that can 
 
 Available standard-library subsets include Object descriptor/prototype/key utilities; Function call/apply/bind; common Array construction, mutation, search, iteration and reduction methods; common String code-unit, search, slicing, splitting, literal replacement, case and trimming methods; Number/Boolean conversion; parseInt/parseFloat; Math; and core Error constructors. This list describes implemented paths, not complete coverage of each constructor or method.
 
+A sparse array can represent the full ECMAScript length range through 4,294,967,295. Extending its length allocates no elements. Shrinking it visits stored properties and stops at the highest non-configurable index.
+
 The Array methods `find`, `findIndex`, `findLast` and `findLastIndex` read the receiver’s length once and visit indices until the predicate matches. Sparse holes and inherited properties are observable during each visit. The VM charges work per visited index, so a match at the first visited index can complete even on an array-like object with a length of `Number.MAX_SAFE_INTEGER`.
 
 Objects enumerate numeric index keys before other string keys, then Symbol keys in insertion order. Object.keys/values/entries/getOwnPropertyNames and for-in omit Symbols; Object.getOwnPropertySymbols and Reflect.ownKeys expose the appropriate key kinds. Object.assign, defineProperties and freeze/seal include Symbol descriptors. Deleting and reinserting a key moves it to the end of its key category. Array length changes enforce writable length and non-configurable element restrictions. Native-generated TypeError/ReferenceError/etc. inherit their intrinsic subtype prototype; caught errors therefore retain constructor identity independently of a user-controlled `name` property. Throwing an arbitrary object or Symbol does not coerce it.
@@ -220,7 +222,7 @@ Default `VmLimits`:
 | max_heap_bytes | 64 MiB conservative aggregate allowance |
 | max_source_bytes | 2 MiB, further constrained by the aggregate parser allowance |
 | max_string_units | 8 Mi UTF-16 code units per string |
-| max_array_length | 1,000,000 |
+| max_array_length | 1,000,000 stored elements per array, also used as a limit for native collection operations |
 | max_pending_jobs | 4,096 jobs, reactions per pending promise, or unhandled rejection records |
 
 Browser documents and dedicated workers use a 512 MiB aggregate heap allowance,

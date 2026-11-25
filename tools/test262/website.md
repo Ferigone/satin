@@ -22,6 +22,7 @@ The site’s default catalog lists `harness`, `language`, `annexB` and `built-in
 | Complete the built-in object chapter | `--chapter built-ins` |
 | Complete Annex B | `--chapter annexB` |
 | Complete Run All | `--until complete --timeout-ms 7200000` |
+| Require every selected case to pass and return a failing exit code on any failure or incomplete run | `--require-all-pass` |
 | Observe Run All making progress, pause and open Results | `--until first` |
 
 `--chapter` defaults to completion. A native run without a chapter defaults to Run All. Use `--until first` for a short progress check. Full runs of the larger chapters and Run All allow six hours by default. First-result checks, harness and Annex B allow seven minutes. Use `--timeout-ms` to set a shorter deadline or allow up to six hours. Execution, startup and Results observation have separate deadlines. The native catalog and row waits are capped at two minutes each. Each invocation creates a fresh browser profile and writes a report, action file, screenshot and checkpoint evidence under `target/test262/website/run-*`. Use `--output DIR` to change the parent directory.
@@ -47,3 +48,16 @@ A plain `--satin FILE` invocation keeps the independent headless load and contro
 ```powershell
 node --test tools/test262/website.test.mjs tools/test262/native-checkpoint-verify.test.mjs
 ```
+
+## Reproduce an individual website case in the standalone VM
+
+For a fast engine diagnostic, the legacy VM adapter uses the website's pinned four catalogs, declared includes, error handler and result validator. It runs one classic script per fresh VM, applies the original strict-mode flag and drains Promise jobs for asynchronous cases. Its output records every selected path, verdict and exception. A host resource limit or worker failure is reported explicitly. This adapter has no DOM or real iframe lifecycle. Use the native website procedure above to measure browser progress and verify the displayed score.
+
+```sh
+git clone --branch gh-pages https://github.com/v8/test262.git legacy-test262
+git -C legacy-test262 checkout e1166500a0d26c8b90e704a31c6646992573f632
+cargo build --release --locked -p rust-browser-js-harness
+python3 tools/test262/legacy-vm.py --website legacy-test262/website --worker target/release/rb-js --output legacy-vm.jsonl
+```
+
+The runner verifies the Git blob hashes of the downloaded catalog and helper scripts, including the count and identity of all 16,436 test paths. Use `--filter Array/prototype/indexOf` to run a subset. Windows uses `target/release/rb-js.exe`.

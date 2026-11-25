@@ -296,3 +296,62 @@ fn recursive_delegation_and_long_generators_are_bounded_on_one_mib_stack() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn suspended_destructuring_preserves_target_order_rest_and_assignment_value() {
+    let mut vm = Vm::new();
+    let first = vm.eval(r#"
+        var log = [], target = {}, src = {
+            get entry() { log.push("get"); return [undefined, 12, 13]; },
+            other: 40
+        };
+        var it = (function* () {
+            var result = ({
+                [yield "key"]: [target[yield "target"] = yield "default", ...target.rest],
+                ...target.other
+            } = src);
+            return result === src;
+        })();
+        [it.next().value, it.next("entry").value, log.join(), it.next("first").value, log.join()].join("|");
+    "#).unwrap();
+    assert_eq!(first, Value::from("key|target|get|default|get"));
+    vm.collect_garbage();
+    assert_eq!(
+        vm.eval(
+            r#"
+        var final = it.next(86);
+        [final.value, final.done, target.first, target.rest.join(","), target.other.other,
+         'entry' in target.other].join("|")
+    "#
+        )
+        .unwrap(),
+        Value::from("true|true|86|12,13|40|false")
+    );
+}
+
+#[test]
+fn abrupt_destructuring_closes_nested_iterators_once_and_preserves_the_throw() {
+    expect(
+        r#"
+        var log = [];
+        function iterable(name, value) {
+            return {
+                [Symbol.iterator]() { return this; },
+                next() { log.push("next-" + name); return {value: value, done: false}; },
+                return() { log.push("close-" + name); throw name; }
+            };
+        }
+        function* work() {
+            var x;
+            [[ x = yield 1 ]] = iterable("outer", iterable("inner", undefined));
+        }
+        var a = work(), b = work();
+        a.next();
+        try { a.throw("original"); } catch (e) { log.push(e); }
+        b.next();
+        try { b.return(9); } catch (e) { log.push(e); }
+        log.join();
+    "#,
+        "next-outer,next-inner,close-inner,close-outer,original,next-outer,next-inner,close-inner,close-outer,inner",
+    );
+}

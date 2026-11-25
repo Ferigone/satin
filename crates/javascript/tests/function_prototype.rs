@@ -103,3 +103,43 @@ fn bound_calls_and_construction_have_distinct_receiver_and_new_target_rules() {
             Object.getPrototypeOf(alternate) === Alternate.prototype && rejected
     "#);
 }
+
+#[test]
+fn legacy_caller_observes_the_active_sloppy_call_and_hides_strict_callers() {
+    yes(r#"
+        function leaf() {
+            let d = Object.getOwnPropertyDescriptor(leaf, 'caller');
+            return d.value === leaf.caller && !d.writable && !d.configurable && !d.enumerable && leaf.caller;
+        }
+        function via() { return leaf(); }
+        function strictCaller() { 'use strict'; return leaf(); }
+        function recur(n) { return n ? recur(0) : recur.caller; }
+        function target() { this.parent = target.caller; }
+        function make() { return new target(); }
+        leaf.caller === null && via() === via && strictCaller() === null &&
+        recur(1) === recur && recur.caller === null && make().parent === make
+    "#);
+}
+
+#[test]
+fn throw_type_error_name_and_length_are_frozen() {
+    yes(r#"
+        let obj = (function () { 'use strict'; return arguments; })();
+        let t = Object.getOwnPropertyDescriptor(obj, 'callee').get;
+        !Object.isExtensible(t) && ['name', 'length'].every(k => {
+            let d = Object.getOwnPropertyDescriptor(t, k);
+            return !d.configurable && !d.writable && !d.enumerable;
+        })
+    "#);
+}
+
+#[test]
+fn last_index_of_uses_the_end_when_position_converts_to_nan() {
+    yes(r#"
+        let calls = 0;
+        let pos = { valueOf() { calls++; return NaN; } };
+        'abcabc'.lastIndexOf('bc', pos) === 4 && calls === 1 &&
+        'ab'.lastIndexOf('', 'not a number') === 2 &&
+        'ab'.endsWith('b', NaN) === false
+    "#);
+}

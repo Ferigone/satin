@@ -267,6 +267,9 @@ impl Vm {
                 return Ok(false);
             }
             if self.proxy(id) {return self.proxy_define(id,key,crate::proxy::PartialDescriptor::value_only(value))}
+            if key == &PropertyKey::from("length") && matches!(self.heap.object(id)?.kind, ObjectKind::Array { .. }) {
+                return crate::proxy::PartialDescriptor::value_only(value).apply_array_length(self, id);
+            }
             property.kind = PropertyKind::Data {
                 value,
                 writable: true,
@@ -280,6 +283,11 @@ impl Vm {
         } else if self.proxy(id){
             return self.proxy_define(id,key,crate::proxy::PartialDescriptor::full(Property::data(value)))
         } else if self.heap.object(id)?.extensible {
+            if let PropertyKey::String(name) = key
+                && self.array_index_blocked(id, name)?
+            {
+                return Ok(false);
+            }
             self.define_key(receiver, key.clone(), Property::data(value))?;
         } else {
             return Ok(false);

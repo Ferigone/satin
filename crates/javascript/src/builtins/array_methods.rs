@@ -130,7 +130,7 @@ pub(super) fn install(vm: &mut Vm, proto: &Value) {
         let backward = from < to && to < from + count;
         for i in 0..count {
             let offset = if backward { count - i - 1 } else { i };
-            move_indexed_property(vm, &obj, from + offset, to + offset)?;
+            move_indexed_property(vm, &obj, (from + offset) as u64, (to + offset) as u64)?;
         }
         Ok(obj)
     });

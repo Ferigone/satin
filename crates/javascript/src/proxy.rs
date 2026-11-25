@@ -485,6 +485,30 @@ impl PartialDescriptor {
             set,
         })
     }
+    pub(crate) fn apply_array_length(self, vm: &mut Vm, id: ObjectId) -> Result<bool, JsError> {
+        // ArraySetLength performs both numeric conversions before fetching the
+        // current length. Converting an object can itself mutate the array.
+        let length = self
+            .value
+            .as_ref()
+            .map(|value| {
+                let unsigned = crate::vm::to_u32(vm.to_number(value)?);
+                if vm.to_number(value)? != f64::from(unsigned) {
+                    return Err(JsError::new(ErrorKind::RangeError, "Invalid array length"));
+                }
+                Ok(unsigned)
+            })
+            .transpose()?;
+        if self.configurable == Some(true)
+            || self.enumerable == Some(true)
+            || self.get.is_some()
+            || self.set.is_some()
+        {
+            return Ok(false);
+        }
+        vm.resize_sparse_array(id, length, self.writable)
+    }
+
     pub(crate) fn value_only(value:Value)->Self {Self{value:Some(value),..Self::default()}}
     pub(crate) fn full(property: Property) -> Self {
         let mut d = Self {

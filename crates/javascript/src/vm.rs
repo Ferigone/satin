@@ -108,6 +108,7 @@ pub struct VmLimits {
     pub max_heap_bytes: usize,
     pub max_source_bytes: usize,
     pub max_string_units: usize,
+    /// Bounds materialized elements and indexed work in native collection operations.
     pub max_array_length: u32,
     pub max_pending_jobs: usize,
 }
@@ -158,6 +159,7 @@ pub struct Vm {
     active: usize,
     pub(crate) call_depth: usize,
     active_calls: Vec<Option<JsString>>,
+    legacy_calls: Vec<LegacyCall>,
     inspection_enabled: bool,
     pub(crate) execution_depth: usize,
     string_storage: BTreeMap<usize, usize>,
@@ -176,6 +178,13 @@ pub struct Vm {
     pub(crate) module_evaluation_active: bool,
     pub(crate) module_async_order: u64,
 }
+struct LegacyCall {
+    function: ObjectId,
+    realm: EnvId,
+    depth: usize,
+    visible: bool,
+}
+
 #[derive(Clone)]
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
@@ -277,6 +286,7 @@ impl Vm {
             active: 0,
             call_depth: 0,
             active_calls: Vec::new(),
+            legacy_calls: Vec::new(),
             inspection_enabled: false,
             execution_depth: 0,
             string_storage: BTreeMap::new(),
@@ -1359,7 +1369,7 @@ impl Vm {
             {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
-            let property = self.stored_argument_property(object, key);
+            let property = self.stored_property(id, object, key);
             current = object.prototype;
             let indexed = object.indexed_properties.is_some();
             let named = object.named_properties.is_some();
@@ -1479,7 +1489,34 @@ impl Vm {
                 configurable: false,
             }));
         }
-        Ok(self.stored_argument_property(o, key))
+        Ok(self.stored_property(id, o, key))
+    }
+    fn stored_property(&self, id: ObjectId, object: &Object, key: &JsString) -> Option<Property> {
+        let mut property = self.stored_argument_property(object, key)?;
+        if let ObjectKind::Function { code, .. } = &object.kind
+            && code.constructible() && !code.strict && key == &JsString::from("caller")
+            && let PropertyKind::Data { value, .. } = &mut property.kind
+        {
+            // Expose only the adjacent, non-strict interpreted caller from this realm.
+            // Native entry points and suspended executions are boundaries.
+            *value = self.legacy_calls.windows(2).rev()
+                .find(|frames| frames[1].function == id)
+                .filter(|frames| frames[0].visible
+                    && frames[0].depth + 1 == frames[1].depth
+                    && frames[0].realm == self.realm.global_env
+                    && frames[1].realm == self.realm.global_env)
+                .map_or(Value::Null, |frames| Value::Object(frames[0].function));
+        }
+        Some(property)
+    }
+
+    fn enter_legacy_call(&mut self, function: ObjectId, code: &Code) {
+        self.legacy_calls.push(LegacyCall {
+            function,
+            realm: self.realm.global_env,
+            depth: self.call_depth,
+            visible: !code.strict && code.constructible(),
+        });
     }
     fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
         matches!(receiver, Value::String(s) if
@@ -1577,6 +1614,17 @@ impl Vm {
                     }
                     PropertyKind::Data { writable: true, .. } => {
                         if owner == id {
+                            if key == &JsString::from("length")
+                                && matches!(self.heap.object(id)?.kind, ObjectKind::Array { .. })
+                            {
+                                let success = crate::proxy::PartialDescriptor::value_only(value)
+                                    .apply_array_length(self, id)?;
+                                return if !success && strict {
+                                    Err(JsError::type_error("Cannot assign array length"))
+                                } else {
+                                    Ok(())
+                                };
+                            }
                             let mut property = property;
                             property.kind = PropertyKind::Data {
                                 value,
@@ -1603,8 +1651,63 @@ impl Vm {
                 Ok(())
             };
         }
+        if !strict && self.array_index_blocked(id, key)? {
+            return Ok(());
+        }
         self.define_property(receiver, key.clone(), Property::data(value))
     }
+    pub(crate) fn resize_sparse_array(
+        &mut self,
+        id: ObjectId,
+        length: Option<u32>,
+        writable: Option<bool>,
+    ) -> Result<bool, JsError> {
+        let object = self.heap.object(id)?;
+        let ObjectKind::Array {
+            length: old,
+            length_writable,
+        } = object.kind
+        else {
+            unreachable!()
+        };
+        let requested = length.unwrap_or(old);
+        if !length_writable {
+            return Ok(writable != Some(true) && requested == old);
+        }
+        let mut final_length = requested;
+        if requested < old {
+            self.consume_work(object.properties.len().saturating_mul(2))?;
+            let object = self.heap.object_mut(id)?;
+            // Descending deletion stops at the highest non-configurable index.
+            // Index keys have no delete hooks; both scans only visit stored entries.
+            for (key, property) in &object.properties {
+                if !property.configurable
+                    && let Some(index) = array_index(key)
+                {
+                    final_length = final_length.max(index + 1);
+                }
+            }
+            object
+                .properties
+                .retain(|key, _| array_index(key).is_none_or(|index| index < final_length));
+        }
+        self.heap.object_mut(id)?.kind = ObjectKind::Array {
+            length: final_length,
+            length_writable: writable.unwrap_or(true),
+        };
+        Ok(final_length == requested)
+    }
+    pub(crate) fn array_index_blocked(
+        &self,
+        id: ObjectId,
+        key: &JsString,
+    ) -> Result<bool, JsError> {
+        Ok(
+            matches!(self.heap.object(id)?.kind, ObjectKind::Array { length, length_writable: false }
+            if array_index(key).is_some_and(|index| index >= length)),
+        )
+    }
+
     pub(crate) fn define_property(
         &mut self,
         receiver: Value,
@@ -1648,6 +1751,17 @@ impl Vm {
             return self.define_namespace_property(id, &key, &property);
         }
 
+        if key == JsString::from("length")
+            && matches!(self.heap.object(id)?.kind, ObjectKind::Array { .. })
+        {
+            let success =
+                crate::proxy::PartialDescriptor::full(property).apply_array_length(self, id)?;
+            return if success {
+                Ok(())
+            } else {
+                Err(JsError::type_error("Cannot redefine array length"))
+            };
+        }
         let previous = self.own_descriptor(id, &key)?;
         if previous.is_none() {
             self.account_string(&key)?;
@@ -1703,84 +1817,25 @@ impl Vm {
         } else if !self.heap.object(id)?.extensible {
             return Err(JsError::type_error("Object is not extensible"));
         }
-        if key == JsString::from("length")
-            && matches!(self.heap.object(id)?.kind, ObjectKind::Array { .. })
-        {
-            let PropertyKind::Data { value, writable } = property.kind else {
-                return Err(JsError::type_error("Array length cannot be an accessor"));
-            };
-            let number = self.to_number(&value)?;
-            if !number.is_finite()
-                || number < 0.0
-                || number.fract() != 0.0
-                || number > u32::MAX as f64
-            {
-                return Err(JsError::new(ErrorKind::RangeError, "Invalid array length"));
-            }
-            let length = number as u32;
-            if length > self.limits.max_array_length {
-                return Err(JsError::new(
-                    ErrorKind::ExecutionLimit,
-                    "Array length budget exhausted",
-                ));
-            }
-            let o = self.heap.object_mut(id)?;
-            let ObjectKind::Array {
-                length: old,
-                length_writable,
-            } = &mut o.kind
-            else {
-                unreachable!()
-            };
-            if !*length_writable && *old != length {
-                return Err(JsError::type_error("Array length is not writable"));
-            }
-            if length < *old {
-                let mut doomed: Vec<(u32, JsString)> = o
-                    .properties
-                    .keys()
-                    .filter_map(|k| {
-                        array_index(k)
-                            .filter(|i| *i >= length)
-                            .map(|i| (i, k.clone()))
-                    })
-                    .collect();
-                doomed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-                for (index, key) in doomed {
-                    if !o.properties[&key].configurable {
-                        *old = index + 1;
-                        if !writable {
-                            *length_writable = false;
-                        }
-                        return Err(JsError::type_error(
-                            "Cannot truncate non-configurable array element",
-                        ));
-                    }
-                    o.properties.remove(&key);
-                }
-            }
-            *old = length;
-            *length_writable = writable;
-            return Ok(());
-        }
         if let Some(index) = array_index(&key) {
             let o = self.heap.object_mut(id)?;
             if let ObjectKind::Array {
                 length,
                 length_writable,
             } = &mut o.kind
-                && index >= *length
             {
-                if !*length_writable {
+                if index >= *length && !*length_writable {
                     return Err(JsError::type_error("Array length is not writable"));
                 }
-                if index >= self.limits.max_array_length {
+                // The array stores only present indices. Named keys are tracked in order.
+                let occupied = o.properties.len() - o.order.len();
+                if previous.is_none() && occupied >= self.limits.max_array_length as usize {
                     return Err(JsError::new(
                         ErrorKind::ExecutionLimit,
-                        "Array length budget exhausted",
+                        "Array element budget exhausted",
                     ));
                 }
-                *length = index + 1;
+                *length = (*length).max(index + 1);
             }
         }
         let property = self.update_argument_mapping(id, &key, property)?;
@@ -2578,6 +2633,7 @@ impl Vm {
             environment
         };
         let constructible = code.constructible();
+        let legacy_caller = constructible && !code.strict;
         let generator_prototype = match code.kind {
             FunctionKind::Generator => self.realm.generator_prototype,
             FunctionKind::AsyncGenerator => self.realm.async_generator_prototype,
@@ -2596,6 +2652,9 @@ impl Vm {
             Some(prototype),
         )));
         let function = Value::Object(id);
+        if legacy_caller {
+            self.define_data_property(function.clone(), "caller", Value::Null, false, false, false)?;
+        }
         if self_binding {
             self.reserve_binding(&name)?;
             self.heap.environment_mut(environment).bindings.insert(
@@ -2756,6 +2815,7 @@ impl Vm {
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
             self.active_calls.push(code.name.clone());
+            self.enter_legacy_call(id, &code);
             let mut result = self.with_referrer(referrer, |vm| {
                 let invocation = Invocation {
                     function,
@@ -2787,6 +2847,7 @@ impl Vm {
             {
                 error.inspected_calls = self.inspect_call_stack();
             }
+            self.legacy_calls.pop();
             self.active_calls.pop();
             result
         };
@@ -2933,6 +2994,7 @@ impl Vm {
             unreachable!()
         };
         self.call_depth += 1;
+        self.enter_legacy_call(id, &code);
         let result = self.with_referrer(referrer, |vm| {
             let (env, body) = vm.function_environment(
                 &code,
@@ -2954,6 +3016,7 @@ impl Vm {
                 )),
             })
         });
+        self.legacy_calls.pop();
         self.call_depth -= 1;
         let result = result?;
         if matches!(result, Value::Object(_)) {

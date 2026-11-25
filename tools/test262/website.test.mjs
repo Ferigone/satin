@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  completeCounters, count, countersConsistent, findChapter, nativeWebsiteActions, parseOptions, satinFailure, satinFirstDiagnostic, satinSnapshot,
+  allCasesPassed, completeCounters, count, countersConsistent, findChapter, nativeWebsiteActions, parseOptions, satinFailure, satinFirstDiagnostic, satinSnapshot,
 } from './website.mjs';
 
 const initial = `<a href="#" class="nav-link" id="run">Run</a>
@@ -141,4 +141,25 @@ test('long full-suite budgets apply to execution while startup and Results waits
   assert.equal(steps.find(s => s.name === 'run').timeout_ms, 21600000);
   assert.equal(steps.find(s => s.name === 'results').timeout_ms, 15000);
   assert.throws(() => parseOptions(['--satin', 'satin', '--timeout-ms', '21600001']), /Invalid arguments/);
+});
+
+test('all-pass mode requires verified completion and exact Results counters', () => {
+  const opts = parseOptions(['--satin', 'satin', '--require-all-pass']);
+  assert.equal(opts.native, true);
+  assert.equal(opts.until, 'complete');
+  assert.throws(() => parseOptions(['--satin', 'satin', '--until', 'first', '--require-all-pass']));
+  const run = {websiteRun: 'complete', selection: {planned: 2}, snapshots: {results: {counters: {
+    planned: 2, ran: 2, pass: 2, fail: 0, failedToLoad: 0,
+  }}}};
+  assert.equal(allCasesPassed(run), true);
+  const counters = run.snapshots.results.counters;
+  for (const key of Object.keys(counters)) counters[key] = String(counters[key]);
+  assert.equal(allCasesPassed(run), true);
+  assert.equal(allCasesPassed({...run, websiteRun: 'partial'}), false);
+  counters.pass = '1';
+  counters.fail = '1';
+  assert.equal(allCasesPassed(run), false);
+  counters.pass = '2';
+  counters.fail = '';
+  assert.equal(allCasesPassed(run), false);
 });
