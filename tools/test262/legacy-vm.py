@@ -117,6 +117,11 @@ def run_case(command, timeout, request, workers):
         reply = json.loads(line)
         if not isinstance(reply, dict) or reply.get('id') != request['id'] or reply.get('status') not in ('pass', 'fail', 'harness_error'):
             raise ValueError('invalid worker reply')
+        if 'diagnostic_profile' in request:
+            settings = reply.get('diagnostic_profile')
+            if (not isinstance(settings, dict) or settings.get('name') != request['diagnostic_profile']
+                    or settings.get('max_instructions') != request['max_instructions']):
+                raise ValueError('worker did not confirm the requested diagnostic settings')
         return reply
     except (OSError, EOFError, Empty, ValueError) as err:
         reason = 'worker deadline exceeded' if isinstance(err, Empty) else str(err)
@@ -136,10 +141,18 @@ def main():
     parser.add_argument('--filter', help='only run paths containing this substring')
     parser.add_argument('--require-all-pass', action='store_true',
                         help='exit 1 if any selected case fails')
+    parser.add_argument('--diagnostic-profile', choices=['web-vm-alpha37'],
+                        help='record isolated VM diagnostics using versioned document VM limits')
+    parser.add_argument('--max-instructions', type=int,
+                        help='per-script fuel for --diagnostic-profile (1 to 100000000, default 1000000)')
     args = parser.parse_args()
+    if args.max_instructions is not None:
+        if not args.diagnostic_profile or not 1 <= args.max_instructions <= 100_000_000:
+            parser.error('--max-instructions requires --diagnostic-profile and a value from 1 to 100000000')
     if args.jobs <= 0 or args.timeout <= 0:
         parser.error('--jobs and --timeout must be positive')
-    if not shutil.which(args.worker):
+    executable = shutil.which(args.worker)
+    if not executable:
         parser.error(f'worker executable was not found: {args.worker}')
     try:
         catalog = requests(args.website)
@@ -149,6 +162,18 @@ def main():
                 if not args.filter or args.filter in case['id']]
     if not selected:
         parser.error('empty selection')
+    if args.diagnostic_profile:
+        fuel = args.max_instructions or 1_000_000
+        for _, case in selected:
+            case.update(diagnostic_profile=args.diagnostic_profile, max_instructions=fuel)
+        digest = hashlib.sha256()
+        with Path(executable).open('rb') as worker:
+            for chunk in iter(lambda: worker.read(1024 * 1024), b''):
+                digest.update(chunk)
+        provenance = {'requested_profile': args.diagnostic_profile, 'max_instructions': fuel,
+                      'corpus_revision': REVISION, 'worker_sha256': digest.hexdigest(),
+                      'process_timeout_seconds': args.timeout}
+        print('Isolated VM diagnostic', json.dumps(provenance, sort_keys=True), flush=True)
     totals = {}
     workers = Queue()
     try:
@@ -156,6 +181,8 @@ def main():
             results = pool.map(lambda item: run_case(args.worker, args.timeout, item[1], workers), selected)
             for completed, ((index, _), result) in enumerate(zip(selected, results), 1):
                 result['index'] = index
+                if args.diagnostic_profile:
+                    result['diagnostic_run'] = provenance
                 dest.write(json.dumps(result, ensure_ascii=True, separators=(',', ':')) + '\n')
                 totals[result['status']] = totals.get(result['status'], 0) + 1
                 if completed % 500 == 0:

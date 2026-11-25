@@ -65,3 +65,15 @@ The runner verifies the Git blob hashes of the catalogs and helper scripts and c
 Add `--require-all-pass` to return exit code 1 when a selected case fails. Exit code 2 indicates a worker or input problem, including an external timeout. The default reports all results and returns 0 when the run completes without worker errors. Rows with `verdict_source: "website-callback"` received a result from the original validator. Rows marked `"vm"` identify a resource stop, unsupported feature, or missing completion. The VM runs promise jobs. Browser timers, rendering, and frame teardown require the native probe. For example, `built-ins/Object/defineProperty/S15.2.3.6_A1.js` also exercises a form element when `document.createElement` exists. Only a browser run exercises that branch.
 
 The same fixture can test different language rules in different revisions. Case 1,680 of the legacy site replaces an iterator’s `next` method inside a `for…of` loop and expects the replacement to terminate iteration. The modern test at the same path throws if the loop reads `next` again and checks that it read the method exactly once. [2016 fixture](https://github.com/v8/test262/blob/e1166500a0d26c8b90e704a31c6646992573f632/test/language/statements/for-of/iterator-next-reference.js) · [Modern pinned fixture](https://github.com/tc39/test262/blob/48221d7c1f7745dc13e420a2e850a248c0b2afb4/test/language/statements/for-of/iterator-next-reference.js)
+
+### Isolated VM resource diagnostics
+
+The legacy worker normally uses its standalone VM limits, including 1,000,000 instructions per script. A separate diagnostic can apply Satin alpha.37 document VM limits and a chosen fuel budget to a selected set of original cases.
+
+```sh
+python3 tools/test262/legacy-vm.py --website /path/to/website --worker target/release/rb-js \
+  --output unicode-diagnostic.jsonl --filter S7.4_A5.js --diagnostic-profile web-vm-alpha37 \
+  --max-instructions 100000000 --timeout 30
+```
+
+The diagnostic accepts 1 through 100,000,000 instructions per script and defaults to 1,000,000. Each result records the requested profile, fuel, corpus revision, worker SHA-256 and process timeout. Completed worker responses also include the VM settings actually applied. Compare these isolated VM results separately from default VM reports and from the browser’s Run All counters. The browser additionally schedules callbacks, enforces timer deadlines, and shares resources across nested frame scripts.

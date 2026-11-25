@@ -5,9 +5,64 @@ use rust_browser_javascript::{ErrorKind, JsError, Value, Vm, VmLimits};
 use serde_json::{Value as Json, json};
 use std::{cell::RefCell, rc::Rc};
 
+/// The versioned profile copies document VM settings from alpha.37's
+/// engine/src/script.rs. It runs isolated scripts without a browser or timer.
+#[derive(Clone, Copy, serde::Deserialize)]
+pub(super) enum DiagnosticProfile {
+    #[serde(rename = "web-vm-alpha37")]
+    WebVmAlpha37,
+}
+
+impl DiagnosticProfile {
+    fn limits(self, ordinary: VmLimits) -> VmLimits {
+        match self {
+            Self::WebVmAlpha37 => VmLimits {
+                shared_array_buffer: false,
+                max_string_units: 64 * 1024 * 1024,
+                max_source_bytes: 12 * 1024 * 1024,
+                max_heap_objects: 512 * 1024,
+                max_heap_bytes: 512 * 1024 * 1024,
+                max_bytecode_depth: 96,
+                buffer_units_per_instruction: 1024,
+                ..ordinary
+            },
+        }
+    }
+
+    fn settings(self, limits: &VmLimits) -> Json {
+        json!({
+            "name": "web-vm-alpha37",
+            "source_commit": "014e7754608bb500ba2c32b80af1094793ae2e0b",
+            "max_instructions": limits.max_instructions,
+            "buffer_units_per_instruction": limits.buffer_units_per_instruction,
+            "max_heap_bytes": limits.max_heap_bytes,
+            "max_heap_objects": limits.max_heap_objects,
+            "max_call_depth": limits.max_call_depth,
+            "max_bytecode_depth": limits.max_bytecode_depth,
+            "max_source_bytes": limits.max_source_bytes,
+            "max_string_units": limits.max_string_units,
+            "max_array_length": limits.max_array_length,
+            "max_pending_jobs": limits.max_pending_jobs,
+            "shared_array_buffer": limits.shared_array_buffer,
+        })
+    }
+}
+
 pub(super) fn execute(request: Request, limits: VmLimits) -> Json {
+    let vm = Vm::with_limits(match request.diagnostic_profile {
+        Some(profile) => profile.limits(limits),
+        None => limits,
+    });
+    let settings = request.diagnostic_profile.map(|profile| profile.settings(vm.limits()));
+    let mut result = execute_in_vm(request, vm);
+    if let Some(settings) = settings {
+        result["diagnostic_profile"] = settings;
+    }
+    result
+}
+
+fn execute_in_vm(request: Request, mut vm: Vm) -> Json {
     let id = &request.id;
-    let mut vm = Vm::with_limits(limits);
     let observation = Rc::new(RefCell::new(None));
     let report = observation.clone();
     let record = vm.new_native_function("testRun", move |vm, _, args| {
