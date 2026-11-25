@@ -28,18 +28,21 @@ pub(super) fn install(
     }
     let state = state.clone();
     method(vm, document, "createElementNS", move |vm, this, args| {
-        if node(&state, &this)? != state.borrow().document.root {
-            return Err(JsError::type_error("Expected a Document"));
-        }
-        let namespace = text(vm, arg(args, 0))?;
+        let receiver = super::document_node(&state, &this)?;
+        webidl::required(args, 2, "Document.createElementNS")?;
+        let value = arg(args, 0);
+        let namespace = if value.is_nullish() {
+            String::new()
+        } else {
+            text(vm, value)?
+        };
         let namespace = match namespace.as_str() {
+            "" => Namespace::Null,
             "http://www.w3.org/1999/xhtml" => Namespace::Html,
             "http://www.w3.org/2000/svg" => Namespace::Svg,
             "http://www.w3.org/1998/Math/MathML" => Namespace::MathMl,
             _ => {
-                return Err(unsupported(
-                    "Additional/null XML namespaces are not implemented",
-                ));
+                return Err(unsupported("Additional XML namespaces are not implemented"));
             }
         };
         let tag = text(vm, arg(args, 1))?;
@@ -62,9 +65,15 @@ pub(super) fn install(
                 attrs: Default::default(),
             },
         )?;
+        state.borrow_mut().document.adopt(id, receiver);
         if namespace != Namespace::Html {
             state.borrow_mut().document.namespaces.insert(id, namespace);
+            return wrap(vm, &state, Some(id));
         }
-        wrap(vm, &state, Some(id))
+        if receiver == state.borrow().document.root {
+            custom_elements::created(vm, &state, id)
+        } else {
+            wrap(vm, &state, Some(id))
+        }
     })
 }

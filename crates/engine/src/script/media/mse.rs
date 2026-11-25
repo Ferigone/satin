@@ -77,6 +77,7 @@ impl Drop for Ranges {
 }
 
 enum Task {
+    RateChange(crate::dom::NodeId),
     Event(RootId, &'static str),
     Opened(MediaKey),
     BufferUpdated {
@@ -176,6 +177,26 @@ fn intersect(left: &[Range], right: &[Range]) -> Vec<Range> {
 impl Store {
     pub(super) fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()
+    }
+
+    pub(super) fn reset_rate_changes(
+        &mut self,
+        node: crate::dom::NodeId,
+        changed: bool,
+    ) -> Result<(), JsError> {
+        // The media load algorithm discards pending tasks for the old load.
+        self.tasks
+            .retain(|task| !matches!(task, Task::RateChange(target) if *target == node));
+        if changed {
+            self.queue_rate_change(node)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn queue_rate_change(&mut self, node: crate::dom::NodeId) -> Result<(), JsError> {
+        self.ensure_tasks(1)?;
+        self.tasks.push_back(Task::RateChange(node));
+        Ok(())
     }
 
     fn ensure_tasks(&self, additional: usize) -> Result<(), JsError> {
@@ -332,6 +353,9 @@ pub(super) fn run_next(vm: &mut Vm, state: &Shared) -> Result<bool, JsError> {
     let task = state.borrow_mut().media.mse.tasks.pop_front();
     match task {
         None => return Ok(false),
+        Some(Task::RateChange(node)) => {
+            super::event(vm, state, node, "ratechange")?;
+        }
         Some(Task::Event(root, name)) => {
             let events = state
                 .borrow()

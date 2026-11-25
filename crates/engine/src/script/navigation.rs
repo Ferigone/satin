@@ -15,7 +15,7 @@ use crate::{
     layout::Viewport,
     loader::{
         DocumentInput, DocumentResource, OpenedPage, ResourceBody, ResourceKind, ResourceRequest,
-        image_asset_key,
+        CLASSIC_SCRIPT_LIMIT, DOCUMENT_CLASSIC_SCRIPT_LIMIT, image_asset_key,
     },
     network::CredentialsMode,
 };
@@ -32,7 +32,6 @@ const RESOURCE_COUNT: usize = 768;
 const RESOURCE_URL_BYTES: usize = 24 * 1024 * 1024;
 const CONCURRENT_RESOURCES: usize = 4;
 const DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
-const CLASSIC_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 const STYLESHEET_BYTES: usize = 8 * 1024 * 1024;
 const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(18);
 const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(36);
@@ -621,6 +620,12 @@ impl DocumentSession {
                 let step = step.map_err(|error| error.to_string())?;
                 if let Some(realm) = runtime {
                     mutation_observers::schedule(&mut realm.vm, &realm.state);
+                    if let Some(parser) = &self.parser {
+                        ParserHost::construct_element(parser, &mut realm.vm, &realm.state)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    custom_elements::flush(&mut realm.vm, &realm.state)
+                        .map_err(|error| error.to_string())?;
                 }
                 self.dirty = true;
                 match step {
@@ -1027,7 +1032,9 @@ impl DocumentSession {
     }
 
     fn classic_code(&mut self, source: String, name: String, identifier: Arc<Url>) -> ScriptCode {
-        if source.len() > 1024 * 1024 || self.classic_bytes + source.len() > CLASSIC_SOURCE_BYTES {
+        if source.len() > CLASSIC_SCRIPT_LIMIT
+            || source.len() > DOCUMENT_CLASSIC_SCRIPT_LIMIT - self.classic_bytes
+        {
             return ScriptCode::Failed("Classic script source budget exceeded".into());
         }
         self.classic_bytes += source.len();
@@ -1388,6 +1395,7 @@ pub(super) fn install_parser_methods(
     vm: &mut Vm,
     state: &Shared,
     document: Value,
+    errors: &dom_api::Errors,
 ) -> Result<(), JsError> {
-    parser_host::install(vm, state, document)
+    parser_host::install(vm, state, document, errors)
 }

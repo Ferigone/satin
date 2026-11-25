@@ -63,13 +63,82 @@ fn ordinary_grammar_compile_execute_and_drop_on_one_mib_stack() {
 }
 
 #[test]
+fn ordinary_method_call_chains_keep_receiver_and_evaluation_order_on_a_small_stack() {
+    small_stack(|| {
+        let calls = ".put(next())".repeat(240);
+        let script = format!(r#"
+            let seq = 0, total = 0;
+            function next() {{ return ++seq; }}
+            const builder = {{ get put() {{
+                const expected = seq + 1;
+                return function(value) {{
+                    if (this !== builder || value !== expected) throw 'order or receiver';
+                    total += value;
+                    return this;
+                }};
+            }}, build() {{ return this === builder ? total : -1; }} }};
+            builder{calls}.build()
+        "#);
+        let mut vm = Vm::new();
+        vm.check_syntax(&script).unwrap();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Number(28_920.0));
+        assert_eq!(
+            vm.eval(r#"
+                class Parent { start() { return this; } }
+                class Child extends Parent {
+                    run() { return super.start().finish().finish() === this; }
+                    finish() { return this; }
+                }
+                let child = new Child(), missing = null, effects = 0;
+                missing?.start(++effects).finish(++effects);
+                let threw = false;
+                try { (missing?.start)(++effects).finish(); } catch (e) { threw = true; }
+                child.run() && threw && effects === 1 && (child.finish().finish).call(child) === child
+            "#).unwrap(),
+            Value::Bool(true)
+        );
+    });
+}
+
+#[test]
+fn nested_first_arguments_preserve_callee_lookup_and_later_argument_order() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        let deep = format!(
+            "function plus(a,b){{return a+b}} {}0{}",
+            "plus(".repeat(180),
+            ", 1)".repeat(180)
+        );
+        vm.check_syntax(&deep).unwrap();
+        assert_eq!(vm.eval(&deep).unwrap(), Value::Number(180.0));
+        assert_eq!(vm.eval(r#"
+            var log = '', ns = { get f() {
+                log += 'g';
+                return function(a,b) { log += this === ns ? 't' : 'x'; return a+b; };
+            } };
+            function side(s) { log += s; return 1; }
+            var sum;
+            with (ns) { sum = f(f(f(side('a'), side('b')), ...[side('c')]), side('d')); }
+            function lexical() { let secret = 42; return plus(eval('secret'), 0); }
+            sum === 4 && log === 'gggabtctdt' && lexical() === 42
+        "#).unwrap(), Value::Bool(true));
+        assert_eq!(vm.eval(r#"
+            function id(x) { return x; }
+            function obj(x) { return { add(y) { return x+y } }; }
+            plus(id(obj(4).add(2)), 3) === 9
+        "#).unwrap(), Value::Bool(true));
+    });
+}
+
+#[test]
 fn standalone_blocks_still_charge_parser_recursion() {
     small_stack(|| {
+        // Parenthesized arguments still recurse through cover grammar.
         let source = format!(
             "function bump(x){{return x+1;}} let result; {}result = {}0{};{} result;",
             "{".repeat(17),
-            "bump(".repeat(10),
-            ")".repeat(10),
+            "bump((".repeat(10),
+            "))".repeat(10),
             "}".repeat(17),
         );
         let error = Vm::new().check_syntax(&source).unwrap_err();
@@ -171,7 +240,7 @@ fn recursive_calls_functions_and_classes_stay_bounded_on_one_mib_stack() {
         // Each shape keeps different parser frames live at the guard. Do
         // not assume that the same grammar depth means the same stack use.
         let cases = [
-            ("calls", format!("{}0{}", "f(".repeat(128), ")".repeat(128))),
+            ("member calls", format!("{}0{}", "o.f(".repeat(128), ")".repeat(128))),
             (
                 "function expressions with control blocks",
                 format!(
@@ -245,7 +314,7 @@ fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
             std::iter::repeat_n("1", 4096)
                 .collect::<Vec<_>>()
                 .join("**"),
-            format!("{}1", "0?1:".repeat(4096)),
+            format!("{}1{}", "0?".repeat(4096), ":1".repeat(4096)),
         ];
         for source in chains {
             let mut vm = Vm::new();
@@ -256,6 +325,24 @@ fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
                 ErrorKind::ExecutionLimit
             );
         }
+    });
+}
+
+#[test]
+fn conditional_alternates_select_one_arm_on_one_mib_stack() {
+    small_stack(|| {
+        let arms = (0..180)
+            .map(|i| format!("visit({i}) ? selected({i}) : "))
+            .collect::<String>();
+        let source = format!(r#"
+            let visits = 0, selections = 0, target = 137;
+            function visit(i) {{ visits++; return i === target; }}
+            function selected(i) {{ selections++; return i; }}
+            function pick() {{ return {arms} -1; }}
+            const first = pick(); target = 200;
+            first === 137 && visits === 138 && pick() === -1 && visits === 318 && selections === 1;
+        "#);
+        assert_eq!(Vm::new().eval(&source).unwrap(), Value::Bool(true));
     });
 }
 
@@ -455,5 +542,36 @@ fn nested_identifier_expression_statements_use_their_expression_budget() {
             count;
         "#;
         assert_eq!(Vm::new().eval(script).unwrap(), Value::Number(4.0));
+    });
+}
+
+#[test]
+fn else_if_ladders_remain_flat_through_execution() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        let alternatives = (0..40)
+            .map(|n| format!("if (++seen === {n}) {n}; else "))
+            .collect::<String>();
+        let source = format!("var seen=0; {alternatives} 99;");
+        assert_eq!(vm.eval(&source).unwrap(), Value::Number(99.0));
+        assert_eq!(vm.eval("seen").unwrap(), Value::Number(40.0));
+        // The unbraced inner if consumes its own else before the outer tail.
+        assert_eq!(
+            vm.eval("if (true) if (false) 1; else 2; else if (true) 3;").unwrap(),
+            Value::Number(2.0)
+        );
+        let wide = format!("{} 7;", "if(false) 1; else ".repeat(512));
+        assert_eq!(vm.eval(&wide).unwrap(), Value::Number(7.0));
+        let generator = r#"
+            function* select() {
+                if (yield 1) { return 11; }
+                else if (yield 2) { return yield 22; }
+                else { return 33; }
+            }
+            const it = select();
+            it.next().value === 1 && it.next(false).value === 2 &&
+                it.next(true).value === 22 && it.next(44).value === 44;
+        "#;
+        assert_eq!(vm.eval(generator).unwrap(), Value::Bool(true));
     });
 }

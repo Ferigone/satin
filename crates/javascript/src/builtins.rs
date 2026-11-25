@@ -2223,31 +2223,7 @@ fn install_number(vm: &mut Vm) {
         if radix == 10 || !n.is_finite() {
             return Ok(Value::from(crate::vm::number_string(n)));
         }
-        if n.fract() != 0.0 || n.abs() > u64::MAX as f64 {
-            return Err(JsError::new(
-                ErrorKind::UnsupportedFeature,
-                "Non-decimal fractional number formatting is not implemented",
-            ));
-        }
-        let mut value = n.abs() as u64;
-        let mut out = Vec::new();
-        loop {
-            let digit = (value % radix as u64) as u8;
-            out.push(if digit < 10 {
-                b'0' + digit
-            } else {
-                b'a' + digit - 10
-            });
-            value /= radix as u64;
-            if value == 0 {
-                break;
-            }
-        }
-        if n < 0.0 {
-            out.push(b'-');
-        }
-        out.reverse();
-        Ok(Value::from(String::from_utf8(out).unwrap()))
+        Ok(number_format::non_decimal(n, radix as u32).into())
     });
     number_format::install(vm, proto);
     let boolean_proto = Value::Object(vm.realm.boolean_prototype);

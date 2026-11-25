@@ -103,6 +103,15 @@ impl Bridge {
                     key: native_key(key),
                     time,
                 },
+                MediaCommand::PlaybackRate {
+                    key,
+                    revision,
+                    value,
+                } => Command::PlaybackRate {
+                    key: native_key(key),
+                    revision,
+                    value,
+                },
                 MediaCommand::Volume { key, value } => Command::Volume {
                     key: native_key(key),
                     value,
@@ -247,6 +256,9 @@ impl Bridge {
             EventKind::Playing => MediaUpdate::Playing,
             EventKind::Paused => MediaUpdate::Paused,
             EventKind::Waiting => MediaUpdate::Waiting,
+            EventKind::RateRejected { revision, actual } => {
+                MediaUpdate::RateRejected { revision, actual }
+            }
             EventKind::Seeking => MediaUpdate::Seeking,
             EventKind::Seeked(time) => MediaUpdate::Seeked(time),
             EventKind::Time(time) => MediaUpdate::Time(time),

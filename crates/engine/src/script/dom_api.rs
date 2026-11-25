@@ -39,36 +39,52 @@ fn charge(
     // Computing this conservative estimate is itself bounded by the arena node
     // budget. Charge before the actual operation, including on invalid requests,
     // so catching repeated hierarchy errors cannot evade native task accounting.
-    let units = {
-        let state = state.borrow();
-        let document = &state.document;
-        let mut units = extra.saturating_add(parent.map_or(0, |id| {
-            document.nodes[id.0]
-                .children
-                .len()
-                .saturating_add(document.template_contents.len())
-                .saturating_add(DOM_DEPTH_LIMIT)
-        }));
-        let mut pending = roots.to_vec();
-        let mut seen = HashSet::new();
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            units = units.saturating_add(1);
-            if copy_bytes {
-                units = units.saturating_add(kind_bytes(&document.nodes[id.0].kind));
-            }
-            if !matches!(walk, Walk::Root) {
-                pending.extend(document.nodes[id.0].children.iter().copied());
-            }
-            if matches!(walk, Walk::Ownership) {
-                pending.extend(document.template_contents.get(&id).copied());
-            }
+    let state = state.borrow();
+    vm.charge_work(tree_work(
+        &state.document,
+        parent,
+        roots,
+        walk,
+        copy_bytes,
+        extra,
+    ))
+}
+
+fn tree_work(
+    document: &Document,
+    parent: Option<NodeId>,
+    roots: &[NodeId],
+    walk: Walk,
+    copy_bytes: bool,
+    extra: usize,
+) -> usize {
+    let mut units = extra.saturating_add(parent.map_or(0, |id| {
+        document.nodes[id.0]
+            .children
+            .len()
+            .saturating_add(document.template_contents.len())
+            .saturating_add(document.shadow_hosts.len())
+            .saturating_add(DOM_DEPTH_LIMIT)
+    }));
+    let mut pending = roots.to_vec();
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
         }
-        units
-    };
-    vm.charge_work(units)
+        units = units.saturating_add(1);
+        if copy_bytes {
+            units = units.saturating_add(kind_bytes(&document.nodes[id.0].kind));
+        }
+        if !matches!(walk, Walk::Root) {
+            pending.extend(document.nodes[id.0].children.iter().copied());
+        }
+        if matches!(walk, Walk::Ownership) {
+            pending.extend(document.template_contents.get(&id).copied());
+            pending.extend(document.shadow_roots.get(&id).map(|tree| tree.root));
+        }
+    }
+    units
 }
 
 #[derive(Debug)]
@@ -167,7 +183,12 @@ pub(super) fn clone_exception(
 }
 
 impl Errors {
-    pub(super) fn exception(&self, vm: &mut Vm, name: &'static str, message: &'static str) -> JsError {
+    pub(super) fn exception(
+        &self,
+        vm: &mut Vm,
+        name: &'static str,
+        message: &'static str,
+    ) -> JsError {
         self.convert(vm, Failure::Dom(name, message))
     }
 
@@ -254,7 +275,7 @@ struct Staged {
     namespaces: BTreeMap<NodeId, crate::dom::Namespace>,
     attribute_namespaces: BTreeMap<(NodeId, String), crate::dom::AttributeNamespace>,
     source_ids: Vec<NodeId>,
-    cloning: bool,
+    started_script_clones: Vec<NodeId>,
     inert_scripts: Vec<NodeId>,
     roots: Vec<NodeId>,
     bytes: usize,
@@ -377,6 +398,15 @@ impl Staged {
         staged.check(existing, arena_bytes, limits)?;
         Ok(staged)
     }
+    fn copy_script_flags(&mut self, started: impl Fn(NodeId) -> bool) {
+        self.started_script_clones = self
+            .source_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &source)| started(source).then_some(NodeId(index)))
+            .collect();
+    }
+
     fn check(&self, existing: usize, bytes: usize, limits: Limits) -> Checked<()> {
         if existing.saturating_add(self.nodes.len()) > limits.nodes {
             return Err(budget("DOM node budget exceeded"));
@@ -422,11 +452,10 @@ impl Staged {
                 .dynamic_scripts
                 .mark_fragment_inert(NodeId(base + id.0));
         }
-        if self.cloning {
-            for (index, source) in self.source_ids.into_iter().enumerate() {
-                let clone = NodeId(base + index);
-                state.dynamic_scripts.clone_state(source, clone);
-            }
+        for id in self.started_script_clones {
+            state
+                .dynamic_scripts
+                .mark_clone_started(NodeId(base + id.0));
         }
         state.dom_bytes = state.dom_bytes.saturating_add(self.bytes);
         roots
@@ -499,7 +528,8 @@ fn parent_depth(
         }
         current = document.nodes[id.0]
             .parent
-            .or_else(|| owners.get(&id).copied());
+            .or_else(|| owners.get(&id).copied())
+            .or_else(|| document.shadow_hosts.get(&id).copied());
     }
     Ok(depth)
 }
@@ -525,6 +555,9 @@ fn check_depth(view: &View<'_>, roots: &[NodeId], base: usize, limits: Limits) -
         );
         if let Some(content) = view.content(id) {
             pending.push((content, depth));
+        }
+        if let Some(tree) = view.doc.shadow_roots.get(&id) {
+            pending.push((tree.root, depth));
         }
     }
     Ok(())
@@ -564,6 +597,10 @@ impl Plan {
         for &id in &self.removed {
             mutation_observers::removing(state, self.parent, id, true);
             state.document.nodes[id.0].parent = None;
+        }
+        let destination = state.document.node_document(self.parent);
+        for &id in &self.roots {
+            state.document.adopt(id, destination);
         }
         for &id in &self.children {
             state.document.nodes[id.0].parent = Some(self.parent);
@@ -637,7 +674,7 @@ fn plan(
     let mut roots = Vec::new();
     let mut converted = HashSet::new();
     for &id in input {
-        if id == document.root {
+        if document.is_document(id) {
             return Err(hierarchy("A Document cannot be inserted"));
         }
         if matches!(view.node(id).kind, NodeKind::Document) {
@@ -665,8 +702,12 @@ fn plan(
     check_depth(&view, &roots, depth, limits)?;
     for &id in &roots {
         match view.node(id).kind {
-            NodeKind::Element { .. } | NodeKind::Comment(_) | NodeKind::Text(_) => {}
-            NodeKind::Doctype { .. } if parent == document.root => {}
+            NodeKind::Element { .. }
+            | NodeKind::Comment(_)
+            | NodeKind::Text(_)
+            | NodeKind::Cdata(_)
+            | NodeKind::ProcessingInstruction { .. } => {}
+            NodeKind::Doctype { .. } if document.is_document(parent) => {}
             _ => {
                 return Err(hierarchy(
                     "This node kind cannot be inserted into this parent",
@@ -712,14 +753,14 @@ fn plan(
         insertion = Some(children.len());
         children.extend(roots.iter().copied());
     }
-    if parent == document.root {
+    if document.is_document(parent) {
         let mut element = false;
         let mut doctype = false;
         for &id in &children {
             match view.node(id).kind {
                 NodeKind::Element { .. } if !element => element = true,
                 NodeKind::Doctype { .. } if !doctype && !element => doctype = true,
-                NodeKind::Comment(_) => {}
+                NodeKind::Comment(_) | NodeKind::ProcessingInstruction { .. } => {}
                 _ => {
                     return Err(hierarchy(
                         "A Document permits one element and one preceding doctype, and no text children",
@@ -774,6 +815,7 @@ fn context(state: &State, id: NodeId, body_fallback: bool) -> FragmentContext<'_
         }
         current = document.nodes[node.0].parent;
     }
+    let active = document.node_document(id) == document.root;
     FragmentContext {
         tag,
         namespace: document.namespace(id),
@@ -781,8 +823,12 @@ fn context(state: &State, id: NodeId, body_fallback: bool) -> FragmentContext<'_
             NodeKind::Element { attrs, .. } => Some(attrs),
             _ => None,
         },
-        scripting_enabled: document.scripting_enabled,
-        quirks_mode: document.quirks_mode,
+        scripting_enabled: active && document.scripting_enabled,
+        quirks_mode: if active {
+            document.quirks_mode
+        } else {
+            crate::dom::QuirksMode::NoQuirks
+        },
         form_ancestor,
     }
 }
@@ -1078,22 +1124,22 @@ fn install_mutations(
         let id = node(&get_state, &this)?;
         let null = {
             let state = get_state.borrow();
-            id == state.document.root
+            state.document.is_document(id)
                 || matches!(state.document.nodes[id.0].kind, NodeKind::Doctype { .. })
         };
         if !null {
             charge(vm, &get_state, None, &[id], Walk::Children, true, 0)?;
         }
         let state = get_state.borrow();
-        if id == state.document.root
+        if state.document.is_document(id)
             || matches!(state.document.nodes[id.0].kind, NodeKind::Doctype { .. })
         {
             return Ok(Value::Null);
         }
-        match &state.document.nodes[id.0].kind {
-            NodeKind::Text(value) | NodeKind::Comment(value) => Ok(value.clone().into()),
-            _ => Ok(state.document.text(id).into()),
-        }
+        Ok(match state.document.nodes[id.0].kind.character_data() {
+            Some(value) => value.clone().into(),
+            None => state.document.text(id).into(),
+        })
     });
     let set_state = state.clone();
     let set_errors = errors.clone();
@@ -1114,16 +1160,17 @@ fn install_mutations(
             false,
             value.len(),
         )?;
-        if matches!(
-            set_state.borrow().document.nodes[id.0].kind,
-            NodeKind::Text(_) | NodeKind::Comment(_)
-        ) {
+        if set_state.borrow().document.nodes[id.0]
+            .kind
+            .character_data()
+            .is_some()
+        {
             set_text_and_react(vm, &set_state, id, value)?;
             return Ok(Value::Undefined);
         }
         let result = {
             let mut state = set_state.borrow_mut();
-            if id == state.document.root
+            if state.document.is_document(id)
                 || matches!(state.document.nodes[id.0].kind, NodeKind::Doctype { .. })
             {
                 return Ok(Value::Undefined);
@@ -1165,6 +1212,51 @@ fn html_string(vm: &mut Vm, value: Value) -> Result<String, JsError> {
     } else {
         text(vm, value)
     }
+}
+
+pub(super) fn install_shadow_html(
+    vm: &mut Vm,
+    state: &Shared,
+    prototype: Value,
+    errors: &Errors,
+) -> Result<(), JsError> {
+    let get_state = state.clone();
+    let get = vm.new_native_function("get innerHTML", move |vm, this, _| {
+        let root = node(&get_state, &this)?;
+        if !get_state.borrow().document.shadow_hosts.contains_key(&root) {
+            return Err(JsError::type_error("Expected a ShadowRoot receiver"));
+        }
+        charge(vm, &get_state, None, &[root], Walk::Children, true, 0)?;
+        Ok(get_state.borrow().document.inner_html(root).into())
+    });
+    let set_state = state.clone();
+    let errors = errors.clone();
+    let set = vm.new_native_function("set innerHTML", move |vm, this, args| {
+        let root = node(&set_state, &this)?;
+        let host = set_state
+            .borrow()
+            .document
+            .shadow_hosts
+            .get(&root)
+            .copied()
+            .ok_or_else(|| JsError::type_error("Expected a ShadowRoot receiver"))?;
+        let source = html_string(vm, arg(args, 0))?;
+        charge(
+            vm,
+            &set_state,
+            Some(root),
+            &[],
+            Walk::Root,
+            false,
+            source.len().saturating_mul(4),
+        )?;
+        let candidates = insert_html(&set_state, root, host, false, None, None, true, &source)
+            .map_err(|failure| errors.convert(vm, failure))?;
+        mutation_observers::schedule(vm, &set_state);
+        dynamic_scripts::post_connection(vm, &set_state, candidates)?;
+        Ok(Value::Undefined)
+    });
+    vm.define_accessor(prototype, "innerHTML", Some(get), Some(set))
 }
 fn install_html(
     vm: &mut Vm,
@@ -1217,7 +1309,7 @@ fn install_html(
                 let Some(parent) = parent else {
                     return Ok(Value::Undefined);
                 };
-                if parent == set_state.borrow().document.root {
+                if set_state.borrow().document.is_document(parent) {
                     return Err(errors.convert(
                         vm,
                         Failure::Dom(
@@ -1266,7 +1358,7 @@ fn install_html(
                     "afterbegin" => Ok((id, state.document.nodes[id.0].children.first().copied())),
                     "beforeend" => Ok((id, None)),
                     "beforebegin" | "afterend" => match state.document.nodes[id.0].parent {
-                        Some(parent) if parent != state.document.root => {
+                        Some(parent) if !state.document.is_document(parent) => {
                             let before = if position == "beforebegin" {
                                 Some(id)
                             } else {
@@ -1317,6 +1409,146 @@ fn install_html(
     )
 }
 
+pub(super) fn new_fragment(
+    vm: &mut Vm,
+    state: &Shared,
+    errors: &Errors,
+    prototype: Value,
+) -> Result<Value, JsError> {
+    charge(vm, state, None, &[], Walk::Root, false, 1)?;
+    let id = {
+        let mut state = state.borrow_mut();
+        let staged = Staged::singleton(NodeKind::Document);
+        staged
+            .check(state.document.nodes.len(), state.dom_bytes, LIMITS)
+            .map_err(|failure| errors.convert(vm, failure))?;
+        staged.commit(&mut state)[0]
+    };
+    wrap_new_node(vm, state, id, prototype)
+}
+
+/// Build a detached copy in the target arena. Source IDs stay relative to
+/// their own document until staging has mapped the tree to fresh indices.
+fn stage_clone(source: &Document, id: NodeId, deep: bool, target: &State) -> Checked<Staged> {
+    let base = target.document.nodes.len();
+    let staged = Staged::from_forest(source, &[id], deep, base, target.dom_bytes, LIMITS)?;
+    check_depth(
+        &View {
+            doc: &target.document,
+            staged: Some(&staged),
+        },
+        &staged.global_roots(base),
+        0,
+        LIMITS,
+    )?;
+    Ok(staged)
+}
+
+fn clone_local_node(
+    vm: &mut Vm,
+    host: &Shared,
+    id: NodeId,
+    destination: NodeId,
+    deep: bool,
+    errors: &Errors,
+) -> Result<Value, JsError> {
+    if host.borrow().document.shadow_hosts.contains_key(&id) {
+        return Err(errors.exception(
+            vm,
+            "NotSupportedError",
+            "Shadow roots cannot be cloned or imported directly",
+        ));
+    }
+    charge(
+        vm,
+        host,
+        None,
+        &[id],
+        if deep { Walk::Ownership } else { Walk::Root },
+        true,
+        1,
+    )?;
+    let mut state = host.borrow_mut();
+    let mut staged = stage_clone(&state.document, id, deep, &state)
+        .map_err(|failure| errors.convert(vm, failure))?;
+    if let Some(hook) = &state.form_clone_hook {
+        hook(vm, &staged.source_ids, state.document.nodes.len())?;
+    }
+    staged.copy_script_flags(|source| state.dynamic_scripts.has_started(source));
+    let clone = staged.commit(&mut state)[0];
+    state.document.adopt(clone, destination);
+    drop(state);
+    wrap(vm, host, Some(clone))
+}
+
+fn import_subtree(vm: &mut Vm, options: &Value) -> Result<bool, JsError> {
+    if matches!(options, Value::Null) {
+        return Ok(true); // An empty dictionary.
+    }
+    if options.as_object().is_none() {
+        return Ok(options.is_truthy());
+    }
+    let registry = vm.get_property(options.clone(), "customElementRegistry")?;
+    if !registry.is_undefined() {
+        return Err(JsError::type_error("Expected a CustomElementRegistry"));
+    }
+    Ok(!vm.get_property(options.clone(), "selfOnly")?.is_truthy())
+}
+
+enum ImportSource {
+    Document,
+    Local(NodeId),
+    Frame(Rc<frames::FrameNode>),
+    Xml,
+}
+
+impl ImportSource {
+    fn from_value(vm: &Vm, state: &Shared, value: &Value) -> Result<Self, JsError> {
+        if let Some(source) = vm.host_data::<frames::FrameNode>(value) {
+            return Ok(Self::Frame(source));
+        }
+        if vm.host_data::<frames::FrameWindow>(value).is_some() {
+            return Ok(Self::Document);
+        }
+        if let Some(kind) = fetch::xml_node_type(vm, value) {
+            return Ok(if kind == 9 { Self::Document } else { Self::Xml });
+        }
+        let id = node(state, value)?;
+        Ok(if state.borrow().document.is_document(id) {
+            Self::Document
+        } else {
+            Self::Local(id)
+        })
+    }
+}
+
+fn import_frame_node(
+    vm: &mut Vm,
+    host: &Shared,
+    source: &frames::FrameNode,
+    destination: NodeId,
+    deep: bool,
+    errors: &Errors,
+) -> Result<Value, JsError> {
+    let staged = source.with_document(|doc, id, started| {
+        vm.charge_work(tree_work(
+            doc,
+            None,
+            &[id],
+            if deep { Walk::Ownership } else { Walk::Root },
+            true,
+            1,
+        ))?;
+        let mut staged = stage_clone(doc, id, deep, &host.borrow())
+            .map_err(|failure| errors.convert(vm, failure))?;
+        staged.copy_script_flags(|id| started.contains(&id));
+        Ok::<_, JsError>(staged)
+    })?;
+    let clone = staged.commit(&mut host.borrow_mut())[0];
+    host.borrow_mut().document.adopt(clone, destination);
+    wrap(vm, host, Some(clone))
+}
+
 fn install_cloning(
     vm: &mut Vm,
     state: &Shared,
@@ -1329,7 +1561,12 @@ fn install_cloning(
     getter(vm, prototype.clone(), "content", move |vm, this, _| {
         let id = node(&content_state, &this)?;
         charge(vm, &content_state, None, &[], Walk::Root, false, 1)?;
-        if content_state.borrow().document.tag(id) != "template" {
+        let is_template = {
+            let s = content_state.borrow();
+            s.document.tag(id) == "template"
+                && s.document.namespace(id) == crate::dom::Namespace::Html
+        };
+        if !is_template {
             return Ok(Value::Undefined);
         }
         let content = ensure_template(&content_state, id)
@@ -1340,56 +1577,51 @@ fn install_cloning(
     let clone_errors = errors.clone();
     method(vm, prototype, "cloneNode", move |vm, this, args| {
         let id = node(&clone_state, &this)?;
-        let deep = arg(args, 0).is_truthy();
-        charge(
+        if clone_state.borrow().document.is_document(id) {
+            return Err(unsupported(
+                "Cloning a Document with a separate owner realm is not implemented",
+            ));
+        }
+        let owner = clone_state.borrow().document.node_document(id);
+        clone_local_node(
             vm,
             &clone_state,
-            None,
-            &[id],
-            if deep { Walk::Ownership } else { Walk::Root },
-            true,
-            1,
-        )?;
-        let staged = {
-            let state = clone_state.borrow();
-            if id == state.document.root {
-                return Err(unsupported(
-                    "Cloning a Document with a separate owner realm is not implemented",
-                ));
-            }
-            Staged::from_forest(
-                &state.document,
-                &[id],
-                deep,
-                state.document.nodes.len(),
-                state.dom_bytes,
-                LIMITS,
-            )
-            .and_then(|staged| {
-                let roots = staged.global_roots(state.document.nodes.len());
-                check_depth(
-                    &View {
-                        doc: &state.document,
-                        staged: Some(&staged),
-                    },
-                    &roots,
-                    0,
-                    LIMITS,
-                )?;
-                Ok(staged)
-            })
-        };
-        let mut staged = staged.map_err(|failure| clone_errors.convert(vm, failure))?;
-        staged.cloning = true;
-        let id = {
-            let mut state = clone_state.borrow_mut();
-            if let Some(hook) = &state.form_clone_hook {
-                hook(vm, &staged.source_ids, state.document.nodes.len())?;
-            }
-            staged.commit(&mut state)[0]
-        };
-        wrap(vm, &clone_state, Some(id))
+            id,
+            owner,
+            arg(args, 0).is_truthy(),
+            &clone_errors,
+        )
     })?;
+    let import_state = state.clone();
+    let import_errors = errors.clone();
+    webidl::operation(
+        vm,
+        document.clone(),
+        "importNode",
+        1,
+        move |vm, this, args| {
+            let receiver = super::document_node(&import_state, &this)?;
+            webidl::required(args, 1, "Document.importNode")?;
+            let source = ImportSource::from_value(vm, &import_state, &args[0])?;
+            let deep = import_subtree(vm, &arg(args, 1))?;
+            match source {
+                ImportSource::Document => Err(import_errors.exception(
+                    vm,
+                    "NotSupportedError",
+                    "A Document cannot be imported",
+                )),
+                ImportSource::Local(id) => {
+                    clone_local_node(vm, &import_state, id, receiver, deep, &import_errors)
+                }
+                ImportSource::Frame(source) => {
+                    import_frame_node(vm, &import_state, &source, receiver, deep, &import_errors)
+                }
+                ImportSource::Xml => Err(unsupported(
+                    "Importing a read-only XML response node into an HTML document is not implemented",
+                )),
+            }
+        },
+    )?;
     let fragment_state = state.clone();
     let fragment_errors = errors.clone();
     method(
@@ -1397,20 +1629,12 @@ fn install_cloning(
         document.clone(),
         "createDocumentFragment",
         move |vm, this, _| {
-            let receiver = node(&fragment_state, &this)?;
-            charge(vm, &fragment_state, None, &[], Walk::Root, false, 1)?;
-            let result = {
-                let mut state = fragment_state.borrow_mut();
-                if receiver != state.document.root {
-                    return Err(JsError::type_error("Expected a Document receiver"));
-                }
-                let staged = Staged::singleton(NodeKind::Document);
-                staged
-                    .check(state.document.nodes.len(), state.dom_bytes, LIMITS)
-                    .map(|_| staged.commit(&mut state)[0])
-            };
-            let id = result.map_err(|failure| fragment_errors.convert(vm, failure))?;
-            wrap(vm, &fragment_state, Some(id))
+            let receiver = super::document_node(&fragment_state, &this)?;
+            let prototype = fragment_state.borrow().fragment_prototype.clone();
+            let fragment = new_fragment(vm, &fragment_state, &fragment_errors, prototype)?;
+            let id = node(&fragment_state, &fragment)?;
+            fragment_state.borrow_mut().document.adopt(id, receiver);
+            Ok(fragment)
         },
     )?;
     // Materialize template contents at creation, so subsequent setters never
@@ -1418,7 +1642,8 @@ fn install_cloning(
     let create_state = state.clone();
     let create_errors = errors.clone();
     method(vm, document, "createElement", move |vm, this, args| {
-        let receiver = node(&create_state, &this)?;
+        let receiver = super::document_node(&create_state, &this)?;
+        let html = create_state.borrow().document.is_html_document(receiver);
         if args.is_empty() {
             return Err(JsError::type_error(
                 "createElement requires an element name",
@@ -1426,7 +1651,10 @@ fn install_cloning(
         }
         let name = vm.to_string(&arg(args, 0))?;
         let scalar_name = char::decode_utf16(name.as_utf16().iter().copied()).all(|ch| ch.is_ok());
-        let tag = name.to_string_lossy().to_ascii_lowercase();
+        let mut tag = name.to_string_lossy();
+        if html {
+            tag.make_ascii_lowercase();
+        }
         charge(
             vm,
             &create_state,
@@ -1444,10 +1672,7 @@ fn install_cloning(
         }
         let result = {
             let mut state = create_state.borrow_mut();
-            if receiver != state.document.root {
-                return Err(JsError::type_error("Expected a Document receiver"));
-            }
-            let template = tag == "template";
+            let template = html && tag == "template";
             let mut staged = Staged::singleton(NodeKind::Element {
                 tag,
                 attrs: Default::default(),
@@ -1465,7 +1690,21 @@ fn install_cloning(
                 .map(|_| staged.commit(&mut state)[0])
         };
         let id = result.map_err(|failure| create_errors.convert(vm, failure))?;
-        wrap(vm, &create_state, Some(id))
+        if receiver == create_state.borrow().document.root {
+            super::custom_elements::created(vm, &create_state, id)
+        } else {
+            {
+                let mut state = create_state.borrow_mut();
+                if !html {
+                    state
+                        .document
+                        .namespaces
+                        .insert(id, crate::dom::Namespace::Null);
+                }
+                state.document.adopt(id, receiver);
+            }
+            wrap(vm, &create_state, Some(id))
+        }
     })
 }
 

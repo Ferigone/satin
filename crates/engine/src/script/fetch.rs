@@ -25,6 +25,7 @@ use std::{
     time::Instant,
 };
 use url::Url;
+pub(in crate::script) use xhr::xml_node_type;
 
 const LIVE_BYTES: usize = 2 * FETCH_RESPONSE_BODY_LIMIT;
 const PENDING: usize = 16;

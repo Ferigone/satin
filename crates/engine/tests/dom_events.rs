@@ -199,3 +199,56 @@ fn uncanceled_errors_are_diagnosed_but_cross_origin_script_details_are_muted() {
             .any(|message| message.contains("Thrown: uncanceled"))
     );
 }
+
+#[test]
+fn mouse_event_bootstrap_factory_and_native_click_share_an_interface() {
+    let page = LoadedPage::from_html("https://events.test/", "<button id='target'>Go</button>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let probe = r#"(() => {
+        if (typeof window.MouseEvent !== "function") return false;
+        const b = document.getElementById("target");
+        const m = new MouseEvent("click", {bubbles:true, detail:2, view:window, clientX:-3,
+            screenY: 50, button:65537, buttons:4, ctrlKey:true, relatedTarget:b});
+        if (!(m instanceof UIEvent && m instanceof Event && m.detail === 2 && m.view === window &&
+              m.x === -3 && m.screenY === 50 && m.button === 1 && m.buttons === 4 &&
+              m.getModifierState("Control") && m.relatedTarget === b && !m.isTrusted)) return false;
+        const l = document.createEvent("MouseEvents");
+        let uninitialized = false;
+        try { b.dispatchEvent(l); } catch(e) { uninitialized = e.name === "InvalidStateError"; }
+        l.initMouseEvent("hello",true,true,window,1,2,3,4,5,false,true,false,false,1,b);
+        b.addEventListener("hello", function(e) { e.initMouseEvent("changed"); e.preventDefault(); });
+        if (!uninitialized || b.dispatchEvent(l) || l.type !== "hello" || l.clientY !== 5 ||
+            !l.altKey || l.relatedTarget !== b || !(l instanceof MouseEvent)) return false;
+        const ui = document.createEvent("UIEvents");
+        ui.initUIEvent("resize",false,false,window,7);
+        if (!(ui instanceof UIEvent) || ui.detail !== 7 || ui.view !== window) return false;
+        window.nativeMouse = false;
+        b.addEventListener("click", e => { window.nativeMouse = e instanceof MouseEvent && e.view === window; });
+        return true;
+    })()"#;
+    assert_eq!(runtime.eval(probe).unwrap(), Value::from(true));
+    runtime.click(page.document.elements("button").next().unwrap());
+    assert_eq!(
+        runtime.eval("window.nativeMouse").unwrap(),
+        Value::from(true)
+    );
+}
+
+#[test]
+fn page_global_implements_window_and_dispatches_through_its_event_target() {
+    let page = LoadedPage::from_html("https://window.test/", "<main></main>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    for check in [
+        "this === window && globalThis === window && self === window && document.defaultView === window && frames === window",
+        "Object.getPrototypeOf(window) === Window.prototype && window.constructor === Window && window instanceof Window && window instanceof EventTarget",
+        "Object.getPrototypeOf(Window) === EventTarget && EventTarget.prototype.isPrototypeOf(Window.prototype) && !(new EventTarget() instanceof Window)",
+        "Object.prototype.toString.call(window) === '[object Window]' && Object.prototype.toString.call(Window.prototype) === '[object Window]'",
+        "Object.getOwnPropertyDescriptor(window,'Window').enumerable === false && typeof Object.getOwnPropertyDescriptor(window,'window').get === 'function'",
+        "!Reflect.set(window, 'window', {}) && !Reflect.deleteProperty(window,'window') && window === globalThis",
+        "Reflect.setPrototypeOf(window, Window.prototype) && !Reflect.setPrototypeOf(window, null) && !Reflect.setPrototypeOf(Window.prototype,null) && !Reflect.setPrototypeOf(EventTarget.prototype,null)",
+        "(() => {try { new Window(); } catch (e) { return e instanceof TypeError; }})() && (() => {try { Window(); } catch (e) { return e instanceof TypeError; }})()",
+        "(() => { let seen=0; const opts={once:true}; Window.prototype.addEventListener.call(window,'sample',function(e) { if(this===window && e.target===window && e.currentTarget===window) seen++; },opts); dispatchEvent(new Event('sample')); window.dispatchEvent(new Event('sample')); return seen===1; })()",
+    ] {
+        assert_eq!(runtime.eval(check).unwrap(), Value::Bool(true), "{check}");
+    }
+}

@@ -1402,6 +1402,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -2470,7 +2472,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rust-browser"
-version = "0.1.0-alpha.34"
+version = "0.1.0-alpha.35"
 dependencies = [
  "arboard",
  "fs2",
@@ -2496,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "rust-browser-engine"
-version = "0.1.0-alpha.34"
+version = "0.1.0-alpha.35"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -2508,6 +2510,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
+ "indexmap",
  "percent-encoding",
  "reqwest",
  "ring",
@@ -2528,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "rust-browser-javascript"
-version = "0.1.0-alpha.34"
+version = "0.1.0-alpha.35"
 dependencies = [
  "base64 0.22.1",
  "fixed_decimal",
@@ -2557,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "rust-browser-js-harness"
-version = "0.1.0-alpha.34"
+version = "0.1.0-alpha.35"
 dependencies = [
  "rust-browser-javascript",
  "serde",
@@ -2566,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "rust-browser-launcher"
-version = "0.1.0-alpha.34"
+version = "0.1.0-alpha.35"
 dependencies = [
  "serde_json",
  "windows-sys 0.59.0",

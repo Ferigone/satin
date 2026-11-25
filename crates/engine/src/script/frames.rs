@@ -13,7 +13,7 @@ use rust_browser_javascript::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
 };
 
@@ -39,8 +39,25 @@ pub(super) struct FrameWindow {
     pub(super) realm: RealmId,
     parent: Weak<RefCell<State>>,
     parser: RefCell<HtmlStream>,
+    started_scripts: RefCell<HashSet<NodeId>>,
     attached: Cell<bool>,
     reporting_error: Cell<bool>,
+}
+
+/// Frame node IDs index the child parser's arena, including after document.open.
+pub(super) struct FrameNode {
+    frame: Rc<FrameWindow>,
+    id: NodeId,
+}
+
+impl FrameNode {
+    pub(super) fn with_document<T>(
+        &self,
+        f: impl FnOnce(&Document, NodeId, &HashSet<NodeId>) -> T,
+    ) -> T {
+        self.frame
+            .with_document(|doc| f(doc, self.id, &self.frame.started_scripts.borrow()))
+    }
 }
 
 fn eligible(doc: &Document, node: NodeId) -> bool {
@@ -234,6 +251,7 @@ fn get(
         realm,
         parent: Rc::downgrade(host),
         parser: RefCell::new(parser),
+        started_scripts: RefCell::default(),
         attached: Cell::new(true),
         reporting_error: Cell::new(false),
     });
@@ -415,6 +433,13 @@ fn wrap(
     }
     let wrapper = vm.new_object();
     vm.mark_platform_object(&wrapper)?;
+    vm.set_host_data(
+        wrapper.clone(),
+        Rc::new(FrameNode {
+            frame: frame.clone(),
+            id,
+        }),
+    )?;
     getter(vm, wrapper.clone(), "textContent", move |vm, _, _| {
         let value = frame.with_document(|doc| doc.text(id));
         vm.charge_work(value.len())?;
@@ -489,6 +514,12 @@ impl FrameWindow {
             };
             match event {
                 ParserEvent::Script(script) => {
+                    if self.with_document(|doc| {
+                        super::dynamic_scripts::has_source(doc, script.node)
+                            && super::dynamic_scripts::kind(doc, script.node).is_some()
+                    }) {
+                        self.started_scripts.borrow_mut().insert(script.node);
+                    }
                     let source = self.with_document(|doc| {
                         (!script.external
                             && script.kind == ParserScriptKind::ClassicBlocking
@@ -516,6 +547,12 @@ impl FrameWindow {
                     result?;
                 }
                 ParserEvent::Progress(progress) => {
+                    if let Some(node) = progress.closed
+                        && self.parser.borrow().report().completed
+                        && self.with_document(|doc| super::dynamic_scripts::is_script(doc, node))
+                    {
+                        self.started_scripts.borrow_mut().insert(node);
+                    }
                     for node in progress.new_nodes {
                         let policy = self.with_document(|doc| {
                             crate::loader::DocumentPolicy::from_meta_element(doc, NodeId(node))

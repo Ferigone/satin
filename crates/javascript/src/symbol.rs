@@ -569,7 +569,8 @@ impl Vm {
             "Prototype chain limit exceeded",
         ))
     }
-    pub(crate) fn is_constructor(&self, value: &Value) -> bool {
+    /// Whether a value supplies the ECMAScript [[Construct]] internal method.
+    pub fn is_constructor(&self, value: &Value) -> bool {
         let mut value = value.clone();
         for _ in 0..1024 {
             let Some(id) = value.as_object() else {

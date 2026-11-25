@@ -22,7 +22,7 @@ mod tokenizer_tests;
 #[path = "html/tree_builder.rs"]
 mod tree_builder;
 use crate::dom::{Document, Namespace, QuirksMode};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 /// Resource budgets for this alpha. Reaching any budget sets Document::truncated.
@@ -53,7 +53,7 @@ pub struct FragmentContext<'a> {
     pub tag: &'a str,
     pub namespace: Namespace,
     /// Context attributes are needed for MathML annotation-xml integration.
-    pub attrs: Option<&'a BTreeMap<String, String>>,
+    pub attrs: Option<&'a crate::dom::Attributes>,
     pub scripting_enabled: bool,
     pub quirks_mode: QuirksMode,
     pub form_ancestor: bool,

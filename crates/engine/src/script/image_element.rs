@@ -34,7 +34,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(
             if new_target.is_none() {
                 return Err(JsError::type_error("Image must be constructed with new"));
             }
-            let mut attrs = std::collections::BTreeMap::new();
+            let mut attrs = crate::dom::Attributes::new();
             for (index, name) in ["width", "height"].into_iter().enumerate() {
                 if args.get(index).is_some_and(|value| !value.is_undefined()) {
                     attrs.insert(name.into(), dimension(vm, &args[index])?.to_string());

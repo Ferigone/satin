@@ -196,12 +196,13 @@ pub(crate) enum Expr {
     PrivateMember(Box<Expr>, JsString),
     PrivateIn(JsString, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
+    NestedCalls(Box<Expr>, Vec<(JsString, Vec<Expr>)>),
     New(Box<Expr>, Vec<Expr>),
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
     Assign(&'static str, Box<Expr>, Box<Expr>),
     Update(&'static str, Box<Expr>, bool),
-    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    Conditional(Vec<(Expr, Expr)>, Box<Expr>),
     Sequence(Vec<Expr>),
 }
 pub(crate) type LabelId = std::num::NonZeroU32;
@@ -217,7 +218,7 @@ pub(crate) enum Stmt {
     Class(JsString, Class),
     DefaultExport(Expr),
     DefaultFunction(Function),
-    If(Expr, Box<Stmt>, Option<Box<Stmt>>),
+    If(Vec<(Expr, Stmt)>, Option<Box<Stmt>>),
     With(Expr, Box<Stmt>),
     While(Expr, Box<Stmt>),
     DoWhile(Box<Stmt>, Expr),
@@ -642,16 +643,22 @@ impl Parser {
     }
 
     fn if_statement(&mut self) -> Result<Stmt, JsError> {
-        self.expect("(")?;
-        let test = self.expression(1)?;
-        self.expect(")")?;
-        let yes = Box::new(self.if_clause()?);
-        let no = if self.eat("else") {
-            Some(Box::new(self.if_clause()?))
-        } else {
-            None
+        // Else-if clauses share a parser frame. Their conditions and bodies
+        // retain their own ordinary grammar and syntax-tree depth checks.
+        let mut arms = Vec::new();
+        let fallback = loop {
+            self.expect("(")?;
+            let test = self.expression(1)?;
+            self.expect(")")?;
+            arms.push((test, self.if_clause()?));
+            if !self.eat("else") {
+                break None;
+            }
+            if !self.eat("if") {
+                break Some(Box::new(self.if_clause()?));
+            }
         };
-        Ok(Stmt::If(test, yes, no))
+        Ok(Stmt::If(arms, fallback))
     }
     fn while_statement(&mut self) -> Result<Stmt, JsError> {
         self.expect("(")?;
@@ -1535,10 +1542,7 @@ impl Parser {
                 test: Expr,
                 allow_in: bool,
             },
-            Alternate {
-                test: Expr,
-                yes: Expr,
-            },
+            Alternate(Vec<(Expr, Expr)>),
             Sequence(Vec<Expr>),
         }
         let mut pending = Vec::new();
@@ -1592,14 +1596,22 @@ impl Parser {
                     Pending::Consequent { test, allow_in } => {
                         self.allow_in = allow_in;
                         self.expect(":")?;
-                        (Pending::Alternate { test, yes: left }, 2)
+                        // A conditional in the alternate is the next branch of
+                        // the same chain. Preserve the outer binding power when
+                        // replacing that pending frame with the extended chain.
+                        let mut branches = Vec::new();
+                        if matches!(pending.last(), Some((Pending::Alternate(_), _))) {
+                            let Some((Pending::Alternate(previous), outer)) = pending.pop() else {
+                                unreachable!()
+                            };
+                            branches = previous;
+                            min = outer;
+                        }
+                        branches.push((test, left));
+                        (Pending::Alternate(branches), 2)
                     }
-                    Pending::Alternate { test, yes } => {
-                        left = self.checked_expression(Expr::Conditional(
-                            Box::new(test),
-                            Box::new(yes),
-                            Box::new(left),
-                        ))?;
+                    Pending::Alternate(branches) => {
+                        left = self.checked_expression(Expr::Conditional(branches, Box::new(left)))?;
                         continue;
                     }
                     Pending::Sequence(mut values) => {
@@ -1824,7 +1836,14 @@ impl Parser {
                     if matches!(e, Expr::Chain(..)) {
                         self.chain_link(e, ChainLink::Member(key, false))?
                     } else {
-                        self.checked_expression(Expr::Member(Box::new(e), Box::new(key)))?
+                        let member =
+                            self.checked_expression(Expr::Member(Box::new(e), Box::new(key)))?;
+                        if calls && self.eat("(") {
+                            let args = self.arguments()?;
+                            self.method_calls(member, args)?
+                        } else {
+                            member
+                        }
                     }
                 };
             } else if self.eat("[") {
@@ -1847,6 +1866,31 @@ impl Parser {
             }
         }
         Ok(e)
+    }
+    fn method_calls(&mut self, first_member: Expr, mut args: Vec<Expr>) -> Result<Expr, JsError> {
+        let mut links = Vec::new();
+        while self.at(".")
+            && self.lookahead(1).is_some_and(|t| {
+                matches!(t.kind, TokenKind::Word(_) | TokenKind::EscapedWord(_))
+            })
+            && self.lookahead(2).is_some_and(|t| matches!(t.kind, TokenKind::Punct("(")))
+        {
+            self.advance(1);
+            let key = Expr::Literal(Value::String(self.member_name()?));
+            self.expect("(")?;
+            links.push(ChainLink::Call(args, false));
+            links.push(ChainLink::Member(key, false));
+            args = self.arguments()?;
+        }
+        // Keep the outer Call for assignment-target and tagged-template grammar.
+        // The existing chain emitter keeps every intermediate property reference
+        // (including its receiver) until the subsequent call consumes it.
+        let callee = if links.is_empty() {
+            first_member
+        } else {
+            self.checked_expression(Expr::Chain(Box::new(first_member), links))?
+        };
+        self.checked_expression(Expr::Call(Box::new(callee), args))
     }
     fn chain_link(&self, e: Expr, link: ChainLink) -> Result<Expr, JsError> {
         let e = if let Expr::Chain(base, mut links) = e {
@@ -1883,7 +1927,50 @@ impl Parser {
         self.checked_expression(Expr::Template(parts, substitutions, tag.map(Box::new)))
     }
     fn arguments(&mut self) -> Result<Vec<Expr>, JsError> {
-        self.cover().map(|(items, _)| items)
+        // Collect ordinary calls that immediately begin the preceding call's
+        // first argument. Handle context-sensitive names with the normal grammar.
+        let mut names = Vec::new();
+        while matches!(&self.current().kind, TokenKind::Word(name) | TokenKind::EscapedWord(name)
+                if !matches!(name.as_str(), "async" | "arguments" | "yield" | "await")
+                    && self.identifier_allowed(name))
+            && self.lookahead(1).is_some_and(|t| t.kind == TokenKind::Punct("("))
+        {
+            names.push(self.name()?);
+            self.advance(1);
+        }
+        let (mut args, _) = self.cover()?;
+        for name in names.into_iter().rev() {
+            let call = if !args.is_empty() && !matches!(args[0], Expr::Spread(_)) {
+                let rest = args.split_off(1);
+                let first = args.pop().unwrap();
+                let (base, mut levels) = match first {
+                    Expr::NestedCalls(base, levels) => (base, levels),
+                    first => (Box::new(first), Vec::new()),
+                };
+                levels.push((name, rest));
+                Expr::NestedCalls(base, levels)
+            } else {
+                Expr::Call(Box::new(Expr::Identifier(name)), args)
+            };
+            args = if self.at(")") || self.at(",") {
+                vec![call]
+            } else {
+                // A suffix belongs to this first argument, just as if it had
+                // been parsed by cover() in its own recursive invocation.
+                let previous = self.allow_in;
+                self.allow_in = true;
+                let first = self.initializer_tail(call);
+                self.allow_in = previous;
+                vec![first?]
+            };
+            if self.eat(",") {
+                let (rest, _) = self.cover()?;
+                args.extend(rest);
+            } else {
+                self.expect(")")?;
+            }
+        }
+        Ok(args)
     }
     fn async_function_ahead(&self) -> bool {
         self.at("async")
@@ -2187,6 +2274,12 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 Expr::Sequence(terms) => {
                     pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
+                Expr::NestedCalls(base, levels) => {
+                    pending.push((Ast::Expression(base), child_depth));
+                    for (_, args) in levels {
+                        pending.extend(args.iter().map(|e| (Ast::Expression(e), child_depth)));
+                    }
+                }
                 Expr::Call(target, args) | Expr::New(target, args) => {
                     pending.push((Ast::Expression(target), child_depth));
                     pending.extend(args.iter().map(|e| (Ast::Expression(e), child_depth)));
@@ -2201,10 +2294,12 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                 Expr::Yield { value, .. } => {
                     pending.extend(value.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
-                Expr::Conditional(a, b, c) => {
-                    pending.push((Ast::Expression(a), child_depth));
-                    pending.push((Ast::Expression(b), child_depth));
-                    pending.push((Ast::Expression(c), child_depth));
+                Expr::Conditional(branches, fallback) => {
+                    for (test, yes) in branches {
+                        pending.push((Ast::Expression(test), child_depth));
+                        pending.push((Ast::Expression(yes), child_depth));
+                    }
+                    pending.push((Ast::Expression(fallback), child_depth));
                 }
             },
             Ast::Statement(statement) => match statement {
@@ -2238,9 +2333,11 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                         pending.extend(value.iter().map(|e| (Ast::Expression(e), child_depth)));
                     }
                 }
-                Stmt::If(test, yes, no) => {
-                    pending.push((Ast::Expression(test), child_depth));
-                    pending.push((Ast::Statement(yes), child_depth));
+                Stmt::If(arms, no) => {
+                    for (test, body) in arms {
+                        pending.push((Ast::Expression(test), child_depth));
+                        pending.push((Ast::Statement(body), child_depth));
+                    }
                     pending.extend(no.iter().map(|s| (Ast::Statement(s), child_depth)));
                 }
                 Stmt::With(test, body) | Stmt::While(test, body) | Stmt::DoWhile(body, test) => {
@@ -2290,7 +2387,8 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
 
 pub(crate) fn call_assignment_target(mut e: &Expr) -> bool {
     while let Expr::Group(inner) = e { e = inner; }
-    matches!(e, Expr::Call(callee, _) if !matches!(callee.as_ref(), Expr::Super))
+    matches!(e, Expr::NestedCalls(..))
+        || matches!(e, Expr::Call(callee, _) if !matches!(callee.as_ref(), Expr::Super))
 }
 
 fn assignable(e: &Expr) -> bool {

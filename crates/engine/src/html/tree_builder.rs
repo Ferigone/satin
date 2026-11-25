@@ -172,9 +172,22 @@ pub(super) struct TreeStep {
     pub script: Option<NodeId>,
 }
 
+pub(crate) type CustomElementTest = Box<dyn Fn(&str) -> bool>;
+
+/// A streaming host must run the element constructor with a detached,
+/// attribute-free node before the tree builder performs the actual insertion.
+pub(crate) struct PendingElement {
+    pub node: NodeId,
+    pub parent: NodeId,
+    pub before: Option<NodeId>,
+    pub attributes: Vec<(String, String)>,
+}
+
 pub(super) struct Tree {
     pub doc: Document,
     pub(super) mutation_sink: Option<MutationSink>,
+    pub(super) custom_element_test: Option<CustomElementTest>,
+    pub(super) pending_element: Option<PendingElement>,
     stack: Vec<NodeId>,
     formatting: Vec<Option<Formatting>>,
     formatting_bytes: usize,
@@ -207,6 +220,8 @@ impl Tree {
                 ..Document::default()
             },
             mutation_sink: None,
+            custom_element_test: None,
+            pending_element: None,
             stack: vec![],
             formatting: vec![],
             formatting_bytes: 0,
@@ -310,7 +325,7 @@ impl Tree {
                             || value.eq_ignore_ascii_case("application/xhtml+xml")
                     })
             }
-            Namespace::Html => false,
+            Namespace::Html | Namespace::Null => false,
         }
     }
 
@@ -471,7 +486,9 @@ impl Tree {
                 self.halted = true;
                 return;
             }
-            ancestor = self.doc.nodes[node.0].parent;
+            ancestor = self.doc.nodes[node.0]
+                .parent
+                .or_else(|| self.doc.shadow_hosts.get(&node).copied());
         }
         let scan = if before.is_some() {
             self.doc.nodes[parent.0].children.len().saturating_mul(2)
@@ -565,6 +582,28 @@ impl Tree {
     }
 
     fn insert(&mut self, tag: &Tag) -> NodeId {
+        if self
+            .custom_element_test
+            .as_ref()
+            .is_some_and(|test| test(&tag.name))
+            && !self.parsing_template()
+        {
+            let id = self.create(NodeKind::Element {
+                tag: tag.name.clone(),
+                attrs: Default::default(),
+            });
+            if !self.halted {
+                let (parent, before) = self.location(None);
+                self.pending_element = Some(PendingElement {
+                    node: id,
+                    parent,
+                    before,
+                    attributes: tag.attrs.clone().into_iter().collect(),
+                });
+                self.push(id);
+            }
+            return id;
+        }
         let id = self.create(NodeKind::Element {
             tag: tag.name.clone(),
             attrs: tag.attrs.clone(),
@@ -573,6 +612,25 @@ impl Tree {
         self.attach(id, parent, before);
         self.push(id);
         id
+    }
+
+    pub(super) fn finish_custom_element(
+        &mut self,
+        original: NodeId,
+        element: NodeId,
+        parent: NodeId,
+        before: Option<NodeId>,
+    ) {
+        if original != element
+            && let Some(entry) = self
+                .stack
+                .iter_mut()
+                .rev()
+                .find(|entry| **entry == original)
+        {
+            *entry = element;
+        }
+        self.attach(element, parent, before);
     }
 
     fn insert_foreign(&mut self, tag: &Tag, namespace: Namespace) -> NodeId {
@@ -1107,8 +1165,8 @@ impl Tree {
         }
         if let Some(sink) = &mut self.mutation_sink {
             for name in tag
-                .merge_attribute_order
-                .iter()
+                .attrs
+                .keys()
                 .filter(|name| self.doc.attr(id, name).is_none())
             {
                 sink(
@@ -2200,7 +2258,8 @@ pub(super) fn kind_bytes(kind: &NodeKind) -> usize {
                     .map(|(name, value)| name.len() + value.len())
                     .sum::<usize>()
         }
-        NodeKind::Text(text) | NodeKind::Comment(text) => text.len(),
+        NodeKind::Text(text) | NodeKind::Cdata(text) | NodeKind::Comment(text) => text.len(),
+        NodeKind::ProcessingInstruction { target, data } => target.len() + data.len(),
         NodeKind::Doctype {
             name,
             public_id,
@@ -2271,7 +2330,7 @@ fn foreign_special(namespace: Namespace, name: &str) -> bool {
     match namespace {
         Namespace::MathMl => matches!(name, "mi" | "mo" | "mn" | "ms" | "mtext" | "annotation-xml"),
         Namespace::Svg => matches!(name, "foreignObject" | "desc" | "title"),
-        Namespace::Html => false,
+        Namespace::Html | Namespace::Null => false,
     }
 }
 

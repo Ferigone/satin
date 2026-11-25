@@ -166,6 +166,7 @@ impl Player {
             surface: None,
             native_size: None,
             pending_seek: None,
+            pending_rate: None,
             ready: false,
             playing: false,
             waiting_through: None,
@@ -213,6 +214,7 @@ pub(super) struct Player {
     surface: Option<WicSurface>,
     native_size: Option<(u32, u32)>,
     pending_seek: Option<f64>,
+    pending_rate: Option<(u64, f64)>,
     ready: bool,
     playing: bool,
     waiting_through: Option<f64>,
@@ -228,7 +230,7 @@ impl Drop for Player {
 }
 
 impl Player {
-    pub(super) fn control(&mut self, command: Command) -> Result<()> {
+    pub(super) fn control(&mut self, command: Command, output: &Shared) -> Result<()> {
         // Each operation runs on the same apartment that owns the engine.
         unsafe {
             match command {
@@ -260,6 +262,20 @@ impl Player {
                     self.ended = false;
                     self.engine.SetCurrentTime(time.max(0.))
                 }
+                Command::PlaybackRate {
+                    revision, value, ..
+                } if self.native_size.is_none() => {
+                    self.pending_rate = Some((revision, value));
+                    Ok(())
+                }
+                Command::PlaybackRate {
+                    key,
+                    revision,
+                    value,
+                } => {
+                    self.apply_rate(key, output, revision, value);
+                    Ok(())
+                }
                 Command::Volume { value, .. } if (0. ..=1.).contains(&value) => {
                     self.engine.SetVolume(value)
                 }
@@ -280,6 +296,15 @@ impl Player {
                 }
                 _ => unreachable!("only player controls are passed to a native player"),
             }
+        }
+    }
+
+    fn apply_rate(&self, key: Key, output: &Shared, revision: u64, requested: f64) {
+        // Rate support can also depend on the current source. A rejected
+        // optional speed change must leave the current media session usable.
+        if unsafe { self.engine.SetPlaybackRate(requested) }.is_err() {
+            let actual = unsafe { self.engine.GetPlaybackRate() };
+            output.publish(key, EventKind::RateRejected { revision, actual });
         }
     }
 
@@ -309,6 +334,9 @@ impl Player {
     fn publish_metadata(&mut self, (width, height): (u32, u32), output: &Shared, key: Key) {
         self.native_size = Some((width, height));
         self.surface = None;
+        if let Some((revision, rate)) = self.pending_rate.take() {
+            self.apply_rate(key, output, revision, rate);
+        }
         output.publish(
             key,
             EventKind::Metadata {
@@ -340,7 +368,7 @@ impl Player {
                     stream.ended();
                 }
                 if std::mem::take(&mut self.play_after_stream_end) {
-                    self.control(Command::Play(key))
+                    self.control(Command::Play(key), output)
                         .map_err(|error| error.to_string())?;
                 }
                 return Ok(());

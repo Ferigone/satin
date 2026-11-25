@@ -121,6 +121,7 @@ pub(crate) struct Object {
     pub symbols: BTreeMap<SymbolId, Property>,
     pub symbol_order: Vec<SymbolId>,
     pub extensible: bool,
+    pub immutable_prototype: bool,
 }
 impl Object {
     pub fn is_platform_object(&self) -> bool {
@@ -150,6 +151,7 @@ impl Object {
             symbols: BTreeMap::new(),
             symbol_order: Vec::new(),
             extensible: true,
+            immutable_prototype: false,
         }
     }
     pub fn insert(&mut self, key: JsString, property: Property) {

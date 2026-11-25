@@ -348,20 +348,6 @@ pub(super) fn install(
     }
     install_history(vm, &host, window.clone())?;
     install_location(vm, &host, window.clone(), document.clone())?;
-    for name in ["URL", "documentURI", "baseURI"] {
-        let host = host.clone();
-        getter(vm, document.clone(), name, move |vm, _, _| {
-            if name == "baseURI" {
-                vm.charge_work(host.dom.borrow().document.nodes.len())?;
-            }
-            let value = if name == "baseURI" {
-                host.base()
-            } else {
-                host.dom.borrow().url.clone()
-            };
-            Ok(value.as_str().into())
-        })?;
-    }
     let origin = dom.borrow().url.origin().ascii_serialization();
     getter(vm, window, "origin", move |_, _, _| {
         Ok(origin.as_str().into())

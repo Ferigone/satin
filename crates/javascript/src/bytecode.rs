@@ -173,7 +173,7 @@ pub(crate) enum Op {
     Block(Rc<Chunk>),
     Label(LabelId, Rc<Chunk>),
     With(Rc<Chunk>, Rc<Chunk>),
-    Branch(Rc<Chunk>, Rc<Chunk>, Option<Rc<Chunk>>),
+    Branch(Rc<[(Rc<Chunk>, Rc<Chunk>)]>, Option<Rc<Chunk>>),
     While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     For {
@@ -232,9 +232,8 @@ impl Op {
             Self::Initialize(_, _, chunk) | Self::Return(chunk) => {
                 chunk.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
-            Self::Branch(test, yes, no) => {
-                test.can_suspend
-                    || yes.can_suspend
+            Self::Branch(arms, no) => {
+                arms.iter().any(|(test, body)| test.can_suspend || body.can_suspend)
                     || no.as_ref().is_some_and(|chunk| chunk.can_suspend)
             }
             Self::With(test, body)
@@ -322,12 +321,30 @@ pub(crate) fn compile_dynamic_function(
     }
     compile_function(&function, false)
 }
-/// Conservative retained bytecode size; shared chunks/functions are counted once.
+fn vector_storage<T>(values: &Vec<T>) -> usize {
+    values.capacity() * std::mem::size_of::<T>()
+}
+
+fn scope_storage(scope: &ScopePlan) -> usize {
+    vector_storage(&scope.lexical)
+        + vector_storage(&scope.vars)
+        + vector_storage(&scope.annex_vars)
+        + vector_storage(&scope.functions)
+        + scope.lexical.iter().map(|(name, _)| name)
+            .chain(&scope.vars)
+            .chain(&scope.annex_vars)
+            .chain(scope.functions.iter().map(|(name, _, _)| name))
+            .map(JsString::allocation_bytes).sum::<usize>()
+}
+
+/// Count the storage retained by compiled code, including spare vector capacity.
+/// Code, chunks and source buffers may be reachable from more than one root.
 pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc<Chunk>>) -> usize {
     let mut functions = roots;
     let mut seen_functions = BTreeSet::new();
     let mut seen_sources = BTreeSet::new();
     let mut seen_chunks = BTreeSet::new();
+    const RC_COUNTS: usize = 2 * std::mem::size_of::<usize>();
     let mut bytes = 0usize;
     loop {
         while let Some(code) = functions.pop() {
@@ -335,15 +352,15 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 continue;
             }
             let (address, size) = code.source.storage();
-            if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
+            if seen_sources.insert(address) { bytes = bytes.saturating_add(RC_COUNTS + size); }
             bytes = bytes.saturating_add(
-                256 + code
-                    .param_names
-                    .iter()
-                    .map(|p| 64 + p.len() * 2)
-                    .sum::<usize>()
-                    + code.mapped_indices.capacity() * std::mem::size_of::<usize>()
-                    + code.name.as_ref().map_or(0, |s| s.len() * 2),
+                std::mem::size_of::<Code>() + std::mem::size_of::<crate::lexer::SourceSpan>()
+                    + 2 * RC_COUNTS
+                    + vector_storage(&code.params)
+                    + vector_storage(&code.param_names)
+                    + vector_storage(&code.mapped_indices)
+                    + code.param_names.iter().map(JsString::allocation_bytes).sum::<usize>()
+                    + code.name.as_ref().map_or(0, JsString::allocation_bytes),
             );
             chunks.push(code.body.clone());
             for parameter in &code.params {
@@ -358,19 +375,9 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
             continue;
         }
         bytes = bytes.saturating_add(
-            512 + chunk.ops.len() * 256
-                + chunk
-                    .scope
-                    .lexical
-                    .iter()
-                    .map(|(k, _)| 64 + k.len() * 2)
-                    .sum::<usize>()
-                + chunk
-                    .scope
-                    .vars
-                    .iter().chain(&chunk.scope.annex_vars)
-                    .map(|k| 64 + k.len() * 2)
-                    .sum::<usize>(),
+            std::mem::size_of::<Chunk>() + RC_COUNTS
+                + vector_storage(&chunk.ops)
+                + scope_storage(&chunk.scope),
         );
         functions.extend(chunk.scope.functions.iter().map(|(_, c, _)| c.clone()));
         for op in &chunk.ops {
@@ -381,27 +388,25 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                 | Op::LoadName(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
-                | Op::InferName(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
+                | Op::InferName(s)
+                | Op::TemplateAppend(s) => bytes = bytes.saturating_add(s.allocation_bytes()),
                 Op::Push(Value::BigInt(integer)) => {
                     bytes = bytes.saturating_add(integer.retained_bytes())
                 }
                 Op::RegExp(program) => bytes = bytes.saturating_add(program.retained_bytes()),
                 Op::TemplateObject(site) => {
                     bytes = bytes.saturating_add(
-                        site.parts
-                            .iter()
-                            .map(|part| {
-                                128 + part.raw.len() * 2
-                                    + part.cooked.as_ref().map_or(0, |s| s.len() * 2)
-                            })
-                            .sum::<usize>(),
+                        std::mem::size_of::<TemplateSite>() + RC_COUNTS + vector_storage(&site.parts)
+                            + site.parts.iter().map(|part| {
+                                part.raw.allocation_bytes()
+                                    + part.cooked.as_ref().map_or(0, JsString::allocation_bytes)
+                            }).sum::<usize>(),
                     );
                 }
-                Op::TemplateAppend(s) => bytes = bytes.saturating_add(64 + s.len() * 2),
                 Op::Function(code) => functions.push(code.clone()),
                 Op::Class(class, name) => {
                     let (address, size) = class.source.storage();
-                    if seen_sources.insert(address) { bytes = bytes.saturating_add(size); }
+                    if seen_sources.insert(address) { bytes = bytes.saturating_add(RC_COUNTS + size); }
                     if let ClassName::Binding(name) = name {
                         bytes = bytes.saturating_add(name.len() * 2 + 64);
                     }
@@ -418,10 +423,13 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     bytes = bytes.saturating_add(pattern_retained_size(pattern, &mut chunks));
                     chunks.extend(c.iter().cloned());
                 }
-                Op::Branch(a, b, c) => {
-                    chunks.push(a.clone());
-                    chunks.push(b.clone());
-                    chunks.extend(c.iter().cloned());
+                Op::Branch(arms, no) => {
+                    bytes = bytes.saturating_add(RC_COUNTS + std::mem::size_of_val(arms.as_ref()));
+                    for (test, body) in arms.iter() {
+                        chunks.push(test.clone());
+                        chunks.push(body.clone());
+                    }
+                    chunks.extend(no.iter().cloned());
                 }
                 Op::With(a, b) | Op::While(a, b, _) | Op::DoWhile(a, b, _) => {
                     chunks.push(a.clone());
@@ -432,8 +440,11 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     test,
                     update,
                     body,
+                    lexical,
                     ..
                 } => {
+                    bytes = bytes.saturating_add(vector_storage(lexical)
+                        + lexical.iter().map(|(name, _)| name.allocation_bytes()).sum::<usize>());
                     chunks.extend(initial.iter().cloned());
                     chunks.extend(test.iter().cloned());
                     chunks.extend(update.iter().cloned());
@@ -460,6 +471,8 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     chunks.extend(c.iter().cloned());
                 }
                 Op::Switch(test, cases, scope) => {
+                    bytes = bytes.saturating_add(vector_storage(cases)
+                        + std::mem::size_of::<ScopePlan>() + scope_storage(scope));
                     chunks.push(test.clone());
                     for (test, body) in cases {
                         chunks.extend(test.iter().cloned());
@@ -473,6 +486,10 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
     }
     bytes
 }
+
+#[cfg(test)]
+mod retained_tests;
+
 fn syntax(message: impl Into<String>) -> JsError {
     JsError::new(ErrorKind::SyntaxError, message)
 }
@@ -624,16 +641,16 @@ fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>)
     let mut bytes = 0usize;
     let mut pending = vec![pattern.as_ref()];
     while let Some(pattern) = pending.pop() {
-        bytes = bytes.saturating_add(128);
+        bytes = bytes.saturating_add(std::mem::size_of::<PatternCode>() + 2 * std::mem::size_of::<usize>());
         match pattern {
-            PatternCode::Name(name) => bytes = bytes.saturating_add(name.len() * 2),
+            PatternCode::Name(name) => bytes = bytes.saturating_add(name.allocation_bytes()),
             PatternCode::Target(object, key) => {
                 chunks.push(object.clone());
                 chunks.push(key.clone());
             }
             PatternCode::PrivateTarget(object, name) => {
                 chunks.push(object.clone());
-                bytes = bytes.saturating_add(name.len() * 2);
+                bytes = bytes.saturating_add(name.allocation_bytes());
             }
             PatternCode::SuperTarget(key) | PatternCode::CallTarget(key) => chunks.push(key.clone()),
             PatternCode::Default { target, value, .. } => {
@@ -641,10 +658,12 @@ fn pattern_retained_size(pattern: &Rc<PatternCode>, chunks: &mut Vec<Rc<Chunk>>)
                 chunks.push(value.clone());
             }
             PatternCode::Array(items, rest) => {
+                bytes = bytes.saturating_add(vector_storage(items));
                 pending.extend(items.iter().flatten().map(Rc::as_ref));
                 pending.extend(rest.iter().map(Rc::as_ref));
             }
             PatternCode::Object(properties, rest) => {
+                bytes = bytes.saturating_add(vector_storage(properties));
                 for (key, p) in properties {
                     chunks.push(key.clone());
                     pending.push(p);
@@ -859,10 +878,9 @@ fn collect_declarations(stmts: &[Stmt], out: &mut BTreeSet<JsString>, annex: boo
                 out.extend(d.iter().flat_map(|(pattern, _)| bound_names(pattern)));
             }
             Stmt::Block(body) => collect_declarations(body, out, annex),
-            Stmt::If(_, yes, no) => {
-                collect_declarations(std::slice::from_ref(&**yes), out, annex);
-                if let Some(no) = no {
-                    collect_declarations(std::slice::from_ref(&**no), out, annex);
+            Stmt::If(arms, no) => {
+                for body in arms.iter().map(|(_, body)| body).chain(no.as_deref()) {
+                    collect_declarations(std::slice::from_ref(body), out, annex);
                 }
             }
             Stmt::With(_, b) | Stmt::While(_, b) | Stmt::DoWhile(b, _) | Stmt::Label(_, _, b) => {
@@ -998,11 +1016,16 @@ fn compile_statement(
         Stmt::Block(body) => out.push(Op::Block(block(body, false, strict)?)),
         Stmt::Label(id, names, item) => compile_label(*id, names, item, out, strict)?,
         Stmt::Variable(kind, decls) => compile_variables(*kind, decls, out, strict)?,
-        Stmt::If(test, yes, no) => out.push(Op::Branch(
-            expression(test, strict)?,
-            if_clause(yes, strict)?,
-            no.as_ref().map(|s| if_clause(s, strict)).transpose()?,
-        )),
+        Stmt::If(arms, no) => {
+            let mut compiled = Vec::with_capacity(arms.len());
+            for (test, body) in arms {
+                compiled.push((expression(test, strict)?, if_clause(body, strict)?));
+            }
+            out.push(Op::Branch(
+                compiled.into(),
+                no.as_ref().map(|s| if_clause(s, strict)).transpose()?,
+            ));
+        }
         Stmt::With(object, body) => {
             if strict {
                 return Err(syntax("with is forbidden in strict mode"));
@@ -1295,8 +1318,9 @@ enum Emit<'a> {
     Sequence(&'a [Expr]),
     ShortCircuit(&'static str, &'a Expr),
     Patch(usize, &'static str),
-    Conditional(&'a Expr, &'a Expr),
-    Alternative(usize, &'a Expr),
+    Conditional(&'a [(Expr, Expr)], &'a Expr),
+    Consequent(&'a Expr, &'a [(Expr, Expr)], &'a Expr),
+    Alternative(usize, &'a [(Expr, Expr)], &'a Expr),
     Logical(&'static str, &'a Expr, Option<&'a JsString>),
     LogicalKeep(usize, &'static str),
     Optional(Rc<RefCell<Vec<usize>>>, bool),
@@ -1380,18 +1404,25 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 pending.push(Emit::Patch(branch, op));
                 pending.push(E(right));
             }
-            Emit::Conditional(yes, no) => {
+            Emit::Conditional(branches, fallback) => {
+                if let Some(((test, yes), rest)) = branches.split_first() {
+                    pending.extend([Emit::Consequent(yes, rest, fallback), E(test)]);
+                } else {
+                    pending.push(E(fallback));
+                }
+            }
+            Emit::Consequent(yes, rest, fallback) => {
                 let branch = out.len();
                 out.push(Op::JumpFalse(0));
-                pending.push(Emit::Alternative(branch, no));
+                pending.push(Emit::Alternative(branch, rest, fallback));
                 pending.push(E(yes));
             }
-            Emit::Alternative(branch, no) => {
+            Emit::Alternative(branch, rest, fallback) => {
                 let jump = out.len();
                 out.push(Op::Jump(0));
                 out[branch] = Op::JumpFalse(out.len());
                 pending.push(Emit::Patch(jump, "jump"));
-                pending.push(E(no));
+                pending.push(Emit::Conditional(rest, fallback));
             }
             R(e, assignment) => match e {
                 Expr::Group(value) => pending.push(R(value, assignment)),
@@ -1593,6 +1624,27 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Function(function) => {
                     out.push(Op::Function(compile_function(function, strict)?))
                 }
+                Expr::NestedCalls(base, levels) => {
+                    // Capture each callee's reference, receiver and function
+                    // before evaluating its first argument, from outside in.
+                    // Finish calls and evaluate later arguments from inside out.
+                    for (name, args) in levels.iter().rev() {
+                        check_identifier(name, strict)?;
+                        out.push(Op::Name(name.clone()));
+                        out.push(Op::PrepareCall(true));
+                        out.push(Op::Arguments);
+                        pending.push(I(Op::Call));
+                        for arg in args.iter().rev() {
+                            if let Expr::Spread(value) = arg {
+                                pending.extend([I(Op::Argument(true)), E(value)]);
+                            } else {
+                                pending.extend([I(Op::Argument(false)), E(arg)]);
+                            }
+                        }
+                        pending.push(I(Op::Argument(false)));
+                    }
+                    pending.push(E(base));
+                }
                 Expr::Call(target, args) if matches!(target.as_ref(), Expr::Super) => {
                     pending.push(I(Op::SuperConstruct));
                     for arg in args.iter().rev() {
@@ -1726,8 +1778,8 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     }),
                     R(value, true),
                 ]),
-                Expr::Conditional(test, yes, no) => {
-                    pending.extend([Emit::Conditional(yes, no), E(test)])
+                Expr::Conditional(branches, fallback) => {
+                    pending.push(Emit::Conditional(branches, fallback));
                 }
                 Expr::Sequence(terms) => pending.push(Emit::Sequence(terms)),
             },

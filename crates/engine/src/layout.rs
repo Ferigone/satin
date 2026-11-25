@@ -1786,10 +1786,10 @@ impl Builder<'_> {
             if let Some(&first) = text.first() {
                 let entry = self.grid_text.entry(first).or_insert_with(|| {
                     if text.len() == 1 {
-                        let visible = matches!(&doc.nodes[first.0].kind, NodeKind::Text(text) if !text.chars().all(is_css_space));
+                        let visible = matches!(&doc.nodes[first.0].kind, NodeKind::Text(text) | NodeKind::Cdata(text) if !text.chars().all(is_css_space));
                         GridText { merged: None, visible }
                     } else {
-                        let merged: String = text.iter().filter_map(|node| if let NodeKind::Text(text) = &doc.nodes[node.0].kind { Some(text.as_str()) } else { None }).collect();
+                        let merged: String = text.iter().filter_map(|node| doc.nodes[node.0].kind.text_data()).collect();
                         let visible = !merged.chars().all(is_css_space);
                         self.intrinsic[first.0] = None;
                         GridText { merged: Some(Arc::from(merged)), visible }
@@ -1803,8 +1803,10 @@ impl Builder<'_> {
         };
         for &node in &doc.nodes[id.0].children {
             match &doc.nodes[node.0].kind {
-                NodeKind::Text(_) => text.push(node),
-                NodeKind::Comment(_) | NodeKind::Doctype { .. } => {}
+                NodeKind::Text(_) | NodeKind::Cdata(_) => text.push(node),
+                NodeKind::Comment(_)
+                | NodeKind::ProcessingInstruction { .. }
+                | NodeKind::Doctype { .. } => {}
                 NodeKind::Element { .. } if self.styles[node.0].display == Display::None => {}
                 NodeKind::Element { .. } if self.styles[node.0].position.out_of_flow() => {}
                 _ => {
@@ -1818,7 +1820,7 @@ impl Builder<'_> {
         }
         flush(&mut nodes, &mut text);
         nodes.sort_by_key(|node| {
-            if matches!(self.page.document.nodes[node.0].kind, NodeKind::Text(_)) {
+            if self.page.document.nodes[node.0].kind.text_data().is_some() {
                 0
             } else {
                 self.styles[node.0].order
@@ -1828,10 +1830,11 @@ impl Builder<'_> {
     }
     fn grid_inline_contribution(&mut self, item: GridItem, width: f32) -> GridContribution {
         let (min_content, max_content) = self.intrinsic_width(item.node);
-        if matches!(
-            self.page.document.nodes[item.node.0].kind,
-            NodeKind::Text(_)
-        ) {
+        if self.page.document.nodes[item.node.0]
+            .kind
+            .text_data()
+            .is_some()
+        {
             return GridContribution {
                 start: item.column,
                 span: item.columns,
@@ -1905,7 +1908,7 @@ impl Builder<'_> {
         let Some(placement) = grid_placement(
             nodes,
             self.styles,
-            |node| matches!(doc.nodes[node.0].kind, NodeKind::Text(_)),
+            |node| doc.nodes[node.0].kind.text_data().is_some(),
             container,
             [&rows, &columns],
             &mut self.work_remaining,
@@ -1975,7 +1978,7 @@ impl Builder<'_> {
         let placement = grid_placement(
             nodes,
             self.styles,
-            |node| matches!(doc.nodes[node.0].kind, NodeKind::Text(_)),
+            |node| doc.nodes[node.0].kind.text_data().is_some(),
             container,
             [&row_template, &column_template],
             &mut self.work_remaining,
@@ -2025,10 +2028,10 @@ impl Builder<'_> {
         for &item in &placement.items {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let style = &self.styles[item.node.0];
-            let text = matches!(
-                self.page.document.nodes[item.node.0].kind,
-                NodeKind::Text(_)
-            );
+            let text = self.page.document.nodes[item.node.0]
+                .kind
+                .text_data()
+                .is_some();
             let m = if text {
                 BoxMetrics::anonymous(area_width)
             } else {
@@ -2183,10 +2186,10 @@ impl Builder<'_> {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let area_height = grid_area(&row_sizes, item.row, item.rows, used_gap_y);
             let style = &self.styles[item.node.0];
-            let text = matches!(
-                self.page.document.nodes[item.node.0].kind,
-                NodeKind::Text(_)
-            );
+            let text = self.page.document.nodes[item.node.0]
+                .kind
+                .text_data()
+                .is_some();
             let m = if text {
                 BoxMetrics::anonymous(area_width)
             } else {
@@ -2303,7 +2306,7 @@ impl Builder<'_> {
 impl Builder<'_> {
     fn is_flex_item(&self, child: NodeId) -> bool {
         match &self.page.document.nodes[child.0].kind {
-            NodeKind::Text(text) => !text.chars().all(is_css_space),
+            NodeKind::Text(text) | NodeKind::Cdata(text) => !text.chars().all(is_css_space),
             NodeKind::Element { .. } => {
                 let style = &self.styles[child.0];
                 style.display != Display::None && !style.position.out_of_flow()
@@ -2332,7 +2335,7 @@ impl Builder<'_> {
                 continue;
             }
             let (mut child_min, mut child_max) = self.intrinsic[child.0].unwrap_or_default();
-            if !matches!(self.page.document.nodes[child.0].kind, NodeKind::Text(_)) {
+            if self.page.document.nodes[child.0].kind.text_data().is_none() {
                 let item = &self.styles[child.0];
                 let metrics = BoxMetrics::new(item, 0., Constraints::default());
                 let to_border = |value: f32| {
@@ -2412,7 +2415,7 @@ impl Builder<'_> {
             .filter(|&child| self.is_flex_item(child))
             .collect();
         nodes.sort_by_key(|node| {
-            if matches!(self.page.document.nodes[node.0].kind, NodeKind::Text(_)) {
+            if self.page.document.nodes[node.0].kind.text_data().is_some() {
                 0
             } else {
                 self.styles[node.0].order
@@ -2420,7 +2423,7 @@ impl Builder<'_> {
         });
         let mut items = vec![];
         for node in nodes {
-            let text = matches!(self.page.document.nodes[node.0].kind, NodeKind::Text(_));
+            let text = self.page.document.nodes[node.0].kind.text_data().is_some();
             let s = &self.styles[node.0];
             let m = BoxMetrics::new(
                 s,
@@ -2723,10 +2726,10 @@ impl Builder<'_> {
             };
             for (item, &size) in group.iter_mut().zip(&sizes) {
                 let s = &self.styles[item.node.0];
-                let text = matches!(
-                    self.page.document.nodes[item.node.0].kind,
-                    NodeKind::Text(_)
-                );
+                let text = self.page.document.nodes[item.node.0]
+                    .kind
+                    .text_data()
+                    .is_some();
                 let align = if s.align_self == Align::Auto {
                     container.align_items
                 } else {
@@ -2845,8 +2848,10 @@ impl Builder<'_> {
         let doc = &self.page.document;
         let s = &self.styles[id.0];
         match &doc.nodes[id.0].kind {
-            NodeKind::Comment(_) | NodeKind::Doctype { .. } => return,
-            NodeKind::Text(text) => {
+            NodeKind::Comment(_)
+            | NodeKind::ProcessingInstruction { .. }
+            | NodeKind::Doctype { .. } => return,
+            NodeKind::Text(text) | NodeKind::Cdata(text) => {
                 self.text(text, s, line, href, doc.nodes[id.0].parent.unwrap_or(id));
                 return;
             }
@@ -3240,10 +3245,10 @@ impl Builder<'_> {
         };
         let s = &self.styles[id.0];
         let m = BoxMetrics::new(s, available, c);
-        let text = matches!(self.page.document.nodes[id.0].kind, NodeKind::Text(_));
-        let height = if let NodeKind::Text(t) = &self.page.document.nodes[id.0].kind {
+        let text = self.page.document.nodes[id.0].kind.text_data().is_some();
+        let height = if let Some(t) = self.page.document.nodes[id.0].kind.text_data() {
             let merged = self.grid_text.get(&id).and_then(|text| text.merged.clone());
-            let t = merged.as_deref().unwrap_or(t.as_str());
+            let t = merged.as_deref().unwrap_or(t);
             let mut line = Line::new(0., 0., c.width.unwrap_or(available), s, c.containing_height);
             self.text(
                 t,
@@ -3656,11 +3661,13 @@ impl Builder<'_> {
                     let d = &self.page.document;
                     let s = &self.styles[node.0];
                     match &d.nodes[node.0].kind {
-                        NodeKind::Text(text) => {
+                        NodeKind::Text(text) | NodeKind::Cdata(text) => {
                             self.text(text, s, line, href, d.nodes[node.0].parent.unwrap_or(node));
                             continue;
                         }
-                        NodeKind::Comment(_) | NodeKind::Doctype { .. } => continue,
+                        NodeKind::Comment(_)
+                        | NodeKind::ProcessingInstruction { .. }
+                        | NodeKind::Doctype { .. } => continue,
                         _ => {}
                     }
                     if s.display == Display::None {
@@ -4123,7 +4130,7 @@ impl Builder<'_> {
         }
         let s = &self.styles[id.0];
         let d = &self.page.document;
-        if s.display == Display::None && !matches!(d.nodes[id.0].kind, NodeKind::Text(_)) {
+        if s.display == Display::None && d.nodes[id.0].kind.text_data().is_none() {
             self.intrinsic[id.0] = Some((0., 0.));
             return (0., 0.);
         }
@@ -4134,9 +4141,9 @@ impl Builder<'_> {
             self.intrinsic[id.0] = Some(result);
             return result;
         }
-        let result = if let NodeKind::Text(text) = &d.nodes[id.0].kind {
+        let result = if let Some(text) = d.nodes[id.0].kind.text_data() {
             let merged = self.grid_text.get(&id).and_then(|text| text.merged.clone());
-            let text = merged.as_deref().unwrap_or(text.as_str());
+            let text = merged.as_deref().unwrap_or(text);
             let mut min = 0f32;
             let mut max = 0f32;
             let mut current = 0f32;
@@ -4244,13 +4251,13 @@ impl Builder<'_> {
                 let mut has_inline_content = false;
                 for &child in &d.nodes[id.0].children {
                     let cs = &self.styles[child.0];
-                    let text = matches!(d.nodes[child.0].kind, NodeKind::Text(_));
+                    let text = d.nodes[child.0].kind.text_data().is_some();
                     if !text && (cs.position.out_of_flow() || cs.display == Display::None) {
                         continue;
                     }
                     if !cs.pre
                         && !has_inline_content
-                        && matches!(&d.nodes[child.0].kind, NodeKind::Text(t) if t.chars().all(is_css_space))
+                        && matches!(&d.nodes[child.0].kind, NodeKind::Text(t) | NodeKind::Cdata(t) if t.chars().all(is_css_space))
                     {
                         continue;
                     }

@@ -44,6 +44,10 @@ const DOCUMENT_LIMIT: usize = 8 * 1024 * 1024;
 // partially filled batch is delivered immediately when the socket goes idle.
 const NAVIGATION_BATCH_BYTES: usize = 128 * 1024;
 const ENCODING_WAIT: Duration = Duration::from_millis(100);
+// A single production application bundle can exceed 10 MiB of decoded source.
+// Keep both its per-script limit and the cumulative document budget bounded.
+pub(crate) const CLASSIC_SCRIPT_LIMIT: usize = 12 * 1024 * 1024;
+pub(crate) const DOCUMENT_CLASSIC_SCRIPT_LIMIT: usize = 24 * 1024 * 1024;
 const RESOURCE_LIMIT: usize = 4 * 1024 * 1024;
 const DECODED_IMAGES_LIMIT: usize = 64 * 1024 * 1024;
 
@@ -1055,7 +1059,7 @@ impl Loader {
             if script.unsupported.is_some() {
                 continue;
             }
-            if index >= 32 || script_bytes >= 4 * 1024 * 1024 {
+            if index >= 32 || script_bytes >= DOCUMENT_CLASSIC_SCRIPT_LIMIT {
                 script.unsupported = Some("Script count/byte budget exceeded".into());
                 page.stats.skipped_resources += 1;
                 continue;
@@ -1069,7 +1073,7 @@ impl Loader {
                     Some(uri) if Instant::now() <= deadline => match self
                         .fetch(
                             &NavigationRequest::subresource(uri, &Url::parse(&page.url).unwrap()),
-                            1024 * 1024,
+                            CLASSIC_SCRIPT_LIMIT,
                             Duration::from_secs(4),
                             cancel,
                         )
@@ -1092,11 +1096,13 @@ impl Loader {
                     }
                 }
             }
-            script_bytes += script.source.as_ref().map_or(0, String::len);
-            if script_bytes > 4 * 1024 * 1024 {
+            let size = script.source.as_ref().map_or(0, String::len);
+            if size > CLASSIC_SCRIPT_LIMIT || size > DOCUMENT_CLASSIC_SCRIPT_LIMIT - script_bytes {
                 script.source = None;
                 script.unsupported = Some("Script byte budget exceeded".into());
                 page.stats.skipped_resources += 1;
+            } else {
+                script_bytes += size;
             }
         }
         page.scripts = Arc::new(scripts);

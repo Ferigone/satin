@@ -79,6 +79,10 @@ pub(super) struct Events {
     implicit_receiver: Option<Value>,
 }
 
+pub(super) fn target_table_exists(vm: &Vm, object: &Value) -> bool {
+    target_table(vm, object).is_some()
+}
+
 fn target_table(vm: &Vm, object: &Value) -> Option<(Value, Rc<TargetData>)> {
     let table = vm.host_slot(object, LISTENERS_SLOT)?;
     let data = vm.host_data::<TargetData>(&table)?;
@@ -679,7 +683,7 @@ fn install_with_receiver(
     vm.root(events.target_proto.clone());
     vm.root(events.event_proto.clone());
     let proto = events.target_proto.clone();
-    webidl::interface(
+    let target_constructor = webidl::interface(
         vm,
         proto.clone(),
         "EventTarget",
@@ -698,12 +702,27 @@ fn install_with_receiver(
             let state = dom.state.borrow();
             (state.prototype.clone(), state.window.clone())
         };
-        for object in [node, window] {
-            vm.call(
-                set_prototype.clone(),
-                Value::Undefined,
-                &[object, events.target_proto.clone()],
-            )?;
+        let window_proto = vm.new_object_with_prototype(events.target_proto.clone())?;
+        let window_constructor =
+            webidl::interface(vm, window_proto.clone(), "Window", 0, |_, _, _, _| {
+                Err(JsError::type_error("Illegal Window constructor"))
+            })?;
+        vm.define_data_property(
+            window.clone(),
+            "Window",
+            window_constructor.clone(),
+            true,
+            false,
+            true,
+        )?;
+        vm.set_prototype(node.as_object().unwrap(), events.target_proto.as_object())?;
+        vm.set_prototype(
+            window_constructor.as_object().unwrap(),
+            target_constructor.as_object(),
+        )?;
+        vm.set_prototype(window.as_object().unwrap(), window_proto.as_object())?;
+        for object in [&window, &window_proto, &events.target_proto] {
+            vm.make_prototype_immutable(object)?;
         }
     }
     let proto = events.target_proto.clone();
@@ -916,7 +935,7 @@ fn install_with_receiver(
         })?;
     }
 
-    let custom_proto = vm.new_object_with_prototype(proto)?;
+    let custom_proto = vm.new_object_with_prototype(proto.clone())?;
     let intrinsic = custom_proto.clone();
     let custom = webidl::interface(
         vm,
@@ -941,7 +960,11 @@ fn install_with_receiver(
             Ok(object)
         },
     )?;
-    vm.call(set_prototype, Value::Undefined, &[custom, constructor])?;
+    vm.call(
+        set_prototype.clone(),
+        Value::Undefined,
+        &[custom, constructor.clone()],
+    )?;
     getter(vm, custom_proto.clone(), "detail", |vm, this, _| {
         event(vm, &this)?;
         vm.host_slot(&this, CUSTOM_DETAIL_SLOT)
@@ -967,6 +990,11 @@ fn install_with_receiver(
         },
     )?;
     if let Some(dom) = &events.dom {
+        let (ui_proto, mouse_proto) =
+            super::ui_events::install(vm, &dom.state, proto, constructor, set_prototype)?;
+        vm.root(ui_proto.clone());
+        vm.root(mouse_proto.clone());
+        dom.state.borrow_mut().mouse_event_prototype = mouse_proto.clone();
         let root = dom.state.borrow().document.root;
         let document = super::wrap(vm, &dom.state, Some(root))?;
         let state = dom.state.clone();
@@ -987,6 +1015,13 @@ fn install_with_receiver(
             let object = match name.as_str() {
                 "event" | "events" | "htmlevents" => {
                     vm.new_object_with_prototype(create.event_proto.clone())?
+                }
+                "uievent" | "uievents" | "mouseevent" | "mouseevents" => {
+                    let mouse = name.starts_with("mouse");
+                    let proto = if mouse { &mouse_proto } else { &ui_proto };
+                    let object = vm.new_object_with_prototype(proto.clone())?;
+                    super::ui_events::initialize_empty(vm, &object, mouse)?;
+                    object
                 }
                 "customevent" => {
                     let object = vm.new_object_with_prototype(custom_proto.clone())?;

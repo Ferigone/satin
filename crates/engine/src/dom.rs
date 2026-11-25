@@ -12,11 +12,13 @@ pub enum Namespace {
     Html,
     Svg,
     MathMl,
+    Null,
 }
 
 impl Namespace {
     pub fn uri(self) -> &'static str {
         match self {
+            Self::Null => "",
             Self::Html => "http://www.w3.org/1999/xhtml",
             Self::Svg => "http://www.w3.org/2000/svg",
             Self::MathMl => "http://www.w3.org/1998/Math/MathML",
@@ -41,20 +43,69 @@ impl AttributeNamespace {
     }
 }
 
+/// Element attributes in DOM attribute-list order. Replacing a value keeps its position.
+pub type Attributes = indexmap::IndexMap<String, String>;
+
 #[derive(Clone, Debug)]
 pub enum NodeKind {
     Document,
     Element {
         tag: String,
-        attrs: BTreeMap<String, String>,
+        attrs: Attributes,
     },
     Text(String),
+    Cdata(String),
+    ProcessingInstruction {
+        target: String,
+        data: String,
+    },
     Comment(String),
     Doctype {
         name: String,
         public_id: Option<String>,
         system_id: Option<String>,
     },
+}
+
+/// XML 1.0 NameStartChar and NameChar (productions 4 and 4a).
+pub(crate) mod xml_names {
+    pub(crate) fn name_start(c: char) -> bool {
+        matches!(c, ':' | '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
+    }
+    pub(crate) fn name_char(c: char) -> bool {
+        name_start(c)
+            || matches!(c, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}')
+    }
+}
+
+impl NodeKind {
+    /// Text and CDATASection contribute to descendant text content.
+    pub fn text_data(&self) -> Option<&str> {
+        match self {
+            Self::Text(data) | Self::Cdata(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn character_data(&self) -> Option<&String> {
+        match self {
+            Self::Text(data)
+            | Self::Cdata(data)
+            | Self::Comment(data)
+            | Self::ProcessingInstruction { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn character_data_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Text(data)
+            | Self::Cdata(data)
+            | Self::Comment(data)
+            | Self::ProcessingInstruction { data, .. } => Some(data),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -72,16 +123,41 @@ pub struct Node {
     pub children: Vec<NodeId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShadowMode {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowTree {
+    pub root: NodeId,
+    pub mode: ShadowMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DocumentKind {
+    Html,
+    Xml,
+}
+
 #[derive(Clone, Debug)]
 pub struct Document {
     pub nodes: Vec<Node>,
     pub root: NodeId,
     pub truncated: bool,
     pub quirks_mode: QuirksMode,
+    /// Independent documents live in the same arena so adoption preserves node identity.
+    pub(crate) other_documents: BTreeMap<NodeId, DocumentKind>,
+    // Only nodes owned by a document other than the active page need an entry.
+    pub(crate) node_documents: BTreeMap<NodeId, NodeId>,
     pub scripting_enabled: bool,
     /// Template element -> detached Document-kind fragment container. Its
     /// children are inert, and are not ordinary children of the template node.
     pub template_contents: BTreeMap<NodeId, NodeId>,
+    /// Shadow roots stay outside the host's light-tree child list.
+    pub(crate) shadow_roots: BTreeMap<NodeId, ShadowTree>,
+    pub(crate) shadow_hosts: BTreeMap<NodeId, NodeId>,
     /// Element namespace overrides. Missing entries mean HTML. Keys and values
     /// must be copied/remapped together with the element during arena imports.
     pub namespaces: BTreeMap<NodeId, Namespace>,
@@ -101,8 +177,12 @@ impl Default for Document {
             root: NodeId(0),
             truncated: false,
             quirks_mode: QuirksMode::NoQuirks,
+            other_documents: BTreeMap::new(),
+            node_documents: BTreeMap::new(),
             scripting_enabled: false,
             template_contents: BTreeMap::new(),
+            shadow_roots: BTreeMap::new(),
+            shadow_hosts: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             attribute_namespaces: BTreeMap::new(),
         }
@@ -110,6 +190,16 @@ impl Default for Document {
 }
 
 impl Document {
+    pub(crate) fn shadow_including_nodes(&self, root: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        let mut pending = vec![root];
+        std::iter::from_fn(move || {
+            let id = pending.pop()?;
+            pending.extend(self.nodes[id.0].children.iter().rev().copied());
+            pending.extend(self.shadow_roots.get(&id).map(|tree| tree.root));
+            Some(id)
+        })
+    }
+
     /// Connected tree order; arena allocation order can retain detached nodes
     /// after HTML error recovery and later DOM mutations.
     pub fn connected_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
@@ -120,12 +210,59 @@ impl Document {
             Some(id)
         })
     }
-    pub fn is_connected(&self, mut node: NodeId) -> bool {
+    pub(crate) fn is_document(&self, node: NodeId) -> bool {
+        node == self.root || self.other_documents.contains_key(&node)
+    }
+
+    pub(crate) fn is_html_document(&self, node: NodeId) -> bool {
+        node == self.root || self.other_documents.get(&node) == Some(&DocumentKind::Html)
+    }
+
+    pub(crate) fn node_document(&self, node: NodeId) -> NodeId {
+        if self.is_document(node) {
+            node
+        } else {
+            self.node_documents.get(&node).copied().unwrap_or(self.root)
+        }
+    }
+
+    pub(crate) fn html_element_in_html_document(&self, id: NodeId) -> bool {
+        self.namespace(id) == Namespace::Html && self.is_html_document(self.node_document(id))
+    }
+
+    /// Adopt a detached subtree, including its shadow tree and template contents.
+    pub(crate) fn adopt(&mut self, node: NodeId, document: NodeId) {
+        if self.node_document(node) == document {
+            return;
+        }
+        let mut pending = vec![node];
+        while let Some(id) = pending.pop() {
+            if document == self.root {
+                self.node_documents.remove(&id);
+            } else {
+                self.node_documents.insert(id, document);
+            }
+            pending.extend(self.nodes[id.0].children.iter().copied());
+            pending.extend(self.template_contents.get(&id).copied());
+            pending.extend(self.shadow_roots.get(&id).map(|tree| tree.root));
+        }
+    }
+
+    pub fn is_connected(&self, node: NodeId) -> bool {
+        self.connected_to(node, self.root)
+    }
+
+    pub(crate) fn connected_to(&self, mut node: NodeId, document: NodeId) -> bool {
         while let Some(entry) = self.nodes.get(node.0) {
-            if node == self.root {
+            if node == document {
                 return true;
             }
-            let Some(parent) = entry.parent else { break };
+            let Some(parent) = entry
+                .parent
+                .or_else(|| self.shadow_hosts.get(&node).copied())
+            else {
+                break;
+            };
             node = parent;
         }
         false
@@ -139,6 +276,10 @@ impl Document {
             children: vec![],
         });
         self.nodes[parent.0].children.push(id);
+        let document = self.node_document(parent);
+        if document != self.root {
+            self.node_documents.insert(id, document);
+        }
         id
     }
 
@@ -159,7 +300,9 @@ impl Document {
     }
 
     pub fn namespace_uri(&self, id: NodeId) -> Option<&'static str> {
-        matches!(self.nodes[id.0].kind, NodeKind::Element { .. }).then(|| self.namespace(id).uri())
+        (matches!(self.nodes[id.0].kind, NodeKind::Element { .. })
+            && self.namespace(id) != Namespace::Null)
+            .then(|| self.namespace(id).uri())
     }
 
     pub fn attribute_namespace(&self, id: NodeId, name: &str) -> Option<AttributeNamespace> {
@@ -203,7 +346,7 @@ impl Document {
         let mut result = String::new();
         let mut pending = vec![id];
         while let Some(node) = pending.pop() {
-            if let NodeKind::Text(text) = &self.nodes[node.0].kind {
+            if let Some(text) = self.nodes[node.0].kind.text_data() {
                 result.push_str(text);
             }
             pending.extend(self.nodes[node.0].children.iter().rev().copied());
@@ -212,8 +355,12 @@ impl Document {
     }
 
     pub fn elements(&self, tag: &str) -> impl Iterator<Item = NodeId> + '_ {
+        self.elements_in(self.root, tag)
+    }
+
+    pub(crate) fn elements_in(&self, root: NodeId, tag: &str) -> impl Iterator<Item = NodeId> + '_ {
         let tag = tag.to_owned();
-        let mut pending = vec![self.root];
+        let mut pending = vec![root];
         std::iter::from_fn(move || {
             while let Some(id) = pending.pop() {
                 pending.extend(self.nodes[id.0].children.iter().rev().copied());
@@ -234,8 +381,16 @@ impl Document {
     }
 
     pub fn title(&self) -> String {
-        self.html_elements("title")
-            .next()
+        self.title_in(self.root)
+    }
+
+    pub(crate) fn title_element(&self, root: NodeId) -> Option<NodeId> {
+        self.elements_in(root, "title")
+            .find(|&id| self.namespace(id) == Namespace::Html)
+    }
+
+    pub(crate) fn title_in(&self, root: NodeId) -> String {
+        self.title_element(root)
             .map(|n| {
                 self.text(n)
                     .split(['\t', '\n', '\x0c', '\r', ' '])
@@ -287,7 +442,19 @@ impl Document {
                 NodeKind::Document => {
                     pending.extend(self.nodes[id.0].children.iter().rev().map(|&c| (c, false)));
                 }
-                NodeKind::Text(s) => {
+                NodeKind::Cdata(s) if !self.is_html_document(self.node_document(id)) => {
+                    out.push_str("<![CDATA[");
+                    out.push_str(s);
+                    out.push_str("]]>");
+                }
+                NodeKind::ProcessingInstruction { target, data } => {
+                    out.push_str("<?");
+                    out.push_str(target);
+                    out.push(' ');
+                    out.push_str(data);
+                    out.push_str("?>");
+                }
+                NodeKind::Text(s) | NodeKind::Cdata(s) => {
                     let raw = self.nodes[id.0].parent.is_some_and(|p| {
                         self.namespace(p) == Namespace::Html
                             && (matches!(
