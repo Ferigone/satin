@@ -93,6 +93,11 @@ fn media_source_appends_independent_tracks_and_exposes_buffered_intersection() {
             buffer.addEventListener(name, event => events.push(event.type + ":" + buffer.updating));
           }
         }
+        source.setLiveSeekableRange(20, 30);
+        const unknownDuration = player.seekable.length === 0;
+        source.duration = 0;
+        const zeroDuration = player.seekable.length === 1 && player.seekable.end(0) === 0;
+        source.clearLiveSeekableRange();
         source.duration = 9;
         const input = new Uint8Array([11, 22, 33]);
         videoBuffer.timestampOffset = 1.5;
@@ -104,7 +109,8 @@ fn media_source_appends_independent_tracks_and_exposes_buffered_intersection() {
         let busy = false;
         try { source.endOfStream(); }
         catch (error) { busy = error.name === "InvalidStateError"; }
-        source.sourceBuffers.length === 2 && source.sourceBuffers[0] === videoBuffer &&
+        unknownDuration && zeroDuration &&
+          source.sourceBuffers.length === 2 && source.sourceBuffers[0] === videoBuffer &&
           videoBuffer instanceof SourceBuffer && videoBuffer.updating && audioBuffer.updating && busy &&
           events.length === 1 && player.buffered.length === 0;
     "#).unwrap();
@@ -151,10 +157,20 @@ fn media_source_appends_independent_tracks_and_exposes_buffered_intersection() {
     runtime.pump();
     let result = runtime.eval(r#"
         const ranges = player.buffered;
+        source.duration = Infinity;
+        const live = player.seekable;
+        source.setLiveSeekableRange(4, 5);
+        const within = player.seekable;
+        source.setLiveSeekableRange(9, 12);
+        const ahead = player.seekable;
+        source.clearLiveSeekableRange();
         let invalid = false;
         try { ranges.end(5); } catch (error) { invalid = error.name === "IndexSizeError"; }
         source.endOfStream();
-        ranges instanceof TimeRanges && ranges.length === 2 && ranges.start(0) === 3 &&
+        live.length === 1 && live.start(0) === 0 && live.end(0) === 7.5 &&
+          within.length === 1 && within.start(0) === 3 && within.end(0) === 7.5 &&
+          ahead.length === 1 && ahead.start(0) === 3 && ahead.end(0) === 12 &&
+          ranges instanceof TimeRanges && ranges.length === 2 && ranges.start(0) === 3 &&
           ranges.end(0) === 6 && ranges.start(1) === 7 && ranges.end(1) === 7.5 && invalid &&
           source.activeSourceBuffers.length === 2 && source.readyState === "ended" &&
           events.join(",") === "sourceopen,updatestart:true,updatestart:true,update:false,updateend:false,update:false,updateend:false";

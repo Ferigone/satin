@@ -533,6 +533,15 @@ pub(super) fn element_ranges(
         return make_ranges(vm, store, ranges);
     };
     let source = brand::<Source>(vm, &source_value, "MediaSource")?;
+    if seekable {
+        let duration = source.duration.get();
+        if duration.is_nan() {
+            return make_ranges(vm, store, Vec::new());
+        }
+        if duration.is_finite() {
+            return make_ranges(vm, store, vec![(0., duration)]);
+        }
+    }
     let active = list_for(vm, &source_value, ACTIVE_LIST);
     let ranges: Vec<_> = list_values(vm, &active)?
         .iter()
@@ -545,22 +554,7 @@ pub(super) fn element_ranges(
         .iter()
         .filter_map(|ranges| ranges.last().map(|range| range.1))
         .fold(0., f64::max);
-    let value = if seekable {
-        let duration = source.duration.get();
-        if duration.is_finite() && duration > 0. {
-            vec![(0., duration)]
-        } else if let Some((start, end)) = source.live.get() {
-            let earliest = ranges
-                .iter()
-                .filter_map(|ranges| ranges.first().map(|range| range.0))
-                .fold(start, f64::min);
-            vec![(earliest, end.max(highest))]
-        } else if highest > 0. {
-            vec![(0., highest)]
-        } else {
-            Vec::new()
-        }
-    } else if highest == 0. {
+    let buffered = if highest == 0. {
         Vec::new()
     } else {
         ranges
@@ -574,7 +568,19 @@ pub(super) fn element_ranges(
                 intersect(&prior, &current)
             })
     };
-    make_ranges(vm, store, value)
+    if !seekable {
+        return make_ranges(vm, store, buffered);
+    }
+    let latest = buffered.last().map_or(0., |range| range.1);
+    let ranges = if let Some((start, end)) = source.live.get() {
+        let earliest = buffered.first().map_or(start, |range| range.0);
+        vec![(start.min(earliest), end.max(latest))]
+    } else if buffered.is_empty() {
+        Vec::new()
+    } else {
+        vec![(0., latest)]
+    };
+    make_ranges(vm, store, ranges)
 }
 
 pub(super) use idl::install;
