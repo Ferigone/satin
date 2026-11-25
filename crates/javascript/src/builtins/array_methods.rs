@@ -108,15 +108,12 @@ pub(super) fn install(vm: &mut Vm, proto: &Value) {
             return Ok((-1).into());
         }
         let needle = arg(args, 0);
-        for i in (0..=index as usize).rev() {
-            vm.tick()?;
-            let key = JsString::from(i.to_string());
-            if vm.has(&obj, &key)? {
-                let value = vm.get(obj.clone(), &key)?;
-                vm.charge_bigint_comparison(&value, &needle)?;
-                if value == needle {
-                    return Ok(Value::from(i));
-                }
+        let mut indices = super::array_iteration::PresentIndices::new(0..(index as u64 + 1), true);
+        while let Some((i, key)) = indices.next(vm, &obj)? {
+            let value = vm.get(obj.clone(), &key)?;
+            vm.charge_bigint_comparison(&value, &needle)?;
+            if value == needle {
+                return Ok(Value::from(i as f64));
             }
         }
         Ok((-1).into())

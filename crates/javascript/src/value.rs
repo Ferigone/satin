@@ -110,23 +110,46 @@ impl JsString {
         other.copy_units(&mut units);
         Self::from_utf16(units)
     }
-    pub(crate) fn can_append(&self, other: &Self) -> bool {
-        other.len() <= INLINE_UNITS && self.depth() < MAX_APPEND_DEPTH
-    }
-    pub(crate) fn append(self, other: &Self) -> Self {
-        let len = self.len() + other.len();
-        let depth = self.depth() + 1;
-        let suffix_len = other.len();
+    /// Share the existing prefix and fill the last inline suffix before adding
+    /// another node. The second result is the number of copied code units.
+    pub(crate) fn append_short(&self, other: &Self) -> Option<(Self, usize)> {
+        if other.len() > INLINE_UNITS {
+            return None;
+        }
         let mut suffix = [0; INLINE_UNITS];
-        suffix[..suffix_len].copy_from_slice(other.as_utf16());
-        Self(Rc::new(StringStorage::Appended {
-            prefix: RefCell::new(Some(self)),
+        let mut used = 0;
+        let mut base = self.clone();
+        if let StringStorage::Appended {
+            prefix,
+            suffix: previous,
+            suffix_len,
+            ..
+        } = self.0.as_ref()
+        {
+            let previous_len = *suffix_len as usize;
+            if previous_len + other.len() <= INLINE_UNITS {
+                if let Some(prefix) = prefix.borrow().as_ref() {
+                    base = prefix.clone();
+                    suffix[..previous_len].copy_from_slice(&previous[..previous_len]);
+                    used = previous_len;
+                }
+            }
+        }
+        let depth = base.depth() + 1;
+        if depth > MAX_APPEND_DEPTH {
+            return None;
+        }
+        let suffix_len = used + other.len();
+        suffix[used..suffix_len].copy_from_slice(other.as_utf16());
+        let result = Self(Rc::new(StringStorage::Appended {
+            prefix: RefCell::new(Some(base)),
             suffix,
             suffix_len: suffix_len as u8,
-            len,
+            len: self.len() + other.len(),
             depth,
             flattened: OnceCell::new(),
-        }))
+        }));
+        Some((result, suffix_len))
     }
     pub(crate) fn prefix(&self) -> Option<Self> {
         match self.0.as_ref() {

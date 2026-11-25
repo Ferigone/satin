@@ -4286,9 +4286,9 @@ impl Vm {
             }
             let len = a.len().saturating_add(b.len());
             self.ensure_string_allocation(len)?;
-            if a.can_append(&b) {
-                self.consume_work(b.len())?;
-                return self.checked_string(a.append(&b));
+            if let Some((result, copied)) = a.append_short(&b) {
+                self.consume_work(copied)?;
+                return self.checked_string(result);
             }
             self.charge_buffer_work(len)?;
             return self.checked_string(a.concat(&b));

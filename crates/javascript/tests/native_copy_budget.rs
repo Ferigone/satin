@@ -146,3 +146,26 @@ fn materialized_strings_release_unreferenced_append_prefixes() {
     // The temporary prefix strings used to assemble each result are unobservable.
     assert!(retained < 512 * 1024, "retained {retained} bytes");
 }
+
+#[test]
+fn ten_thousand_short_appends_share_storage_and_preserve_intermediate_values() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        let text = '', snapshot, mixed;
+        for (let i = 0; i < 10000; i++) {
+            text += '.';
+            if (i === 34) {
+                snapshot = text;
+                mixed = text + '\ud800';
+                if (mixed.charCodeAt(35) !== 0xd800) throw 'lost code unit';
+            }
+        }
+        snapshot === '.'.repeat(35) && mixed.length === 36 && text === '.'.repeat(10000)
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}

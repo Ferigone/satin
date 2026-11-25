@@ -130,3 +130,50 @@ fn reduce_right_uses_exact_indices_near_the_safe_integer_limit() {
         thrown === sentinel && trace === 'top:third'
     "#);
 }
+
+#[test]
+fn sparse_traversal_rechecks_prototypes_getters_and_callback_mutations() {
+    yes(r#"
+        const a = new Array(1000000);
+        const proto = Object.create(Array.prototype);
+        Object.setPrototypeOf(a, proto);
+        a[1] = 1;
+        a[900000] = 'deleted';
+        Object.defineProperty(proto, '500000', {get() {
+            a[800000] = 8;
+            delete a[900000];
+            return 5;
+        }});
+        const seen = [];
+        const mapped = a.map((v, i) => {
+            seen.push(i);
+            if (i === 1) a[100000] = 2;
+            return v * 2;
+        });
+        seen.join(',') === '1,100000,500000,800000' &&
+            mapped.length === 1000000 && !(499999 in mapped) &&
+            mapped[500000] === 10 && mapped[800000] === 16 &&
+            a.lastIndexOf(2) === 100000 && a.reduceRight((s, x) => s + x, 0) === 16
+    "#);
+}
+
+#[test]
+fn sparse_traversal_falls_back_for_a_new_proxy_in_the_prototype_chain() {
+    yes(r#"
+        const a = new Array(2000);
+        a[25] = 1;
+        let probes = 0;
+        const seen = [];
+        a.forEach((value, i) => {
+            seen.push(i);
+            if (i === 25) Object.setPrototypeOf(a, new Proxy(Array.prototype, {
+                has(target, key) {
+                    probes++;
+                    return key === '1780';
+                },
+                get(target, key) { return key === '1780' ? 3 : target[key]; }
+            }));
+        });
+        seen.join(',') === '25,1780' && probes === 1974
+    "#);
+}

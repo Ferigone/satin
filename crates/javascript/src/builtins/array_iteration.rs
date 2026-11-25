@@ -1,5 +1,9 @@
 use super::{arg, method};
-use crate::{JsError, JsString, Value, Vm, heap::Property};
+use crate::{
+    JsError, JsString, Value, Vm,
+    heap::{ObjectKind, Property, array_index},
+};
+use std::ops::Range;
 
 #[derive(Clone, Copy)]
 enum Visit {
@@ -55,6 +59,100 @@ fn prepare(vm: &mut Vm, this: Value, args: &[Value]) -> Result<(Value, u64, Valu
     Ok((object, length, callback))
 }
 
+/// Each candidate is looked up again after the last callback, indexed getter
+/// or species result write. Only an uninterrupted run of holes may be skipped.
+pub(super) struct PresentIndices {
+    range: Range<u64>,
+    reverse: bool,
+}
+
+impl PresentIndices {
+    pub(super) fn new(range: Range<u64>, reverse: bool) -> Self {
+        Self { range, reverse }
+    }
+
+    pub(super) fn next(
+        &mut self,
+        vm: &mut Vm,
+        object: &Value,
+    ) -> Result<Option<(u64, JsString)>, JsError> {
+        let mut misses = 0usize;
+        loop {
+            let index = if self.reverse {
+                self.range.next_back()
+            } else {
+                self.range.next()
+            };
+            let Some(index) = index else { return Ok(None) };
+            vm.tick()?;
+            let key = JsString::from(index.to_string());
+            if vm.has(object, &key)? {
+                return Ok(Some((index, key)));
+            }
+            misses += 1;
+            if misses >= 64
+                && misses.is_power_of_two()
+                && self.range.end - self.range.start > misses as u64
+            {
+                self.skip_ordinary_holes(vm, object, misses)?;
+            }
+        }
+    }
+
+    fn skip_ordinary_holes(
+        &mut self,
+        vm: &mut Vm,
+        object: &Value,
+        mut scan_budget: usize,
+    ) -> Result<(), JsError> {
+        let Some(mut id) = object.as_object() else {
+            return Ok(());
+        };
+        if self.range.end > u64::from(u32::MAX)
+            || !matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. })
+        {
+            return Ok(());
+        }
+        let mut nearest = None;
+        loop {
+            let entry = vm.heap.object(id)?;
+            if !matches!(entry.kind, ObjectKind::Ordinary | ObjectKind::Array { .. })
+                || entry.is_platform_object()
+            {
+                return Ok(());
+            }
+            // A key scan must cost no more than the sequential misses that
+            // justified it. This bounds repeated scans on partly dense inputs.
+            let cost = entry.properties.len() + 1;
+            let Some(remaining) = scan_budget.checked_sub(cost) else {
+                return Ok(());
+            };
+            scan_budget = remaining;
+            vm.consume_work(cost)?;
+            let entry = vm.heap.object(id)?;
+            for key in entry.properties.keys().filter(|key| key.len() <= 10) {
+                if let Some(index) = array_index(key).map(u64::from)
+                    && self.range.contains(&index)
+                {
+                    nearest = Some(match nearest {
+                        Some(found) if self.reverse => index.max(found),
+                        Some(found) => index.min(found),
+                        None => index,
+                    });
+                }
+            }
+            let Some(parent) = entry.prototype else { break };
+            id = parent;
+        }
+        if self.reverse {
+            self.range.end = nearest.map_or(self.range.start, |i| i + 1);
+        } else {
+            self.range.start = nearest.unwrap_or(self.range.end);
+        }
+        Ok(())
+    }
+}
+
 fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value, JsError> {
     let (object, length, callback) = prepare(vm, this, args)?;
     let result = match kind {
@@ -66,12 +164,8 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value,
     };
     let this_arg = arg(args, 1);
     let mut count = 0u64;
-    for index in 0..length {
-        vm.tick()?;
-        let key = JsString::from(index.to_string());
-        if !vm.has(&object, &key)? {
-            continue;
-        }
+    let mut indices = PresentIndices::new(0..length, false);
+    while let Some((index, key)) = indices.next(vm, &object)? {
         let value = vm.get(object.clone(), &key)?;
         let mapped = vm.invoke(
             callback.clone(),
@@ -99,13 +193,8 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value,
 fn reduce(vm: &mut Vm, this: Value, args: &[Value], right: bool) -> Result<Value, JsError> {
     let (object, length, callback) = prepare(vm, this, args)?;
     let mut accumulator = args.get(1).cloned();
-    for offset in 0..length {
-        vm.tick()?;
-        let index = if right { length - 1 - offset } else { offset };
-        let key = JsString::from(index.to_string());
-        if !vm.has(&object, &key)? {
-            continue;
-        }
+    let mut indices = PresentIndices::new(0..length, right);
+    while let Some((index, key)) = indices.next(vm, &object)? {
         let value = vm.get(object.clone(), &key)?;
         accumulator = Some(match accumulator {
             Some(accumulator) => vm.invoke(
