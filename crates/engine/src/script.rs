@@ -42,6 +42,8 @@ mod structured_clone;
 mod style_sheets;
 mod text_encoding;
 mod tree_walker;
+#[cfg(feature = "twitch-bootstrap-profile")]
+mod twitch_profile;
 mod url_api;
 mod webidl;
 mod workers;
@@ -151,6 +153,8 @@ struct State {
 }
 
 pub struct ScriptRuntime {
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    twitch_profile: Option<twitch_profile::Profile>,
     vm: Vm,
     state: Shared,
     fetch: fetch::FetchHost,
@@ -668,14 +672,6 @@ impl ScriptRuntime {
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
-        let callback=vm.new_native_function("__satinProfile",move|vm,_,a|{
-            if let [Value::Number(enter),Value::Number(id),..]=a {
-                vm.qa_factory(*enter != 0.0, *id as u64);
-                println!("FACTORY {} {} {} {} {}",*enter as u64,*id as u64,vm.qa_fuel(),vm.estimated_heap_bytes(),vm.heap_cell_count());
-            }
-            Ok(Value::Undefined)
-        });
-        vm.set_global("__satinProfile",callback)?;
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
@@ -828,6 +824,7 @@ impl ScriptRuntime {
             &[window.clone(), "window".into(), descriptor],
         )?;
         navigator::install(&mut vm, &window)?;
+        install_css_namespace(&mut vm, window.clone())?;
         let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
         let state_get = state.clone();
@@ -980,6 +977,8 @@ impl ScriptRuntime {
         let next_collection_bytes = vm.estimated_heap_bytes() + 1024 * 1024;
         let next_collection_cells = vm.limits().max_heap_objects / 2;
         Ok(Self {
+            #[cfg(feature = "twitch-bootstrap-profile")]
+            twitch_profile: None,
             vm,
             state,
             fetch,
@@ -1076,16 +1075,14 @@ impl ScriptRuntime {
         external: bool,
     ) {
         let state = self.state.clone();
-        let core = identifier.contains("assets.twitch.tv/assets/core-");
-        let budget = if core { std::env::var("QA_FUEL").ok().and_then(|v|v.parse().ok()).unwrap_or(1_000_000) } else { self.vm.limits().max_instructions };
-        if core { self.vm.qa_begin(); }
-        let t=Instant::now();
-        let result = self.vm.with_task_limits(budget,Some(t+std::time::Duration::from_secs(120)),|vm|run_classic(vm,&state,node,source,identifier,external,true));
-        if core { 
-            self.vm.qa_finish();
-            let error=result.as_ref().err().map(|e|(&e.kind,&e.message));
-            println!("CORE elapsed={:?} budget={budget} remaining={} bytes={} cells={} error={error:?}",t.elapsed(),self.vm.qa_fuel(),self.vm.estimated_heap_bytes(),self.vm.heap_cell_count());
-        }
+        let run = |vm: &mut Vm| run_classic(vm, &state, node, source, identifier, external, true);
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        let result = match self.twitch_profile {
+            Some(profile) => profile.run(&mut self.vm, identifier, run),
+            None => self.vm.with_task(run),
+        };
+        #[cfg(not(feature = "twitch-bootstrap-profile"))]
+        let result = self.vm.with_task(run);
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
@@ -1097,9 +1094,12 @@ impl ScriptRuntime {
             });
         }
         report_unhandled(&mut self.vm, &self.state);
-        let t=Instant::now();
-        if std::env::var_os("QA_ALWAYS_COLLECT").is_some(){self.vm.collect_garbage();}else{self.collect_after_task(true);}
-        eprintln!("GC {:.6}",t.elapsed().as_secs_f64());
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        if let Some(profile) = self.twitch_profile {
+            profile.collect(self);
+            return;
+        }
+        self.collect_after_task(true);
     }
     /// Returns whether the link's default navigation is allowed.
     pub fn click(&mut self, node: NodeId) -> bool {
@@ -2069,15 +2069,17 @@ fn install_selectors(
                 let state = state.borrow();
                 let doc = &state.document;
                 let form_state = |node, pseudo| forms.matches_form_pseudo(doc, node, pseudo);
+                let mut context = css::SelectorContext::new(&form_state);
+                context.scope = Some(id);
                 match name {
-                    "matches" => return Ok(selectors.matches(doc, id, &form_state).into()),
+                    "matches" => return Ok(selectors.matches(doc, id, &mut context).into()),
                     "closest" => std::iter::successors(Some(id), |id| doc.nodes[id.0].parent)
-                        .find(|&id| selectors.matches(doc, id, &form_state))
+                        .find(|&id| selectors.matches(doc, id, &mut context))
                         .into_iter()
                         .collect(),
                     _ => {
                         let matches = descendants(doc, id)
-                            .filter(|&id| selectors.matches(doc, id, &form_state));
+                            .filter(|&id| selectors.matches(doc, id, &mut context));
                         if name == "querySelector" {
                             matches.take(1).collect::<Vec<_>>()
                         } else {
@@ -2192,21 +2194,32 @@ fn inline_style_node(vm: &Vm, style: &Value) -> Result<NodeId, JsError> {
         .ok_or_else(|| JsError::type_error("Expected an inline CSS style"))
 }
 
+fn install_css_namespace(vm: &mut Vm, window: Value) -> Result<(), JsError> {
+    let namespace = vm.new_object();
+    webidl::tag(vm, namespace.clone(), "CSS")?;
+    webidl::operation(vm, namespace.clone(), "supports", 1, |vm, _, args| {
+        webidl::required(args, 1, "CSS.supports")?;
+        let first = text(vm, args[0].clone())?;
+        let supported = if let Some(value) = args.get(1) {
+            let value = text(vm, value.clone())?;
+            css::supports::property(&first, &value)
+        } else {
+            css::supports::query(&first)
+        };
+        Ok(supported.into())
+    })?;
+    vm.define_data_property(window, "CSS", namespace, true, false, true)
+}
+
 fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
     // Each document shares these CSS accessors across its inline styles.
     let style_prototype = vm.new_object();
-    for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
-        .iter()
-        .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(css::BOX_PAINT_LONGHANDS)
-        .chain(css::CORNER_OUTLINE_SHORTHANDS)
-        .chain(&[
-            ("cssFloat", "float"),
-            ("listStyle", "list-style"),
-            ("listStyleType", "list-style-type"),
-            ("opacity", "opacity"),
-            ("paddingLeft", "padding-left"),
-        ])
+    for &(property, css_name) in layout_api::shared_style_properties().chain(&[
+        ("cssFloat", "float"),
+        ("listStyleType", "list-style-type"),
+        ("opacity", "opacity"),
+        ("paddingLeft", "padding-left"),
+    ])
     {
         let get_state = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {

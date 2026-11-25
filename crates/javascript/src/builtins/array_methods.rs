@@ -145,34 +145,6 @@ pub(super) fn install(vm: &mut Vm, proto: &Value) {
         }
         Ok(obj)
     });
-    for (name, indexed) in [("findLast", false), ("findLastIndex", true)] {
-        method(vm, proto.clone(), name, 1, move |vm, this, args| {
-            let (obj, len) = array_like(vm, this)?;
-            let callback = arg(args, 0);
-            if !vm.is_callable(&callback) {
-                return Err(JsError::type_error("Array predicate is not callable"));
-            }
-            for i in (0..len).rev() {
-                vm.tick()?;
-                let value = vm.get_property(obj.clone(), &i.to_string())?;
-                if vm
-                    .invoke(
-                        callback.clone(),
-                        arg(args, 1),
-                        &[value.clone(), Value::from(i), obj.clone()],
-                    )?
-                    .is_truthy()
-                {
-                    return Ok(if indexed { Value::from(i) } else { value });
-                }
-            }
-            Ok(if indexed {
-                (-1).into()
-            } else {
-                Value::Undefined
-            })
-        });
-    }
     for (name, which) in [
         ("toReversed", Copy::Reverse),
         ("toSpliced", Copy::Splice),

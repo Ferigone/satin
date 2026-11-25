@@ -160,8 +160,8 @@ impl Vm {
     ) -> Result<Value, JsError> {
         let function = invocation.function.clone();
         let owner = function.as_object().unwrap();
-        let env = self.function_environment(&code, parent, invocation)?;
-        self.prepare(&code.body.scope, env)?;
+        let (env, body) = self.function_environment(&code, parent, invocation)?;
+        self.prepare(&body.scope, env)?;
         let asynchronous = code.kind == FunctionKind::AsyncGenerator;
         let fallback = if asynchronous {
             self.realm.async_generator_prototype
@@ -170,7 +170,7 @@ impl Vm {
         }
         .unwrap();
         let prototype = self.prototype_from_constructor(function, fallback)?;
-        let execution = Execution::new(self, owner, code.body.clone(), env)?;
+        let execution = Execution::new(self, owner, body, env)?;
         self.ensure_allocation(mem::size_of::<Execution>() + 384)?;
         let execution = Box::new(execution);
         let kind = if asynchronous {

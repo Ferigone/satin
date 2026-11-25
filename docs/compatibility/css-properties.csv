@@ -1,0 +1,824 @@
+property,input,inline_before,inline_after,computed_before,computed_after,Satin_control,Satin_value,Chromium_control,Chromium_value
+-webkit-align-content,center,rejected,rejected,missing-readback,missing-readback,,,normal,center
+-webkit-align-items,center,rejected,rejected,missing-readback,missing-readback,,,normal,center
+-webkit-align-self,center,rejected,rejected,missing-readback,missing-readback,,,auto,center
+-webkit-animation,0.25,rejected,rejected,missing-readback,missing-readback,,,none,0.25
+-webkit-animation-delay,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+-webkit-animation-direction,reverse,rejected,rejected,missing-readback,missing-readback,,,normal,reverse
+-webkit-animation-duration,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+-webkit-animation-fill-mode,both,rejected,rejected,missing-readback,missing-readback,,,none,both
+-webkit-animation-iteration-count,0.25,rejected,rejected,missing-readback,missing-readback,,,1,0.25
+-webkit-animation-name,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+-webkit-animation-play-state,paused,rejected,rejected,missing-readback,missing-readback,,,running,paused
+-webkit-animation-timing-function,ease-in,rejected,rejected,missing-readback,missing-readback,,,ease,ease-in
+-webkit-appearance,auto,rejected,rejected,missing-readback,missing-readback,,,none,auto
+-webkit-backface-visibility,hidden,rejected,rejected,missing-readback,missing-readback,,,visible,hidden
+-webkit-background-clip,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+-webkit-background-origin,border-box,rejected,rejected,missing-readback,missing-readback,,,padding-box,border-box
+-webkit-background-size,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px 7px
+-webkit-border-bottom-left-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-border-bottom-right-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-border-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-border-top-left-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-border-top-right-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-box-align,center,rejected,rejected,missing-readback,missing-readback,,,stretch,center
+-webkit-box-flex,0.25,rejected,rejected,missing-readback,missing-readback,,,0,0.25
+-webkit-box-ordinal-group,3,rejected,rejected,missing-readback,missing-readback,,,1,3
+-webkit-box-orient,vertical,rejected,rejected,missing-readback,missing-readback,,,horizontal,vertical
+-webkit-box-pack,center,rejected,rejected,missing-readback,missing-readback,,,start,center
+-webkit-box-shadow,2px 4px,rejected,rejected,missing-readback,missing-readback,,,none,"rgb(0, 0, 0) 2px 4px 0px 0px"
+-webkit-box-sizing,border-box,rejected,rejected,missing-readback,missing-readback,,,content-box,border-box
+-webkit-filter,blur(2px),rejected,rejected,missing-readback,missing-readback,,,none,blur(2px)
+-webkit-flex,7px,rejected,rejected,missing-readback,missing-readback,,,0 1 auto,1 1 7px
+-webkit-flex-basis,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+-webkit-flex-direction,row-reverse,rejected,rejected,missing-readback,missing-readback,,,row,row-reverse
+-webkit-flex-flow,row-reverse,rejected,rejected,missing-readback,missing-readback,,,row nowrap,row-reverse nowrap
+-webkit-flex-grow,0.25,rejected,rejected,missing-readback,missing-readback,,,0,0.25
+-webkit-flex-shrink,0.25,rejected,rejected,missing-readback,missing-readback,,,1,0.25
+-webkit-flex-wrap,wrap,rejected,rejected,missing-readback,missing-readback,,,nowrap,wrap
+-webkit-justify-content,center,rejected,rejected,missing-readback,missing-readback,,,normal,center
+-webkit-line-clamp,3,rejected,rejected,missing-readback,missing-readback,,,none,3
+-webkit-mask,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px 50%
+-webkit-mask-box-image,initial,rejected,rejected,reference-not-distinguishing,reference-not-distinguishing,,,none,none
+-webkit-mask-box-image-outset,7px,rejected,rejected,missing-readback,missing-readback,,,0,7px
+-webkit-mask-box-image-repeat,repeat,rejected,rejected,missing-readback,missing-readback,,,stretch,repeat
+-webkit-mask-box-image-slice,0.25,rejected,rejected,missing-readback,missing-readback,,,0 fill,0
+-webkit-mask-box-image-source,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+-webkit-mask-box-image-width,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+-webkit-mask-clip,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+-webkit-mask-composite,xor,rejected,rejected,missing-readback,missing-readback,,,add,xor
+-webkit-mask-image,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+-webkit-mask-origin,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+-webkit-mask-position,7px,rejected,rejected,missing-readback,missing-readback,,,0% 0%,7px 50%
+-webkit-mask-repeat,no-repeat,rejected,rejected,missing-readback,missing-readback,,,repeat,no-repeat
+-webkit-mask-size,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px auto
+-webkit-order,3,rejected,rejected,missing-readback,missing-readback,,,0,3
+-webkit-perspective,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+-webkit-perspective-origin,7px,rejected,rejected,missing-readback,missing-readback,,,160px 0px,7px 0px
+-webkit-text-fill-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+-webkit-text-size-adjust,12%,rejected,rejected,missing-readback,missing-readback,,,auto,12%
+-webkit-text-stroke,7px,rejected,rejected,missing-readback,missing-readback,,,"0px rgb(0, 0, 0)","7px rgb(0, 0, 0)"
+-webkit-text-stroke-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+-webkit-text-stroke-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+-webkit-transform,rotate(23deg),rejected,rejected,missing-readback,missing-readback,,,none,"matrix(0.920505, 0.390731, -0.390731, 0.920505, 0, 0)"
+-webkit-transform-origin,7px,rejected,rejected,missing-readback,missing-readback,,,160px 0px,7px 0px
+-webkit-transform-style,preserve-3d,rejected,rejected,missing-readback,missing-readback,,,flat,preserve-3d
+-webkit-transition,0.5s,rejected,rejected,missing-readback,missing-readback,,,all,0.5s
+-webkit-transition-delay,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+-webkit-transition-duration,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+-webkit-transition-property,center,rejected,rejected,missing-readback,missing-readback,,,all,center
+-webkit-transition-timing-function,ease-in,rejected,rejected,missing-readback,missing-readback,,,ease,ease-in
+-webkit-user-select,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+accent-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,auto,"rgb(11, 37, 73)"
+align-content,center,matched,matched,missing-readback,missing-readback,,,normal,center
+align-items,center,matched,matched,missing-readback,missing-readback,,,normal,center
+align-self,center,matched,matched,missing-readback,missing-readback,,,auto,center
+alignment-baseline,baseline,rejected,rejected,missing-readback,missing-readback,,,auto,baseline
+all,initial,matched,matched,reference-not-distinguishing,reference-not-distinguishing,,,,
+anchor-name,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+anchor-scope,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+animation,0.25,rejected,rejected,missing-readback,missing-readback,,,none,0.25
+animation-composition,add,rejected,rejected,missing-readback,missing-readback,,,replace,add
+animation-delay,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+animation-delay-end,initial,rejected,rejected,no-reference,no-reference,,,,
+animation-delay-start,initial,rejected,rejected,no-reference,no-reference,,,,
+animation-direction,reverse,rejected,rejected,missing-readback,missing-readback,,,normal,reverse
+animation-duration,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+animation-fill-mode,both,rejected,rejected,missing-readback,missing-readback,,,none,both
+animation-iteration-count,0.25,rejected,rejected,missing-readback,missing-readback,,,1,0.25
+animation-name,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+animation-play-state,paused,rejected,rejected,missing-readback,missing-readback,,,running,paused
+animation-range,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+animation-range-center,initial,rejected,rejected,no-reference,no-reference,,,,
+animation-range-end,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+animation-range-start,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+animation-timeline,--satin-example,rejected,rejected,missing-readback,missing-readback,,,auto,--satin-example
+animation-timing-function,ease-in,rejected,rejected,missing-readback,missing-readback,,,ease,ease-in
+animation-trigger,none,rejected,rejected,reference-not-distinguishing,reference-not-distinguishing,,,none,none
+appearance,auto,rejected,rejected,missing-readback,missing-readback,,,none,auto
+aspect-ratio,0.25,rejected,rejected,missing-readback,missing-readback,,,auto,0.25 / 1
+backdrop-filter,blur(2px),rejected,rejected,missing-readback,missing-readback,,,none,blur(2px)
+backface-visibility,hidden,rejected,rejected,missing-readback,missing-readback,,,visible,hidden
+background,7px,rejected,rejected,missing-readback,missing-readback,,,"rgba(0, 0, 0, 0) none repeat scroll 0% 0% / auto padding-box border-box","rgba(0, 0, 0, 0) none repeat scroll 7px 50% / auto padding-box border-box"
+background-attachment,fixed,rejected,rejected,missing-readback,missing-readback,,,scroll,fixed
+background-blend-mode,multiply,rejected,rejected,missing-readback,missing-readback,,,normal,multiply
+background-clip,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+background-color,"rgb(11, 37, 73)",matched,matched,matched-change,matched-change,"rgba(0, 0, 0, 0)","rgb(11, 37, 73)","rgba(0, 0, 0, 0)","rgb(11, 37, 73)"
+background-image,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+background-origin,border-box,rejected,rejected,missing-readback,missing-readback,,,padding-box,border-box
+background-position,7px,rejected,rejected,missing-readback,missing-readback,,,0% 0%,7px 50%
+background-position-block,initial,rejected,rejected,no-reference,no-reference,,,,
+background-position-inline,initial,rejected,rejected,no-reference,no-reference,,,,
+background-position-x,7px,rejected,rejected,missing-readback,missing-readback,,,0%,7px
+background-position-y,7px,rejected,rejected,missing-readback,missing-readback,,,0%,7px
+background-repeat,no-repeat,rejected,rejected,missing-readback,missing-readback,,,repeat,no-repeat
+background-repeat-block,initial,rejected,rejected,no-reference,no-reference,,,,
+background-repeat-inline,initial,rejected,rejected,no-reference,no-reference,,,,
+background-repeat-x,initial,rejected,rejected,no-reference,no-reference,,,,
+background-repeat-y,initial,rejected,rejected,no-reference,no-reference,,,,
+background-size,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px auto
+background-tbd,initial,rejected,rejected,no-reference,no-reference,,,,
+baseline-shift,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+baseline-source,first,rejected,rejected,missing-readback,missing-readback,,,auto,first
+block-ellipsis,initial,rejected,rejected,no-reference,no-reference,,,,
+block-size,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+block-step,initial,rejected,rejected,no-reference,no-reference,,,,
+block-step-align,initial,rejected,rejected,no-reference,no-reference,,,,
+block-step-insert,initial,rejected,rejected,no-reference,no-reference,,,,
+block-step-round,initial,rejected,rejected,no-reference,no-reference,,,,
+block-step-size,initial,rejected,rejected,no-reference,no-reference,,,,
+bookmark-label,initial,rejected,rejected,no-reference,no-reference,,,,
+bookmark-level,initial,rejected,rejected,no-reference,no-reference,,,,
+bookmark-state,initial,rejected,rejected,no-reference,no-reference,,,,
+border,7px,matched,matched,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-block,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-block-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-block-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-block-end,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-block-end-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-block-end-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-block-end-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-block-end-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-block-end-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-block-start,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-block-start-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-block-start-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-block-start-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-block-start-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-block-start-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-block-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-block-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-bottom,7px,matched,matched,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-bottom-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-bottom-color,"rgb(11, 37, 73)",matched,matched,missing-readback,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-bottom-left-radius,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-bottom-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-bottom-right-radius,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-bottom-style,hidden,matched,matched,missing-readback,missing-readback,,,solid,hidden
+border-bottom-width,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-boundary,initial,rejected,rejected,no-reference,no-reference,,,,
+border-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-collapse,collapse,rejected,rejected,missing-readback,missing-readback,,,separate,collapse
+border-color,"rgb(11, 37, 73)",matched,matched,missing-readback,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-end-end-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-end-start-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-image,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255)) 100% / 1 / 0 stretch"
+border-image-outset,7px,rejected,rejected,missing-readback,missing-readback,,,0,7px
+border-image-repeat,repeat,rejected,rejected,missing-readback,missing-readback,,,stretch,repeat
+border-image-slice,0.25,rejected,rejected,missing-readback,missing-readback,,,100%,0
+border-image-source,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+border-image-width,7px,rejected,rejected,missing-readback,missing-readback,,,1,7px
+border-inline,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-inline-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-inline-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-inline-end,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-inline-end-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-inline-end-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-inline-end-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-inline-end-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-inline-end-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-inline-start,7px,rejected,rejected,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-inline-start-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-inline-start-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-inline-start-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-inline-start-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-inline-start-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-inline-style,hidden,rejected,rejected,missing-readback,missing-readback,,,solid,hidden
+border-inline-width,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-left,7px,matched,matched,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-left-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-left-color,"rgb(11, 37, 73)",matched,matched,missing-readback,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-left-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-left-style,hidden,matched,matched,missing-readback,missing-readback,,,solid,hidden
+border-left-width,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-limit,initial,rejected,rejected,no-reference,no-reference,,,,
+border-radius,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-right,7px,matched,matched,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-right-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-right-color,"rgb(11, 37, 73)",matched,matched,missing-readback,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-right-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-right-style,hidden,matched,matched,missing-readback,missing-readback,,,solid,hidden
+border-right-width,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-shape,inset(7px),rejected,rejected,missing-readback,missing-readback,,,none,inset(7px)
+border-spacing,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-start-end-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-start-start-radius,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+border-style,hidden,matched,matched,missing-readback,missing-readback,,,solid,hidden
+border-top,7px,matched,matched,missing-readback,missing-readback,,,"0px solid rgb(0, 0, 0)","0px none rgb(0, 0, 0)"
+border-top-clip,initial,rejected,rejected,no-reference,no-reference,,,,
+border-top-color,"rgb(11, 37, 73)",matched,matched,missing-readback,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+border-top-left-radius,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-top-radius,initial,rejected,rejected,no-reference,no-reference,,,,
+border-top-right-radius,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-top-style,hidden,matched,matched,missing-readback,missing-readback,,,solid,hidden
+border-top-width,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+border-width,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+bottom,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+box-decoration-break,clone,rejected,rejected,missing-readback,missing-readback,,,slice,clone
+box-shadow,2px 4px,rejected,rejected,missing-readback,missing-readback,,,none,"rgb(0, 0, 0) 2px 4px 0px 0px"
+box-shadow-blur,initial,rejected,rejected,no-reference,no-reference,,,,
+box-shadow-color,initial,rejected,rejected,no-reference,no-reference,,,,
+box-shadow-offset,initial,rejected,rejected,no-reference,no-reference,,,,
+box-shadow-position,initial,rejected,rejected,no-reference,no-reference,,,,
+box-shadow-spread,initial,rejected,rejected,no-reference,no-reference,,,,
+box-sizing,border-box,matched,matched,matched-change,matched-change,content-box,border-box,content-box,border-box
+box-snap,initial,rejected,rejected,no-reference,no-reference,,,,
+break-after,avoid,rejected,rejected,missing-readback,missing-readback,,,auto,avoid
+break-before,avoid,rejected,rejected,missing-readback,missing-readback,,,auto,avoid
+break-inside,avoid,rejected,rejected,missing-readback,missing-readback,,,auto,avoid
+caption-side,bottom,rejected,rejected,missing-readback,missing-readback,,,top,bottom
+caret,initial,rejected,rejected,no-reference,no-reference,,,,
+caret-animation,manual,rejected,rejected,missing-readback,missing-readback,,,auto,manual
+caret-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+caret-shape,bar,rejected,rejected,missing-readback,missing-readback,,,auto,bar
+clear,both,matched,matched,matched-change,matched-change,none,both,none,both
+clip,"rect(0px, 7px, 5px, 0px)",rejected,rejected,missing-readback,missing-readback,,,auto,"rect(0px, 7px, 5px, 0px)"
+clip-path,"url(""#satin-probe"")",matched,matched,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+clip-rule,evenodd,matched,matched,missing-readback,missing-readback,,,nonzero,evenodd
+color,"rgb(11, 37, 73)",matched,matched,matched-change,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+color-adjust,initial,rejected,rejected,no-reference,no-reference,,,,
+color-interpolation,auto,rejected,rejected,missing-readback,missing-readback,,,srgb,auto
+color-interpolation-filters,auto,rejected,rejected,missing-readback,missing-readback,,,linearrgb,auto
+color-scheme,center,rejected,rejected,missing-readback,missing-readback,,,normal,center
+column-count,3,rejected,rejected,missing-readback,missing-readback,,,auto,3
+column-fill,auto,rejected,rejected,missing-readback,missing-readback,,,balance,auto
+column-gap,7px,matched,matched,missing-readback,missing-readback,,,normal,7px
+column-height,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+column-rule,7px,rejected,rejected,missing-readback,missing-readback,,,"3px rgb(0, 0, 0)","7px rgb(0, 0, 0)"
+column-rule-break,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+column-rule-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+column-rule-inset,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-cap,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-cap-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-cap-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-junction,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-junction-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-junction-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-inset-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+column-rule-style,hidden,rejected,rejected,missing-readback,missing-readback,,,none,hidden
+column-rule-visibility-items,all,rejected,rejected,missing-readback,missing-readback,,,normal,all
+column-rule-width,7px,rejected,rejected,missing-readback,missing-readback,,,3px,7px
+column-span,all,rejected,rejected,missing-readback,missing-readback,,,none,all
+column-width,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+column-wrap,nowrap,rejected,rejected,missing-readback,missing-readback,,,auto,nowrap
+columns,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+contain,strict,rejected,rejected,missing-readback,missing-readback,,,none,strict
+contain-intrinsic-block-size,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+contain-intrinsic-height,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+contain-intrinsic-inline-size,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+contain-intrinsic-size,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+contain-intrinsic-width,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+container,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+container-name,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+container-type,size,rejected,rejected,missing-readback,missing-readback,,,normal,size
+content,"""ab""",rejected,rejected,missing-readback,missing-readback,,,normal,"""ab"""
+content-visibility,hidden,rejected,rejected,missing-readback,missing-readback,,,visible,hidden
+continue,initial,rejected,rejected,no-reference,no-reference,,,,
+copy-into,initial,rejected,rejected,no-reference,no-reference,,,,
+corner,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-block-end,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-block-end-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-block-start,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-block-start-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-bottom,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-bottom-left,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-bottom-left-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-bottom-right,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-bottom-right-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-bottom-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-end-end,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-end-end-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-end-start,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-end-start-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-inline-end,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-inline-end-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-inline-start,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-inline-start-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-left,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-left-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-right,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-right-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-start-end,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-start-end-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-start-start,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-start-start-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-top,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-top-left,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-top-left-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-top-right,initial,rejected,rejected,no-reference,no-reference,,,,
+corner-top-right-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+corner-top-shape,bevel,rejected,rejected,missing-readback,missing-readback,,,superellipse(1),superellipse(0)
+counter-increment,center,rejected,rejected,missing-readback,missing-readback,,,none,center 1
+counter-reset,center,rejected,rejected,missing-readback,missing-readback,,,none,center 0
+counter-set,center,rejected,rejected,missing-readback,missing-readback,,,none,center 0
+cue,initial,rejected,rejected,no-reference,no-reference,,,,
+cue-after,initial,rejected,rejected,no-reference,no-reference,,,,
+cue-before,initial,rejected,rejected,no-reference,no-reference,,,,
+cursor,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+cx,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+cy,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+d,path('M 0 0 L 3 7'),rejected,rejected,missing-readback,missing-readback,,,none,"path(""M 0 0 L 3 7"")"
+direction,rtl,matched,matched,matched-change,matched-change,ltr,rtl,ltr,rtl
+display,grid,matched,matched,matched-change,matched-change,block,grid,block,grid
+dominant-baseline,alphabetic,rejected,rejected,missing-readback,missing-readback,,,auto,alphabetic
+dynamic-range-limit,standard,rejected,rejected,missing-readback,missing-readback,,,no-limit,standard
+empty-cells,hide,rejected,rejected,missing-readback,missing-readback,,,show,hide
+event-trigger,initial,rejected,rejected,no-reference,no-reference,,,,
+event-trigger-name,initial,rejected,rejected,no-reference,no-reference,,,,
+event-trigger-source,initial,rejected,rejected,no-reference,no-reference,,,,
+field-sizing,content,rejected,rejected,missing-readback,missing-readback,,,fixed,content
+fill,"rgb(11, 37, 73)",matched,matched,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+fill-break,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-color,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-image,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-opacity,0.25,matched,matched,missing-readback,missing-readback,,,1,0.25
+fill-origin,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-position,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-repeat,initial,rejected,rejected,no-reference,no-reference,,,,
+fill-rule,evenodd,matched,matched,missing-readback,missing-readback,,,nonzero,evenodd
+fill-size,initial,rejected,rejected,no-reference,no-reference,,,,
+filter,blur(2px),rejected,rejected,missing-readback,missing-readback,,,none,blur(2px)
+fit-tolerance,initial,rejected,rejected,no-reference,no-reference,,,,
+flex,7px,different-serialization,different-serialization,missing-readback,matched-change,0 1 auto,1 1 7px,0 1 auto,1 1 7px
+flex-basis,7px,matched,matched,missing-readback,matched-change,auto,7px,auto,7px
+flex-direction,row-reverse,matched,matched,missing-readback,matched-change,row,row-reverse,row,row-reverse
+flex-flow,row-reverse,matched,matched,missing-readback,matched-change,row nowrap,row-reverse nowrap,row nowrap,row-reverse nowrap
+flex-grow,0.25,matched,matched,missing-readback,matched-change,0,0.25,0,0.25
+flex-line-count,3,rejected,rejected,missing-readback,missing-readback,,,1,3
+flex-shrink,0.25,matched,matched,missing-readback,matched-change,1,0.25,1,0.25
+flex-wrap,wrap,matched,matched,missing-readback,matched-change,nowrap,wrap,nowrap,wrap
+float,inline-start,matched,matched,matched-change,matched-change,none,inline-start,none,inline-start
+float-defer,initial,rejected,rejected,no-reference,no-reference,,,,
+float-offset,initial,rejected,rejected,no-reference,no-reference,,,,
+float-reference,initial,rejected,rejected,no-reference,no-reference,,,,
+flood-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+flood-opacity,0.25,rejected,rejected,missing-readback,missing-readback,,,1,0.25
+flow-from,initial,rejected,rejected,no-reference,no-reference,,,,
+flow-into,initial,rejected,rejected,no-reference,no-reference,,,,
+font,italic 12px monospace,matched,matched,missing-readback,missing-readback,,,16px / 20px sans-serif,italic 12px monospace
+font-family,center,matched,matched,matched-change,matched-change,sans-serif,center,sans-serif,center
+font-feature-settings,'liga' 0,rejected,rejected,missing-readback,missing-readback,,,normal,"""liga"" 0"
+font-kerning,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+font-language-override,"""ab""",rejected,rejected,missing-readback,missing-readback,,,normal,"""ab"""
+font-optical-sizing,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+font-palette,--satin-example,rejected,rejected,missing-readback,missing-readback,,,normal,--satin-example
+font-size,7px,matched,matched,matched-change,matched-change,16px,7px,16px,7px
+font-size-adjust,0.25,rejected,rejected,missing-readback,missing-readback,,,none,0.25
+font-stretch,12%,rejected,rejected,missing-readback,missing-readback,,,100%,12%
+font-style,italic,matched,matched,matched-change,matched-change,normal,italic,normal,italic
+font-synthesis,none,rejected,rejected,missing-readback,missing-readback,,,weight style small-caps,none
+font-synthesis-position,initial,rejected,rejected,no-reference,no-reference,,,,
+font-synthesis-small-caps,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+font-synthesis-style,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+font-synthesis-weight,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+font-variant,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+font-variant-alternates,historical-forms,rejected,rejected,missing-readback,missing-readback,,,normal,historical-forms
+font-variant-caps,small-caps,rejected,rejected,missing-readback,missing-readback,,,normal,small-caps
+font-variant-east-asian,ruby,rejected,rejected,missing-readback,missing-readback,,,normal,ruby
+font-variant-emoji,text,rejected,rejected,missing-readback,missing-readback,,,normal,text
+font-variant-ligatures,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+font-variant-numeric,ordinal,rejected,rejected,missing-readback,missing-readback,,,normal,ordinal
+font-variant-position,sub,rejected,rejected,missing-readback,missing-readback,,,normal,sub
+font-variation-settings,'liga' 0,rejected,rejected,missing-readback,missing-readback,,,normal,"""liga"" 0"
+font-weight,3,matched,matched,matched-change,matched-change,400,3,400,3
+font-width,initial,rejected,rejected,no-reference,no-reference,,,,
+footnote-display,initial,rejected,rejected,no-reference,no-reference,,,,
+footnote-policy,initial,rejected,rejected,no-reference,no-reference,,,,
+forced-color-adjust,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+frame-sizing,content-width,rejected,rejected,missing-readback,missing-readback,,,auto,content-width
+gap,7px,matched,matched,missing-readback,missing-readback,,,normal,7px
+glyph-orientation-vertical,initial,rejected,rejected,no-reference,no-reference,,,,
+grid,20px / 30px,rejected,rejected,missing-readback,missing-readback,,,none / none / none / row / auto / auto,20px / 30px / none / row / auto / auto
+grid-area,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-auto-columns,7px,matched,matched,missing-readback,missing-readback,,,auto,7px
+grid-auto-flow,column,matched,matched,missing-readback,missing-readback,,,row,column
+grid-auto-rows,7px,matched,matched,missing-readback,missing-readback,,,auto,7px
+grid-column,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-column-end,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-column-gap,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+grid-column-start,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-gap,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+grid-row,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-row-end,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-row-gap,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+grid-row-start,3,matched,matched,missing-readback,missing-readback,,,auto,3
+grid-template,20px / 30px,matched,matched,missing-readback,missing-readback,,,none,20px / 30px
+grid-template-areas,"""ab""",matched,matched,missing-readback,missing-readback,,,none,"""ab"""
+grid-template-columns,7px,matched,matched,missing-readback,missing-readback,,,none,7px
+grid-template-rows,7px,matched,matched,missing-readback,missing-readback,,,none,7px
+hanging-punctuation,initial,rejected,rejected,no-reference,no-reference,,,,
+height,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+hyphenate-character,"""ab""",rejected,rejected,missing-readback,missing-readback,,,auto,"""ab"""
+hyphenate-limit-chars,3,rejected,rejected,missing-readback,missing-readback,,,auto,3
+hyphenate-limit-last,initial,rejected,rejected,no-reference,no-reference,,,,
+hyphenate-limit-lines,initial,rejected,rejected,no-reference,no-reference,,,,
+hyphenate-limit-zone,initial,rejected,rejected,no-reference,no-reference,,,,
+hyphens,none,rejected,rejected,missing-readback,missing-readback,,,manual,none
+image-animation,initial,rejected,rejected,no-reference,no-reference,,,,
+image-orientation,none,rejected,rejected,missing-readback,missing-readback,,,from-image,none
+image-rendering,pixelated,rejected,rejected,missing-readback,missing-readback,,,auto,pixelated
+image-resolution,initial,rejected,rejected,no-reference,no-reference,,,,
+initial-letter,3,rejected,rejected,missing-readback,missing-readback,,,normal,3
+initial-letter-align,initial,rejected,rejected,no-reference,no-reference,,,,
+initial-letter-wrap,initial,rejected,rejected,no-reference,no-reference,,,,
+inline-size,7px,matched,matched,matched-change,matched-change,320px,7px,320px,7px
+inline-sizing,initial,rejected,rejected,no-reference,no-reference,,,,
+input-security,initial,rejected,rejected,no-reference,no-reference,,,,
+inset,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+inset-block,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+inset-block-end,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+inset-block-start,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+inset-inline,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+inset-inline-end,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+inset-inline-start,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+interactivity,inert,rejected,rejected,missing-readback,missing-readback,,,auto,inert
+interest-delay,0.5s,rejected,rejected,missing-readback,missing-readback,,,normal,0.5s
+interest-delay-end,0.5s,rejected,rejected,missing-readback,missing-readback,,,normal,0.5s
+interest-delay-start,0.5s,rejected,rejected,missing-readback,missing-readback,,,normal,0.5s
+interpolate-size,allow-keywords,rejected,rejected,missing-readback,missing-readback,,,numeric-only,allow-keywords
+isolation,isolate,rejected,rejected,missing-readback,missing-readback,,,auto,isolate
+justify-content,center,matched,matched,missing-readback,missing-readback,,,normal,center
+justify-items,center,matched,matched,missing-readback,missing-readback,,,normal,center
+justify-self,center,matched,matched,missing-readback,missing-readback,,,auto,center
+left,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+letter-spacing,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+lighting-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(255, 255, 255)","rgb(11, 37, 73)"
+line-break,normal,rejected,rejected,missing-readback,missing-readback,,,auto,normal
+line-clamp,initial,rejected,rejected,no-reference,no-reference,,,,
+line-fit-edge,initial,rejected,rejected,no-reference,no-reference,,,,
+line-grid,initial,rejected,rejected,no-reference,no-reference,,,,
+line-height,7px,matched,matched,matched-change,matched-change,20px,7px,20px,7px
+line-height-step,initial,rejected,rejected,no-reference,no-reference,,,,
+line-padding,initial,rejected,rejected,no-reference,no-reference,,,,
+line-snap,initial,rejected,rejected,no-reference,no-reference,,,,
+link-parameters,initial,rejected,rejected,no-reference,no-reference,,,,
+list-style,square,matched,matched,matched-change,matched-change,outside none disc,outside none square,outside none disc,outside none square
+list-style-image,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+list-style-position,inside,rejected,rejected,missing-readback,missing-readback,,,outside,inside
+list-style-type,square,matched,matched,matched-change,matched-change,disc,square,disc,square
+margin,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+margin-block,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-block-end,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-block-start,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-bottom,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-break,initial,rejected,rejected,no-reference,no-reference,,,,
+margin-inline,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-inline-end,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-inline-start,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-left,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-right,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-top,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+margin-trim,block,rejected,rejected,missing-readback,missing-readback,,,none,block
+marker,"url(""#satin-probe"")",rejected,rejected,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+marker-end,"url(""#satin-probe"")",rejected,rejected,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+marker-mid,"url(""#satin-probe"")",rejected,rejected,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+marker-side,initial,rejected,rejected,no-reference,no-reference,,,,
+marker-start,"url(""#satin-probe"")",rejected,rejected,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+mask,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px 50%
+mask-border,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-mode,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-outset,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-repeat,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-slice,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-source,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-border-width,initial,rejected,rejected,no-reference,no-reference,,,,
+mask-clip,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+mask-composite,exclude,rejected,rejected,missing-readback,missing-readback,,,add,exclude
+mask-image,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+mask-mode,alpha,rejected,rejected,missing-readback,missing-readback,,,match-source,alpha
+mask-origin,padding-box,rejected,rejected,missing-readback,missing-readback,,,border-box,padding-box
+mask-position,7px,rejected,rejected,missing-readback,missing-readback,,,0% 0%,7px 50%
+mask-repeat,no-repeat,rejected,rejected,missing-readback,missing-readback,,,repeat,no-repeat
+mask-size,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px auto
+mask-type,alpha,rejected,rejected,missing-readback,missing-readback,,,luminance,alpha
+math-depth,3,rejected,rejected,missing-readback,missing-readback,,,0,3
+math-shift,compact,rejected,rejected,missing-readback,missing-readback,,,normal,compact
+math-style,compact,rejected,rejected,missing-readback,missing-readback,,,normal,compact
+max-block-size,7px,matched,matched,matched-change,matched-change,none,7px,none,7px
+max-height,7px,matched,matched,matched-change,matched-change,none,7px,none,7px
+max-inline-size,7px,matched,matched,matched-change,matched-change,none,7px,none,7px
+max-lines,initial,rejected,rejected,no-reference,no-reference,,,,
+max-size,initial,rejected,rejected,no-reference,no-reference,,,,
+max-width,7px,matched,matched,matched-change,matched-change,none,7px,none,7px
+min-block-size,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+min-height,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+min-inline-size,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+min-intrinsic-sizing,initial,rejected,rejected,no-reference,no-reference,,,,
+min-size,initial,rejected,rejected,no-reference,no-reference,,,,
+min-width,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+mix-blend-mode,multiply,rejected,rejected,missing-readback,missing-readback,,,normal,multiply
+nav-down,initial,rejected,rejected,no-reference,no-reference,,,,
+nav-left,initial,rejected,rejected,no-reference,no-reference,,,,
+nav-right,initial,rejected,rejected,no-reference,no-reference,,,,
+nav-up,initial,rejected,rejected,no-reference,no-reference,,,,
+object-fit,none,matched,matched,matched-change,matched-change,fill,none,fill,none
+object-position,7px,different-serialization,different-serialization,matched-change,matched-change,50% 50%,7px 50%,50% 50%,7px 50%
+object-view-box,inset(7px),rejected,rejected,missing-readback,missing-readback,,,none,inset(7px)
+offset,7px,rejected,rejected,missing-readback,missing-readback,,,none 0px auto 0deg,7px 50% none 0px auto 0deg
+offset-anchor,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px 50%
+offset-distance,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+offset-path,"url(""#satin-probe"")",rejected,rejected,missing-readback,missing-readback,,,none,"url(""#satin-probe"")"
+offset-position,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px 50%
+offset-rotate,23deg,rejected,rejected,missing-readback,missing-readback,,,auto 0deg,23deg
+opacity,0.25,matched,matched,matched-change,matched-change,1,0.25,1,0.25
+order,3,matched,matched,missing-readback,matched-change,0,3,0,3
+orphans,3,rejected,rejected,missing-readback,missing-readback,,,2,3
+outline,7px,matched,matched,matched-change,matched-change,"rgb(0, 0, 0) solid 0px","rgb(0, 0, 0) none 7px","rgb(0, 0, 0) solid 0px","rgb(0, 0, 0) none 7px"
+outline-color,"rgb(11, 37, 73)",matched,matched,matched-change,matched-change,"rgb(0, 0, 0)","rgb(11, 37, 73)","rgb(0, 0, 0)","rgb(11, 37, 73)"
+outline-offset,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+outline-style,none,matched,matched,matched-change,matched-change,solid,none,solid,none
+outline-width,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+overflow,hidden,matched,matched,missing-readback,missing-readback,,,visible,hidden
+overflow-anchor,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+overflow-block,hidden,rejected,rejected,missing-readback,missing-readback,,,visible,hidden
+overflow-clip-margin,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+overflow-clip-margin-block,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-block-end,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-block-start,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-bottom,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-inline,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-inline-end,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-inline-start,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-left,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-right,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-clip-margin-top,initial,rejected,rejected,no-reference,no-reference,,,,
+overflow-inline,hidden,rejected,rejected,missing-readback,missing-readback,,,visible,hidden
+overflow-wrap,break-word,matched,matched,missing-readback,missing-readback,,,normal,break-word
+overflow-x,hidden,matched,matched,matched-change,matched-change,visible,hidden,visible,hidden
+overflow-y,hidden,matched,matched,matched-change,matched-change,visible,hidden,visible,hidden
+overlay,none,rejected,rejected,reference-not-distinguishing,reference-not-distinguishing,,,none,none
+overscroll-behavior,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+overscroll-behavior-block,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+overscroll-behavior-inline,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+overscroll-behavior-x,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+overscroll-behavior-y,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+padding,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+padding-block,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-block-end,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-block-start,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-bottom,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-inline,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-inline-end,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-inline-start,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-left,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-right,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+padding-top,7px,matched,matched,matched-change,matched-change,0px,7px,0px,7px
+page,center,rejected,rejected,missing-readback,missing-readback,,,auto,center
+page-break-after,always,rejected,rejected,missing-readback,missing-readback,,,auto,always
+page-break-before,always,rejected,rejected,missing-readback,missing-readback,,,auto,always
+page-break-inside,avoid,rejected,rejected,missing-readback,missing-readback,,,auto,avoid
+paint-order,fill,rejected,rejected,missing-readback,missing-readback,,,normal,fill
+path-length,initial,rejected,rejected,no-reference,no-reference,,,,
+pause,initial,rejected,rejected,no-reference,no-reference,,,,
+pause-after,initial,rejected,rejected,no-reference,no-reference,,,,
+pause-before,initial,rejected,rejected,no-reference,no-reference,,,,
+perspective,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+perspective-origin,7px,rejected,rejected,missing-readback,missing-readback,,,160px 0px,7px 0px
+place-content,center,matched,matched,missing-readback,missing-readback,,,normal,center
+place-items,center,matched,matched,missing-readback,missing-readback,,,normal,center
+place-self,center,matched,matched,missing-readback,missing-readback,,,auto,center
+pointer-events,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+pointer-timeline,initial,rejected,rejected,no-reference,no-reference,,,,
+pointer-timeline-axis,initial,rejected,rejected,no-reference,no-reference,,,,
+pointer-timeline-name,initial,rejected,rejected,no-reference,no-reference,,,,
+position,fixed,matched,matched,matched-change,matched-change,relative,fixed,relative,fixed
+position-anchor,--satin-example,rejected,rejected,missing-readback,missing-readback,,,normal,--satin-example
+position-area,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+position-try,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+position-try-fallbacks,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+position-try-order,most-width,rejected,rejected,missing-readback,missing-readback,,,normal,most-width
+position-visibility,always,rejected,rejected,missing-readback,missing-readback,,,anchor-visible,always
+print-color-adjust,exact,rejected,rejected,missing-readback,missing-readback,,,economy,exact
+quotes,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+r,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+reading-flow,source-order,rejected,rejected,missing-readback,missing-readback,,,normal,source-order
+reading-order,3,rejected,rejected,missing-readback,missing-readback,,,0,3
+region-fragment,initial,rejected,rejected,no-reference,no-reference,,,,
+resize,both,rejected,rejected,missing-readback,missing-readback,,,none,both
+rest,initial,rejected,rejected,no-reference,no-reference,,,,
+rest-after,initial,rejected,rejected,no-reference,no-reference,,,,
+rest-before,initial,rejected,rejected,no-reference,no-reference,,,,
+right,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+rotate,23deg,rejected,rejected,missing-readback,missing-readback,,,none,23deg
+row-gap,7px,matched,matched,missing-readback,missing-readback,,,normal,7px
+row-rule,7px,rejected,rejected,missing-readback,missing-readback,,,"3px rgb(0, 0, 0)","7px rgb(0, 0, 0)"
+row-rule-break,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+row-rule-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+row-rule-inset,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-cap,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-cap-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-cap-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-junction,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-junction-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-junction-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-inset-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+row-rule-style,hidden,rejected,rejected,missing-readback,missing-readback,,,none,hidden
+row-rule-visibility-items,all,rejected,rejected,missing-readback,missing-readback,,,normal,all
+row-rule-width,7px,rejected,rejected,missing-readback,missing-readback,,,3px,7px
+ruby-align,center,rejected,rejected,missing-readback,missing-readback,,,space-around,center
+ruby-merge,initial,rejected,rejected,no-reference,no-reference,,,,
+ruby-overhang,none,rejected,rejected,missing-readback,missing-readback,,,auto,spaces
+ruby-position,under,rejected,rejected,missing-readback,missing-readback,,,over,under
+rule,7px,rejected,rejected,missing-readback,missing-readback,,,"3px rgb(0, 0, 0)","7px rgb(0, 0, 0)"
+rule-break,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+rule-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+rule-inset,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+rule-inset-cap,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+rule-inset-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+rule-inset-junction,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+rule-inset-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+rule-overlap,column-over-row,rejected,rejected,missing-readback,missing-readback,,,row-over-column,column-over-row
+rule-style,hidden,rejected,rejected,missing-readback,missing-readback,,,none,hidden
+rule-visibility-items,all,rejected,rejected,missing-readback,missing-readback,,,normal,all
+rule-width,7px,rejected,rejected,missing-readback,missing-readback,,,3px,7px
+rx,7px,matched,matched,missing-readback,missing-readback,,,auto,7px
+ry,7px,matched,matched,missing-readback,missing-readback,,,auto,7px
+scale,0.25,rejected,rejected,missing-readback,missing-readback,,,none,0.25
+scroll-axis-lock,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+scroll-behavior,smooth,rejected,rejected,missing-readback,missing-readback,,,auto,smooth
+scroll-initial-target,nearest,rejected,rejected,missing-readback,missing-readback,,,none,nearest
+scroll-margin,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-block,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-block-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-block-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-bottom,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-inline,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-inline-end,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-inline-start,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-left,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-right,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-margin-top,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+scroll-marker-group,before,rejected,rejected,missing-readback,missing-readback,,,none,before links
+scroll-padding,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-block,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-block-end,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-block-start,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-bottom,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-inline,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-inline-end,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-inline-start,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-left,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-right,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-padding-top,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+scroll-snap-align,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+scroll-snap-stop,always,rejected,rejected,missing-readback,missing-readback,,,normal,always
+scroll-snap-type,both,rejected,rejected,missing-readback,missing-readback,,,none,both
+scroll-target-group,auto,rejected,rejected,missing-readback,missing-readback,,,none,auto
+scroll-timeline,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+scroll-timeline-axis,inline,rejected,rejected,missing-readback,missing-readback,,,block,inline
+scroll-timeline-name,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+scrollbar-color,red blue,rejected,rejected,missing-readback,missing-readback,,,auto,"rgb(255, 0, 0) rgb(0, 0, 255)"
+scrollbar-gutter,stable,rejected,rejected,missing-readback,missing-readback,,,auto,stable
+scrollbar-width,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+shape-image-threshold,0.25,rejected,rejected,missing-readback,missing-readback,,,0,0.25
+shape-inside,initial,rejected,rejected,no-reference,no-reference,,,,
+shape-margin,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+shape-outside,"linear-gradient(red, blue)",rejected,rejected,missing-readback,missing-readback,,,none,"linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255))"
+shape-padding,initial,rejected,rejected,no-reference,no-reference,,,,
+shape-rendering,optimizeSpeed,rejected,rejected,missing-readback,missing-readback,,,auto,optimizespeed
+size,7px,rejected,rejected,reference-not-distinguishing,reference-not-distinguishing,,,,
+slider-orientation,initial,rejected,rejected,no-reference,no-reference,,,,
+spatial-navigation-action,initial,rejected,rejected,no-reference,no-reference,,,,
+spatial-navigation-contain,initial,rejected,rejected,no-reference,no-reference,,,,
+spatial-navigation-function,initial,rejected,rejected,no-reference,no-reference,,,,
+speak,none,rejected,rejected,missing-readback,missing-readback,,,normal,none
+speak-as,initial,rejected,rejected,no-reference,no-reference,,,,
+stop-color,"rgb(11, 37, 73)",matched,matched,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+stop-opacity,0.25,matched,matched,missing-readback,missing-readback,,,1,0.25
+string-set,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke,"rgb(11, 37, 73)",matched,matched,missing-readback,missing-readback,,,none,"rgb(11, 37, 73)"
+stroke-align,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-alignment,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-break,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-color,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-dash-corner,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-dash-justify,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-dashadjust,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-dasharray,7px,matched,matched,missing-readback,missing-readback,,,none,7px
+stroke-dashcorner,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-dashoffset,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+stroke-image,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-linecap,round,matched,matched,missing-readback,missing-readback,,,butt,round
+stroke-linejoin,bevel,matched,matched,missing-readback,missing-readback,,,miter,bevel
+stroke-miterlimit,0.25,rejected,rejected,missing-readback,missing-readback,,,4,0.25
+stroke-opacity,0.25,matched,matched,missing-readback,missing-readback,,,1,0.25
+stroke-origin,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-position,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-repeat,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-size,initial,rejected,rejected,no-reference,no-reference,,,,
+stroke-width,7px,matched,matched,missing-readback,missing-readback,,,1px,7px
+tab-size,7px,rejected,rejected,missing-readback,missing-readback,,,8,7px
+table-layout,fixed,rejected,rejected,missing-readback,missing-readback,,,auto,fixed
+text-align,center,matched,matched,missing-readback,missing-readback,,,start,center
+text-align-all,initial,rejected,rejected,no-reference,no-reference,,,,
+text-align-last,center,rejected,rejected,missing-readback,missing-readback,,,auto,center
+text-anchor,middle,rejected,rejected,missing-readback,missing-readback,,,start,middle
+text-autospace,normal,rejected,rejected,missing-readback,missing-readback,,,no-autospace,normal
+text-autospace-size,initial,rejected,rejected,no-reference,no-reference,,,,
+text-box,auto,rejected,rejected,missing-readback,missing-readback,,,normal,trim-both
+text-box-edge,text,rejected,rejected,missing-readback,missing-readback,,,auto,text
+text-box-trim,trim-start,rejected,rejected,missing-readback,missing-readback,,,none,trim-start
+text-combine-upright,all,rejected,rejected,missing-readback,missing-readback,,,none,all
+text-decoration,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+text-decoration-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+text-decoration-inset,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+text-decoration-line,underline,matched,matched,missing-readback,missing-readback,,,none,underline
+text-decoration-skip,initial,rejected,rejected,no-reference,no-reference,,,,
+text-decoration-skip-box,initial,rejected,rejected,no-reference,no-reference,,,,
+text-decoration-skip-ink,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+text-decoration-skip-self,initial,rejected,rejected,no-reference,no-reference,,,,
+text-decoration-skip-spaces,initial,rejected,rejected,no-reference,no-reference,,,,
+text-decoration-style,double,rejected,rejected,missing-readback,missing-readback,,,solid,double
+text-decoration-thickness,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+text-emphasis,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"none rgb(0, 0, 0)","none rgb(11, 37, 73)"
+text-emphasis-color,"rgb(11, 37, 73)",rejected,rejected,missing-readback,missing-readback,,,"rgb(0, 0, 0)","rgb(11, 37, 73)"
+text-emphasis-position,under,rejected,rejected,missing-readback,missing-readback,,,over,under
+text-emphasis-skip,initial,rejected,rejected,no-reference,no-reference,,,,
+text-emphasis-style,"""ab""",rejected,rejected,missing-readback,missing-readback,,,none,"""ab"""
+text-fit,grow,rejected,rejected,missing-readback,missing-readback,,,none,grow
+text-group-align,initial,rejected,rejected,no-reference,no-reference,,,,
+text-indent,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+text-justify,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+text-orientation,upright,rejected,rejected,missing-readback,missing-readback,,,mixed,upright
+text-overflow,"""ab""",rejected,rejected,missing-readback,missing-readback,,,clip,"""ab"""
+text-rendering,optimizeSpeed,rejected,rejected,missing-readback,missing-readback,,,auto,optimizespeed
+text-shadow,2px 4px,rejected,rejected,missing-readback,missing-readback,,,none,"rgb(0, 0, 0) 2px 4px 0px"
+text-size-adjust,12%,rejected,rejected,missing-readback,missing-readback,,,auto,12%
+text-spacing,initial,rejected,rejected,no-reference,no-reference,,,,
+text-spacing-trim,trim-start,rejected,rejected,missing-readback,missing-readback,,,normal,trim-start
+text-transform,capitalize,rejected,rejected,missing-readback,missing-readback,,,none,capitalize
+text-underline-offset,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+text-underline-position,from-font,rejected,rejected,missing-readback,missing-readback,,,auto,from-font
+text-wrap,nowrap,rejected,rejected,missing-readback,missing-readback,,,wrap,nowrap
+text-wrap-mode,nowrap,rejected,rejected,missing-readback,missing-readback,,,wrap,nowrap
+text-wrap-style,balance,rejected,rejected,missing-readback,missing-readback,,,auto,balance
+timeline-scope,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+timeline-trigger,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+timeline-trigger-activation-range,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+timeline-trigger-activation-range-end,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+timeline-trigger-activation-range-start,7px,rejected,rejected,missing-readback,missing-readback,,,normal,7px
+timeline-trigger-active-range,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+timeline-trigger-active-range-end,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+timeline-trigger-active-range-start,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+timeline-trigger-name,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+timeline-trigger-range,initial,rejected,rejected,no-reference,no-reference,,,,
+timeline-trigger-source,--satin-example,rejected,rejected,missing-readback,missing-readback,,,auto,--satin-example
+top,7px,matched,matched,matched-change,matched-change,auto,7px,0px,7px
+touch-action,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+transform,rotate(23deg),matched,matched,different-value,different-value,none,"matrix(0.92050487, 0.39073113, -0.39073113, 0.92050487, 0, 0)",none,"matrix(0.920505, 0.390731, -0.390731, 0.920505, 0, 0)"
+transform-box,border-box,rejected,rejected,missing-readback,missing-readback,,,view-box,border-box
+transform-origin,7px,different-serialization,different-serialization,matched-change,matched-change,160px 0px,7px 0px,160px 0px,7px 0px
+transform-style,preserve-3d,rejected,rejected,missing-readback,missing-readback,,,flat,preserve-3d
+transition,0.5s,rejected,rejected,missing-readback,missing-readback,,,all,0.5s
+transition-behavior,allow-discrete,rejected,rejected,missing-readback,missing-readback,,,normal,allow-discrete
+transition-delay,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+transition-duration,0.5s,rejected,rejected,missing-readback,missing-readback,,,0s,0.5s
+transition-property,center,rejected,rejected,missing-readback,missing-readback,,,all,center
+transition-timing-function,ease-in,rejected,rejected,missing-readback,missing-readback,,,ease,ease-in
+translate,7px,rejected,rejected,missing-readback,missing-readback,,,none,7px
+trigger-scope,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+unicode-bidi,normal,rejected,rejected,missing-readback,missing-readback,,,isolate,normal
+user-select,none,rejected,rejected,missing-readback,missing-readback,,,auto,none
+vector-effect,non-scaling-stroke,rejected,rejected,missing-readback,missing-readback,,,none,non-scaling-stroke
+vertical-align,7px,rejected,rejected,missing-readback,missing-readback,,,baseline,7px
+view-timeline,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+view-timeline-axis,inline,rejected,rejected,missing-readback,missing-readback,,,block,inline
+view-timeline-inset,7px,rejected,rejected,missing-readback,missing-readback,,,auto,7px
+view-timeline-name,--satin-example,rejected,rejected,missing-readback,missing-readback,,,none,--satin-example
+view-transition-class,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+view-transition-group,center,rejected,rejected,missing-readback,missing-readback,,,normal,center
+view-transition-name,center,rejected,rejected,missing-readback,missing-readback,,,none,center
+view-transition-scope,all,rejected,rejected,missing-readback,missing-readback,,,none,all
+visibility,hidden,matched,matched,matched-change,matched-change,visible,hidden,visible,hidden
+voice-balance,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-duration,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-family,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-pitch,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-range,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-rate,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-stress,initial,rejected,rejected,no-reference,no-reference,,,,
+voice-volume,initial,rejected,rejected,no-reference,no-reference,,,,
+white-space,pre,matched,matched,missing-readback,missing-readback,,,normal,pre
+white-space-collapse,preserve,rejected,rejected,missing-readback,missing-readback,,,collapse,preserve
+white-space-trim,initial,rejected,rejected,no-reference,no-reference,,,,
+widows,3,rejected,rejected,missing-readback,missing-readback,,,2,3
+width,7px,matched,matched,matched-change,matched-change,320px,7px,320px,7px
+will-change,center,rejected,rejected,missing-readback,missing-readback,,,auto,center
+window-drag,move,rejected,rejected,missing-readback,missing-readback,,,none,move
+word-break,break-all,matched,matched,missing-readback,missing-readback,,,normal,break-all
+word-space-transform,initial,rejected,rejected,no-reference,no-reference,,,,
+word-spacing,7px,rejected,rejected,missing-readback,missing-readback,,,0px,7px
+word-wrap,break-word,matched,matched,missing-readback,missing-readback,,,normal,break-word
+wrap-after,initial,rejected,rejected,no-reference,no-reference,,,,
+wrap-before,initial,rejected,rejected,no-reference,no-reference,,,,
+wrap-flow,initial,rejected,rejected,no-reference,no-reference,,,,
+wrap-inside,initial,rejected,rejected,no-reference,no-reference,,,,
+wrap-through,initial,rejected,rejected,no-reference,no-reference,,,,
+writing-mode,vertical-rl,rejected,rejected,missing-readback,missing-readback,,,horizontal-tb,vertical-rl
+x,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+y,7px,matched,matched,missing-readback,missing-readback,,,0px,7px
+z-index,3,matched,matched,matched-change,matched-change,auto,3,auto,3
+zoom,0.25,rejected,rejected,missing-readback,missing-readback,,,1,0.25

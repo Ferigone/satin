@@ -66,3 +66,79 @@ fn invalid_functional_colors_do_not_override_a_painted_fallback() {
         .collect();
     assert_eq!(actual, expected, "each entry is a swatch center");
 }
+
+#[test]
+fn named_colors_and_hwb_resolve_to_srgb_in_paint() {
+    let cases = [
+        ("DarkSlateGrey", 0x2f4f4f),
+        ("goldenrod", 0xdaa520),
+        ("lightgoldenrodyellow", 0xfafad2),
+        ("RebeccaPurple", 0x663399),
+        ("hwb(120 0% 50%)", 0x008000),
+        ("hwb(320deg 30% 40%)", 0x994d80),
+        ("hwb(-180deg 20 30)", 0x33b3b3),
+        ("HWb(1turn 70% 60%)", 0x898989),
+        ("hwb(none none 0%)", 0xff0000),
+        ("hwb(0 0% 0% / none)", 0xffffff),
+        ("hwb(0 0% 0% / 80%)", 0xff3333),
+        ("hwb(210 -30 20)", 0x0040cc),
+        ("hwb(120 300% 10%)", 0xf7f7f7),
+        ("hwb(0, 10%, 10%)", 0x123456),
+        ("hwb(0 0% / 1)", 0x123456),
+        ("hwb(1.deg 0 0)", 0x123456),
+        ("hwb(0 0.% 0)", 0x123456),
+        ("hwb(0 0 0 / 1.)", 0x123456),
+    ];
+    let mut html =
+        String::from("<style>body{margin:0;background:white}div{height:4px;width:8px}</style>");
+    for (value, _) in cases {
+        html.push_str(&format!(
+            "<div style='background:#123456;background-color:{value}'></div>"
+        ));
+    }
+    let page = LoadedPage::from_html("https://css-color.test/", &html);
+    let mut fonts = Fonts::new().unwrap();
+    let layout = Layout::build(&page, &fonts, 16.);
+    let mut canvas = Canvas::new(16, cases.len() as u32 * 4, layout.background);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    for (row, (value, expected)) in cases.into_iter().enumerate() {
+        assert_eq!(canvas.pixels[(row * 4 + 2) * 16 + 2], expected, "{value}");
+    }
+}
+
+#[test]
+fn all_absolute_named_colors_paint_their_reference_values() {
+    // WPT 9b8b1beec730: css/css-color/parsing/color-computed-named-color.html
+    // and css/css-color/rebeccapurple-ref.html. The implementation uses the CSS Color 4 table.
+    let cases: Vec<_> = include_str!("fixtures/css_named_colors.tsv")
+        .lines()
+        .map(|line| line.split_once('\t').unwrap())
+        .collect();
+    assert_eq!(cases.len(), 148);
+    let mut html = String::from("<style>body{margin:0}div{height:2px;width:8px}</style>");
+    for (name, _) in &cases {
+        html.push_str(&format!(
+            "<div style='background:#123456;background-color:{}'></div>",
+            name.to_ascii_uppercase()
+        ));
+    }
+    let mut fonts = Fonts::new().unwrap();
+    let page = LoadedPage::from_html("https://css-color.test/", &html);
+    let layout = Layout::build(&page, &fonts, 16.);
+    let mut canvas = Canvas::new(16, cases.len() as u32 * 2, layout.background);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    assert!(!layout.limited && !canvas.limited);
+    let mismatches: Vec<_> = cases
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, (name, hex))| {
+            let expected = u32::from_str_radix(hex, 16).unwrap();
+            (canvas.pixels[(2 * i + 1) * 16 + 4] != expected).then_some(name)
+        })
+        .collect();
+    assert!(
+        mismatches.is_empty(),
+        "{} named colors differed: {mismatches:?}",
+        mismatches.len()
+    );
+}

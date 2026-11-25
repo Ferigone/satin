@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+twitch-bootstrap-profile = ["rust-browser-javascript/twitch-bootstrap-profile"]
+
+[[test]]
+name = "twitch_bootstrap_profile"
+required-features = ["twitch-bootstrap-profile"]
+
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }
 rust-browser-javascript = { path = "../javascript" }

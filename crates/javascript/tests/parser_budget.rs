@@ -575,3 +575,32 @@ fn else_if_ladders_remain_flat_through_execution() {
         assert_eq!(vm.eval(generator).unwrap(), Value::Bool(true));
     });
 }
+
+#[test]
+fn large_strict_scripts_validate_unused_functions_and_preserve_closures() {
+    small_stack(|| {
+        let padding = format!("/*{}*/", " ".repeat(64 * 1024));
+        let mut vm = Vm::new();
+        vm.eval("var observed = 0").unwrap();
+        let invalid = format!(r#"{padding}"use strict";
+            observed = 1;
+            (function() {{ function unused(a) {{ let a; }} }})();
+        "#);
+        assert_eq!(vm.eval(&invalid).unwrap_err().kind, ErrorKind::SyntaxError);
+        assert_eq!(vm.eval("observed").unwrap(), Value::Number(0.0));
+        let valid = format!(r#"{padding}"use strict";
+            (function(seed) {{
+                function Counter(value) {{ this.value = value; }}
+                function factory(offset) {{
+                    return function step(n) {{ return n ? step(n-1)+1 : seed+offset; }};
+                }}
+                var named = function inner() {{ return inner.name }};
+                var counter = new Counter(3);
+                var a = factory(counter.value), b = factory(10);
+                return a(2)===12 && b(1)===18 && named()==="inner" &&
+                    factory.length===1 && /function factory\(offset\)/.test(factory.toString());
+            }})(7)
+        "#);
+        assert_eq!(vm.eval(&valid).unwrap(), Value::Bool(true));
+    });
+}

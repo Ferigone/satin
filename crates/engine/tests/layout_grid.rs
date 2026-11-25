@@ -416,3 +416,122 @@ fn intrinsic_repetition_counts_percent_tracks_and_gutters_against_their_bases() 
         ],
     );
 }
+
+#[test]
+fn nested_fixed_height_grids_reuse_measurement_without_losing_percentage_resolution() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.nest{display:grid;width:100px;height:20px;grid-template-columns:100px;grid-template-rows:20px}</style>",
+    );
+    for _ in 0..12 {
+        html.push_str("<div class='nest'>");
+    }
+    html.push_str("<a id='leaf' href='about:next' style='display:block;height:50%'>next</a>");
+    for _ in 0..12 {
+        html.push_str("</div>");
+    }
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(
+        !layout.limited,
+        "nested fixed-height grids exhausted layout work"
+    );
+    let leaf = page
+        .document
+        .connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("leaf"))
+        .unwrap();
+    let rect = layout.rect_for(leaf).unwrap();
+    assert!((rect.height - 10.).abs() < 0.05, "{rect:?}");
+    assert_eq!(layout.link_at(10., 5.), Some("about:next"));
+}
+
+#[test]
+fn nested_auto_stretched_grids_reuse_identical_fragments() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.nest{display:grid;width:100px;grid-template-columns:100px}</style>",
+    );
+    for _ in 0..12 {
+        html.push_str("<div class='nest'>");
+    }
+    html.push_str("<a id='leaf' href='about:next' style='display:block;height:20px'>next</a>");
+    for _ in 0..12 {
+        html.push_str("</div>");
+    }
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(
+        !layout.limited,
+        "repeated auto-stretch exhausted layout work"
+    );
+    let leaf = page
+        .document
+        .connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("leaf"))
+        .unwrap();
+    let rect = layout.rect_for(leaf).unwrap();
+    assert!(
+        (rect.width - 100.).abs() < 0.05 && (rect.height - 20.).abs() < 0.05,
+        "{rect:?}"
+    );
+    assert_eq!(layout.link_at(10., 5.), Some("about:next"));
+}
+
+#[test]
+fn intrinsic_and_final_dense_grid_share_placement_within_work_budget() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.outer{display:grid;width:100px}.inner{display:grid;height:320px;grid-template-columns:100px;grid-auto-rows:10px;grid-auto-flow:row dense}.inner>*{display:block;height:10px}</style><div class='outer'><div class='inner'>",
+    );
+    for _ in 0..31 {
+        html.push_str("<div></div>");
+    }
+    html.push_str("<a id='last' href='about:next'></a></div></div>");
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(
+        !layout.limited,
+        "identical dense placement spent the layout budget twice"
+    );
+    let last = page
+        .document
+        .connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("last"))
+        .unwrap();
+    let rect = layout.rect_for(last).unwrap();
+    assert!(
+        (rect.y - 310.).abs() < 0.05 && (rect.height - 10.).abs() < 0.05,
+        "{rect:?}"
+    );
+    assert_eq!(layout.link_at(10., 315.), Some("about:next"));
+}
+
+#[test]
+fn hidden_subtree_does_not_spend_intrinsic_grid_placement_budget() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.outer{display:grid;width:100px;grid-template-columns:100px}.hidden{display:none}.dense{display:grid;grid-template-columns:100px;grid-auto-rows:10px;grid-auto-flow:row dense}</style><div class='outer'><div><div class='hidden'><div class='dense'>",
+    );
+    for _ in 0..128 {
+        html.push_str("<div></div>");
+    }
+    html.push_str("</div></div><a id='visible' href='about:next' style='display:block;height:20px'>next</a></div></div>");
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(
+        !layout.limited,
+        "a display:none subtree must not consume intrinsic grid placement work"
+    );
+    let visible = page
+        .document
+        .connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("visible"))
+        .unwrap();
+    let rect = layout.rect_for(visible).unwrap();
+    assert!(
+        (rect.width - 100.).abs() < 0.05 && (rect.height - 20.).abs() < 0.05,
+        "{rect:?}"
+    );
+    assert_eq!(layout.link_at(10., 5.), Some("about:next"));
+}

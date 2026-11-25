@@ -59,7 +59,8 @@ impl Vm {
         code: &Code,
         parent: EnvId,
         invocation: Invocation<'_>,
-    ) -> Result<EnvId, JsError> {
+    ) -> Result<(EnvId, std::rc::Rc<crate::bytecode::Chunk>), JsError> {
+        let chunk = self.materialize_body(code)?;
         let Invocation {
             function,
             this,
@@ -92,14 +93,12 @@ impl Vm {
             record.this_initialized = this_initialized;
         }
         let arguments_name = crate::JsString::from("arguments");
-        let body_shadows_arguments = code
-            .body
+        let body_shadows_arguments = chunk
             .scope
             .lexical
             .iter()
             .any(|(name, _)| name == &arguments_name)
-            || code
-                .body
+            || chunk
                 .scope
                 .functions
                 .iter()
@@ -147,12 +146,12 @@ impl Vm {
             )?;
         }
         if !code.parameter_expressions {
-            return Ok(env);
+            return Ok((env, chunk));
         }
         let body = self
             .heap
             .allocate_env(Environment::new(Some(env), EnvKind::Function, None));
-        for name in &code.body.scope.vars {
+        for name in &chunk.scope.vars {
             if name == &arguments_name && self.heap.environment(env).pending_arguments.is_some() {
                 self.materialize_arguments(env)?;
             }
@@ -165,7 +164,7 @@ impl Vm {
                     .insert(name.clone(), binding);
             }
         }
-        Ok(body)
+        Ok((body, chunk))
     }
     pub(crate) fn declare_pattern(
         &mut self,

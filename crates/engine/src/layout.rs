@@ -1,7 +1,7 @@
 use crate::{
     css::{
-        self, Align, BoxSizing, Color, Display, FlexDirection, GRID_TRACK_LIMIT, GridAutoFlow,
-        GridBreadth, Length, Overflow, Style,
+        self, Align, BoxSizing, Color, Display, FlexDirection, FlexWrap, GRID_TRACK_LIMIT,
+        GridAutoFlow, GridBreadth, Length, Overflow, Style,
     },
     dom::{NodeId, NodeKind},
     fonts::{FontRequest, FontSet, Fonts, Run},
@@ -425,6 +425,8 @@ impl Layout {
             }
         }
         let stylesheet = css::Stylesheet::with_viewport(rules, width, viewport.height);
+        let form_state = |node, pseudo| page.matches_form_pseudo(node, pseudo);
+        let mut selector_context = css::SelectorContext::new(&form_state);
         let mut styles = ComputedStyles::new(page.document.nodes.len());
         // HTML recovery and DOM reparenting can allocate parents after children.
         let mut stack = vec![page.document.root];
@@ -433,12 +435,12 @@ impl Layout {
             let n = &page.document.nodes[id.0];
             let parent = n.parent.map_or(0, |p| styles.by_node[p.0]);
             styles.by_node[id.0] = if matches!(n.kind, NodeKind::Element { .. }) {
-                let style = stylesheet.compute_with_form_state(
+                let style = stylesheet.compute_in_context(
                     &page.document,
                     id,
                     &styles.entries[parent],
                     root_font,
-                    &|node, pseudo| page.matches_form_pseudo(node, pseudo),
+                    &mut selector_context,
                 );
                 styles.entries.push(style);
                 styles.entries.len() - 1
@@ -499,7 +501,7 @@ impl Layout {
             || layout
                 .scroll_regions
                 .iter()
-                .any(|r| r.max_x > 0. || r.max_y > 0.)
+                .any(ScrollRegion::can_scroll)
         {
             layout.scroll_flow = candidate;
         }
@@ -668,7 +670,7 @@ impl<'a> Line<'a> {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fragment {
     commands: TrackedCommands,
     positioned: Vec<positioning::Positioned>,
@@ -683,9 +685,66 @@ struct Constraints {
     width: Option<f32>,
     intrinsic_width: bool,
     height: Option<f32>,
+    // A column flex item may have a used height but no definite percentage basis.
+    indefinite_height: bool,
     containing_height: Option<f32>,
     flex_item: bool,
 }
+impl Constraints {
+    // With both border-box dimensions imposed, block_inner never consults
+    // the parent's block-size basis: explicit height comes from height,
+    // min/max height clamping is skipped and replaced auto-width is bypassed.
+    // The box establishes its own percentage basis (or none for an indefinite flex item).
+    // Keep the basis for every other case, including percentage auto sizes.
+    fn fragment_height_basis_key(self) -> Option<u32> {
+        if self.width.is_some() && self.height.is_some() {
+            None
+        } else {
+            self.containing_height.map(f32::to_bits)
+        }
+    }
+}
+// Exact, frame-local fragment memoization. CSS styles, DOM and resource
+// snapshots are immutable for the lifetime of this Builder.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FragmentKey {
+    node: NodeId,
+    available: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+    containing_height: Option<u32>,
+    indefinite_height: bool,
+    intrinsic_width: bool,
+    flex_item: bool,
+    href: Option<Arc<str>>,
+}
+
+impl Fragment {
+    // Bound both the cache's retained payload and the work of cloning it.
+    // Text runs own glyph vectors, and anchors own their strings.
+    fn cache_cost(&self) -> Option<usize> {
+        let mut cost = self
+            .commands
+            .len()
+            .saturating_mul(8)
+            .saturating_add(self.positioned.len())
+            .saturating_add(self.links.len())
+            .saturating_add(self.elements.len())
+            .saturating_add(1);
+        for command in self.commands.iter() {
+            match command {
+                DrawCommand::Text { run, .. } => cost = cost.saturating_add(run.glyphs.len()),
+                DrawCommand::Control { .. } => return None,
+                _ => {}
+            }
+        }
+        for name in self.anchors.keys() {
+            cost = cost.saturating_add(name.len()).saturating_add(1);
+        }
+        (cost <= 4096).then_some(cost)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BoxMetrics {
     margin: [f32; 4],
@@ -813,7 +872,11 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
+    fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
+    fragment_cache_cost: usize,
     grid_text: HashMap<NodeId, GridText>,
+    grid_placements: HashMap<(NodeId, [usize; 3], [usize; 3]), Arc<GridPlacement>>,
+    grid_placement_items: usize,
     floats: floats::FloatContext,
     float_work_remaining: usize,
     recursion: usize,
@@ -842,7 +905,11 @@ impl<'a> Builder<'a> {
             anchors: HashMap::new(),
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
+            fragment_cache: HashMap::new(),
+            fragment_cache_cost: 0,
             grid_text: HashMap::new(),
+            grid_placements: HashMap::new(),
+            grid_placement_items: 0,
             floats: floats::FloatContext::default(),
             float_work_remaining: page
                 .document
@@ -883,6 +950,7 @@ struct FlexItem {
     node: NodeId,
     basis: f32, // Border-box base used for free-space accounting.
     inner_basis: f32,
+    indefinite_height: bool,
     min: f32,
     max: f32,
     grow: f32,
@@ -974,10 +1042,32 @@ fn distribute_flex(items: &[FlexItem], available: f32) -> Vec<f32> {
     }
     sizes
 }
+// Express flow-relative start/end in the coordinates of a flex axis. Flex-start
+// and flex-end already follow that axis when its direction is reversed.
+fn flex_alignment(align: Align, reversed: bool) -> Align {
+    match (align, reversed) {
+        (Align::Start, true) | (Align::FlexEnd, _) => Align::End,
+        (Align::End, true) | (Align::FlexStart, _) => Align::Start,
+        _ => align,
+    }
+}
+
+fn flex_content_space(align: Align, reversed: bool, extra: f32, count: usize) -> (f32, f32) {
+    // Space-around and space-evenly fall back to safe center on overflow.
+    // Safe center overflows at the flow-relative end, even on reversed axes.
+    let align = if extra < 0. && matches!(align, Align::SpaceAround | Align::SpaceEvenly) {
+        Align::Start
+    } else {
+        align
+    };
+    alignment_space(flex_alignment(align, reversed), extra, count)
+}
+
 fn alignment_space(align: Align, extra: f32, count: usize) -> (f32, f32) {
     match align {
-        Align::End => (extra, 0.),
+        Align::End | Align::FlexEnd | Align::Right => (extra, 0.),
         Align::Center => (extra / 2., 0.),
+        _ if extra <= 0. => (0., 0.),
         Align::SpaceBetween if count > 1 => (0., extra / (count - 1) as f32),
         Align::SpaceAround if count > 0 => (extra / (count * 2) as f32, extra / count as f32),
         Align::SpaceEvenly if count > 0 => (extra / (count + 1) as f32, extra / (count + 1) as f32),
@@ -1748,7 +1838,10 @@ fn grid_offsets(
     let extra = available - total;
     let (offset, spacing) = alignment_space(
         align,
-        if matches!(align, Align::Center | Align::End) {
+        if matches!(
+            align,
+            Align::Center | Align::End | Align::FlexEnd | Align::Right
+        ) {
             extra
         } else {
             extra.max(0.)
@@ -1828,6 +1921,47 @@ impl Builder<'_> {
         });
         nodes
     }
+    // Placement depends on the immutable frame's item order, line names and
+    // expanded track topology, not on the resolved track sizes. Intrinsic
+    // and final grid passes can share it when automatic repeats agree.
+    fn grid_placement_cached(
+        &mut self,
+        id: NodeId,
+        rows: &Axis<'_>,
+        columns: &Axis<'_>,
+    ) -> Option<Arc<GridPlacement>> {
+        let key = (id, rows.placement_key(), columns.placement_key());
+        if let Some(placement) = self.grid_placements.get(&key) {
+            let charge = 1 + placement.items.len() / 64;
+            self.work_remaining = self.work_remaining.checked_sub(charge)?;
+            return Some(Arc::clone(placement));
+        }
+        let nodes = self.grid_nodes(id);
+        let doc = &self.page.document;
+        let before = self.work_remaining;
+        let placement = Arc::new(grid_placement(
+            nodes,
+            self.styles,
+            |node| doc.nodes[node.0].kind.text_data().is_some(),
+            &self.styles[id.0],
+            [rows, columns],
+            &mut self.work_remaining,
+        )?);
+        let items = placement.items.len();
+        // Retain only successful, useful placements in a bounded frame-local
+        // cache. A different auto-repeat count must perform placement anew.
+        if !self.limited
+            && !rows.limited
+            && !columns.limited
+            && before.saturating_sub(self.work_remaining) > 1 + items / 64
+            && self.grid_placements.len() < 512
+            && self.grid_placement_items.saturating_add(items) <= 16384
+        {
+            self.grid_placement_items += items;
+            self.grid_placements.insert(key, Arc::clone(&placement));
+        }
+        Some(placement)
+    }
     fn grid_inline_contribution(&mut self, item: GridItem, width: f32) -> GridContribution {
         let (min_content, max_content) = self.intrinsic_width(item.node);
         if self.page.document.nodes[item.node.0]
@@ -1903,16 +2037,7 @@ impl Builder<'_> {
             AxisSize::from_style(container, false, None, metrics),
         );
         self.limited |= rows.limited || columns.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let Some(placement) = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&rows, &columns],
-            &mut self.work_remaining,
-        ) else {
+        let Some(placement) = self.grid_placement_cached(id, &rows, &columns) else {
             self.limited = true;
             return (0., 0.);
         };
@@ -1973,17 +2098,8 @@ impl Builder<'_> {
         );
         let column_template = Axis::new(container, false, inline_size);
         self.limited |= row_template.limited || column_template.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let placement = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&row_template, &column_template],
-            &mut self.work_remaining,
-        );
-        let Some(placement) = placement else {
+        let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template)
+        else {
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
             for &child in &self.page.document.nodes[id.0].children {
@@ -2243,7 +2359,18 @@ impl Builder<'_> {
                 } else {
                     None
                 };
-            if !text {
+            // The measuring pass already used the final inline size. A second
+            // pass is required only if the final block constraint can affect
+            // this box. Without an imposed stretch height or a percentage
+            // block-size constraint, its own explicit content height (and
+            // hence the basis passed to its descendants) is unchanged.
+            // Reuse the measured fragment rather than recursively formatting
+            // nested grids twice at every level.
+            let needs_final_layout = target_height.is_some()
+                || style.height.has_percent()
+                || style.min_height.has_percent()
+                || style.max_height.has_percent();
+            if !text && needs_final_layout {
                 fragment = self.fragment(
                     item.node,
                     area_width,
@@ -2272,7 +2399,7 @@ impl Builder<'_> {
                     + usize::from(style.margin[2] == Length::Auto)
             };
             let offset = |align, free| match align {
-                Align::End => free,
+                Align::End | Align::FlexEnd => free,
                 Align::Center => free / 2.,
                 _ => 0.,
             };
@@ -2366,7 +2493,7 @@ impl Builder<'_> {
             } else {
                 max_width = max_width.max(child_max);
             }
-            if row && !style.flex_wrap {
+            if row && style.flex_wrap == FlexWrap::NoWrap {
                 min_width += spacing + child_min;
             } else {
                 min_width = min_width.max(child_min);
@@ -2377,26 +2504,39 @@ impl Builder<'_> {
     }
 
     /// Useful horizontal-writing Flexbox subset: row/column, reverse directions,
-    /// row wrapping, order, gaps, constrained grow/shrink, auto margins and main/
-    /// cross alignment. No baselines, column wrapping or full intrinsic sizing.
+    /// line wrapping, order, gaps, constrained grow/shrink, auto margins and main/
+    /// cross alignment. Baselines and full intrinsic sizing are not implemented.
     fn flex(
         &mut self,
         id: NodeId,
         x: f32,
         y: f32,
         width: f32,
-        height: Option<f32>,
+        block_size: AxisSize,
         href: Option<Arc<str>>,
     ) -> f32 {
         let container = &self.styles[id.0];
+        let height = block_size.preferred;
         let row = matches!(
             container.flex_direction,
             FlexDirection::Row | FlexDirection::RowReverse
         );
-        let reverse = matches!(
+        let reverse_direction = matches!(
             container.flex_direction,
             FlexDirection::RowReverse | FlexDirection::ColumnReverse
         );
+        let reverse = reverse_direction ^ (row && container.rtl);
+        // Physical left/right map to inline start/end in rows. In columns
+        // both fall back to logical start, including column-reverse.
+        let justify = match container.justify_content {
+            Align::Left if row && container.rtl => Align::End,
+            Align::Right if row && !container.rtl => Align::End,
+            Align::Left | Align::Right => Align::Start,
+            align => align,
+        };
+        let wrap = container.flex_wrap != FlexWrap::NoWrap;
+        let reverse_wrap = container.flex_wrap == FlexWrap::WrapReverse;
+        let reverse_cross = reverse_wrap ^ (!row && container.rtl);
         let gap = container.gap[if row { 1 } else { 0 }]
             .resolve(
                 if row { width } else { height.unwrap_or(0.) },
@@ -2404,8 +2544,11 @@ impl Builder<'_> {
             )
             .unwrap_or(0.)
             .max(0.);
-        let cross_gap = container.gap[0]
-            .resolve(height.unwrap_or(0.), container.font_size)
+        let cross_gap = container.gap[if row { 0 } else { 1 }]
+            .resolve(
+                if row { height.unwrap_or(0.) } else { width },
+                container.font_size,
+            )
             .unwrap_or(0.)
             .max(0.);
         let mut nodes: Vec<_> = self.page.document.nodes[id.0]
@@ -2506,12 +2649,14 @@ impl Builder<'_> {
                 };
                 let cross = if text {
                     max_content.min(width).max(min_content)
-                } else if s.width == Length::FitContent {
+                } else if s.width == Length::FitContent
+                    || (s.width == Length::Auto
+                        && (wrap || align != Align::Stretch || auto[1] || auto[3]))
+                {
+                    // Measure the hypothetical item before its line is stretched.
                     m.fit_content_width(s, width, (min_content, max_content))
-                } else if s.width != Length::Auto || align == Align::Stretch {
-                    m.width + m.extra_x()
                 } else {
-                    max_content.min((width - margin[1] - margin[3]).max(min_content))
+                    m.width + m.extra_x()
                 };
                 let f = self.fragment(
                     node,
@@ -2574,10 +2719,18 @@ impl Builder<'_> {
                 .max(min);
                 (basis.max(extra), min, max, Some(f))
             };
+            let used_basis = if s.flex_basis == Length::Auto {
+                s.height
+            } else {
+                s.flex_basis
+            };
             items.push(FlexItem {
                 node,
                 basis,
                 inner_basis: basis - extra,
+                indefinite_height: !row
+                    && height.is_none()
+                    && used_basis.resolve_with_basis(None, s.font_size).is_none(),
                 min,
                 max,
                 grow: if text { 0. } else { s.flex_grow },
@@ -2592,6 +2745,12 @@ impl Builder<'_> {
         }
         let mut ranges = vec![];
         let (mut start, mut used) = (0, 0.);
+        let line_limit = if row {
+            width
+        } else {
+            height.unwrap_or(block_size.maximum)
+        };
+        let mut longest_line = 0f32;
         for (index, item) in items.iter().enumerate() {
             let outer = item.basis.clamp(item.min, item.max)
                 + if row {
@@ -2599,7 +2758,8 @@ impl Builder<'_> {
                 } else {
                     item.margin[0] + item.margin[2]
                 };
-            if row && container.flex_wrap && index > start && used + gap + outer > width {
+            if wrap && index > start && used + gap + outer > line_limit {
+                longest_line = longest_line.max(used);
                 ranges.push(start..index);
                 start = index;
                 used = 0.;
@@ -2610,6 +2770,15 @@ impl Builder<'_> {
             used += outer;
         }
         ranges.push(start..items.len());
+        let main_limit = if row {
+            width
+        } else {
+            height.unwrap_or_else(|| {
+                longest_line
+                    .max(used)
+                    .clamp(block_size.minimum, block_size.maximum)
+            })
+        };
         let mut lines = vec![];
         for range in ranges {
             let group = &mut items[range.clone()];
@@ -2624,18 +2793,6 @@ impl Builder<'_> {
                 })
                 .sum();
             let gaps = gap * group.len().saturating_sub(1) as f32;
-            let main_limit = if row {
-                width
-            } else {
-                height.unwrap_or_else(|| {
-                    group
-                        .iter()
-                        .map(|i| i.basis.clamp(i.min, i.max))
-                        .sum::<f32>()
-                        + margins
-                        + gaps
-                })
-            };
             let sizes = distribute_flex(group, main_limit - margins - gaps);
             let mut cross = 0f32;
             for (item, &size) in group.iter_mut().zip(&sizes) {
@@ -2663,6 +2820,7 @@ impl Builder<'_> {
                             Constraints {
                                 width: Some(cross_width),
                                 height: Some(size),
+                                indefinite_height: item.indefinite_height,
                                 containing_height: height,
                                 flex_item: true,
                                 ..Constraints::default()
@@ -2673,31 +2831,39 @@ impl Builder<'_> {
                 let f = item.fragment.as_ref().unwrap();
                 cross = cross.max(if row { f.height } else { f.width });
             }
-            if !container.flex_wrap
-                && row
-                && let Some(height) = height
-            {
-                cross = height;
-            }
-            if !row {
-                cross = width;
-            }
-            lines.push((range, sizes, cross, main_limit));
+            lines.push((range, sizes, cross));
         }
-        if row
-            && container.flex_wrap
-            && let Some(height) = height
-        {
-            let natural = lines.iter().map(|line| line.2).sum::<f32>()
-                + cross_gap * lines.len().saturating_sub(1) as f32;
-            let extra = (height - natural).max(0.) / lines.len() as f32;
+        let natural_cross = lines.iter().map(|line| line.2).sum::<f32>()
+            + cross_gap * lines.len().saturating_sub(1) as f32;
+        let cross_size = if row {
+            height.unwrap_or_else(|| natural_cross.clamp(block_size.minimum, block_size.maximum))
+        } else {
+            width
+        };
+        let free_cross = cross_size - natural_cross;
+        let (mut cross_cursor, distributed_cross_gap) = if !wrap {
+            lines[0].2 = cross_size;
+            (0., 0.)
+        } else if container.align_content == Align::Stretch && free_cross > 0. {
+            let share = free_cross / lines.len() as f32;
             for line in &mut lines {
-                line.2 += extra;
+                line.2 += share;
             }
-        }
-        let mut cross_cursor = 0f32;
-        let mut column_height = 0f32;
-        for (range, sizes, cross, main_limit) in lines {
+            (0., 0.)
+        } else {
+            flex_content_space(
+                container.align_content,
+                reverse_wrap,
+                free_cross,
+                lines.len(),
+            )
+        };
+        for (range, sizes, cross) in lines {
+            let line_start = if reverse_cross {
+                cross_size - cross_cursor - cross
+            } else {
+                cross_cursor
+            };
             let group = &mut items[range];
             let (before, after) = if row {
                 if reverse { (1, 3) } else { (3, 1) }
@@ -2713,16 +2879,20 @@ impl Builder<'_> {
                 .map(|(i, size)| size + i.margin[before] + i.margin[after])
                 .sum::<f32>()
                 + gap * group.len().saturating_sub(1) as f32;
-            let extra = (main_limit - occupied).max(0.);
+            let extra = main_limit - occupied;
             let autos = group
                 .iter()
                 .map(|i| usize::from(i.auto[before]) + usize::from(i.auto[after]))
                 .sum::<usize>();
-            let auto_share = if autos > 0 { extra / autos as f32 } else { 0. };
-            let (mut cursor, distributed_gap) = if autos > 0 {
+            let auto_share = if autos > 0 {
+                extra.max(0.) / autos as f32
+            } else {
+                0.
+            };
+            let (mut cursor, distributed_gap) = if autos > 0 && extra > 0. {
                 (0., 0.)
             } else {
-                alignment_space(container.justify_content, extra, group.len())
+                flex_content_space(justify, reverse_direction, extra, group.len())
             };
             for (item, &size) in group.iter_mut().zip(&sizes) {
                 let s = &self.styles[item.node.0];
@@ -2736,39 +2906,39 @@ impl Builder<'_> {
                     s.align_self
                 };
                 let has_cross_auto = item.auto[cross_before] || item.auto[cross_after];
-                if row
-                    && !text
+                let cross_length = if row { s.height } else { s.width };
+                if !text
                     && align == Align::Stretch
                     && !has_cross_auto
-                    && s.height == Length::Auto
+                    && cross_length == Length::Auto
                 {
                     let m = BoxMetrics::new(s, width, Constraints::default());
-                    let to_border = |v: f32| {
-                        if s.box_sizing == BoxSizing::BorderBox {
-                            v.max(m.extra_y())
-                        } else {
-                            v + m.extra_y()
-                        }
+                    let (min, max, extra, basis) = if row {
+                        (s.min_height, s.max_height, m.extra_y(), height)
+                    } else {
+                        (s.min_width, s.max_width, m.extra_x(), Some(width))
                     };
-                    let mut target = (cross - item.margin[0] - item.margin[2]).max(0.);
-                    if let Some(max) = s.max_height.resolve_with_basis(height, s.font_size) {
+                    let margins = item.margin[cross_before] + item.margin[cross_after];
+                    let to_border = |v| to_content(v, extra, s.box_sizing) + extra;
+                    let mut target = (cross - margins).max(extra);
+                    if let Some(max) = max.resolve_with_basis(basis, s.font_size) {
                         target = target.min(to_border(max));
                     }
-                    if let Some(min) = s.min_height.resolve(height.unwrap_or(0.), s.font_size) {
+                    if let Some(min) = min.resolve_with_basis(basis, s.font_size) {
                         target = target.max(to_border(min));
                     }
-                    let current =
-                        (item.fragment.as_ref().unwrap().height - item.margin[0] - item.margin[2])
-                            .max(0.);
+                    let old = item.fragment.as_ref().unwrap();
+                    let current = if row { old.height } else { old.width } - margins;
                     if (target - current).abs() > 0.01 {
                         item.fragment = Some(self.fragment(
                             item.node,
                             width,
                             href.clone(),
                             Constraints {
-                                width: Some(size),
-                                height: Some(target),
-                                containing_height: Some(cross),
+                                width: Some(if row { size } else { target }),
+                                height: Some(if row { target } else { size }),
+                                indefinite_height: item.indefinite_height,
+                                containing_height: height,
                                 flex_item: true,
                                 ..Constraints::default()
                             },
@@ -2778,9 +2948,17 @@ impl Builder<'_> {
                 let f = item.fragment.take().unwrap();
                 let outer_main = if row { f.width } else { f.height };
                 let outer_cross = if row { f.height } else { f.width };
-                let cross_extra = (cross - outer_cross).max(0.);
+                let cross_extra = cross - outer_cross;
                 let cross_offset = if has_cross_auto {
-                    if item.auto[cross_before] {
+                    // Cross-axis auto margins use physical sides. Oversized items
+                    // overflow at block-end (inline-end in a column).
+                    if cross_extra < 0. {
+                        if !row && container.rtl {
+                            cross_extra
+                        } else {
+                            0.
+                        }
+                    } else if item.auto[cross_before] {
                         if item.auto[cross_after] {
                             cross_extra / 2.
                         } else {
@@ -2790,10 +2968,15 @@ impl Builder<'_> {
                         0.
                     }
                 } else {
-                    match align {
+                    let offset = match flex_alignment(align, reverse_wrap) {
                         Align::End => cross_extra,
                         Align::Center => cross_extra / 2.,
                         _ => 0.,
+                    };
+                    if reverse_cross {
+                        cross_extra - offset
+                    } else {
+                        offset
                     }
                 };
                 if item.auto[before] {
@@ -2804,10 +2987,11 @@ impl Builder<'_> {
                 } else {
                     cursor
                 };
+                let cross_position = line_start + cross_offset;
                 let (fx, fy) = if row {
-                    (x + position, y + cross_cursor + cross_offset)
+                    (x + position, y + cross_position)
                 } else {
-                    (x + cross_offset, y + position)
+                    (x + cross_position, y + position)
                 };
                 self.append_fragment(f, fx, fy);
                 cursor += outer_main + gap + distributed_gap;
@@ -2815,14 +2999,9 @@ impl Builder<'_> {
                     cursor += auto_share;
                 }
             }
-            cross_cursor += cross + cross_gap;
-            column_height = column_height.max(main_limit);
+            cross_cursor += cross + cross_gap + distributed_cross_gap;
         }
-        if row {
-            (cross_cursor - cross_gap).max(0.)
-        } else {
-            column_height
-        }
+        if row { cross_size } else { main_limit }
     }
 }
 impl Builder<'_> {
@@ -3079,6 +3258,7 @@ impl Builder<'_> {
                 .resolve_with_basis(c.containing_height, s.font_size)
                 .map(|v| to_content(v, m.extra_y(), s.box_sizing))
         });
+        let percentage_basis = explicit.filter(|_| !c.indefinite_height);
         if let Some(name) = self.page.document.attr(id, "id") {
             self.anchors.insert(name.into(), oy);
         }
@@ -3133,7 +3313,22 @@ impl Builder<'_> {
             h
         } else if matches!(s.display, Display::Flex | Display::InlineFlex) {
             self.queue_positioned_children(id, cx, cy, href.clone());
-            self.flex(id, cx, cy, m.width, explicit, href.clone())
+            let mut block_size = match c.height {
+                Some(_) if c.indefinite_height => AxisSize {
+                    preferred: None,
+                    minimum: explicit.unwrap(),
+                    maximum: explicit.unwrap(),
+                },
+                Some(border_height) => AxisSize::fixed((border_height - m.extra_y()).max(0.)),
+                None => AxisSize::from_style(s, true, c.containing_height, m),
+            };
+            if tag == "fieldset" && block_size.preferred.is_none() {
+                // The anonymous flex content box is height:100%. It does not
+                // inherit the fieldset's min/max-height when height is auto.
+                block_size.minimum = 0.;
+                block_size.maximum = f32::INFINITY;
+            }
+            self.flex(id, cx, cy, m.width, block_size, href.clone())
         } else if matches!(s.display, Display::Grid | Display::InlineGrid) {
             self.queue_positioned_children(id, cx, cy, href.clone());
             let minimum = if c.height.is_some() {
@@ -3153,10 +3348,19 @@ impl Builder<'_> {
                     .unwrap_or(f32::INFINITY)
                     .max(minimum)
             };
-            let block = AxisSize {
-                preferred: explicit,
-                minimum,
-                maximum,
+            let block = if c.indefinite_height {
+                let used = explicit.unwrap_or(0.);
+                AxisSize {
+                    preferred: None,
+                    minimum: used,
+                    maximum: used,
+                }
+            } else {
+                AxisSize {
+                    preferred: explicit,
+                    minimum,
+                    maximum,
+                }
             };
             let inline = if c.intrinsic_width {
                 AxisSize::from_style(s, false, Some(available), m)
@@ -3171,7 +3375,7 @@ impl Builder<'_> {
                 || s.overflow.iter().any(|o| o.scrollable())
                 || self.page.document.nodes[id.0].parent == Some(self.page.document.root);
             let outer = independent.then(|| std::mem::take(&mut self.floats));
-            let mut line = Line::new(cx, cy, m.width, s, explicit);
+            let mut line = Line::new(cx, cy, m.width, s, percentage_basis);
             if matches!(tag, "input" | "button" | "select" | "textarea")
                 && let Some(label) = self
                     .page
@@ -3234,6 +3438,31 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        // Repeated grid/flex measure and stretch passes can revisit the same
+        // subtree under identical constraints exponentially. Never reuse
+        // measurements across different percentage bases or inherited links.
+        let key = (c.flex_item
+            && !self.page.document.nodes[id.0].children.is_empty()
+            && href.as_ref().is_none_or(|url| url.len() <= 4096))
+        .then(|| FragmentKey {
+            node: id,
+            available: available.to_bits(),
+            width: c.width.map(f32::to_bits),
+            height: c.height.map(f32::to_bits),
+            containing_height: c.fragment_height_basis_key(),
+            indefinite_height: c.indefinite_height,
+            intrinsic_width: c.intrinsic_width,
+            flex_item: c.flex_item,
+            href: href.clone(),
+        });
+        if let Some((cached, cost)) = key.as_ref().and_then(|key| self.fragment_cache.get(key)) {
+            let charge = 1 + cost / 64;
+            if self.work_remaining >= charge {
+                self.work_remaining -= charge;
+                return cached.clone();
+            }
+        }
+        let work_before = self.work_remaining;
         let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
             commands: std::mem::take(&mut self.commands),
@@ -3268,7 +3497,7 @@ impl Builder<'_> {
         } else {
             m.width + m.extra_x() + m.margin[1] + m.margin[3]
         };
-        Fragment {
+        let fragment = Fragment {
             commands: std::mem::replace(&mut self.commands, old.commands),
             positioned: std::mem::replace(&mut self.positioned, old.positioned),
             links: std::mem::replace(&mut self.links, old.links),
@@ -3276,7 +3505,26 @@ impl Builder<'_> {
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
             width,
             height,
+        };
+        // Do not cache a fallback or partial result. Only retain fragments
+        // whose measured work exceeds their reuse charge; cap aggregate
+        // retained payload, including the inherited href in the key.
+        if !self.limited
+            && self.work_remaining > 0
+            && self.fragment_cache.len() < 256
+            && let Some(key) = key
+            && let Some(cost) = fragment.cache_cost()
+        {
+            let cost = cost.saturating_add(key.href.as_ref().map_or(0, |url| url.len()));
+            if work_before.saturating_sub(self.work_remaining) > 1 + cost / 64
+                && self.fragment_cache_cost.saturating_add(cost) <= 32768
+                && !self.fragment_cache.contains_key(&key)
+            {
+                self.fragment_cache.insert(key, (fragment.clone(), cost));
+                self.fragment_cache_cost += cost;
+            }
         }
+        fragment
     }
     fn append_fragment(&mut self, mut f: Fragment, x: f32, y: f32) {
         for command in &mut f.commands {
@@ -4110,6 +4358,15 @@ impl Builder<'_> {
                 if self.intrinsic[node.0].is_some() {
                     continue;
                 }
+                // display:none removes the entire subtree from intrinsic sizing.
+                // Descendants can still have grid/flex computed styles, so walking
+                // them first wastes placement work on boxes that cannot contribute.
+                if self.styles[node.0].display == Display::None
+                    && self.page.document.nodes[node.0].kind.text_data().is_none()
+                {
+                    self.intrinsic[node.0] = Some((0., 0.));
+                    continue;
+                }
                 if ready {
                     self.intrinsic_node(node);
                 } else {
@@ -4310,5 +4567,75 @@ impl Builder<'_> {
         };
         self.intrinsic[id.0] = Some(result);
         result
+    }
+}
+
+#[cfg(test)]
+mod fragment_height_basis_tests {
+    use super::{Builder, Constraints, Fonts, Layout, LoadedPage, Viewport};
+
+    #[test]
+    fn cached_flex_item_respects_percentage_height_definiteness() {
+        let page = LoadedPage::from_html(
+            "about:flex",
+            "<!doctype html><main><div style='height:50%'><span></span></div></main>",
+        );
+        let fonts = Fonts::new().unwrap();
+        let viewport = Viewport::default();
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+        let mut builder = Builder::new(&page, &fonts, &layout.computed_styles, viewport);
+        let item = page.document.elements("main").next().unwrap();
+        let child = page.document.elements("div").next().unwrap();
+        let constraints = Constraints {
+            width: Some(100.),
+            height: Some(40.),
+            flex_item: true,
+            ..Constraints::default()
+        };
+        for (indefinite_height, expected) in [(false, 20.), (true, 0.), (false, 20.)] {
+            let fragment = builder.fragment(
+                item,
+                100.,
+                None,
+                Constraints {
+                    indefinite_height,
+                    ..constraints
+                },
+            );
+            let element = fragment.elements.iter().find(|e| e.node == child).unwrap();
+            assert_eq!(element.rect.height, expected);
+        }
+        assert_eq!(builder.fragment_cache.len(), 2);
+    }
+
+    #[test]
+    fn only_fully_imposed_dimensions_ignore_parent_height_in_fragment_key() {
+        let a = Constraints {
+            width: Some(100.),
+            height: Some(40.),
+            containing_height: Some(80.),
+            flex_item: true,
+            ..Constraints::default()
+        };
+        let b = Constraints {
+            containing_height: Some(120.),
+            ..a
+        };
+        assert_eq!(a.fragment_height_basis_key(), b.fragment_height_basis_key());
+        assert_eq!(a.fragment_height_basis_key(), None);
+        for partial in [
+            Constraints { height: None, ..a },
+            Constraints { width: None, ..a },
+        ] {
+            assert_eq!(partial.fragment_height_basis_key(), Some(80f32.to_bits()));
+            assert_ne!(
+                partial.fragment_height_basis_key(),
+                Constraints {
+                    containing_height: Some(120.),
+                    ..partial
+                }
+                .fragment_height_basis_key()
+            );
+        }
     }
 }
