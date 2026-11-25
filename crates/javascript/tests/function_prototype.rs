@@ -109,13 +109,17 @@ fn legacy_caller_observes_the_active_sloppy_call_and_hides_strict_callers() {
     yes(r#"
         function leaf() {
             let d = Object.getOwnPropertyDescriptor(leaf, 'caller');
-            return d.value === leaf.caller && !d.writable && !d.configurable && !d.enumerable && leaf.caller;
+            return typeof d.get === 'function' && d.set === undefined &&
+                !('value' in d) && !d.configurable && !d.enumerable && leaf.caller;
         }
         function via() { return leaf(); }
         function strictCaller() { 'use strict'; return leaf(); }
         function recur(n) { return n ? recur(0) : recur.caller; }
         function target() { this.parent = target.caller; }
         function make() { return new target(); }
+        let getter = Object.getOwnPropertyDescriptor(leaf, 'caller').get;
+        !Reflect.defineProperty(leaf, 'caller', {writable:false, configurable:false}) &&
+        Object.getOwnPropertyDescriptor(leaf, 'caller').get === getter &&
         leaf.caller === null && via() === via && strictCaller() === null &&
         recur(1) === recur && recur.caller === null && make().parent === make
     "#);

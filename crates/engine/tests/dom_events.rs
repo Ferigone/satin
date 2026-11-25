@@ -252,3 +252,179 @@ fn page_global_implements_window_and_dispatches_through_its_event_target() {
         assert_eq!(runtime.eval(check).unwrap(), Value::Bool(true), "{check}");
     }
 }
+
+#[test]
+fn native_click_and_form_input_allow_bounded_work_and_flush_microtasks() {
+    let page = LoadedPage::from_html(
+        "https://events.test/input",
+        "<button id='go'>Go</button><input id='field'>",
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let button = page.document.elements("button").next().unwrap();
+    let field = page.document.elements("input").next().unwrap();
+    runtime
+        .eval(
+            r#"
+        var blank = ' '.repeat(8000), completed = '';
+        function work() {
+            for (var i = 0; i < 150; ++i) blank.repeat(1);
+            var kind = this.id;
+            queueMicrotask(function() { completed += kind; });
+        }
+        document.getElementById('go').addEventListener('click', work);
+        document.getElementById('field').addEventListener('input', work);
+    "#,
+        )
+        .unwrap();
+    assert!(runtime.click(button));
+    runtime.focus_control(Some(field)).unwrap();
+    assert!(runtime.insert_form_text("x").unwrap());
+    assert_eq!(runtime.eval("completed").unwrap(), Value::from("gofield"));
+    assert!(runtime.diagnostics().is_empty());
+
+    runtime
+        .eval(
+            r#"
+        var button = document.getElementById('go');
+        button.removeEventListener('click', work);
+        function tooMuch() {
+            for (;;) blank.repeat(1);
+        }
+        button.addEventListener('click', tooMuch);
+    "#,
+        )
+        .unwrap();
+    assert!(!runtime.click(button));
+    assert!(
+        runtime
+            .last_diagnostic()
+            .unwrap()
+            .contains("budget exhausted")
+    );
+    runtime
+        .eval("button.removeEventListener('click', tooMuch); button.addEventListener('click', work); completed = ''")
+        .unwrap();
+    assert!(runtime.click(button));
+    assert_eq!(runtime.eval("completed").unwrap(), Value::from("go"));
+}
+
+#[test]
+fn reentrant_synthetic_click_and_microtasks_spend_the_callers_remaining_fuel() {
+    let page = LoadedPage::from_html(
+        "https://events.test/reentrant",
+        "<button id='outer'></button><button id='inner'></button>",
+    );
+    let outer = page.document.elements("button").next().unwrap();
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval(
+            r#"
+        var blank = ' '.repeat(8000), marker = '';
+        var inner = document.getElementById('inner'), outer = document.getElementById('outer');
+        function spend() { for (var i = 0; i < 1500; i++) blank.repeat(1); }
+        inner.addEventListener('click', function() {
+            spend();
+            marker = 'inner';
+            queueMicrotask(function() { spend(); marker = 'unexpectedly finished'; });
+        });
+        outer.addEventListener('click', function() { spend(); inner.click(); });
+    "#,
+        )
+        .unwrap();
+    // Each part uses roughly twelve million units. Only a fresh native input
+    // task can finish either synchronous part; all three exceed its allowance.
+    assert!(!runtime.click(outer));
+    assert_eq!(runtime.eval("marker").unwrap(), Value::from("inner"));
+    assert!(
+        runtime
+            .last_diagnostic()
+            .unwrap()
+            .contains("budget exhausted")
+    );
+    assert_eq!(
+        runtime
+            .eval("marker = ''; inner.click();")
+            .unwrap_err()
+            .kind,
+        rust_browser_javascript::ErrorKind::ExecutionLimit,
+    );
+    assert_eq!(runtime.eval("marker").unwrap(), Value::from(""));
+}
+
+#[test]
+fn dom_listeners_share_a_bounded_document_quota_and_reuse_removed_slots() {
+    let page = LoadedPage::from_html("https://events.test/listeners", "<body>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval(
+            r#"
+        var targets = [], calls = 0;
+        function listen() { calls++; }
+        function addTargets(count) {
+            for (var i = 0; i < count; ++i) {
+                var target = document.createElement('span');
+                target.addEventListener('check', listen);
+                targets.push(target);
+            }
+        }
+    "#,
+        )
+        .unwrap();
+    for _ in 0..32 {
+        runtime.eval("addTargets(256)").unwrap();
+    }
+    let error = runtime.eval("addTargets(1)").unwrap_err();
+    assert_eq!(error.kind, rust_browser_javascript::ErrorKind::HeapLimit);
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+            targets[8191].addEventListener('check', listen);
+            targets[8191].dispatchEvent(new Event('check'));
+            targets[0].removeEventListener('check', listen);
+            addTargets(1);
+            targets[8192].dispatchEvent(new Event('check'));
+            calls
+        "#
+            )
+            .unwrap(),
+        Value::from(2),
+    );
+}
+
+#[test]
+fn a_single_dom_target_preserves_its_listener_limit() {
+    let page = LoadedPage::from_html("https://events.test/listeners", "<button></button>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval(
+            r#"
+        var button = document.querySelector('button'), n = 0, observed = false;
+        function listen() { observed = true; }
+        function addBatch() {
+            for (var i = 0; i < 128; i++) button.addEventListener('event' + n++, listen);
+        }
+    "#,
+        )
+        .unwrap();
+    for _ in 0..32 {
+        runtime.eval("addBatch()").unwrap();
+    }
+    let error = runtime
+        .eval("button.addEventListener('extra', listen)")
+        .unwrap_err();
+    assert_eq!(error.kind, rust_browser_javascript::ErrorKind::HeapLimit);
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+        button.removeEventListener('event1', listen);
+        button.addEventListener('extra', listen);
+        button.dispatchEvent(new Event('extra'));
+        observed
+    "#
+            )
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
