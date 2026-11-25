@@ -4247,6 +4247,15 @@ impl Builder<'_> {
                 if self.intrinsic[node.0].is_some() {
                     continue;
                 }
+                // display:none removes the entire subtree from intrinsic sizing.
+                // Descendants can still have grid/flex computed styles, so walking
+                // them first wastes placement work on boxes that cannot contribute.
+                if self.styles[node.0].display == Display::None
+                    && self.page.document.nodes[node.0].kind.text_data().is_none()
+                {
+                    self.intrinsic[node.0] = Some((0., 0.));
+                    continue;
+                }
                 if ready {
                     self.intrinsic_node(node);
                 } else {
