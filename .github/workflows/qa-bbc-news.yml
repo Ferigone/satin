@@ -1,0 +1,52 @@
+name: Public BBC News alpha.37 retest
+on:
+  push:
+    branches: [qa/bbc-alpha37-retest]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Verify independently downloaded alpha.37 assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/bbc-evidence | Out-Null
+          $versions = @('v0.1.0-alpha.37')
+          $records = foreach ($version in $versions) {
+            $meta = Invoke-RestMethod "https://api.github.com/repos/Ferigone/satin/releases/tags/$version"
+            foreach ($asset in $meta.assets | Where-Object { $_.name -match '\.(exe|zip)$' }) {
+              $path = Join-Path $env:RUNNER_TEMP "$version-$($asset.name)"
+              Invoke-WebRequest $asset.browser_download_url -OutFile $path
+              $digest = 'sha256:' + (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              [pscustomobject]@{version=$version;name=$asset.name;sha256=$digest;expected=$asset.digest;match=($digest -ceq $asset.digest)}
+              Remove-Item $path
+            }
+          }
+          $records | ConvertTo-Json | Set-Content target/bbc-evidence/release-hashes.json
+          Get-Content target/bbc-evidence/release-hashes.json
+          if (@($records | Where-Object { -not $_.match }).Count -ne 0 -or @($records).Count -ne 2) { throw 'Release digest mismatch or incomplete assets' }
+      - name: Ensure Media Foundation is available
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - name: Grid layout regressions
+        run: cargo test --locked -p rust-browser-engine --test layout_grid
+      - name: Build actual Satin
+        run: cargo build --release --locked -p rust-browser
+      - name: Install pinned reference driver
+        run: npm install --prefix "$env:RUNNER_TEMP/bbc-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+      - name: Capture BBC News in native Satin and Chrome
+        run: node tools/qa-bbc-news.mjs target/release/rust-browser.exe "$env:ProgramFiles/Google/Chrome/Application/chrome.exe" "$env:RUNNER_TEMP/bbc-reference/package.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: bbc-news-alpha37-retest
+          path: target/bbc-evidence/
+          if-no-files-found: warn
