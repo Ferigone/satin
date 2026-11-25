@@ -462,3 +462,23 @@ fn nested_auto_stretched_grids_reuse_identical_fragments() {
     assert!((rect.width - 100.).abs() < 0.05 && (rect.height - 20.).abs() < 0.05, "{rect:?}");
     assert_eq!(layout.link_at(10., 5.), Some("about:next"));
 }
+
+#[test]
+fn intrinsic_and_final_dense_grid_share_placement_within_work_budget() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.outer{display:grid;width:100px}.inner{display:grid;height:320px;grid-template-columns:100px;grid-auto-rows:10px;grid-auto-flow:row dense}.inner>*{display:block;height:10px}</style><div class='outer'><div class='inner'>",
+    );
+    for _ in 0..31 {
+        html.push_str("<div></div>");
+    }
+    html.push_str("<a id='last' href='about:next'></a></div></div>");
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(!layout.limited, "identical dense placement spent the layout budget twice");
+    let last = page.document.connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("last")).unwrap();
+    let rect = layout.rect_for(last).unwrap();
+    assert!((rect.y - 310.).abs() < 0.05 && (rect.height - 10.).abs() < 0.05, "{rect:?}");
+    assert_eq!(layout.link_at(10., 315.), Some("about:next"));
+}

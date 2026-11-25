@@ -854,6 +854,8 @@ struct Builder<'a> {
     fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
     fragment_cache_cost: usize,
     grid_text: HashMap<NodeId, GridText>,
+    grid_placements: HashMap<(NodeId, [usize; 3], [usize; 3]), Arc<GridPlacement>>,
+    grid_placement_items: usize,
     floats: floats::FloatContext,
     float_work_remaining: usize,
     recursion: usize,
@@ -886,6 +888,8 @@ impl<'a> Builder<'a> {
             fragment_cache: HashMap::new(),
             fragment_cache_cost: 0,
             grid_text: HashMap::new(),
+            grid_placements: HashMap::new(),
+            grid_placement_items: 0,
             floats: floats::FloatContext::default(),
             float_work_remaining: page
                 .document
@@ -1880,6 +1884,47 @@ impl Builder<'_> {
         });
         nodes
     }
+    // Placement depends on the immutable frame's item order, line names and
+    // expanded track topology, not on the resolved track sizes. Intrinsic
+    // and final grid passes can share it when automatic repeats agree.
+    fn grid_placement_cached(
+        &mut self,
+        id: NodeId,
+        rows: &Axis<'_>,
+        columns: &Axis<'_>,
+    ) -> Option<Arc<GridPlacement>> {
+        let key = (id, rows.placement_key(), columns.placement_key());
+        if let Some(placement) = self.grid_placements.get(&key) {
+            let charge = 1 + placement.items.len() / 64;
+            self.work_remaining = self.work_remaining.checked_sub(charge)?;
+            return Some(Arc::clone(placement));
+        }
+        let nodes = self.grid_nodes(id);
+        let doc = &self.page.document;
+        let before = self.work_remaining;
+        let placement = Arc::new(grid_placement(
+            nodes,
+            self.styles,
+            |node| doc.nodes[node.0].kind.text_data().is_some(),
+            &self.styles[id.0],
+            [rows, columns],
+            &mut self.work_remaining,
+        )?);
+        let items = placement.items.len();
+        // Retain only successful, useful placements in a bounded frame-local
+        // cache. A different auto-repeat count must perform placement anew.
+        if !self.limited
+            && !rows.limited
+            && !columns.limited
+            && before.saturating_sub(self.work_remaining) > 1 + items / 64
+            && self.grid_placements.len() < 512
+            && self.grid_placement_items.saturating_add(items) <= 16384
+        {
+            self.grid_placement_items += items;
+            self.grid_placements.insert(key, Arc::clone(&placement));
+        }
+        Some(placement)
+    }
     fn grid_inline_contribution(&mut self, item: GridItem, width: f32) -> GridContribution {
         let (min_content, max_content) = self.intrinsic_width(item.node);
         if self.page.document.nodes[item.node.0]
@@ -1956,16 +2001,7 @@ impl Builder<'_> {
         );
         if rows.limited || columns.limited { self.qa_trace_limit(id, "grid_intrinsic_tracks"); }
         self.limited |= rows.limited || columns.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let Some(placement) = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&rows, &columns],
-            &mut self.work_remaining,
-        ) else {
+        let Some(placement) = self.grid_placement_cached(id, &rows, &columns) else {
             self.qa_trace_limit(id, "grid_intrinsic_placement");
             self.limited = true;
             return (0., 0.);
@@ -2028,17 +2064,7 @@ impl Builder<'_> {
         let column_template = Axis::new(container, false, inline_size);
         if row_template.limited || column_template.limited { self.qa_trace_limit(id, "grid_tracks"); }
         self.limited |= row_template.limited || column_template.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let placement = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&row_template, &column_template],
-            &mut self.work_remaining,
-        );
-        let Some(placement) = placement else {
+        let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template) else {
             self.qa_trace_limit(id, "grid_placement");
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
