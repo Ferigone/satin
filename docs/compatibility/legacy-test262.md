@@ -1,4 +1,4 @@
-# Legacy browser Test262 results for alpha.38
+# Legacy browser Test262 results
 
 The March 23, 2016 Test262 website lists **16,436 cases** across its harness, language, Annex B and built-ins chapters. One alpha.38 browser-engine session completed all four chapters with **16,151 passed, 285 failed and 0 failed to load**. Running every case in a fresh Satin JavaScript VM produced **16,152 passes in alpha.38 and 16,057 in alpha.37**. All 95 changes from a nonpass to a pass are identifiable by their original Run All index and path. Every case that passed in alpha.37 passed again in this measurement. [Pinned website catalog](https://github.com/v8/test262/blob/e1166500a0d26c8b90e704a31c6646992573f632/website/json/default.json) · [Per-case comparison (TSV.GZ)](legacy-test262-alpha38.tsv.gz)
 
@@ -12,6 +12,12 @@ Of the 95 additional passes, 46 are Array cases, 21 Function, 12 language expres
 An independent Chromium 151 run used the original browser runner in selections with a watchdog. It produced 16,101 passes, 331 failures and four cases with no verdict. All 191 cases that reached a failing assertion in the alpha.38 isolated VM also failed in Chromium. Of the 93 cases that stopped at a VM limit, 61 passed in Chromium, 28 failed there and four returned no verdict. The unmodified Chromium Run All itself stalled at case 1,680.
 
 With the explicit `web-vm-alpha37` diagnostic profile and 100,000,000 instructions per script, the alpha.38 worker passed 16,210. That run used a 512 MiB heap and a 100-second external timeout. The same 191 cases reached a failed assertion and 35 stopped at a VM limit. All 58 changes were improvements. Of the cases Chromium passed, three still stopped in this diagnostic: the 32-deep function parser fixture and the two URI decoders that each test over a million UTF-16 pairs. The indexed comparison records the Chromium result and the diagnostic worker result for every case. [Chromium and diagnostic VM outcomes (TSV.GZ)](legacy-test262-reference-alpha38.tsv.gz)
+
+## Native Results in alpha.40
+
+The alpha.39 native window reproduced an empty results table with 16,436 preloaded case records. Before the browser had inserted the table, the JavaScript VM reached its 512 MiB heap limit while constructing the HTML for row 3,047. At that point it still charged about 400 MB for temporary strings that the next collection discarded. Alpha.40 releases a large string’s reservation as soon as its last reference disappears. An iframe also inherits the allowance of the timer or input handler that executed it, while the parent keeps one quarter of the remaining instructions and CPU time to handle errors. [Measured engine source](https://github.com/Ferigone/satin/commit/fc9de7072128f91df6b509f28dee3c7c3d0f7cb2) · [String accounting regressions](../../crates/javascript/tests/native_copy_budget.rs)
+
+In a Linux desktop window, the original Results renderer populated **4,911 table rows** from the same preloaded data with no script, layout or paint limit. Two independent browser-engine sessions each opened the table twice and bound a click handler to every one of its **4,826 source links**. These counts describe the table shown at the top of the site’s section hierarchy. All 16,436 tests remain in the four original catalog files. The preloaded-data replay measures report rendering only.
 
 ## What the browser reported
 

@@ -63,7 +63,7 @@ On the same 6,536 eligible static CSS reference comparisons, the number passing 
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
-Satin’s JavaScript engine passed **100,530 of 103,346 Test262 checks (97.28%)** on Linux x86_64. **52,244 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `56fd2f7`](https://github.com/Ferigone/satin/commit/56fd2f7529f81bb56df0be415937ed0f0eb98f91) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
+Satin’s JavaScript engine passed **100,801 of 103,346 Test262 checks (97.54%)** on Linux x86_64. **52,402 of 53,792 files** passed in every required mode. Measured 2026-11-25 on [Satin `fc9de70`](https://github.com/Ferigone/satin/commit/fc9de7072128f91df6b509f28dee3c7c3d0f7cb2) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
@@ -74,12 +74,12 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 
 | Suite | Passed / total | Pass rate | Scope and evidence |
 | --- | ---: | ---: | --- |
-| Core language | 44,040 / 44,709 | 98.50% | Test262 · `language` |
-| Built-in objects | 45,931 / 47,449 | 96.80% | Test262 · `built-ins` |
-| Intl (ECMA-402) | 6,428 / 6,786 | 94.72% | Test262 · `intl402` |
+| Core language | 44,092 / 44,709 | 98.62% | Test262 · `language` |
+| Built-in objects | 46,113 / 47,449 | 97.18% | Test262 · `built-ins` |
+| Intl (ECMA-402) | 6,430 / 6,786 | 94.75% | Test262 · `intl402` |
 | Annex B | 1,371 / 1,377 | 99.56% | Test262 · `annexB` |
-| Test harness | 232 / 234 | 99.15% | Test262 · `harness` |
-| Staging | 2,528 / 2,791 | 90.58% | Test262 · `staging` |
+| Test harness | 234 / 234 | 100.00% | Test262 · `harness` |
+| Staging | 2,561 / 2,791 | 91.76% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
 | Static CSS reftests | 1,968 / 6,536 | 30.11% | [Alpha.37 static screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md#alpha37-static-css-rerun) |
@@ -87,7 +87,7 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
 
-The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 690 `fail`, 653 `unsupported`, 1,473 `resource_limit`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
+The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 604 `fail`, 599 `unsupported`, 1,342 `resource_limit`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
 
 The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising the tests. Each variant had a 3-second timeout and a 1,000,000-instruction budget. [Per-file and per-variant outcomes (TSV.GZ)](docs/compatibility/test262-outcomes.tsv.gz) · [Machine-readable totals](docs/compatibility/test262.json) · [Reproduce the measurement](tools/test262/README.md#reports-and-limits)
 
