@@ -2516,6 +2516,7 @@ dependencies = [
  "ring",
  "roxmltree",
  "rust-browser-javascript",
+ "rust-browser-media-foundation",
  "rustls",
  "rustls-platform-verifier",
  "rustybuzz",
@@ -2574,6 +2575,14 @@ dependencies = [
  "serde_json",
  "windows-sys 0.59.0",
  "winresource",
+]
+
+[[package]]
+name = "rust-browser-media-foundation"
+version = "0.1.0-alpha.37"
+dependencies = [
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

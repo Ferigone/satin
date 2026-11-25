@@ -144,7 +144,14 @@ pub(crate) enum EventKind {
     Seeked(f64),
     Time(f64),
     Ended,
-    Frame(Arc<image::RgbaImage>),
+    Frame {
+        pixels: Arc<image::RgbaImage>,
+        sequence: u64,
+    },
+    DecoderFrameStats {
+        dropped: u32,
+        corrupted: u32,
+    },
     Error(String),
 }
 

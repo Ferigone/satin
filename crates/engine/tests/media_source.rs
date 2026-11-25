@@ -27,7 +27,7 @@ fn attached_source() -> (ScriptRuntime, MediaKey) {
           source instanceof EventTarget && source.sourceBuffers instanceof SourceBufferList &&
           source.sourceBuffers === source.sourceBuffers &&
           MediaSource.isTypeSupported('video/mp4; codecs="avc1.42C01E"') &&
-          !MediaSource.isTypeSupported('video/webm; codecs="vp9"');
+          !MediaSource.isTypeSupported('text/html');
     "#,
         )
         .unwrap();
@@ -53,6 +53,33 @@ fn attached_source() -> (ScriptRuntime, MediaKey) {
         Some(true)
     );
     (runtime, key)
+}
+
+#[test]
+fn add_source_buffer_uses_the_same_capabilities_as_the_player_probe() {
+    let (mut runtime, _) = attached_source();
+    let result = runtime
+        .eval(
+            r#"
+        [
+          'video/mp4; codecs="avc1.42C01E"',
+          'video/mp4; codecs="av01.0.05M.08"',
+          'video/mp2t; codecs="avc1.4d001f,mp4a.40.2"',
+          'application/vnd.apple.mpegurl'
+        ].every(mime => {
+          const supported = MediaSource.isTypeSupported(mime);
+          try {
+            const buffer = source.addSourceBuffer(mime);
+            source.removeSourceBuffer(buffer);
+            return supported && buffer instanceof SourceBuffer;
+          } catch (error) {
+            return !supported && error.name === "NotSupportedError";
+          }
+        });
+    "#,
+        )
+        .unwrap();
+    assert_eq!(result.as_bool(), Some(true));
 }
 
 #[test]
@@ -171,7 +198,7 @@ fn late_completion_does_not_finish_a_new_append_after_abort() {
     runtime
         .eval(
             r#"
-        const buffer = source.addSourceBuffer("video/mp4");
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.42C01E"');
         buffer.appendBuffer(new Uint8Array(1));
         buffer.abort();
         buffer.appendBuffer(new Uint8Array(2));

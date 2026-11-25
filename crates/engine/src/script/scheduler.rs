@@ -136,6 +136,10 @@ impl Scheduler {
         }
     }
 
+    pub(super) fn performance_now(&self) -> f64 {
+        self.clock.now(Instant::now())
+    }
+
     pub(super) fn note_response_start(&self, instant: Instant) {
         self.navigation_timing.response_start.set(Some(instant));
     }

@@ -20,10 +20,6 @@ fn owner(vm: &Vm, value: &Value) -> Result<(Value, Rc<Source>), JsError> {
     Ok((object, source))
 }
 
-fn is_supported(input: &str) -> bool {
-    !super::super::can_play_type(input).is_empty()
-}
-
 fn require_open(vm: &mut Vm, state: &Shared, source: &Source) -> Result<MediaKey, JsError> {
     source
         .key
@@ -186,7 +182,7 @@ fn add_buffer(
     if mime.is_empty() {
         return Err(JsError::type_error("An empty media type is invalid"));
     }
-    if !is_supported(&mime) {
+    if !state.borrow().media.mse.is_supported(&mime) {
         return Err(exception(
             vm,
             state,
@@ -722,11 +718,18 @@ pub(in crate::script::media) fn install(
             Ok(object)
         },
     )?;
-    webidl::operation(vm, constructor, "isTypeSupported", 1, |vm, _, args| {
-        webidl::required(args, 1, "MediaSource.isTypeSupported")?;
-        let value = webidl::usv_string(vm, &arg(args, 0), 4096)?;
-        Ok(is_supported(&value).into())
-    })?;
+    let host = state.clone();
+    webidl::operation(
+        vm,
+        constructor,
+        "isTypeSupported",
+        1,
+        move |vm, _, args| {
+            webidl::required(args, 1, "MediaSource.isTypeSupported")?;
+            let value = webidl::usv_string(vm, &arg(args, 0), 4096)?;
+            Ok(host.borrow().media.mse.is_supported(&value).into())
+        },
+    )?;
     webidl::interface(vm, buffer.clone(), "SourceBuffer", 0, |_, _, _, _| {
         Err(JsError::type_error("Illegal SourceBuffer constructor"))
     })?;

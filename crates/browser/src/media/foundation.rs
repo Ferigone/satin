@@ -204,7 +204,9 @@ impl Shared {
     fn publish(&self, key: Key, kind: EventKind) {
         let mut updates = self.updates.lock().unwrap();
         let needs_wake = updates.is_empty();
-        let droppable = |kind: &EventKind| matches!(kind, EventKind::Frame(_) | EventKind::Time(_));
+        let droppable = |kind: &EventKind| {
+            matches!(kind, EventKind::Frame { .. } | EventKind::Time(_) | EventKind::DecoderFrameStats { .. })
+        };
         if droppable(&kind)
             && let Some(index) = updates.iter().position(|event| {
                 event.key == key
@@ -318,7 +320,7 @@ fn run(shared: &Arc<Shared>) {
                     return true;
                 }
                 match player.frame(false, shared, *key) {
-                    Ok(Some(frame)) => shared.publish(*key, EventKind::Frame(frame)),
+                    Ok(Some(frame)) => shared.publish(*key, frame),
                     Ok(None) => {}
                     Err(error) => {
                         shared.publish(*key, EventKind::Error(error.to_string()));

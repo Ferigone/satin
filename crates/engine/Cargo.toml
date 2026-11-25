@@ -30,6 +30,9 @@ ring = "0.17"
 base64 = "0.22"
 roxmltree = "0.20"
 
+[target.'cfg(windows)'.dependencies]
+rust-browser-media-foundation = { path = "../media-foundation" }
+
 [dev-dependencies]
 http-body-util = "0.1"
 hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"] }
