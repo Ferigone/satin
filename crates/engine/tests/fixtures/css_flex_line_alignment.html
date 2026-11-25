@@ -1,0 +1,116 @@
+<!doctype html>
+<style>
+  body { margin: 0 }
+  section { display: flex; flex-wrap: wrap; width: 100px; height: 90px; gap: 4px 8px }
+  section > div { flex: none; width: 45px; height: 20px }
+  .column { flex-direction: column; width: 150px; height: 45px }
+</style>
+<section style="align-content: flex-start">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="53 0 45 20"></div>
+  <div data-rect="0 24 45 20"></div>
+</section>
+<section style="align-content: flex-end">
+  <div data-rect="0 46 45 20"></div>
+  <div data-rect="53 46 45 20"></div>
+  <div data-rect="0 70 45 20"></div>
+</section>
+<section style="align-content: center">
+  <div data-rect="0 23 45 20"></div>
+  <div data-rect="53 23 45 20"></div>
+  <div data-rect="0 47 45 20"></div>
+</section>
+<section style="align-content: space-between">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="53 0 45 20"></div>
+  <div data-rect="0 70 45 20"></div>
+</section>
+<section style="align-content: space-around">
+  <div data-rect="0 11.5 45 20"></div>
+  <div data-rect="53 11.5 45 20"></div>
+  <div data-rect="0 58.5 45 20"></div>
+</section>
+<section style="align-content: space-evenly">
+  <div data-rect="0 15.328125 45 20"></div>
+  <div data-rect="53 15.328125 45 20"></div>
+  <div data-rect="0 54.65625 45 20"></div>
+</section>
+<section style="align-content: stretch">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="53 0 45 20"></div>
+  <div data-rect="0 47 45 20"></div>
+</section>
+<section style="align-content: center">
+  <div data-rect="0 35 45 20"></div>
+</section>
+<section style="flex-wrap: nowrap; align-content: center">
+  <div data-rect="0 0 45 20"></div>
+</section>
+<section style="height: 30px; align-content: center">
+  <div data-rect="0 -7 45 20"></div>
+  <div data-rect="53 -7 45 20"></div>
+  <div data-rect="0 17 45 20"></div>
+</section>
+<section style="height: auto; min-height: 90px; align-content: flex-end">
+  <div data-rect="0 46 45 20"></div>
+  <div data-rect="53 46 45 20"></div>
+  <div data-rect="0 70 45 20"></div>
+</section>
+<section class="column" style="align-content: space-between">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="0 24 45 20"></div>
+  <div data-rect="105 0 45 20"></div>
+</section>
+<section class="column" style="flex-flow: column-reverse wrap; align-content: center">
+  <div data-rect="26 25 45 20"></div>
+  <div data-rect="26 1 45 20"></div>
+  <div data-rect="79 25 45 20"></div>
+</section>
+<section class="column" style="flex-wrap: wrap-reverse; align-content: flex-start">
+  <div data-rect="105 0 45 20"></div>
+  <div data-rect="105 24 45 20"></div>
+  <div data-rect="52 0 45 20"></div>
+</section>
+<section style="flex-wrap: wrap-reverse; align-content: start; align-items: flex-start">
+  <div data-rect="0 24 45 20"></div>
+  <div data-rect="53 34 45 10" style="height: 10px"></div>
+  <div data-rect="0 0 45 20"></div>
+</section>
+<section class="column">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="3 24 50 20" style="width: auto; max-width: 50px; margin: 0 3px"></div>
+  <div data-rect="89 0 25 20" style="width: 25px"></div>
+</section>
+<section class="column" style="height: auto; align-content: flex-end">
+  <div data-rect="105 0 45 20"></div>
+  <div data-rect="105 24 45 20"></div>
+  <div data-rect="105 48 45 20"></div>
+</section>
+<section class="column" style="direction: rtl; align-content: flex-start">
+  <div data-rect="105 0 45 20"></div>
+  <div data-rect="105 24 45 20"></div>
+  <div data-rect="52 0 45 20"></div>
+</section>
+<section style="flex-flow: row-reverse wrap-reverse; justify-content: start; align-content: end">
+  <div data-rect="53 70 45 20"></div>
+  <div data-rect="0 70 45 20"></div>
+  <div data-rect="0 46 45 20"></div>
+</section>
+<section style="flex-wrap: wrap-reverse; gap: 0; width: 150px">
+  <div data-rect="0 70 45 20" style="margin-top: auto"></div>
+  <div data-rect="45 0 45 20" style="margin-bottom: auto"></div>
+  <div data-rect="90 35 45 20" style="margin: auto 0"></div>
+</section>
+<section style="flex-wrap: wrap-reverse; align-content: space-around; height: 10px">
+  <div data-rect="0 24 45 20"></div>
+  <div data-rect="53 24 45 20"></div>
+  <div data-rect="0 0 45 20"></div>
+</section>
+<section class="column" style="flex-wrap: nowrap; direction: rtl; width: 20px">
+  <div data-rect="-25 0 45 20" style="margin-left: auto"></div>
+</section>
+<section class="column" style="max-height: 45px; height: auto; align-content: space-between">
+  <div data-rect="0 0 45 20"></div>
+  <div data-rect="0 24 45 20"></div>
+  <div data-rect="105 0 45 20"></div>
+</section>

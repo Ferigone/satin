@@ -316,8 +316,31 @@ pub struct ScrollRegion {
     pub content_width: f32,
     pub content_height: f32,
     pub offset: ScrollOffset,
+    pub min_x: f32,
     pub max_x: f32,
+    pub min_y: f32,
     pub max_y: f32,
+}
+
+impl ScrollRegion {
+    pub fn can_scroll(&self) -> bool {
+        self.max_x > self.min_x || self.max_y > self.min_y
+    }
+}
+
+// In horizontal writing, flex-direction reverses the main overflow direction,
+// flex-wrap reverses the cross direction and RTL reverses the inline axis.
+fn reversed_flex_axes(style: &Style) -> (bool, bool) {
+    if !matches!(style.display, Display::Flex | Display::InlineFlex) {
+        return (false, false);
+    }
+    let wrap = style.flex_wrap == FlexWrap::WrapReverse;
+    match style.flex_direction {
+        FlexDirection::Row => (style.rtl, wrap),
+        FlexDirection::RowReverse => (!style.rtl, wrap),
+        FlexDirection::Column => (style.rtl ^ wrap, false),
+        FlexDirection::ColumnReverse => (style.rtl ^ wrap, true),
+    }
 }
 
 fn containing_blocks(builder: &Builder<'_>) -> (Vec<Option<NodeId>>, Vec<Option<NodeId>>) {
@@ -928,28 +951,41 @@ impl Builder<'_> {
                 )
                 .unwrap_or(0.)
             });
-            let content_width = (bound.x + bound.width + pad[1] - area.x).max(area.width);
-            let content_height = (bound.y + bound.height + pad[2] - area.y).max(area.height);
+            let (reverse_x, reverse_y) = reversed_flex_axes(style);
+            let content_width = if reverse_x {
+                area.x + area.width - bound.x + pad[3]
+            } else {
+                bound.x + bound.width + pad[1] - area.x
+            }
+            .max(area.width);
+            let content_height = if reverse_y {
+                area.y + area.height - bound.y + pad[0]
+            } else {
+                bound.y + bound.height + pad[2] - area.y
+            }
+            .max(area.height);
             scroll_sizes[id.0] = Some((content_width, content_height));
             let overflow = layout_overflow(style, id, viewport_source);
             if overflow.iter().all(|v| !v.clips()) {
                 continue;
             }
-            let max_x = if overflow[0].scrollable() {
-                content_width - area.width
-            } else {
-                0.
+            let range = |axis: Overflow, extent: f32, reverse: bool| {
+                if !axis.scrollable() {
+                    (0., 0.)
+                } else if reverse {
+                    (-extent, 0.)
+                } else {
+                    (0., extent)
+                }
             };
-            let max_y = if overflow[1].scrollable() {
-                content_height - area.height
-            } else {
-                0.
-            };
+            let (min_x, max_x) = range(overflow[0], content_width - area.width, reverse_x);
+            let (min_y, max_y) = range(overflow[1], content_height - area.height, reverse_y);
             let requested = scroll.get(&id).copied().unwrap_or_default();
-            let clean = |v: f32, max: f32| if v.is_finite() { v.clamp(0., max) } else { 0. };
+            let clean =
+                |v: f32, min: f32, max: f32| if v.is_finite() { v.clamp(min, max) } else { 0. };
             let offset = ScrollOffset {
-                x: clean(requested.x, max_x),
-                y: clean(requested.y, max_y),
+                x: clean(requested.x, min_x, max_x),
+                y: clean(requested.y, min_y, max_y),
             };
             offsets[id.0] = offset;
             scroll_regions.push(ScrollRegion {
@@ -958,7 +994,9 @@ impl Builder<'_> {
                 content_width,
                 content_height,
                 offset,
+                min_x,
                 max_x,
+                min_y,
                 max_y,
             });
         }

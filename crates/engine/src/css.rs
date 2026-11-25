@@ -7,6 +7,9 @@ pub(crate) mod canvas_font;
 mod grid;
 mod inspection;
 mod media;
+mod named_colors;
+mod oklab;
+pub(crate) mod supports;
 pub use inspection::InspectorStylesheets;
 use media::media_allows;
 pub(crate) use media::{serialize_media_query_list, stylesheet_media_applies};
@@ -362,7 +365,17 @@ pub enum FlexDirection {
     ColumnReverse,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlexWrap {
+    NoWrap,
+    Wrap,
+    WrapReverse,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
+    Left,
+    Right,
+    FlexStart,
+    FlexEnd,
     Start,
     End,
     Center,
@@ -474,7 +487,7 @@ pub struct Style {
     pub object_fit: ObjectFit,
     pub object_position: [Length; 2],
     pub flex_direction: FlexDirection,
-    pub flex_wrap: bool,
+    pub flex_wrap: FlexWrap,
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Length,
@@ -560,7 +573,7 @@ impl Default for Style {
             object_fit: ObjectFit::Fill,
             object_position: [Length::Percent(50.); 2],
             flex_direction: FlexDirection::Row,
-            flex_wrap: false,
+            flex_wrap: FlexWrap::NoWrap,
             flex_grow: 0.,
             flex_shrink: 1.,
             flex_basis: Length::Auto,
@@ -948,11 +961,7 @@ pub(crate) fn font_faces_for_viewport(source: &str, viewport: (f32, f32)) -> Vec
                 if let Some(rule) = font_face_rule(body) {
                     out.push(rule);
                 }
-            } else if header
-                .get(..6)
-                .is_some_and(|h| h.eq_ignore_ascii_case("@media"))
-                && media_allows(&header[6..], viewport)
-            {
+            } else if group_applies(header, viewport) {
                 collect(body, viewport, depth + 1, out);
             }
             offset = end + 1;
@@ -1206,6 +1215,21 @@ fn unquoted_font_url(source: &str) -> Option<String> {
     unescape_string(source)
 }
 
+fn font_format(keyword: &str) -> FontFormat {
+    match keyword {
+        "truetype" => FontFormat::TrueType,
+        "opentype" => FontFormat::OpenType,
+        "woff" => FontFormat::Woff,
+        "woff2" => FontFormat::Woff2,
+        _ => FontFormat::Unsupported,
+    }
+}
+
+fn font_tech_supported(keyword: &str) -> bool {
+    // Rustybuzz applies OpenType shaping; FontInstance selects variation axes.
+    keyword.eq_ignore_ascii_case("variations") || keyword.eq_ignore_ascii_case("features-opentype")
+}
+
 fn font_sources(source: &str) -> Option<Vec<FontSource>> {
     let value = without_comments(source);
     let value = value.replace('\0', " ");
@@ -1254,19 +1278,16 @@ fn font_sources(source: &str) -> Option<Vec<FontSource>> {
                 let Some(value) = value else {
                     continue;
                 };
-                format = Some(match value.to_ascii_lowercase().as_str() {
-                    "truetype" | "truetype-variations" => FontFormat::TrueType,
-                    "opentype" | "opentype-variations" => FontFormat::OpenType,
-                    "woff" | "woff-variations" => FontFormat::Woff,
-                    "woff2" | "woff2-variations" => FontFormat::Woff2,
-                    _ => FontFormat::Unsupported,
-                });
+                let value = value.to_ascii_lowercase();
+                format = Some(font_format(
+                    value.strip_suffix("-variations").unwrap_or(&value),
+                ));
                 rest = suffix;
             }
             if let Some((kind, value, suffix)) = font_component(rest)
                 && kind.eq_ignore_ascii_case("tech")
             {
-                if !value.eq_ignore_ascii_case("variations") {
+                if !split_top(value, b',').into_iter().all(font_tech_supported) {
                     format = Some(FontFormat::Unsupported);
                 }
                 rest = suffix;
@@ -1324,6 +1345,23 @@ fn unicode_ranges(source: &str) -> Option<Vec<UnicodeRange>> {
     }
     (!result.is_empty()).then_some(result)
 }
+fn group_applies(header: &str, viewport: (f32, f32)) -> bool {
+    if header
+        .get(..6)
+        .is_some_and(|h| h.eq_ignore_ascii_case("@media"))
+    {
+        return media_allows(&header[6..], viewport);
+    }
+    header
+        .get(..9)
+        .is_some_and(|h| h.eq_ignore_ascii_case("@supports"))
+        && header
+            .as_bytes()
+            .get(9)
+            .is_some_and(|b| !css_name_byte(*b) && *b != b'\\')
+        && supports::group(&header[9..])
+}
+
 fn parse_rules(
     source: &str,
     viewport: (f32, f32),
@@ -1349,14 +1387,11 @@ fn parse_rules(
         let header = trim_boundary(&source[offset..open]);
         let end = stylesheet_block_end(source, open).unwrap_or(source.len());
         let body = &source[open + 1..end];
-        if header
-            .get(..6)
-            .is_some_and(|s| s.eq_ignore_ascii_case("@media"))
-        {
-            if media_allows(&header[6..], viewport) {
+        if header.starts_with('@') {
+            if group_applies(header, viewport) {
                 parse_rules(body, viewport, depth + 1, out, declaration_budget);
             }
-        } else if !header.starts_with('@') {
+        } else {
             let declarations = clean_declarations(body);
             let declaration_cost: usize = declarations
                 .iter()
@@ -1611,6 +1646,7 @@ enum Test {
         insensitive: bool,
     },
     Root,
+    Scope,
     ShadowHost,
     PseudoElement,
     Empty,
@@ -1628,6 +1664,7 @@ enum Test {
     OnlyChild(bool),
     Any(Vec<Selector>),
     Not(Vec<Selector>),
+    Has(Vec<RelativeSelector>),
 }
 #[derive(Clone, Copy, Debug)]
 enum AttrOp {
@@ -1645,6 +1682,12 @@ struct Selector {
     combinators: Vec<Combinator>,
     specificity: Specificity,
 }
+#[derive(Clone, Debug)]
+struct RelativeSelector {
+    leading: Combinator,
+    selector: Selector,
+}
+
 fn css_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-') || b >= 128
 }
@@ -1705,6 +1748,15 @@ fn identifier(source: &str, offset: &mut usize) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
+    compile_selector_in(source, depth, false, false)
+}
+
+fn compile_selector_in(
+    source: &str,
+    depth: usize,
+    inside_has: bool,
+    strict: bool,
+) -> Option<Selector> {
     if source.is_empty() || source.len() > 1024 || depth > 16 {
         return None;
     }
@@ -1795,17 +1847,29 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                         }
                         specificity.add(Specificity(0, 0, 1));
                         Test::PseudoElement
+                    } else if name == "has" {
+                        if inside_has {
+                            return None;
+                        }
+                        let selectors = split_top(argument?, b',')
+                            .into_iter()
+                            .map(|relative| RelativeSelector::parse(relative, depth + 1, strict))
+                            .collect::<Option<Vec<_>>>()?;
+                        specificity.add(selectors.iter().map(|r| r.selector.specificity).max()?);
+                        Test::Has(selectors)
                     } else if matches!(name.as_str(), "is" | "not" | "where") {
                         let arguments = split_top(argument?, b',');
-                        let args: Vec<_> = if name == "not" {
+                        let args: Vec<_> = if name == "not" || strict {
                             arguments
                                 .into_iter()
-                                .map(|s| compile_selector(s, depth + 1))
+                                .map(|s| compile_selector_in(s, depth + 1, inside_has, strict))
                                 .collect::<Option<Vec<_>>>()?
                         } else {
                             arguments
                                 .into_iter()
-                                .filter_map(|s| compile_selector(s, depth + 1))
+                                .filter_map(|s| {
+                                    compile_selector_in(s, depth + 1, inside_has, strict)
+                                })
                                 .collect()
                         };
                         // An empty forgiving list is valid but matches nothing.
@@ -1822,10 +1886,12 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
                         specificity.add(Specificity(0, 1, 0));
                         match (name.as_str(), argument) {
                             ("root", None) => Test::Root,
+                            ("scope", None) => Test::Scope,
                             ("host", None) => Test::ShadowHost,
                             ("host", Some(arg)) => {
                                 // :host() takes one compound selector, including its specificity.
-                                let compound = compile_selector(arg.trim(), depth + 1)?;
+                                let compound =
+                                    compile_selector_in(arg.trim(), depth + 1, inside_has, strict)?;
                                 if compound.parts.len() != 1 {
                                     return None;
                                 }
@@ -2118,11 +2184,43 @@ impl FormPseudoClass {
     }
 }
 
+// Created once per immutable layout pass or DOM query. DOM mutation, form state
+// changes and later queries therefore cannot reuse stale relational results.
+pub(crate) struct SelectorContext<'a> {
+    form_state: &'a dyn Fn(NodeId, FormPseudoClass) -> bool,
+    pub(crate) scope: Option<NodeId>,
+    relative: HashMap<usize, RelativeResult>,
+    index_bytes: usize,
+    allow_index: bool,
+}
+
+enum RelativeResult {
+    One(NodeId, bool),
+    ByNode(Vec<u64>),
+}
+
+impl<'a> SelectorContext<'a> {
+    pub(crate) fn new(form_state: &'a dyn Fn(NodeId, FormPseudoClass) -> bool) -> Self {
+        Self {
+            form_state,
+            scope: None,
+            relative: HashMap::new(),
+            index_bytes: 0,
+            allow_index: true,
+        }
+    }
+}
+
 pub fn matches_selector(doc: &Document, id: NodeId, source: &str) -> bool {
     let clean = without_comments(source);
     split_top(&clean, b',').into_iter().any(|s| {
-        compile_selector(s, 0)
-            .is_some_and(|s| s.matches(doc, id, &|node, pseudo| pseudo.matches_markup(doc, node)))
+        compile_selector(s, 0).is_some_and(|s| {
+            s.matches(
+                doc,
+                id,
+                &mut SelectorContext::new(&|node, pseudo| pseudo.matches_markup(doc, node)),
+            )
+        })
     })
 }
 
@@ -2144,22 +2242,17 @@ impl DomSelectorList {
         &self,
         doc: &Document,
         id: NodeId,
-        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
+        context: &mut SelectorContext<'_>,
     ) -> bool {
         self.0
             .iter()
-            .any(|selector| selector.matches(doc, id, form_state))
+            .any(|selector| selector.matches(doc, id, context))
     }
 }
 
 impl Selector {
-    fn matches(
-        &self,
-        doc: &Document,
-        id: NodeId,
-        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
-    ) -> bool {
-        self.matches_part(doc, id, self.parts.len() - 1, &mut 16384, form_state)
+    fn matches(&self, doc: &Document, id: NodeId, context: &mut SelectorContext<'_>) -> bool {
+        self.matches_part(doc, id, self.parts.len() - 1, &mut 16384, context)
     }
     fn matches_part(
         &self,
@@ -2167,13 +2260,13 @@ impl Selector {
         id: NodeId,
         index: usize,
         budget: &mut usize,
-        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
+        context: &mut SelectorContext<'_>,
     ) -> bool {
         if *budget == 0 {
             return false;
         }
         *budget -= 1;
-        if !self.parts[index].matches(doc, id, budget, form_state) {
+        if !self.parts[index].matches(doc, id, budget, context) {
             return false;
         }
         if index == 0 {
@@ -2182,11 +2275,11 @@ impl Selector {
         match self.combinators[index - 1] {
             Combinator::Child => doc.nodes[id.0]
                 .parent
-                .is_some_and(|p| self.matches_part(doc, p, index - 1, budget, form_state)),
+                .is_some_and(|p| self.matches_part(doc, p, index - 1, budget, context)),
             Combinator::Descendant => {
                 let mut parent = doc.nodes[id.0].parent;
                 while let Some(p) = parent {
-                    if self.matches_part(doc, p, index - 1, budget, form_state) {
+                    if self.matches_part(doc, p, index - 1, budget, context) {
                         return true;
                     }
                     parent = doc.nodes[p.0].parent;
@@ -2208,7 +2301,7 @@ impl Selector {
                     if doc.tag(sibling).is_empty() {
                         continue;
                     }
-                    if self.matches_part(doc, sibling, index - 1, budget, form_state) {
+                    if self.matches_part(doc, sibling, index - 1, budget, context) {
                         return true;
                     }
                     if matches!(self.combinators[index - 1], Combinator::Adjacent) {
@@ -2223,6 +2316,195 @@ impl Selector {
         }
     }
 }
+impl RelativeSelector {
+    fn parse(source: &str, depth: usize, strict: bool) -> Option<Self> {
+        let source = trim_boundary(source);
+        let (leading, selector) = match source.as_bytes().first()? {
+            b'>' => (Combinator::Child, &source[1..]),
+            b'+' => (Combinator::Adjacent, &source[1..]),
+            b'~' => (Combinator::Sibling, &source[1..]),
+            _ => (Combinator::Descendant, source),
+        };
+        Some(Self {
+            leading,
+            selector: compile_selector_in(trim_boundary(selector), depth, true, strict)?,
+        })
+    }
+
+    fn relation(&self, index: usize) -> Combinator {
+        if index == 0 {
+            self.leading
+        } else {
+            self.selector.combinators[index - 1]
+        }
+    }
+
+    fn matches(
+        &self,
+        doc: &Document,
+        anchor: NodeId,
+        budget: &mut usize,
+        context: &mut SelectorContext<'_>,
+    ) -> bool {
+        if !context.allow_index {
+            return self.matches_from(doc, anchor, 0, budget, context);
+        }
+        // The compiled selector and document both outlive this layout pass or DOM query.
+        let key = self as *const Self as usize;
+        if let Some(entry) = context.relative.get(&key) {
+            match entry {
+                RelativeResult::One(node, matched) if *node == anchor => return *matched,
+                RelativeResult::ByNode(bits) => {
+                    return bits[anchor.0 / 64] & (1 << (anchor.0 % 64)) != 0;
+                }
+                _ => {}
+            }
+        }
+        // Most author selectors inspect one or two children. Index a large search
+        // only after the cheap anchor-local walk fails to finish.
+        let local_limit = (*budget).min(256);
+        let mut remaining = local_limit;
+        let matched = self.matches_from(doc, anchor, 0, &mut remaining, context);
+        if matched || remaining > 0 {
+            *budget -= local_limit - remaining;
+            context
+                .relative
+                .insert(key, RelativeResult::One(anchor, matched));
+            return matched;
+        }
+        if !self.selector.parts.iter().all(Compound::can_index_relative) {
+            return self.matches_from(doc, anchor, 0, budget, context);
+        }
+        let anchors = self.index_anchors(doc, context);
+        let result = anchors[anchor.0 / 64] & (1 << (anchor.0 % 64)) != 0;
+        let bytes = std::mem::size_of_val(anchors.as_slice());
+        // Each bit represents one node in this immutable snapshot. Drop old
+        // entries together if a page has many distinct expensive selectors.
+        if context.index_bytes + bytes > 4 * 1024 * 1024 {
+            context.relative.clear();
+            context.index_bytes = 0;
+        }
+        context.index_bytes += bytes;
+        context
+            .relative
+            .insert(key, RelativeResult::ByNode(anchors));
+        result
+    }
+
+    fn index_anchors(&self, doc: &Document, context: &mut SelectorContext<'_>) -> Vec<u64> {
+        let mut anchors = vec![true; doc.nodes.len()];
+        let mut matches = vec![false; doc.nodes.len()];
+        // For each compound, find the anchors from which a matching suffix can
+        // be reached. A child list or parent edge is visited at most once per step.
+        for (index, compound) in self.selector.parts.iter().enumerate().rev() {
+            for (i, hit) in matches.iter_mut().enumerate() {
+                *hit = anchors[i] && compound.matches(doc, NodeId(i), &mut 16384, context);
+            }
+            anchors.fill(false);
+            let relation = self.relation(index);
+            match relation {
+                Combinator::Child | Combinator::Descendant => {
+                    for (i, _) in matches.iter().enumerate().filter(|(_, hit)| **hit) {
+                        let mut parent = doc.nodes[i].parent;
+                        while let Some(node) = parent {
+                            if anchors[node.0] {
+                                break;
+                            }
+                            anchors[node.0] = true;
+                            if matches!(relation, Combinator::Child) {
+                                break;
+                            }
+                            parent = doc.nodes[node.0].parent;
+                        }
+                    }
+                }
+                Combinator::Adjacent | Combinator::Sibling => {
+                    for parent in &doc.nodes {
+                        let mut later_match = false;
+                        for &node in parent.children.iter().rev() {
+                            if doc.tag(node).is_empty() {
+                                continue;
+                            }
+                            anchors[node.0] = later_match;
+                            later_match = matches[node.0]
+                                || (matches!(relation, Combinator::Sibling) && later_match);
+                        }
+                    }
+                }
+            }
+        }
+        let mut bits = vec![0; anchors.len().div_ceil(64)];
+        for (i, _) in anchors.iter().enumerate().filter(|(_, hit)| **hit) {
+            bits[i / 64] |= 1 << (i % 64);
+        }
+        bits
+    }
+
+    // Walk forward from the actual anchor. A relative selector can leave its
+    // subtree via a sibling combinator, but it cannot match an unrelated ancestor.
+    fn matches_from(
+        &self,
+        doc: &Document,
+        anchor: NodeId,
+        index: usize,
+        budget: &mut usize,
+        context: &mut SelectorContext<'_>,
+    ) -> bool {
+        let relation = self.relation(index);
+        let mut nodes: &[NodeId] = match relation {
+            Combinator::Descendant | Combinator::Child => &doc.nodes[anchor.0].children,
+            Combinator::Sibling | Combinator::Adjacent => {
+                let Some(parent) = doc.nodes[anchor.0].parent else {
+                    return false;
+                };
+                let siblings = &doc.nodes[parent.0].children;
+                let Some(position) = siblings
+                    .iter()
+                    .take(*budget)
+                    .position(|&node| node == anchor)
+                else {
+                    *budget = 0;
+                    return false;
+                };
+                *budget -= position + 1;
+                &siblings[position + 1..]
+            }
+        };
+        // Keep only unvisited sibling slices, so a wide or deeply nested DOM is
+        // traversed lazily without copying a subtree or recursing on DOM depth.
+        let mut pending = Vec::new();
+        while *budget > 0 {
+            let Some((&node, rest)) = nodes.split_first() else {
+                let Some(next) = pending.pop() else { break };
+                nodes = next;
+                continue;
+            };
+            nodes = rest;
+            *budget -= 1;
+            if doc.tag(node).is_empty() {
+                continue;
+            }
+            if self.selector.parts[index].matches(doc, node, budget, context)
+                && (index + 1 == self.selector.parts.len()
+                    || self.matches_from(doc, node, index + 1, budget, context))
+            {
+                return true;
+            }
+            if matches!(relation, Combinator::Adjacent) {
+                break;
+            }
+            let children = &doc.nodes[node.0].children;
+            if matches!(relation, Combinator::Descendant) && !children.is_empty() {
+                if !nodes.is_empty() {
+                    pending.push(nodes);
+                }
+                nodes = children;
+            }
+        }
+        false
+    }
+}
+
 fn ascii_folded(name: &str) -> Cow<'_, str> {
     if name.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(name.to_ascii_lowercase())
@@ -2232,12 +2514,24 @@ fn ascii_folded(name: &str) -> Cow<'_, str> {
 }
 
 impl Compound {
+    // Avoid indexing inner predicates which can themselves scan large sibling
+    // or ancestor lists for every candidate. Those keep the normal match budget.
+    fn can_index_relative(&self) -> bool {
+        self.tests.iter().all(|test| match test {
+            Test::Nth { .. } | Test::OnlyChild(_) | Test::Has(_) => false,
+            Test::Any(selectors) | Test::Not(selectors) => selectors
+                .iter()
+                .all(|s| s.parts.len() == 1 && s.parts[0].can_index_relative()),
+            _ => true,
+        })
+    }
+
     fn matches(
         &self,
         doc: &Document,
         id: NodeId,
         budget: &mut usize,
-        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
+        context: &mut SelectorContext<'_>,
     ) -> bool {
         let tag = doc.tag(id);
         if tag.is_empty()
@@ -2267,6 +2561,13 @@ impl Compound {
                     .is_some_and(|actual| attribute_matches(actual, value, *op, *insensitive))
             }
             Test::Root => doc.nodes[id.0].parent.is_some_and(|p| doc.is_document(p)),
+            Test::Scope => match context.scope {
+                Some(scope) if doc.is_document(scope) => doc.nodes[id.0].parent == Some(scope),
+                Some(scope) => id == scope,
+                None => doc.nodes[id.0]
+                    .parent
+                    .is_some_and(|parent| doc.is_document(parent)),
+            },
             // The stylesheet is evaluated in the document tree, outside a shadow root.
             Test::ShadowHost | Test::PseudoElement => false,
             Test::Empty => doc.nodes[id.0]
@@ -2278,8 +2579,8 @@ impl Compound {
                     _ => true,
                 }),
             Test::Link => matches!(tag, "a" | "area") && doc.attr(id, "href").is_some(),
-            Test::Focus => form_state(id, FormPseudoClass::Focus),
-            Test::PlaceholderShown => form_state(id, FormPseudoClass::PlaceholderShown),
+            Test::Focus => (context.form_state)(id, FormPseudoClass::Focus),
+            Test::PlaceholderShown => (context.form_state)(id, FormPseudoClass::PlaceholderShown),
             Test::Checked => {
                 doc.namespace(id) == Namespace::Html
                     && match tag {
@@ -2287,7 +2588,7 @@ impl Compound {
                             doc.attr(id, "type").is_some_and(|kind| {
                                 kind.eq_ignore_ascii_case("checkbox")
                                     || kind.eq_ignore_ascii_case("radio")
-                            }) && form_state(id, FormPseudoClass::CheckedInput)
+                            }) && (context.form_state)(id, FormPseudoClass::CheckedInput)
                         }
                         "option" => doc.attr(id, "selected").is_some(),
                         _ => false,
@@ -2347,13 +2648,16 @@ impl Compound {
                     .count()
                     == 1
             }),
+            Test::Has(selectors) => selectors
+                .iter()
+                .any(|relative| relative.matches(doc, id, budget, context)),
             Test::Any(selectors) => selectors
                 .iter()
-                .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, form_state)),
+                .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, context)),
             Test::Not(selectors) => {
                 let matches = selectors
                     .iter()
-                    .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, form_state));
+                    .any(|s| s.matches_part(doc, id, s.parts.len() - 1, budget, context));
                 *budget > 0 && !matches
             }
         })
@@ -2699,6 +3003,7 @@ enum Value {
     Sizing(BoxSizing),
     Fitting(ObjectFit),
     Direction(FlexDirection),
+    Wrap(FlexWrap),
     Align(Align),
     Text(String),
     WhiteSpace { pre: bool, wrap: bool },
@@ -2917,17 +3222,22 @@ impl Stylesheet {
         count
     }
     pub fn compute(&self, doc: &Document, id: NodeId, parent: &Style, root_font: f32) -> Style {
-        self.compute_with_form_state(doc, id, parent, root_font, &|node, pseudo| {
-            pseudo.matches_markup(doc, node)
-        })
+        let form_state = |node, pseudo: FormPseudoClass| pseudo.matches_markup(doc, node);
+        self.compute_in_context(
+            doc,
+            id,
+            parent,
+            root_font,
+            &mut SelectorContext::new(&form_state),
+        )
     }
-    pub(crate) fn compute_with_form_state(
+    pub(crate) fn compute_in_context(
         &self,
         doc: &Document,
         id: NodeId,
         parent: &Style,
         root_font: f32,
-        form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
+        context: &mut SelectorContext<'_>,
     ) -> Style {
         let mut style = user_agent_style(doc, id, parent);
         let is_root = doc.nodes[id.0].parent == Some(doc.root);
@@ -2945,7 +3255,7 @@ impl Stylesheet {
         // Candidate processing order is irrelevant: source order is in Priority.
         self.candidates(doc, id, |index| {
             let rule = &self.rules[index];
-            if !rule.selector.matches(doc, id, form_state) {
+            if !rule.selector.matches(doc, id, context) {
                 return;
             }
             if is_svg {
@@ -3724,7 +4034,7 @@ fn apply_value(
         (MaxHeight, Value::Length(v)) => s.max_height = l(v),
         (BoxSizing, Value::Sizing(v)) => s.box_sizing = *v,
         (FlexDirection, Value::Direction(v)) => s.flex_direction = *v,
-        (FlexWrap, Value::Bool(v)) => s.flex_wrap = *v,
+        (FlexWrap, Value::Wrap(v)) => s.flex_wrap = *v,
         (FlexGrow, Value::Number(v)) => s.flex_grow = *v,
         (FlexShrink, Value::Number(v)) => s.flex_shrink = *v,
         (FlexBasis, Value::Length(v)) => s.flex_basis = l(v),
@@ -4311,7 +4621,10 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
                 Property::FlexDirection,
                 dir.unwrap_or(Value::Direction(FlexDirection::Row)),
             ),
-            (Property::FlexWrap, wrap.unwrap_or(Value::Bool(false))),
+            (
+                Property::FlexWrap,
+                wrap.unwrap_or(Value::Wrap(FlexWrap::NoWrap)),
+            ),
         ];
     }
     if name == "flex" {
@@ -4707,9 +5020,10 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "column-reverse" => crate::css::FlexDirection::ColumnReverse,
             _ => return None,
         })),
-        FlexWrap => Some(Value::Bool(match v {
-            "wrap" => true,
-            "nowrap" => false,
+        FlexWrap => Some(Value::Wrap(match v {
+            "wrap" => crate::css::FlexWrap::Wrap,
+            "wrap-reverse" => crate::css::FlexWrap::WrapReverse,
+            "nowrap" => crate::css::FlexWrap::NoWrap,
             _ => return None,
         })),
         FlexGrow | FlexShrink => number(v)
@@ -4718,8 +5032,12 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
         JustifyContent | AlignItems | AlignSelf | JustifyItems | JustifySelf | AlignContent => {
             Some(Value::Align(match v {
                 "normal" | "stretch" => Align::Stretch,
-                "start" | "flex-start" => Align::Start,
-                "end" | "flex-end" => Align::End,
+                "start" => Align::Start,
+                "end" => Align::End,
+                "left" if p == JustifyContent => Align::Left,
+                "right" if p == JustifyContent => Align::Right,
+                "flex-start" => Align::FlexStart,
+                "flex-end" => Align::FlexEnd,
                 "center" => Align::Center,
                 "auto" if matches!(p, AlignSelf | JustifySelf) => Align::Auto,
                 "space-between" if matches!(p, JustifyContent | AlignContent) => {
@@ -4878,6 +5196,10 @@ fn parse_transform_origin(source: &str) -> Option<[SpecifiedLength; 2]> {
     }
 }
 fn number(value: &str) -> Option<f32> {
+    // Rust also accepts a trailing decimal point, which is a separate CSS token.
+    if calc::number_end(value)? != value.len() {
+        return None;
+    }
     let n = value.parse::<f32>().ok()?;
     n.is_finite().then_some(n)
 }
@@ -4952,6 +5274,58 @@ pub fn length(value: &str) -> Option<Length> {
     if n == 0. { Some(Length::Px(0.)) } else { None }
 }
 
+fn color_number(token: &str) -> Option<f64> {
+    if calc::number_end(token)? != token.len() {
+        return None;
+    }
+    let value = token.parse::<f64>().ok()?;
+    value.is_finite().then_some(value)
+}
+
+fn hue_degrees(token: &str) -> Option<f64> {
+    let units = [
+        ("turn", 360.),
+        ("grad", 0.9),
+        ("rad", 180. / std::f64::consts::PI),
+        ("deg", 1.),
+    ];
+    let (number, scale) = units
+        .into_iter()
+        .find_map(|(unit, scale)| Some((token.strip_suffix(unit)?, scale)))
+        .unwrap_or((token, 1.));
+    let hue = color_number(number)? * scale;
+    hue.is_finite().then(|| hue.rem_euclid(360.))
+}
+
+fn hwb_color(values: [&str; 3], alpha: u8) -> Option<Color> {
+    let component = |token: &str| {
+        if token == "none" {
+            return Some(0.);
+        }
+        Some(color_number(token.strip_suffix('%').unwrap_or(token))? / 100.)
+    };
+    let h = if values[0] == "none" {
+        0.
+    } else {
+        hue_degrees(values[0])?
+    };
+    let w = component(values[1])?;
+    let b = component(values[2])?;
+    // Stabilize exact half-byte ties after the hue and percentage conversions.
+    let to_byte = |n: f64| ((n.clamp(0., 1.) * 255.) + 1e-12).round() as u8;
+    if w + b >= 1. {
+        let gray = to_byte(w / (w + b));
+        return Some(Color(gray, gray, gray, alpha));
+    }
+    // Convert the pure hue to sRGB and mix in the specified white and black.
+    let channel = |offset: f64| {
+        let k = (offset + h / 30.) % 12.;
+        let pure = 0.5 - 0.5 * (k - 3.).min(9. - k).clamp(-1., 1.);
+        to_byte(w + (1. - w - b) * pure)
+    };
+    Some(Color(channel(0.), channel(8.), channel(4.), alpha))
+}
+
 fn functional_color_components(inner: &str, rgb: bool) -> Option<([&str; 3], Option<&str>)> {
     if inner.contains(',') {
         // Legacy syntax uses commas exclusively, including before alpha.
@@ -5010,14 +5384,32 @@ pub fn color(value: &str) -> Option<Color> {
             _ => None,
         };
     }
+    if v.starts_with("oklab(") || v.starts_with("oklch(") || v.starts_with("color(") {
+        return oklab::parse(&v);
+    }
     let alpha = |s: &str| -> Option<u8> {
         let n = if let Some(n) = s.strip_suffix('%') {
-            number(n)? / 100.
+            color_number(n)? / 100.
         } else {
-            number(s)?
+            color_number(s)?
         };
         Some((n.clamp(0., 1.) * 255.).round() as u8)
     };
+    if let Some(inner) = v
+        .strip_prefix("hwb(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        if inner.contains(',') {
+            return None;
+        }
+        let (values, opacity) = functional_color_components(inner, false)?;
+        let a = match opacity {
+            Some("none") => 0,
+            Some(value) => alpha(value)?,
+            None => 255,
+        };
+        return hwb_color(values, a);
+    }
     if v.starts_with("rgb(")
         || v.starts_with("rgba(")
         || v.starts_with("hsl(")
@@ -5028,16 +5420,7 @@ pub fn color(value: &str) -> Option<Color> {
         let (values, opacity) = functional_color_components(inner, rgb)?;
         let a = opacity.map_or(Some(255), alpha)?;
         if !rgb {
-            let hue = values[0];
-            let h = if let Some(n) = hue.strip_suffix("turn") {
-                number(n)? * 360.
-            } else if let Some(n) = hue.strip_suffix("grad") {
-                number(n)? * 0.9
-            } else if let Some(n) = hue.strip_suffix("rad") {
-                number(n)? * 180. / std::f32::consts::PI
-            } else {
-                number(hue.strip_suffix("deg").unwrap_or(hue))?
-            };
+            let h = hue_degrees(values[0])? as f32;
             let s = (number(values[1].strip_suffix('%')?)? / 100.).clamp(0., 1.);
             let l = (number(values[2].strip_suffix('%')?)? / 100.).clamp(0., 1.);
             let c = (1. - (2. * l - 1.).abs()) * s;
@@ -5074,34 +5457,10 @@ pub fn color(value: &str) -> Option<Color> {
             a,
         ));
     }
-    Some(match v.as_str() {
-        "transparent" => Color(0, 0, 0, 0),
-        "black" => Color::BLACK,
-        "white" => Color::WHITE,
-        "red" => Color::rgb(255, 0, 0),
-        "green" => Color::rgb(0, 128, 0),
-        "blue" => Color::rgb(0, 0, 255),
-        "gray" | "grey" => Color::rgb(128, 128, 128),
-        "silver" => Color::rgb(192, 192, 192),
-        "navy" => Color::rgb(0, 0, 128),
-        "teal" => Color::rgb(0, 128, 128),
-        "aqua" | "cyan" => Color::rgb(0, 255, 255),
-        "yellow" => Color::rgb(255, 255, 0),
-        "orange" => Color::rgb(255, 165, 0),
-        "purple" => Color::rgb(128, 0, 128),
-        "rebeccapurple" => Color::rgb(102, 51, 153),
-        "maroon" => Color::rgb(128, 0, 0),
-        "fuchsia" | "magenta" => Color::rgb(255, 0, 255),
-        "lime" => Color::rgb(0, 255, 0),
-        "olive" => Color::rgb(128, 128, 0),
-        "lightgray" | "lightgrey" => Color::rgb(211, 211, 211),
-        "darkgray" | "darkgrey" => Color::rgb(169, 169, 169),
-        "whitesmoke" => Color::rgb(245, 245, 245),
-        "aliceblue" => Color::rgb(240, 248, 255),
-        "pink" => Color::rgb(255, 192, 203),
-        "brown" => Color::rgb(165, 42, 42),
-        _ => return None,
-    })
+    if v == "transparent" {
+        return Some(Color(0, 0, 0, 0));
+    }
+    named_colors::lookup(&v)
 }
 
 fn contains_variable(source: &str) -> bool {

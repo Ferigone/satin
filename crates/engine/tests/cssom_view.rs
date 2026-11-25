@@ -454,3 +454,47 @@ fn match_media_tracks_the_document_viewport_and_notifies_observers_on_transition
     runtime.pump();
     check(&mut runtime, "seen.length===2 && m.matches");
 }
+
+#[test]
+fn horizontal_flex_overflow_uses_the_scroll_origin_on_each_axis() {
+    let mut runtime = runtime(
+        r#"
+        <style>
+          #box { display: flex; width: 100px; height: 100px; padding: 10px;
+                 border: 3px solid; gap: 10px; overflow: scroll; align-items: start }
+          #box > i { min-width: 110px; min-height: 110px }
+        </style>
+        <div id="box"><i></i><i></i><i id="last"></i></div>
+    "#,
+    );
+    // For each arrangement compare the scrollable size and both reachable
+    // endpoints. The last item must move in the visual viewport by -offset.
+    for (direction, wrap, rtl, expected) in [
+        ("row-reverse", "nowrap", false, "370/130/-250/0/0/10"),
+        ("row", "wrap-reverse", false, "130/370/0/-250/10/0"),
+        ("column", "wrap-reverse", false, "370/130/-250/0/0/10"),
+        (
+            "column-reverse",
+            "wrap-reverse",
+            false,
+            "370/130/-250/-10/0/0",
+        ),
+        ("row-reverse", "nowrap", true, "370/130/0/0/250/10"),
+    ] {
+        let script = format!(
+            r#"
+            var box = document.getElementById('box'), last = document.getElementById('last');
+            box.setAttribute('style', 'flex-direction:{direction}; flex-wrap:{wrap}; direction:{}');
+            box.scrollTo(0,0);
+            var x = last.getBoundingClientRect().left, y = last.getBoundingClientRect().top;
+            box.scrollTo(-1000,-1000);
+            var lowX = box.scrollLeft, lowY = box.scrollTop;
+            var moved = last.getBoundingClientRect().left === x - lowX && last.getBoundingClientRect().top === y - lowY;
+            box.scrollTo(1000,1000);
+            moved && [box.scrollWidth,box.scrollHeight,lowX,lowY,box.scrollLeft,box.scrollTop].join('/') === '{expected}'
+        "#,
+            if rtl { "rtl" } else { "ltr" }
+        );
+        check(&mut runtime, &script);
+    }
+}

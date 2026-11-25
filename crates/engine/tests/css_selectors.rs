@@ -198,3 +198,64 @@ fn checked_input_styles_follow_label_activation_and_radio_group_state() {
         ],
     );
 }
+
+#[test]
+fn relational_selectors_anchor_combinators_and_restyle_on_dom_changes() {
+    stylesheet_fixture(
+        include_str!("../../../tools/fixtures/css-relational-has.html"),
+        &[
+            (
+                "data-live",
+                "90px/24px/8px/1|40px/24px/8px/0|40px/24px/0px/0",
+            ),
+            ("data-relative", "true/false/true/false/true/false/true/1"),
+        ],
+    );
+}
+
+#[test]
+fn relational_selectors_reject_invalid_relative_lists() {
+    for invalid in [
+        ":has()",
+        ":has(, p)",
+        ":has(p,)",
+        ":has(p, :unknown)",
+        ":has(>)",
+        ":has(~ + p)",
+        ":has(p::before)",
+        ":has(.a:has(.b))",
+        ":has(:not(:has(*)))",
+    ] {
+        let source = format!("#control, {invalid} {{ width: 100px }}");
+        assert!(css::parse(&source, 800.).is_empty(), "{invalid}");
+    }
+}
+
+#[test]
+fn relational_queries_find_late_matches_on_wide_mutable_trees() {
+    let source = format!(
+        "<main>{}<i id='previous'></i><!--gap--><b class='last'></b></main>",
+        "<i></i>".repeat(20_000),
+    );
+    let page = LoadedPage::from_html("https://example.test/", &source);
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let result = runtime
+        .eval(
+            r#"
+        var main = document.querySelector('main'), last = main.querySelector('.last');
+        var before = [
+            main.matches(':has(.last)'),
+            document.querySelectorAll('i:has(~ .last)').length,
+            document.querySelector('i:has(+ .last)').id,
+            document.querySelectorAll('main:has(> i + .last) i').length
+        ];
+        last.removeAttribute('class');
+        before.concat(document.querySelectorAll('i:has(~ .last)').length).join('/')
+    "#,
+        )
+        .unwrap();
+    assert_eq!(
+        result.as_string().unwrap().to_string_lossy(),
+        "true/20001/previous/20001/0"
+    );
+}

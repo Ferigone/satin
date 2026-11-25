@@ -820,6 +820,7 @@ impl ScriptRuntime {
             &[window.clone(), "window".into(), descriptor],
         )?;
         navigator::install(&mut vm, &window)?;
+        install_css_namespace(&mut vm, window.clone())?;
         let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
         let state_get = state.clone();
@@ -2052,15 +2053,17 @@ fn install_selectors(
                 let state = state.borrow();
                 let doc = &state.document;
                 let form_state = |node, pseudo| forms.matches_form_pseudo(doc, node, pseudo);
+                let mut context = css::SelectorContext::new(&form_state);
+                context.scope = Some(id);
                 match name {
-                    "matches" => return Ok(selectors.matches(doc, id, &form_state).into()),
+                    "matches" => return Ok(selectors.matches(doc, id, &mut context).into()),
                     "closest" => std::iter::successors(Some(id), |id| doc.nodes[id.0].parent)
-                        .find(|&id| selectors.matches(doc, id, &form_state))
+                        .find(|&id| selectors.matches(doc, id, &mut context))
                         .into_iter()
                         .collect(),
                     _ => {
                         let matches = descendants(doc, id)
-                            .filter(|&id| selectors.matches(doc, id, &form_state));
+                            .filter(|&id| selectors.matches(doc, id, &mut context));
                         if name == "querySelector" {
                             matches.take(1).collect::<Vec<_>>()
                         } else {
@@ -2175,21 +2178,32 @@ fn inline_style_node(vm: &Vm, style: &Value) -> Result<NodeId, JsError> {
         .ok_or_else(|| JsError::type_error("Expected an inline CSS style"))
 }
 
+fn install_css_namespace(vm: &mut Vm, window: Value) -> Result<(), JsError> {
+    let namespace = vm.new_object();
+    webidl::tag(vm, namespace.clone(), "CSS")?;
+    webidl::operation(vm, namespace.clone(), "supports", 1, |vm, _, args| {
+        webidl::required(args, 1, "CSS.supports")?;
+        let first = text(vm, args[0].clone())?;
+        let supported = if let Some(value) = args.get(1) {
+            let value = text(vm, value.clone())?;
+            css::supports::property(&first, &value)
+        } else {
+            css::supports::query(&first)
+        };
+        Ok(supported.into())
+    })?;
+    vm.define_data_property(window, "CSS", namespace, true, false, true)
+}
+
 fn install_style(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
     // Each document shares these CSS accessors across its inline styles.
     let style_prototype = vm.new_object();
-    for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
-        .iter()
-        .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(css::BOX_PAINT_LONGHANDS)
-        .chain(css::CORNER_OUTLINE_SHORTHANDS)
-        .chain(&[
-            ("cssFloat", "float"),
-            ("listStyle", "list-style"),
-            ("listStyleType", "list-style-type"),
-            ("opacity", "opacity"),
-            ("paddingLeft", "padding-left"),
-        ])
+    for &(property, css_name) in layout_api::shared_style_properties().chain(&[
+        ("cssFloat", "float"),
+        ("listStyleType", "list-style-type"),
+        ("opacity", "opacity"),
+        ("paddingLeft", "padding-left"),
+    ])
     {
         let get_state = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {

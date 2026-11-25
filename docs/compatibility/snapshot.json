@@ -17,10 +17,12 @@
       "source": "crates/engine/tests/css_logical.rs"
     },
     {
-      "label": "All CSS modules",
-      "pass": null, "total": null,
-      "scope": "A full run of the WPT CSS suite is still open",
-      "source": "docs/ROADMAP.md"
+      "label": "Static CSS reftests",
+      "date": "2026-11-25",
+      "satinRevision": "7d5477a24b8876a5ee24ad717a5ffce6a541d8bd",
+      "pass": 1968, "total": 6536,
+      "scope": "Alpha.37 static screen comparisons in the pinned WPT CSS tree",
+      "source": "docs/compatibility/css.md#alpha37-static-css-rerun"
     }
   ],
   "web": [

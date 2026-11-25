@@ -101,7 +101,7 @@ Satin’s JavaScript engine passed **${number(overall.statuses.pass)} of ${numbe
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
-Colours show the pass rate within each named suite. The CSS results cover sticky positioning and logical properties with variables. A full CSS Web Platform Tests (WPT) run is still open.
+The CSS tiles show results for the named suites. The static reftest tile compares pages and references rendered by Satin. The [CSS audit](docs/compatibility/css.md) also records live CSSOM results for 823 property names, original WPT JavaScript subtests, and cases outside the runners’ scope.
 
 <details>
 <summary>Exact counts, test scope and reproduction</summary>

@@ -101,6 +101,12 @@ impl<'a> Axis<'a> {
         }
     }
 
+    // Within the same node and axis the template, areas and line names
+    // are immutable. Expansion is the only size-dependent placement input.
+    pub(super) fn placement_key(&self) -> [usize; 3] {
+        [self.count, self.repeat_end, self.explicit]
+    }
+
     fn track(&self, mut index: usize) -> Option<GridTrack> {
         if let Some(repeat) = &self.template.repeat {
             let start = repeat.range.start;

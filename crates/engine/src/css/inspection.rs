@@ -103,6 +103,8 @@ impl InspectorStylesheets {
         {
             return (found, false);
         }
+        let mut context = super::SelectorContext::new(form_state);
+        context.allow_index = false;
         let mut remaining = 131_072;
         for (sheet, selector, rule) in &self.rules {
             // Use exactly the normal per-selector budget until the total inspector work expires.
@@ -111,7 +113,7 @@ impl InspectorStylesheets {
             }
             let mut fuel = 16_384;
             let matches =
-                selector.matches_part(doc, id, selector.parts.len() - 1, &mut fuel, form_state);
+                selector.matches_part(doc, id, selector.parts.len() - 1, &mut fuel, &mut context);
             remaining -= 16_384 - fuel;
             if matches {
                 if found.len() == 64 {
