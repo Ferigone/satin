@@ -604,3 +604,34 @@ fn large_strict_scripts_validate_unused_functions_and_preserve_closures() {
         assert_eq!(vm.eval(&valid).unwrap(), Value::Bool(true));
     });
 }
+
+#[test]
+fn deferred_functions_distinguish_sloppy_and_nested_strict_scopes() {
+    small_stack(|| {
+        let padding = format!("/*{}*/", " ".repeat(64 * 1024));
+        let script = format!(r#"{padding}(function() {{
+            function sloppy(a) {{
+                arguments[0] = 5;
+                with ({{ b: 4 }}) {{ return a + b; }}
+            }}
+            function localStrict() {{
+                "use strict";
+                function inherited() {{ return this; }}
+                return inherited() === undefined;
+            }}
+            function Outer(n) {{
+                this.read = function() {{ return function(value) {{ return n + value; }}; }};
+            }}
+            return sloppy(1) === 9 && localStrict() && new Outer(12).read()(3) === 15;
+        }})()"#);
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Bool(true));
+        let invalid = format!(r#"{padding}(function() {{
+            function strictOuter() {{
+                'use strict';
+                function unused() {{ with ({{}}) {{}} }}
+            }}
+        }})()"#);
+        assert_eq!(vm.check_syntax(&invalid).unwrap_err().kind, ErrorKind::SyntaxError);
+    });
+}

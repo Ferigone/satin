@@ -49,7 +49,8 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
         lexer: Lexer::new(source, compilation_bytes, false),
-        defer_strict_functions: false,
+        defer_functions: false,
+        strict_context: true,
         function_depth: 0,
         legacy_literals: 0,
         last_end: 0,

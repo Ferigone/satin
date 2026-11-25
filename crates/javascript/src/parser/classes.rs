@@ -129,7 +129,10 @@ impl Parser {
         }
         self.depth += 1;
         let legacy_before = self.legacy_literals;
+        let outer_strict = self.strict_context;
+        self.strict_context = true;
         let result = self.class_inner(start, declaration);
+        self.strict_context = outer_strict;
         self.depth -= 1;
         let class = result?;
         if self.legacy_literals != legacy_before { return Err(self.error("Legacy literal in class definition")); }

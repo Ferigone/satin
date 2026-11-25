@@ -809,8 +809,8 @@ fn parameter_expressions(pattern: &Pattern) -> bool {
     }
     false
 }
-pub(crate) fn validate_deferred_function(f: &Function) -> Result<(Rc<Code>, usize), JsError> {
-    let mut code = compile_function(f, true)?;
+pub(crate) fn validate_deferred_function(f: &Function, inherited_strict: bool) -> Result<(Rc<Code>, usize), JsError> {
+    let mut code = compile_function(f, inherited_strict)?;
     // Lower the entire body now for early errors. Until its first invocation,
     // only callable metadata and the original shared source slice are needed.
     Rc::get_mut(&mut code).unwrap().body.take();
@@ -820,7 +820,7 @@ pub(crate) fn validate_deferred_function(f: &Function) -> Result<(Rc<Code>, usiz
 }
 
 pub(crate) fn recompile_body(code: &Code, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
-    let f = parser::reparse_ordinary_function(&code.source, compilation_bytes)?;
+    let f = parser::reparse_ordinary_function(&code.source, compilation_bytes, code.strict)?;
     block(&f.body, true, code.strict)
 }
 
