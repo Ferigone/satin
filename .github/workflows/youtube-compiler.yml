@@ -4,6 +4,10 @@ on:
   push:
     branches: [ci/youtube-script-memory-36]
 
+concurrency:
+  group: youtube-script-memory-36
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -25,5 +29,18 @@ jobs:
         run: cargo build --locked -p rust-browser-javascript --example measure_script
       - name: Identify the public desktop script and record its digest
         run: python3 tools/ci-fetch-desktop-script.py
+      - name: Count tokens in the fetched script
+        run: |
+          npm --prefix "$RUNNER_TEMP/satin-count" install --ignore-scripts --no-audit --no-fund acorn@8.15.0
+          node - "$RUNNER_TEMP/satin-count/node_modules/acorn" <<'NODE'
+          const acorn = require(process.argv[2]);
+          const source = require('node:fs').readFileSync('/tmp/satin-desktop.js', 'utf8');
+          let tokens = 0, closing = 0;
+          for (const t of acorn.tokenizer(source, { ecmaVersion: 'latest' })) {
+            tokens += 1;
+            if ([')', ']', '}', ':'].includes(t.type.label)) closing += 1;
+          }
+          console.log({ tokens, closing });
+          NODE
       - name: Compile the complete site script at the browser's 512 MiB heap budget
         run: target/debug/examples/measure_script /tmp/satin-desktop.js
