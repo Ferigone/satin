@@ -668,7 +668,7 @@ impl<'a> Line<'a> {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fragment {
     commands: TrackedCommands,
     positioned: Vec<positioning::Positioned>,
@@ -686,6 +686,44 @@ struct Constraints {
     containing_height: Option<f32>,
     flex_item: bool,
 }
+// Exact, frame-local fragment memoization. CSS styles, DOM and resource
+// snapshots are immutable for the lifetime of this Builder.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FragmentKey {
+    node: NodeId,
+    available: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+    containing_height: Option<u32>,
+    intrinsic_width: bool,
+    flex_item: bool,
+    href: Option<Arc<str>>,
+}
+
+impl Fragment {
+    // Bound both the cache's retained payload and the work of cloning it.
+    // Text runs own glyph vectors, and anchors own their strings.
+    fn cache_cost(&self) -> Option<usize> {
+        let mut cost = self.commands.len()
+            .saturating_mul(8)
+            .saturating_add(self.positioned.len())
+            .saturating_add(self.links.len())
+            .saturating_add(self.elements.len())
+            .saturating_add(1);
+        for command in self.commands.iter() {
+            match command {
+                DrawCommand::Text { run, .. } => cost = cost.saturating_add(run.glyphs.len()),
+                DrawCommand::Control { .. } => return None,
+                _ => {}
+            }
+        }
+        for name in self.anchors.keys() {
+            cost = cost.saturating_add(name.len()).saturating_add(1);
+        }
+        (cost <= 4096).then_some(cost)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BoxMetrics {
     margin: [f32; 4],
@@ -813,6 +851,8 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
+    fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
+    fragment_cache_cost: usize,
     grid_text: HashMap<NodeId, GridText>,
     floats: floats::FloatContext,
     float_work_remaining: usize,
@@ -843,6 +883,8 @@ impl<'a> Builder<'a> {
             anchors: HashMap::new(),
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
+            fragment_cache: HashMap::new(),
+            fragment_cache_cost: 0,
             grid_text: HashMap::new(),
             floats: floats::FloatContext::default(),
             float_work_remaining: page
@@ -3261,6 +3303,30 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        // Repeated grid/flex measure and stretch passes can revisit the same
+        // subtree under identical constraints exponentially. Never reuse
+        // measurements across different percentage bases or inherited links.
+        let key = (c.flex_item
+            && !self.page.document.nodes[id.0].children.is_empty()
+            && href.as_ref().is_none_or(|url| url.len() <= 4096))
+            .then(|| FragmentKey {
+                node: id,
+                available: available.to_bits(),
+                width: c.width.map(f32::to_bits),
+                height: c.height.map(f32::to_bits),
+                containing_height: c.containing_height.map(f32::to_bits),
+                intrinsic_width: c.intrinsic_width,
+                flex_item: c.flex_item,
+                href: href.clone(),
+            });
+        if let Some((cached, cost)) = key.as_ref().and_then(|key| self.fragment_cache.get(key)) {
+            let charge = 1 + cost / 64;
+            if self.work_remaining >= charge {
+                self.work_remaining -= charge;
+                return cached.clone();
+            }
+        }
+        let work_before = self.work_remaining;
         let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
             commands: std::mem::take(&mut self.commands),
@@ -3295,7 +3361,7 @@ impl Builder<'_> {
         } else {
             m.width + m.extra_x() + m.margin[1] + m.margin[3]
         };
-        Fragment {
+        let fragment = Fragment {
             commands: std::mem::replace(&mut self.commands, old.commands),
             positioned: std::mem::replace(&mut self.positioned, old.positioned),
             links: std::mem::replace(&mut self.links, old.links),
@@ -3303,7 +3369,25 @@ impl Builder<'_> {
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
             width,
             height,
+        };
+        // Do not cache a fallback or partial result. Only retain fragments
+        // whose measured work exceeds their reuse charge; cap aggregate
+        // retained payload, including the inherited href in the key.
+        if !self.limited && self.work_remaining > 0
+            && self.fragment_cache.len() < 256
+            && let Some(key) = key
+            && let Some(cost) = fragment.cache_cost()
+        {
+            let cost = cost.saturating_add(key.href.as_ref().map_or(0, |url| url.len()));
+            if work_before.saturating_sub(self.work_remaining) > 1 + cost / 64
+                && self.fragment_cache_cost.saturating_add(cost) <= 32768
+                && !self.fragment_cache.contains_key(&key)
+            {
+                self.fragment_cache.insert(key, (fragment.clone(), cost));
+                self.fragment_cache_cost += cost;
+            }
         }
+        fragment
     }
     fn append_fragment(&mut self, mut f: Fragment, x: f32, y: f32) {
         for command in &mut f.commands {

@@ -439,3 +439,26 @@ fn nested_fixed_height_grids_reuse_measurement_without_losing_percentage_resolut
     assert!((rect.height - 10.).abs() < 0.05, "{rect:?}");
     assert_eq!(layout.link_at(10., 5.), Some("about:next"));
 }
+
+#[test]
+fn nested_auto_stretched_grids_reuse_identical_fragments() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.nest{display:grid;width:100px;grid-template-columns:100px}</style>",
+    );
+    for _ in 0..12 {
+        html.push_str("<div class='nest'>");
+    }
+    html.push_str("<a id='leaf' href='about:next' style='display:block;height:20px'>next</a>");
+    for _ in 0..12 {
+        html.push_str("</div>");
+    }
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(!layout.limited, "repeated auto-stretch exhausted layout work");
+    let leaf = page.document.connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("leaf")).unwrap();
+    let rect = layout.rect_for(leaf).unwrap();
+    assert!((rect.width - 100.).abs() < 0.05 && (rect.height - 20.).abs() < 0.05, "{rect:?}");
+    assert_eq!(layout.link_at(10., 5.), Some("about:next"));
+}
