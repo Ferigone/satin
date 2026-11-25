@@ -28,6 +28,14 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.36
+
+Flex containers now wrap correctly with reversed axes, gaps and auto margins in the layouts covered by the regression suite. Selectors such as `article:has(+ article)` can match a following sibling. Stylesheets using `@supports` and scripts calling `CSS.supports()` now evaluate the same conditions.
+
+Satin paints all 148 absolute CSS color keywords and accepts `hwb()`, `oklab()`, `oklch()` and Display P3 colors. It converts these colors to 8-bit sRGB for display.
+
+On the same 6,536 eligible static CSS reference comparisons, the number passing rose from 1,726 in alpha.35 to 1,967. The audit records 52 previously passing comparisons that now fail, along with excluded cases and results for 823 individual property names. [CSS measurements and per-case results](docs/compatibility/css.md)
+
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
@@ -78,7 +86,7 @@ The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising 
 | Web pages render correctly | The HTML parser has a pinned corpus. CSS has geometry comparisons and selected WPT cases. | Close the remaining html5lib cases, expand CSS WPT by module, and verify subgrid and vertical text. [Engine roadmap](docs/ROADMAP.md#1-browser-foundation) |
 | Interactive apps run end to end | Forms, Fetch, DOM events and JavaScript modules run in Satin. The Test262 host supports separate realms. | Expand Unicode regular expressions, internationalization and module loading. Exercise persistent app data with IndexedDB. [JavaScript](docs/JAVASCRIPT.md) · [Realms](docs/JS_REALMS.md) |
 | Offline apps and accelerated graphics | Classic Blob workers can exchange buffers and run small WebAssembly programs. Canvas 2D has pixel-readback tests. | Add service workers and test offline navigation. Extend graphics coverage to WebGL and GPU-backed rendering. [Platform roadmap](docs/ROADMAP.md#3-web-platform) |
-| Public media sites play reliably | Local H.264/AAC samples play and seek on Windows. In the recorded alpha.18 run, neither YouTube nor Twitch created a player. | Reach the player on each public site, verify play/pause, then record sustained progress in both playback time and decoded frames. [Media checks](docs/VERIFICATION.md#website-compatibility) · [Site measurements](docs/PUBLIC_MEDIA_QA_2026-11-23.md#satin-candidate) |
+| Public media sites play reliably | Local H.264/AAC samples play and seek on Windows. In the alpha.35 Windows test, Twitch opened no media session and YouTube reported zero decoded frames. [Recorded results](https://github.com/Ferigone/satin/actions/runs/45525503286/job/138907690154) | Verify play, pause and resume on a live Twitch stream and seeking on a public YouTube video. Record advancing playback time and decoded frames in each session. [Media checks](docs/VERIFICATION.md#website-compatibility) |
 | Windows release is ready for daily use | The installer and updater preserve a profile. Windows QA measures startup and idle memory. | Isolate content processes, verify recovery, and track memory and responsiveness across long browsing sessions. [Release goals](docs/ROADMAP.md#4-performance-and-a-practical-release) · [Windows QA](docs/WINDOWS_RELEASE_QA.md) |
 
 ## Install on Windows
