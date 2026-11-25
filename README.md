@@ -28,6 +28,14 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.36
+
+Flex containers now wrap correctly with reversed axes, gaps and auto margins in the layouts covered by the regression suite. Selectors such as `article:has(+ article)` can match a following sibling. Stylesheets using `@supports` and scripts calling `CSS.supports()` now evaluate the same conditions.
+
+Satin paints all 148 absolute CSS color keywords and accepts `hwb()`, `oklab()`, `oklch()` and Display P3 colors. It converts these colors to 8-bit sRGB for display.
+
+On the same 6,536 eligible static CSS reference comparisons, the number passing rose from 1,726 in alpha.35 to 1,967. The audit records 52 previously passing comparisons that now fail, along with excluded cases and results for 823 individual property names. [CSS measurements and per-case results](docs/compatibility/css.md)
+
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
@@ -35,7 +43,7 @@ Satin’s JavaScript engine passed **100,530 of 103,346 Test262 checks (97.28%)*
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
-Colours show the pass rate within each named suite. The CSS results cover sticky positioning and logical properties with variables. A full CSS Web Platform Tests (WPT) run is still open.
+The CSS tiles show results for the named suites. The static reftest tile compares pages and references rendered by Satin. The [CSS audit](docs/compatibility/css.md) also records live CSSOM results for 823 property names, original WPT JavaScript subtests, and cases outside the runners’ scope.
 
 <details>
 <summary>Exact counts, test scope and reproduction</summary>
@@ -50,7 +58,7 @@ Colours show the pass rate within each named suite. The CSS results cover sticky
 | Staging | 2,528 / 2,791 | 90.58% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
-| All CSS modules | — | Unmeasured | [A full run of the WPT CSS suite is still open](docs/ROADMAP.md) |
+| Static CSS reftests | 1,967 / 6,536 | 30.09% | [Eligible screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md) |
 | HTML tokenizer | 7,028 / 7,036 | 99.89% | [html5lib initial-state variants](crates/engine/data/html5lib/README.md) |
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
@@ -66,8 +74,8 @@ The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising 
 
 | Area | What works in Satin | What remains |
 | --- | --- | --- |
-| Cascade & selectors | Specificity, inheritance, `!important` and custom properties. | Extend the range of upstream selector and cascade cases. [CSS implementation](docs/CSS_LAYOUT.md) |
-| Box model & Flexbox | Wrapping, gaps, ordering and auto margins. A box and Flexbox reference checks 44 coordinates across 11 rectangles. | Broader Flexbox sizing and alignment, including text-dependent layouts. [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
+| Cascade & selectors | Specificity, inheritance, `!important`, custom properties, and relational selectors such as `:has(> input:checked)`. | Extend the range of upstream selector and cascade cases. [CSS implementation](docs/CSS_LAYOUT.md) |
+| Box model & Flexbox | Rows and columns wrap in both directions, including with RTL, gaps and auto margins. A Chromium comparison covers 252 coordinates across 63 rectangles. | Broader Flexbox sizing and alignment, including text-dependent layouts. [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
 | Grid | Named lines and areas, `auto-fill` and `auto-fit`. A geometry comparison covers 580 coordinates across 38 fixtures. | Subgrid, nested intrinsic sizing and resolved track values in CSSOM. [Grid](docs/GRID.md) · [Reference measurements](docs/CSS_LAYOUT.md#reference-measurements) |
 | Flow & writing modes | Floats and clearance in horizontal flow. Logical edges follow each element's text direction. | Vertical writing modes and bidirectional text layout. [Float layout](docs/css-float-layout.md) · [Logical properties](docs/CSS_LAYOUT.md#logical-box-properties) |
 
@@ -78,7 +86,7 @@ The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising 
 | Web pages render correctly | The HTML parser has a pinned corpus. CSS has geometry comparisons and selected WPT cases. | Close the remaining html5lib cases, expand CSS WPT by module, and verify subgrid and vertical text. [Engine roadmap](docs/ROADMAP.md#1-browser-foundation) |
 | Interactive apps run end to end | Forms, Fetch, DOM events and JavaScript modules run in Satin. The Test262 host supports separate realms. | Expand Unicode regular expressions, internationalization and module loading. Exercise persistent app data with IndexedDB. [JavaScript](docs/JAVASCRIPT.md) · [Realms](docs/JS_REALMS.md) |
 | Offline apps and accelerated graphics | Classic Blob workers can exchange buffers and run small WebAssembly programs. Canvas 2D has pixel-readback tests. | Add service workers and test offline navigation. Extend graphics coverage to WebGL and GPU-backed rendering. [Platform roadmap](docs/ROADMAP.md#3-web-platform) |
-| Public media sites play reliably | Local H.264/AAC samples play and seek on Windows. In the recorded alpha.18 run, neither YouTube nor Twitch created a player. | Reach the player on each public site, verify play/pause, then record sustained progress in both playback time and decoded frames. [Media checks](docs/VERIFICATION.md#website-compatibility) · [Site measurements](docs/PUBLIC_MEDIA_QA_2026-11-23.md#satin-candidate) |
+| Public media sites play reliably | Local H.264/AAC samples play and seek on Windows. In the alpha.35 Windows test, Twitch opened no media session and YouTube reported zero decoded frames. [Recorded results](https://github.com/Ferigone/satin/actions/runs/45525503286/job/138907690154) | Verify play, pause and resume on a live Twitch stream and seeking on a public YouTube video. Record advancing playback time and decoded frames in each session. [Media checks](docs/VERIFICATION.md#website-compatibility) |
 | Windows release is ready for daily use | The installer and updater preserve a profile. Windows QA measures startup and idle memory. | Isolate content processes, verify recovery, and track memory and responsiveness across long browsing sessions. [Release goals](docs/ROADMAP.md#4-performance-and-a-practical-release) · [Windows QA](docs/WINDOWS_RELEASE_QA.md) |
 
 ## Install on Windows

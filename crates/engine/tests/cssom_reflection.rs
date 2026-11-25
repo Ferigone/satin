@@ -196,3 +196,75 @@ fn computed_opacity_clamps_numbers_and_percentages_without_inheriting() {
     "#,
     );
 }
+
+#[test]
+fn computed_flex_properties_follow_cascade_shorthands_and_individual_edits() {
+    check(
+        r#"
+        var box = document.createElement("div");
+        document.body.appendChild(box);
+        var cs = getComputedStyle(box);
+        var initial = cs.flex === "0 1 auto" && cs.flexFlow === "row nowrap" && cs.order === "0";
+        box.setAttribute("style", "font-size:15px; flex:2 3 2em; flex-flow:wrap-reverse column-reverse; order:-2");
+        var styled = cs.flexDirection === "column-reverse" && cs.flexWrap === "wrap-reverse" &&
+            cs.getPropertyValue("flex-flow") === "column-reverse wrap-reverse" &&
+            cs.flexGrow === "2" && cs.flexShrink === "3" && cs.flexBasis === "30px" &&
+            cs.flex === "2 3 30px" && cs.order === "-2";
+        box.style.setProperty("flex-basis", "calc(25% + 3px)");
+        var updated = cs["flex-basis"] === "calc(25% + 3px)" && cs.flex === "2 3 calc(25% + 3px)";
+        box.style.setProperty("flex", "1");
+        initial && styled && updated && cs.flex === "1 1 0%";
+    "#,
+    );
+}
+
+#[test]
+fn computed_border_colors_follow_each_edge_and_live_currentcolor() {
+    check(
+        r#"
+        var box = document.createElement("div");
+        document.body.appendChild(box);
+        var cs = getComputedStyle(box);
+        box.setAttribute("style", "color:blue; border-color:currentColor red green");
+        var first = cs.borderTopColor === "rgb(0, 0, 255)" && cs.borderRightColor === "rgb(255, 0, 0)" &&
+            cs.getPropertyValue("border-bottom-color") === "rgb(0, 128, 0)" &&
+            cs["border-left-color"] === cs.borderRightColor &&
+            cs.borderColor === "rgb(0, 0, 255) rgb(255, 0, 0) rgb(0, 128, 0)";
+        box.style.color = "black";
+        box.style.setProperty("border-left-color", "white");
+        first && cs.borderColor === "rgb(0, 0, 0) rgb(255, 0, 0) rgb(0, 128, 0) rgb(255, 255, 255)";
+    "#,
+    );
+}
+
+#[test]
+fn flex_and_border_named_writes_use_the_live_inline_declaration() {
+    check(
+        r#"
+        var box = document.createElement("div");
+        document.body.appendChild(box);
+        var style = box.style;
+        var cs = getComputedStyle(box);
+        var empty = style.flexWrap === "" && style["flex-wrap"] === "";
+        style["flex-wrap"] = "wrap-reverse";
+        var reverse = style.flexWrap === "wrap-reverse" && cs.flexWrap === "wrap-reverse";
+        style.setProperty("flex-wrap", "wrap", "important");
+        style.flexWrap = "invalid-value";
+        var preserved = style["flex-wrap"] === "wrap" && style.getPropertyPriority("flex-wrap") === "important";
+        style.flexWrap = "nowrap";
+        style.flexGrow = "2";
+        style.flexGrow = "1.";
+        style.flexShrink = ".5";
+        style["flex-shrink"] = "1.";
+        style["flex-direction"] = "column";
+        style.borderTopColor = "red";
+        style["border-left-color"] = "blue";
+        var edited = cs.getPropertyValue("flex-wrap") === "nowrap" && style.getPropertyPriority("flex-wrap") === "" &&
+            cs.flexGrow === "2" && cs.flexShrink === "0.5" && cs.flexDirection === "column" &&
+            style["border-top-color"] === "red" && style.borderLeftColor === "blue" &&
+            cs.borderTopColor === "rgb(255, 0, 0)" && cs.borderLeftColor === "rgb(0, 0, 255)";
+        style["flex-wrap"] = null;
+        empty && reverse && preserved && edited && style.flexWrap === "" && cs.flexWrap === "nowrap";
+        "#,
+    );
+}

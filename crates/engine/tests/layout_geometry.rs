@@ -201,6 +201,43 @@ fn row_flex_shrinks_wraps_orders_and_aligns() {
     close(rect(&p, &l, "wrap").height, 50.);
 }
 #[test]
+fn flex_line_wrapping_and_alignment_match_chromium() {
+    // Border rectangles relative to each flex container, Chromium 131.0.6778.0.
+    let (p, l) = layout_document(include_str!("fixtures/css_flex_line_alignment.html"), 800.);
+    assert!(!l.limited);
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for node in p.document.connected_nodes() {
+        let Some(reference) = p.document.attr(node, "data-rect") else {
+            continue;
+        };
+        let parent = p.document.nodes[node.0].parent.unwrap();
+        let container = l.rect_for(parent).unwrap();
+        let item = l.rect_for(node).unwrap();
+        let rect = [
+            item.x - container.x,
+            item.y - container.y,
+            item.width,
+            item.height,
+        ];
+        let expected: Vec<f32> = reference
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(expected.len(), rect.len());
+        if !rect.iter().zip(expected).all(|(a, b)| (a - b).abs() < 0.05) {
+            failures.push(format!(
+                "case {:?}, item {node:?}: expected {reference}, got {rect:?}",
+                p.document.attr(parent, "style"),
+            ));
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 63);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn flex_auto_margins_reverse_and_cross_stretch() {
     let (p, l) = layout(
         "<div style='display:flex;width:400px;height:100px;gap:10px'><div id='a' style='width:50px;margin-left:auto'></div><div id='b' style='width:50px'></div></div><div style='display:flex;flex-direction:row-reverse;width:300px;justify-content:space-between'><div id='c' style='width:50px;height:20px'></div><div id='d' style='width:70px;height:20px'></div></div>",
@@ -212,6 +249,65 @@ fn flex_auto_margins_reverse_and_cross_stretch() {
     close(rect(&p, &l, "c").x, 250.);
     close(rect(&p, &l, "d").x, 0.);
 }
+#[test]
+fn used_flex_item_height_is_only_a_percentage_basis_if_definite() {
+    let (p, l) = layout(
+        "<style>.column{display:flex;flex-direction:column;min-height:100px}
+         .column>div{flex-grow:1}.fill{height:100%}</style>
+         <div class=column><div id=automatic><div id=auto-fill class=fill></div></div></div>
+         <div class=column style='flex-wrap:wrap'><div><div id=wrap-fill class=fill></div></div></div>
+         <div class=column style='height:0'><div><div id=definite-fill class=fill></div></div></div>
+         <div class=column><div style='flex-basis:0px'><div id=basis-fill class=fill></div></div></div>
+         <div class=column><div style='height:10px'><div id=size-fill class=fill></div></div></div>",
+        400.,
+    );
+    close(rect(&p, &l, "automatic").height, 100.);
+    for (name, expected) in [
+        ("auto-fill", 0.),
+        ("wrap-fill", 0.),
+        ("definite-fill", 100.),
+        ("basis-fill", 100.),
+        ("size-fill", 100.),
+    ] {
+        close(rect(&p, &l, name).height, expected);
+    }
+}
+
+#[test]
+fn flex_fieldset_min_height_constrains_the_outer_box() {
+    let (p, l) = layout(
+        "<style>fieldset{margin:0;padding:0;border:1px solid;display:flex;align-items:center;
+         flex-direction:column;justify-content:center;width:200px;min-height:200px}
+         fieldset>div{width:100px;height:100px}</style>
+         <fieldset id=auto-field><div id=first></div></fieldset>
+         <fieldset id=fixed-field style='height:200px'><div id=second></div></fieldset>",
+        400.,
+    );
+    for (parent, child, expected_y) in [("auto-field", "first", 1.), ("fixed-field", "second", 51.)]
+    {
+        let field = rect(&p, &l, parent);
+        let item = rect(&p, &l, child);
+        close(field.height, 202.);
+        close(item.x - field.x, 51.);
+        close(item.y - field.y, expected_y);
+    }
+}
+
+#[test]
+fn physical_flex_justification_handles_reversed_axes_and_rtl() {
+    let (p, l) = layout(
+        "<style>section{direction:rtl;display:flex;width:100px;height:40px}
+         section>div{width:20px;height:10px}</style>
+         <section style='justify-content:left'><div id=left></div></section>
+         <section style='flex-direction:row-reverse;justify-content:right'><div id=right></div></section>
+         <section id=column style='flex-direction:column-reverse;justify-content:left'><div id=vertical></div></section>",
+        400.,
+    );
+    close(rect(&p, &l, "left").x, 0.);
+    close(rect(&p, &l, "right").x, 80.);
+    close(rect(&p, &l, "vertical").y - rect(&p, &l, "column").y, 0.);
+}
+
 #[test]
 fn column_flex_grows_in_definite_height() {
     let (p, l) = layout(
