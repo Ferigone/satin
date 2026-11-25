@@ -1,6 +1,8 @@
 //! The document owns object URLs, source-buffer state, and event delivery.
 //! The media thread owns demuxing, coded samples, and playback.
 mod idl;
+#[cfg(windows)]
+mod types;
 
 use super::{MediaCommand, MediaKey, Shared, Value, Vm, blobs};
 use crate::script::{JsError, RootId, event_target, webidl};
@@ -96,6 +98,8 @@ pub(super) struct Store {
     events: Option<event_target::Events>,
     ranges_prototype: Value,
     live_ranges: Rc<Cell<usize>>,
+    #[cfg(windows)]
+    types: std::cell::OnceCell<Option<types::Probe>>,
     next_buffer: u64,
     next_operation: u64,
     pending_bytes: usize,
@@ -175,6 +179,27 @@ fn intersect(left: &[Range], right: &[Range]) -> Vec<Range> {
 }
 
 impl Store {
+    #[cfg(windows)]
+    fn is_supported(&self, input: &str) -> bool {
+        // These registered byte stream formats carry their own timestamps.
+        // Elementary AAC and MPEG audio require sequence mode.
+        crate::mime::MimeType::parse(input).is_some_and(|mime| {
+            matches!(
+                mime.essence.as_str(),
+                "video/mp4" | "audio/mp4" | "video/webm" | "audio/webm" | "video/mp2t"
+            ) && self
+                .types
+                .get_or_init(types::Probe::acquire)
+                .as_ref()
+                .is_some_and(|probe| probe.supported(input))
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn is_supported(&self, _input: &str) -> bool {
+        false
+    }
+
     pub(super) fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()
     }
@@ -508,6 +533,15 @@ pub(super) fn element_ranges(
         return make_ranges(vm, store, ranges);
     };
     let source = brand::<Source>(vm, &source_value, "MediaSource")?;
+    if seekable {
+        let duration = source.duration.get();
+        if duration.is_nan() {
+            return make_ranges(vm, store, Vec::new());
+        }
+        if duration.is_finite() {
+            return make_ranges(vm, store, vec![(0., duration)]);
+        }
+    }
     let active = list_for(vm, &source_value, ACTIVE_LIST);
     let ranges: Vec<_> = list_values(vm, &active)?
         .iter()
@@ -520,22 +554,7 @@ pub(super) fn element_ranges(
         .iter()
         .filter_map(|ranges| ranges.last().map(|range| range.1))
         .fold(0., f64::max);
-    let value = if seekable {
-        let duration = source.duration.get();
-        if duration.is_finite() && duration > 0. {
-            vec![(0., duration)]
-        } else if let Some((start, end)) = source.live.get() {
-            let earliest = ranges
-                .iter()
-                .filter_map(|ranges| ranges.first().map(|range| range.0))
-                .fold(start, f64::min);
-            vec![(earliest, end.max(highest))]
-        } else if highest > 0. {
-            vec![(0., highest)]
-        } else {
-            Vec::new()
-        }
-    } else if highest == 0. {
+    let buffered = if highest == 0. {
         Vec::new()
     } else {
         ranges
@@ -549,7 +568,19 @@ pub(super) fn element_ranges(
                 intersect(&prior, &current)
             })
     };
-    make_ranges(vm, store, value)
+    if !seekable {
+        return make_ranges(vm, store, buffered);
+    }
+    let latest = buffered.last().map_or(0., |range| range.1);
+    let ranges = if let Some((start, end)) = source.live.get() {
+        let earliest = buffered.first().map_or(start, |range| range.0);
+        vec![(start.min(earliest), end.max(latest))]
+    } else if buffered.is_empty() {
+        Vec::new()
+    } else {
+        vec![(0., latest)]
+    };
+    make_ranges(vm, store, ranges)
 }
 
 pub(super) use idl::install;

@@ -1,30 +1,48 @@
-name: Windows public media baseline
+name: Compare public media on Windows
 on:
   push:
     branches: [qa/windows-public-media-36]
 permissions:
   contents: read
 jobs:
-  playback:
+  satin:
     runs-on: windows-2022
-    timeout-minutes: 12
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Prepare Media Foundation and the published baseline
+      - name: Install Windows Media Foundation
         shell: powershell
         run: |
           if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
             Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
           }
-          $exe = Join-Path $env:RUNNER_TEMP 'satin-alpha35.exe'
-          Invoke-WebRequest 'https://github.com/Ferigone/satin/releases/download/v0.1.0-alpha.35/satin-windows-x64.exe' -OutFile $exe -UseBasicParsing
-          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne '817e66ab2caba17bdd3a4b8998cd9055b3956019a2b5f2bb81ea7a265fbea58a') { throw 'Incorrect baseline SHA-256' }
-      - name: Exercise Twitch and YouTube with the native engine
-        shell: pwsh
+      - run: cargo build --release --locked -p rust-browser
+      - name: Visit both public sites in native Satin
         run: |
-          $exe = Join-Path $env:RUNNER_TEMP 'satin-alpha35.exe'
-          node tools/verify-public-media.mjs satin $exe '57e1dbdb00c0c8eb830dcef2503ba46d92b81b19'
+          node tools/verify-public-media.mjs satin target/release/rust-browser.exe "$env:GITHUB_SHA"
           if ($LASTEXITCODE) { throw 'Native media probe failed' }
+          Get-ChildItem target/public-media/*/summary.json | ForEach-Object { Get-Content -LiteralPath $_.FullName }
+  reference:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install Windows Media Foundation
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - name: Play the same public stream and video in Chrome
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'media-reference'
+          npm install --prefix $package --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+          if ($LASTEXITCODE) { throw 'Failed to install driver' }
+          $chrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+          node tools/verify-public-media.mjs chrome-only "$chrome" (Join-Path $package 'package.json')
+          if ($LASTEXITCODE) { throw 'Reference probe failed' }
           Get-ChildItem target/public-media/*/summary.json | ForEach-Object { Get-Content -LiteralPath $_.FullName }

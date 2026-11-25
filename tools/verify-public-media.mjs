@@ -25,7 +25,7 @@ const errorKinds = /\b(?:ReferenceError|TypeError|SyntaxError|UnsupportedFeature
 function safeDiagnostic(line) {
   return {
     kind: line.match(errorKinds)?.[0] ?? 'Other',
-    cause: line.match(/Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
+    cause: line.match(/AST nesting limit exceeded|Script compilation memory budget exhausted|Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
     inline: line.match(/\binline script #(\d+)\b/i)?.[1] ?? null,
   };
 }
@@ -305,7 +305,7 @@ async function reaCase(chrome, cli, { site, url }, dir) {
 
 const [mode, executable, identifier, site] = process.argv.slice(2);
 const selected = cases.filter(test => !site || test.site === site);
-if (!['chrome', 'satin'].includes(mode) || !executable || !identifier || !selected.length) {
+if (!['chrome', 'satin', 'chrome-only'].includes(mode) || !executable || !identifier || !selected.length) {
   console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
   console.error('   or: node tools/verify-public-media.mjs satin <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
@@ -327,7 +327,14 @@ const tempKeys = ['TEMP', 'TMP'];
 const previousTemp = tempKeys.map(key => process.env[key]);
 try {
   for (const key of tempKeys) process.env[key] = temporary;
-  if (mode === 'chrome') {
+  if (mode === 'chrome-only') {
+    const require = createRequire(resolve(identifier));
+    const { chromium } = require('playwright-core');
+    for (const test of selected) {
+      report.cases.push(await chromeCase(exe, chromium, test));
+      await save();
+    }
+  } else if (mode === 'chrome') {
     const cli = resolve(identifier);
     const require = createRequire(cli);
     const { chromium } = require('playwright-core');
