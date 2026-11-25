@@ -1,6 +1,8 @@
 //! The document owns object URLs, source-buffer state, and event delivery.
 //! The media thread owns demuxing, coded samples, and playback.
 mod idl;
+#[cfg(windows)]
+mod types;
 
 use super::{MediaCommand, MediaKey, Shared, Value, Vm, blobs};
 use crate::script::{JsError, RootId, event_target, webidl};
@@ -96,6 +98,8 @@ pub(super) struct Store {
     events: Option<event_target::Events>,
     ranges_prototype: Value,
     live_ranges: Rc<Cell<usize>>,
+    #[cfg(windows)]
+    types: std::cell::OnceCell<Option<types::Probe>>,
     next_buffer: u64,
     next_operation: u64,
     pending_bytes: usize,
@@ -175,6 +179,27 @@ fn intersect(left: &[Range], right: &[Range]) -> Vec<Range> {
 }
 
 impl Store {
+    #[cfg(windows)]
+    fn is_supported(&self, input: &str) -> bool {
+        // These registered byte stream formats carry their own timestamps.
+        // Elementary AAC and MPEG audio require sequence mode.
+        crate::mime::MimeType::parse(input).is_some_and(|mime| {
+            matches!(
+                mime.essence.as_str(),
+                "video/mp4" | "audio/mp4" | "video/webm" | "audio/webm" | "video/mp2t"
+            ) && self
+                .types
+                .get_or_init(types::Probe::acquire)
+                .as_ref()
+                .is_some_and(|probe| probe.supported(input))
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn is_supported(&self, _input: &str) -> bool {
+        false
+    }
+
     pub(super) fn has_tasks(&self) -> bool {
         !self.tasks.is_empty()
     }
