@@ -475,6 +475,7 @@ impl Vm {
         let outer = self.active == 0;
         if outer {
             self.check_interrupt()?;
+            WORK_PROFILE.with(|profile| profile.borrow_mut().clear());
             self.remaining = instructions;
             self.task_deadline = deadline;
         }
@@ -1219,7 +1220,22 @@ impl Vm {
         }
         Ok(())
     }
+    #[track_caller]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
+        let location = std::panic::Location::caller();
+        let exhausts = units as u64 > self.remaining;
+        WORK_PROFILE.with(|profile| {
+            let mut profile = profile.borrow_mut();
+            let count = profile.entry((location.file(), location.line())).or_insert(0);
+            *count = count.saturating_add(units as u64);
+            if exhausts {
+                let mut values: Vec<_> = profile.iter().map(|(loc, units)| (*units, *loc)).collect();
+                values.sort_unstable_by(|a,b| b.cmp(a));
+                for (units, (file, line)) in values.into_iter().take(5) {
+                    eprintln!("SATIN_BUDGET {}:{} {}", file.replace('\\', "/"), line, units);
+                }
+            }
+        });
         self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
@@ -1233,11 +1249,13 @@ impl Vm {
         Ok(())
     }
     /// Charge native DOM/host work to the current shared execution budget.
+    #[track_caller]
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
     /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
     /// One nonempty operation always costs at least one instruction.
+    #[track_caller]
     pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
     }
@@ -4440,4 +4458,8 @@ mod task_limit_tests {
         assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
         assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
     }
+}
+
+thread_local! {
+    static WORK_PROFILE: std::cell::RefCell<std::collections::BTreeMap<(&\'static str, u32), u64>> = std::cell::RefCell::new(std::collections::BTreeMap::new());
 }

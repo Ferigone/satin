@@ -1,0 +1,48 @@
+name: Profile native work on public watch pages
+on:
+  push:
+    branches: [qa/windows-public-script-profile-36]
+permissions:
+  contents: read
+jobs:
+  satin:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install Windows Media Foundation
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - run: cargo build --release --locked -p rust-browser
+      - name: Visit both public sites in native Satin
+        run: |
+          node tools/verify-public-media.mjs satin target/release/rust-browser.exe "$env:GITHUB_SHA"
+          if ($LASTEXITCODE) { throw 'Native media probe failed' }
+          Get-ChildItem target/public-media/*/summary.json | ForEach-Object { Get-Content -LiteralPath $_.FullName }
+  reference:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install Windows Media Foundation
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:WINDIR\System32\mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - name: Play the same public stream and video in Chrome
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'media-reference'
+          npm install --prefix $package --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+          if ($LASTEXITCODE) { throw 'Failed to install driver' }
+          $chrome = Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+          node tools/verify-public-media.mjs chrome-only "$chrome" (Join-Path $package 'package.json')
+          if ($LASTEXITCODE) { throw 'Reference probe failed' }
+          Get-ChildItem target/public-media/*/summary.json | ForEach-Object { Get-Content -LiteralPath $_.FullName }

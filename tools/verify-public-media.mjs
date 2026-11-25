@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const cases = [
-  { site: 'twitch', url: 'https://www.twitch.tv/theburntpeanut_247' },
-  { site: 'youtube', url: 'https://www.youtube.com/watch?v=aqz-KE-bpKQ' },
+  { site: 'twitch', url: 'https://www.twitch.tv/ewroon' },
+  { site: 'youtube', url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw' },
 ];
 const viewport = { width: 1280, height: 800 };
 const player = {
@@ -25,7 +25,7 @@ const errorKinds = /\b(?:ReferenceError|TypeError|SyntaxError|UnsupportedFeature
 function safeDiagnostic(line) {
   return {
     kind: line.match(errorKinds)?.[0] ?? 'Other',
-    cause: line.match(/Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
+    cause: line.match(/AST nesting limit exceeded|Script compilation memory budget exhausted|Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
     inline: line.match(/\binline script #(\d+)\b/i)?.[1] ?? null,
   };
 }
@@ -40,10 +40,11 @@ const capture = promisify(execFile);
 async function run(exe, args, timeout, env) {
   const options = { timeout, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
   try {
-    return { stdout: (await capture(exe, args, options)).stdout, exit: 0, killed: false };
+    const { stdout, stderr } = await capture(exe, args, options);
+    return { stdout, stderr, exit: 0, killed: false };
   } catch (error) {
     return {
-      stdout: error.stdout ?? '',
+      stdout: error.stdout ?? '', stderr: error.stderr ?? '',
       exit: Number.isInteger(error.code) ? error.code : null,
       killed: error.killed ?? false,
     };
@@ -84,6 +85,7 @@ async function satinCase(exe, { site, url }, dir) {
     has_audio: status.has_audio, decoded_frames: status.decoded_frames, paused: status.paused, ended: status.ended,
   })) ?? null;
   return {
+    profile: String(outcome.stderr ?? '').split(/\r?\n/).filter(x => /^SATIN_BUDGET [a-zA-Z0-9_./:-]+ [0-9]+$/.test(x)).slice(0, 80),
     startedUtc: started.toISOString(), elapsedMs: Date.now() - started.getTime(), site, url,
     exit: outcome.exit, killed: outcome.killed, requestedRunForMs: observationMs, version: result?.version ?? null,
     finalHost: result?.url ? new URL(result.url).hostname : null,
@@ -305,7 +307,7 @@ async function reaCase(chrome, cli, { site, url }, dir) {
 
 const [mode, executable, identifier, site] = process.argv.slice(2);
 const selected = cases.filter(test => !site || test.site === site);
-if (!['chrome', 'satin'].includes(mode) || !executable || !identifier || !selected.length) {
+if (!['chrome', 'satin', 'chrome-only'].includes(mode) || !executable || !identifier || !selected.length) {
   console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
   console.error('   or: node tools/verify-public-media.mjs satin <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
@@ -327,7 +329,14 @@ const tempKeys = ['TEMP', 'TMP'];
 const previousTemp = tempKeys.map(key => process.env[key]);
 try {
   for (const key of tempKeys) process.env[key] = temporary;
-  if (mode === 'chrome') {
+  if (mode === 'chrome-only') {
+    const require = createRequire(resolve(identifier));
+    const { chromium } = require('playwright-core');
+    for (const test of selected) {
+      report.cases.push(await chromeCase(exe, chromium, test));
+      await save();
+    }
+  } else if (mode === 'chrome') {
     const cli = resolve(identifier);
     const require = createRequire(cli);
     const { chromium } = require('playwright-core');
