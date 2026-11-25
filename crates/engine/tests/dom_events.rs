@@ -235,6 +235,48 @@ fn mouse_event_bootstrap_factory_and_native_click_share_an_interface() {
 }
 
 #[test]
+fn mouse_page_coordinates_follow_scroll_and_stay_fixed_during_dispatch() {
+    let page = LoadedPage::from_html(
+        "https://events.test/",
+        "<!doctype html><body style='width:2400px;height:3600px'><button id='target'>Go</button>",
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let result = runtime
+        .eval(
+            r#"(() => {
+        scrollTo(100, 200);
+        const event = new MouseEvent('probe', { view: window, clientX: 7, clientY: -3 });
+        const detached = new MouseEvent('probe', { clientX: 7, clientY: -3 });
+        const getter = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'pageX').get;
+        let brand = false;
+        try { getter.call(new Event('probe')); } catch(e) { brand = e instanceof TypeError; }
+        const observations = [brand, event.pageX, event.pageY, detached.pageX, detached.pageY];
+        const target = new EventTarget();
+        target.addEventListener('probe', e => {
+            scrollTo(130, 250);
+            observations.push(e.pageX, e.pageY);
+        });
+        target.dispatchEvent(event);
+        observations.push(event.pageX, event.pageY);
+        const legacy = document.createEvent('MouseEvents');
+        legacy.initMouseEvent('legacy', true, true, window, 0, 0, 0, -5, 11);
+        document.getElementById('target').addEventListener('legacy', e => {
+            scrollTo(0, 0);
+            observations.push(e.pageX, e.pageY);
+        });
+        document.getElementById('target').dispatchEvent(legacy);
+        observations.push(legacy.pageX, legacy.pageY);
+        return observations.join('|');
+    })()"#,
+        )
+        .unwrap();
+    assert_eq!(
+        result,
+        Value::from("true|107|197|7|-3|107|197|137|247|125|261|-5|11")
+    );
+}
+
+#[test]
 fn page_global_implements_window_and_dispatches_through_its_event_target() {
     let page = LoadedPage::from_html("https://window.test/", "<main></main>");
     let mut runtime = ScriptRuntime::new(&page).unwrap();

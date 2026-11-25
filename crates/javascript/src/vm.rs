@@ -167,6 +167,7 @@ pub struct Vm {
     pub(crate) execution_depth: usize,
     string_storage: BTreeMap<usize, usize>,
     string_bytes: usize,
+    live_large_string_bytes: Rc<std::cell::Cell<usize>>,
     pub(crate) code_bytes: usize,
     initializing: bool,
     pub(crate) jobs: VecDeque<crate::promise::Job>,
@@ -294,6 +295,7 @@ impl Vm {
             execution_depth: 0,
             string_storage: BTreeMap::new(),
             string_bytes: 0,
+            live_large_string_bytes: Rc::default(),
             code_bytes: 0,
             initializing: true,
             jobs: VecDeque::new(),
@@ -438,8 +440,9 @@ impl Vm {
         if self.active == 0 {
             return (self.eval_with_identifier(source, identifier), false);
         }
-        let child_budget = (self.remaining - self.remaining / 4).min(self.limits.max_instructions);
-        let reserved = self.remaining - child_budget;
+        // Inherit the actual enclosing task allowance. Timer and trusted input
+        // tasks may have more fuel than a top-level script evaluation.
+        let reserved = self.remaining / 4;
         let parent_cells = self.limits.max_heap_objects;
         let parent_bytes = self.limits.max_heap_bytes;
         let reserved_cells = parent_cells.saturating_sub(self.heap.live) / 4;
@@ -757,6 +760,7 @@ impl Vm {
             .estimated_bytes
             .saturating_add(self.inactive_realms.len() * std::mem::size_of::<realm::RealmState>())
             .saturating_add(self.string_bytes)
+            .saturating_add(self.live_large_string_bytes.get())
             .saturating_add(self.code_bytes)
             .saturating_add(self.bigint_storage.bytes)
     }
@@ -790,21 +794,40 @@ impl Vm {
         }
         self.ensure_allocation(Self::source_allocation(bytes))
     }
+    fn accounted_string_bytes(&self, string: &JsString) -> usize {
+        if string.tracks_lifetime() {
+            if string.charged_to(&self.live_large_string_bytes) {
+                string.allocation_bytes()
+            } else {
+                0
+            }
+        } else {
+            self.string_storage
+                .get(&string.storage_id())
+                .copied()
+                .unwrap_or(0)
+        }
+    }
+
+    fn record_string_storage(&mut self, string: &JsString, bytes: usize, old: usize) {
+        if string.tracks_lifetime() {
+            string.charge_lifetime(&self.live_large_string_bytes, bytes);
+        } else {
+            self.string_bytes = self.string_bytes.saturating_add(bytes - old);
+            self.string_storage.insert(string.storage_id(), bytes);
+        }
+    }
+
     fn account_string(&mut self, string: &JsString) -> Result<(), JsError> {
         let mut part = Some(string.clone());
         while let Some(string) = part {
             let bytes = string.allocation_bytes();
-            let old = self
-                .string_storage
-                .get(&string.storage_id())
-                .copied()
-                .unwrap_or(0);
+            let old = self.accounted_string_bytes(&string);
             if bytes <= old {
                 break;
             }
             self.ensure_allocation(bytes - old)?;
-            self.string_bytes = self.string_bytes.saturating_add(bytes - old);
-            self.string_storage.insert(string.storage_id(), bytes);
+            self.record_string_storage(&string, bytes, old);
             part = string.prefix();
         }
         Ok(())
@@ -1255,18 +1278,16 @@ impl Vm {
             .estimated_bytes
             .saturating_add(self.template_objects.len() * 128);
         self.string_bytes = 0;
+        self.live_large_string_bytes = Rc::default();
         for s in &strings {
             let mut part = Some(s.clone());
             while let Some(string) = part {
                 let bytes = string.allocation_bytes();
-                if self
-                    .string_storage
-                    .insert(string.storage_id(), bytes)
-                    .is_some()
-                {
+                let old = self.accounted_string_bytes(&string);
+                if old >= bytes {
                     break;
                 }
-                self.string_bytes = self.string_bytes.saturating_add(bytes);
+                self.record_string_storage(&string, bytes, old);
                 part = string.prefix();
             }
         }
@@ -4571,6 +4592,27 @@ fn parse_number(s: &JsString) -> f64 {
 mod task_limit_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn embedded_scripts_inherit_the_task_allowance_and_leave_fuel_for_the_parent() {
+        let mut vm = Vm::with_limits(VmLimits {
+            max_instructions: 128,
+            ..VmLimits::default()
+        });
+        let finite = "var i = 0; while (i < 200) { i++; } i";
+        assert_eq!(vm.eval(finite).unwrap_err().kind, ErrorKind::ExecutionLimit);
+        vm.with_task_limits(32_000, None, |vm| {
+            let (finite, _) = vm.eval_embedded_script(finite, "finite-child");
+            assert_eq!(finite?, Value::from(200));
+            let (infinite, recoverable) =
+                vm.eval_embedded_script("while (true) {}", "busy-child");
+            assert_eq!(infinite.unwrap_err().kind, ErrorKind::ExecutionLimit);
+            assert!(recoverable);
+            assert_eq!(vm.eval("21 * 2")?, Value::from(42));
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn embedded_errors_propagate_explicit_interrupts_and_expired_task_deadlines() {
