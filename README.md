@@ -28,7 +28,13 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
-## Changes in alpha.37
+## Changes in alpha.38
+
+Satin can represent a sparse array with a length of 2³² − 1 and only a few stored elements. Methods such as `map`, `filter` and `lastIndexOf` can skip empty ranges while preserving observable getter, proxy and callback behavior. Generator destructuring resumes across yields, and evaluated source preserves lone UTF-16 surrogates. Long strings release unused prefixes. Browser timers now measure CPU time so a descheduled tab can resume its callback.
+
+On the 2016 Test262 website’s 16,436 original cases, the standalone JavaScript engine passed **16,152**, up from **16,057** in alpha.37. All 95 newly passing cases and all 284 remaining nonpasses are identified in the [legacy Test262 comparison](docs/compatibility/legacy-test262.md). It also records what happened when the same fixtures ran inside browser iframes.
+
+### Changes in alpha.37
 
 Pages with nested Grid and Flexbox containers can reuse layout measurements within a frame. Satin skips hidden subtrees when calculating intrinsic sizes and avoids measuring the same grid placement twice. A regression test covers percentage-height children whose parent changes between a definite and an indefinite height. Six CSS Grid reference tests that hit the previous work limit now render to completion. One matches its reference and five show pixel differences. All 1,967 tests that passed in alpha.36 still pass. [Static CSS results](docs/compatibility/css.md#alpha37-static-css-rerun)
 
