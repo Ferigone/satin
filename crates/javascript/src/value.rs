@@ -1,9 +1,9 @@
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 
 const INLINE_UNITS: usize = 8;
@@ -25,12 +25,74 @@ enum StringStorage {
     },
 }
 
+// Larger strings can temporarily consume most of a document budget. Release the
+// reservation with the final reference, even if that happens inside one script.
+const TRACKED_STRING_UNITS: usize = 8192;
+
+struct StringData {
+    storage: StringStorage,
+    charges: OnceCell<Box<RefCell<StringCharges>>>,
+}
+
+struct StringCharges {
+    bytes: usize,
+    accounts: Vec<Weak<Cell<usize>>>,
+}
+
+impl Drop for StringCharges {
+    fn drop(&mut self) {
+        for account in self.accounts.iter().filter_map(Weak::upgrade) {
+            account.set(account.get().saturating_sub(self.bytes));
+        }
+    }
+}
+
 /// JavaScript text is a sequence of UTF-16 code units, not Unicode scalar values.
 /// In particular, this representation round-trips isolated surrogate code units.
 #[derive(Clone)]
-pub struct JsString(Rc<StringStorage>);
+pub struct JsString(Rc<StringData>);
 
 impl JsString {
+    fn from_storage(storage: StringStorage) -> Self {
+        Self(Rc::new(StringData {
+            storage,
+            charges: OnceCell::new(),
+        }))
+    }
+
+    pub(crate) fn tracks_lifetime(&self) -> bool {
+        self.len() >= TRACKED_STRING_UNITS
+    }
+
+    pub(crate) fn charged_to(&self, account: &Rc<Cell<usize>>) -> bool {
+        let owner = Rc::as_ptr(account);
+        self.0.charges.get().is_some_and(|charges| {
+            charges
+                .borrow()
+                .accounts
+                .iter()
+                .any(|weak| weak.as_ptr() == owner)
+        })
+    }
+
+    pub(crate) fn charge_lifetime(&self, account: &Rc<Cell<usize>>, bytes: usize) {
+        let mut charges = self
+            .0
+            .charges
+            .get_or_init(|| {
+                Box::new(RefCell::new(StringCharges {
+                    bytes,
+                    accounts: Vec::with_capacity(1),
+                }))
+            })
+            .borrow_mut();
+        // A tracing collection starts a fresh ledger. A string can also be shared
+        // between multiple embedders, so keep registrations for other live VMs.
+        charges.accounts.retain(|entry| entry.strong_count() != 0);
+        charges.accounts.push(Rc::downgrade(account));
+        account.set(account.get().saturating_add(bytes));
+    }
+
     /// An exactly filled Vec transfers its allocation to the flat boxed slice.
     /// Short strings are copied into inline storage.
     pub(crate) fn adopts_buffer(length: usize, capacity: usize) -> bool {
@@ -41,22 +103,22 @@ impl JsString {
         if units.len() <= INLINE_UNITS {
             return Self::from_utf16_slice(&units);
         }
-        Self(Rc::new(StringStorage::Flat(units.into_boxed_slice())))
+        Self::from_storage(StringStorage::Flat(units.into_boxed_slice()))
     }
     pub(crate) fn from_utf16_slice(units: &[u16]) -> Self {
         if units.len() <= INLINE_UNITS {
             let mut inline = [0; INLINE_UNITS];
             inline[..units.len()].copy_from_slice(units);
-            Self(Rc::new(StringStorage::Inline {
+            Self::from_storage(StringStorage::Inline {
                 units: inline,
                 len: units.len() as u8,
-            }))
+            })
         } else {
-            Self(Rc::new(StringStorage::Flat(units.into())))
+            Self::from_storage(StringStorage::Flat(units.into()))
         }
     }
     pub fn as_utf16(&self) -> &[u16] {
-        match self.0.as_ref() {
+        match &self.0.storage {
             StringStorage::Inline { units, len } => &units[..*len as usize],
             StringStorage::Flat(units) => units,
             StringStorage::Appended {
@@ -86,12 +148,17 @@ impl JsString {
     pub(crate) fn allocation_bytes(&self) -> usize {
         // Appended strings reserve their eventual contiguous representation.
         // Native code may borrow the UTF-16 slice without a fallible allocation API.
+        let registration = if self.tracks_lifetime() {
+            std::mem::size_of::<RefCell<StringCharges>>() + std::mem::size_of::<Weak<Cell<usize>>>()
+        } else {
+            0
+        };
         self.len()
             .saturating_mul(2)
-            .saturating_add(std::mem::size_of::<StringStorage>() + 16)
+            .saturating_add(std::mem::size_of::<StringData>() + 16 + registration)
     }
     pub fn len(&self) -> usize {
-        match self.0.as_ref() {
+        match &self.0.storage {
             StringStorage::Inline { len, .. } => *len as usize,
             StringStorage::Flat(units) => units.len(),
             StringStorage::Appended { len, .. } => *len,
@@ -124,7 +191,7 @@ impl JsString {
             suffix: previous,
             suffix_len,
             ..
-        } = self.0.as_ref()
+        } = &self.0.storage
         {
             let previous_len = *suffix_len as usize;
             if previous_len + other.len() <= INLINE_UNITS {
@@ -141,24 +208,24 @@ impl JsString {
         }
         let suffix_len = used + other.len();
         suffix[used..suffix_len].copy_from_slice(other.as_utf16());
-        let result = Self(Rc::new(StringStorage::Appended {
+        let result = Self::from_storage(StringStorage::Appended {
             prefix: RefCell::new(Some(base)),
             suffix,
             suffix_len: suffix_len as u8,
             len: self.len() + other.len(),
             depth,
             flattened: OnceCell::new(),
-        }));
+        });
         Some((result, suffix_len))
     }
     pub(crate) fn prefix(&self) -> Option<Self> {
-        match self.0.as_ref() {
+        match &self.0.storage {
             StringStorage::Appended { prefix, .. } => prefix.borrow().clone(),
             _ => None,
         }
     }
     fn depth(&self) -> u8 {
-        match self.0.as_ref() {
+        match &self.0.storage {
             StringStorage::Appended { depth, .. } => *depth,
             _ => 0,
         }
@@ -170,7 +237,7 @@ impl JsString {
             suffix_len,
             flattened,
             ..
-        } = self.0.as_ref()
+        } = &self.0.storage
         {
             if let Some(units) = flattened.get() {
                 out.extend_from_slice(units);

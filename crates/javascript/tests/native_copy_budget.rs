@@ -169,3 +169,45 @@ fn ten_thousand_short_appends_share_storage_and_preserve_intermediate_values() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn large_string_reservations_follow_live_aliases_between_collections() {
+    let mut vm = Vm::new();
+    vm.collect_garbage();
+    let baseline = vm.estimated_heap_bytes();
+    let mut strings = Vec::new();
+    for i in 0..24 {
+        strings.push(vm.finish_buffer_string(vec![i; 32 * 1024]).unwrap());
+    }
+    let full = vm.estimated_heap_bytes();
+    assert!(full - baseline >= 24 * 64 * 1024);
+    let alias = strings[0].clone();
+    drop(strings);
+    assert!(vm.estimated_heap_bytes() >= baseline + 64 * 1024);
+    assert!(full - vm.estimated_heap_bytes() >= 23 * 64 * 1024);
+    drop(alias);
+    assert_eq!(vm.estimated_heap_bytes(), baseline);
+}
+
+#[test]
+fn shared_large_strings_keep_separate_vm_charges_across_collection() {
+    let mut left = Vm::new();
+    let mut right = Vm::new();
+    let value = left.finish_buffer_string(vec![0xD800; 32 * 1024]).unwrap();
+    left.set_global("retained", value.clone()).unwrap();
+    right.set_global("retained", value.clone()).unwrap();
+    drop(value);
+    for _ in 0..3 {
+        left.collect_garbage();
+        right.collect_garbage();
+    }
+    left.set_global("retained", Value::Null).unwrap();
+    left.collect_garbage();
+    assert_eq!(
+        right.eval("retained.charCodeAt(0)").unwrap(),
+        Value::from(0xD800)
+    );
+    let before = right.estimated_heap_bytes();
+    right.set_global("retained", Value::Null).unwrap();
+    assert!(before - right.estimated_heap_bytes() >= 64 * 1024);
+}

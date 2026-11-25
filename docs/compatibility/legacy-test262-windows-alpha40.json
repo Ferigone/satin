@@ -1,0 +1,75 @@
+{
+  "sourceCommit": "fc9de7072128f91df6b509f28dee3c7c3d0f7cb2",
+  "sourceTree": "22282f018dc7c6d0c02e9ef29025f4cedcaca8b7",
+  "corpusCommit": "e1166500a0d26c8b90e704a31c6646992573f632",
+  "operatingSystem": "Microsoft Windows Server 2022 Datacenter",
+  "executableSHA256": "6bc0e2be7e025cf54dc6eca2fd0e33eeed63b508e97fcbd0eb785763090c96e0",
+  "workflowUrl": "https://github.com/Ferigone/satin/actions/runs/45664169125",
+  "artifactUrl": "https://github.com/Ferigone/satin/actions/runs/45664169125/artifacts/15049242276",
+  "artifactSHA256": "6d288a9529e6a3e5e7d479c87a3ec9955f28d112aa5a1c3a7c173f5ff6c5f0c6",
+  "strictProbeExit": 1,
+  "websiteRun": "complete",
+  "allCasesPassed": false,
+  "counters": {
+    "planned": 16436,
+    "ran": 16436,
+    "pass": 16193,
+    "fail": 243,
+    "failedToLoad": 0
+  },
+  "tables": {
+    "run": {
+      "runLogger": {
+        "rows": 243,
+        "showSourceLinks": 243,
+        "uniqueLinkTexts": 212,
+        "uniqueFragments": 212,
+        "fragmentMatchesText": 243
+      },
+      "resultsTable": {
+        "rows": 0,
+        "showSourceLinks": 0,
+        "uniqueLinkTexts": 0,
+        "uniqueFragments": 0,
+        "fragmentMatchesText": 0
+      }
+    },
+    "results": {
+      "runLogger": {
+        "rows": 243,
+        "showSourceLinks": 243,
+        "uniqueLinkTexts": 212,
+        "uniqueFragments": 212,
+        "fragmentMatchesText": 243
+      },
+      "resultsTable": {
+        "rows": 4911,
+        "showSourceLinks": 4826,
+        "uniqueLinkTexts": 1,
+        "uniqueFragments": 2980,
+        "fragmentMatchesText": 0
+      }
+    }
+  },
+  "screenshot": "legacy-test262-windows-alpha40.png",
+  "screenshotSHA256": "55a0543cc797e7ff72d6b77c150231a1a6262ab6797b5602964795f680e9d3d8",
+  "runSnapshotSHA256": "f57a4a48d560dc9d5960473cfe2b319e7cff73139f2c5a3460320b4d371b2d76",
+  "resultsSnapshotSHA256": "7ae83e004e961b223c1ea8ab79ad89226c2926927291c930d9aef96abff7305d",
+  "layoutLimited": false,
+  "paintLimited": false,
+  "javascriptDiagnostics": [
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: object",
+    "Unhandled promise rejection: undefined",
+    "Unhandled promise rejection: object",
+    "ExecutionLimit: Task CPU budget exceeded"
+  ],
+  "additionalFailureComparedToLinuxEngine": {
+    "ordinal": 650,
+    "path": "TestCases/language/comments/S7.4_A5.js"
+  }
+}

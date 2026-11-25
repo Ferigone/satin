@@ -28,6 +28,12 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.40
+
+The native Windows browser completed all **16,436 tests** on the original 2016 Test262 website. The Run and Results tabs recorded **16,193 passed, 243 failed and zero failed to load**, 42 more passes than Windows alpha.39. A separate Linux browser-engine session recorded **16,194 passed and 242 failed**, with 188 failures at the previously reported stopping point of 8,276. Opening Results after that run produced 4,911 rows and 4,826 links to test source. [Windows evidence and per-case browser results](docs/compatibility/legacy-test262.md#full-run-all-in-alpha40)
+
+Large temporary JavaScript strings release their heap reservations when the last reference disappears. An iframe can use the instruction allowance of its enclosing timer or input event, with part of the task reserved so the parent can report an error and continue. Mouse events now expose page coordinates, which allows scripts handling clicks on large reports to read the pointer position without forcing a layout at zero scroll. [Legacy Test262 measurements](docs/compatibility/legacy-test262.md)
+
 ## Changes in alpha.39
 
 Satin can run longer click, keyboard and form handlers under a bounded CPU deadline. A regression test registers listeners on 8,192 separate elements and verifies that removing a listener frees a slot. In a native-window replay with 16,436 preloaded Test262 results, the page displayed the total count but reached the JavaScript heap limit before populating the results table. A synthetic event fired inside a handler shares the same task budget. The optional `caller` property on a non-strict JavaScript function now exposes a stable accessor while continuing to hide strict callers. [Legacy Test262 results and verification](docs/compatibility/legacy-test262.md)
@@ -36,7 +42,7 @@ Satin can run longer click, keyboard and form handlers under a bounded CPU deadl
 
 Satin can represent a sparse array with a length of 2³² − 1 and only a few stored elements. Methods such as `map`, `filter` and `lastIndexOf` can skip empty ranges while preserving observable getter, proxy and callback behavior. Generator destructuring resumes across yields, and evaluated source preserves lone UTF-16 surrogates. Long strings release unused prefixes. Browser timers now measure CPU time so a descheduled tab can resume its callback.
 
-On the 2016 Test262 website’s 16,436 original cases, the standalone JavaScript engine passed **16,152**, up from **16,057** in alpha.37. All 95 newly passing cases and all 284 remaining nonpasses are identified in the [legacy Test262 comparison](docs/compatibility/legacy-test262.md). It also records what happened when the same fixtures ran inside browser iframes.
+The alpha.38 browser engine completed the 2016 Test262 website’s **Run All** in one session with **16,151 passed, 285 failed and 0 failed to load** across all 16,436 cases. It passed the reported stopping point of 8,276 with 207 failures recorded there. In fresh standalone VMs, alpha.38 passed 16,152 cases, up from 16,057 in alpha.37. [Browser failure index and isolated VM comparison](docs/compatibility/legacy-test262.md)
 
 On Windows, Media Source Extensions now query the installed Media Foundation backend for supported media types. Players can read total, dropped and corrupted frame counts through `getVideoPlaybackQuality()`. The optional `twitch-bootstrap-profile` Cargo feature lets developers measure JavaScript work during Twitch startup. End-to-end playback on public Twitch streams and YouTube videos still needs verification. [Media checks](docs/VERIFICATION.md#website-compatibility)
 
@@ -59,7 +65,7 @@ On the same 6,536 eligible static CSS reference comparisons, the number passing 
 ## Compatibility roadmap
 
 <!-- compatibility:begin -->
-Satin’s JavaScript engine passed **100,530 of 103,346 Test262 checks (97.28%)** on Linux x86_64. **52,244 of 53,792 files** passed in every required mode. Measured 2026-11-24 on [Satin `56fd2f7`](https://github.com/Ferigone/satin/commit/56fd2f7529f81bb56df0be415937ed0f0eb98f91) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
+Satin’s JavaScript engine passed **100,801 of 103,346 Test262 checks (97.54%)** on Linux x86_64. **52,402 of 53,792 files** passed in every required mode. Measured 2026-11-25 on [Satin `fc9de70`](https://github.com/Ferigone/satin/commit/fc9de7072128f91df6b509f28dee3c7c3d0f7cb2) against [Test262 `48221d7`](https://github.com/tc39/test262/tree/48221d7c1f7745dc13e420a2e850a248c0b2afb4).
 
 ![Compatibility heatmap showing JavaScript by Test262 directory, selected CSS tests, HTML parsing and Canvas pixel tests. Exact counts and sources follow.](assets/compatibility-heatmap.svg)
 
@@ -70,12 +76,12 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 
 | Suite | Passed / total | Pass rate | Scope and evidence |
 | --- | ---: | ---: | --- |
-| Core language | 44,040 / 44,709 | 98.50% | Test262 · `language` |
-| Built-in objects | 45,931 / 47,449 | 96.80% | Test262 · `built-ins` |
-| Intl (ECMA-402) | 6,428 / 6,786 | 94.72% | Test262 · `intl402` |
+| Core language | 44,092 / 44,709 | 98.62% | Test262 · `language` |
+| Built-in objects | 46,113 / 47,449 | 97.18% | Test262 · `built-ins` |
+| Intl (ECMA-402) | 6,430 / 6,786 | 94.75% | Test262 · `intl402` |
 | Annex B | 1,371 / 1,377 | 99.56% | Test262 · `annexB` |
-| Test harness | 232 / 234 | 99.15% | Test262 · `harness` |
-| Staging | 2,528 / 2,791 | 90.58% | Test262 · `staging` |
+| Test harness | 234 / 234 | 100.00% | Test262 · `harness` |
+| Staging | 2,561 / 2,791 | 91.76% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
 | Static CSS reftests | 1,968 / 6,536 | 30.11% | [Alpha.37 static screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md#alpha37-static-css-rerun) |
@@ -83,7 +89,7 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
 
-The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 690 `fail`, 653 `unsupported`, 1,473 `resource_limit`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
+The standalone JavaScript worker ran every eligible test file in the pinned checkout. A file can contribute both a strict and a non-strict result. All outcomes count toward the denominator. The remaining results were 604 `fail`, 599 `unsupported`, 1,342 `resource_limit`. A file whose metadata the runner cannot read contributes one result. To run the legacy website’s `language`, `built-ins`, `annexB` or `harness` chapter in a Satin window, see the [legacy browser probe](tools/test262/website.md).
 
 The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising the tests. Each variant had a 3-second timeout and a 1,000,000-instruction budget. [Per-file and per-variant outcomes (TSV.GZ)](docs/compatibility/test262-outcomes.tsv.gz) · [Machine-readable totals](docs/compatibility/test262.json) · [Reproduce the measurement](tools/test262/README.md#reports-and-limits)
 

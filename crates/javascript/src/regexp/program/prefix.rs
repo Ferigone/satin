@@ -148,16 +148,51 @@ pub(super) fn seek(
     if ascii == ALL {
         return Ok(Some(index));
     }
-    while let Some(&unit) = input.get(index) {
-        // Always leave non-ASCII starts to the matcher, especially the
-        // interior of a surrogate pair with u. Every accepted start pays the
-        // ordinary matcher charge for processing that candidate.
-        if unit >= 128 || ascii & (1 << unit) != 0 {
+    // Charge every rejected start. Checking the deadline once per bounded
+    // native scan avoids a clock read for every UTF-16 unit of a long miss.
+    for chunk in input[index..].chunks(64) {
+        let skipped = chunk
+            .iter()
+            .position(|&unit| unit >= 128 || ascii & (1 << unit) != 0)
+            .unwrap_or(chunk.len());
+        if skipped != 0 {
+            vm.consume_work(skipped)?;
+            index += skipped;
+        }
+        // Always leave a non-ASCII start, including a surrogate pair, to
+        // the matcher. It charges the accepted candidate separately.
+        if skipped < chunk.len() {
             return Ok(Some(index));
         }
-        vm.consume_work(1)?;
-        index += 1;
     }
     // The prefix filter is enabled only where an empty match is impossible.
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prefix_scan_charges_only_the_rejected_units() {
+        let mut vm = Vm::new();
+        for skipped in [0, 1, 63, 64, 65, 128, 129] {
+            for candidate in [Some(b'x' as u16), Some(0xd83d), None] {
+                let mut input = vec![b'-' as u16; skipped + 3];
+                input.extend(candidate);
+                let start = 3;
+                let expected = candidate.map(|_| start + skipped);
+                vm.with_task_limits(skipped as u64 + 1, None, |vm| {
+                    assert_eq!(seek(vm, &input, start, 1 << b'x')?, expected);
+                    vm.charge_work(1)?;
+                    assert_eq!(
+                        vm.charge_work(1).unwrap_err().kind,
+                        crate::ErrorKind::ExecutionLimit
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+    }
 }

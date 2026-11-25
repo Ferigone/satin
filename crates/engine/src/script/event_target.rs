@@ -389,6 +389,7 @@ impl EventData {
         target: Value,
         path: DispatchPath,
     ) -> Result<(), JsError> {
+        super::ui_events::capture_dispatch_position(vm, event)?;
         vm.set_host_slot(event.clone(), EVENT_TARGET_SLOT, target)?;
         self.path.replace(Some(path));
         self.active.set(true);

@@ -1,10 +1,13 @@
 //! Window UIEvent and MouseEvent interfaces, including the legacy event factories.
-use super::{Shared, arg, event_target, getter, webidl};
+use super::{Shared, arg, event_target, getter, layout_api::LayoutHost, webidl};
+use crate::layout::ScrollOffset;
 use rust_browser_javascript::{JsError, Value, Vm};
+use std::{cell::Cell, rc::Rc};
 
 // References must be traced by the VM even when only JS keeps an event alive.
 const UI_FIELDS: u32 = 201;
 const MOUSE_BRAND: u32 = 202;
+const WINDOW_VIEWPORT: u32 = 203;
 const UI: &[&str] = &["detail", "view"];
 const MODIFIERS: &[(&str, &str)] = &[
     ("Alt", "altKey"),
@@ -106,11 +109,61 @@ fn set(vm: &mut Vm, data: &Value, name: &str, value: Value) -> Result<(), JsErro
 
 pub(super) fn initialize_empty(vm: &mut Vm, event: &Value, mouse: bool) -> Result<(), JsError> {
     let data = vm.new_object_with_prototype(Value::Null)?;
-    vm.set_host_slot(event.clone(), UI_FIELDS, data)?;
+    vm.set_host_slot(event.clone(), UI_FIELDS, data.clone())?;
     if mouse {
-        vm.set_host_slot(event.clone(), MOUSE_BRAND, true.into())?;
+        vm.set_host_data(data.clone(), Rc::new(Cell::new(ScrollOffset::default())))?;
+        vm.set_host_slot(event.clone(), MOUSE_BRAND, data)?;
     }
     Ok(())
+}
+
+pub(super) fn set_window_viewport(
+    vm: &mut Vm,
+    window: &Value,
+    layout: LayoutHost,
+) -> Result<(), JsError> {
+    let holder = vm.new_object_with_prototype(Value::Null)?;
+    vm.set_host_data(holder.clone(), Rc::new(layout))?;
+    vm.set_host_slot(window.clone(), WINDOW_VIEWPORT, holder)
+}
+
+fn scroll_offset(vm: &mut Vm, data: &Value) -> Result<ScrollOffset, JsError> {
+    let view = vm.get_property(data.clone(), "view")?;
+    let layout = vm
+        .host_slot(&view, WINDOW_VIEWPORT)
+        .and_then(|holder| vm.host_data::<LayoutHost>(&holder));
+    match layout {
+        Some(layout) => layout.event_scroll_offset(vm),
+        None => Ok(ScrollOffset::default()),
+    }
+}
+
+pub(super) fn capture_dispatch_position(vm: &mut Vm, event: &Value) -> Result<(), JsError> {
+    if let Some(data) = vm.host_slot(event, MOUSE_BRAND)
+        && let Some(offset) = vm.host_data::<Cell<ScrollOffset>>(&data)
+    {
+        offset.set(scroll_offset(vm, &data)?);
+    }
+    Ok(())
+}
+
+fn page_position(vm: &mut Vm, receiver: &Value, horizontal: bool) -> Result<Value, JsError> {
+    let data = fields(vm, receiver, true)?;
+    let dispatch = event_target::event(vm, receiver)?.active.get();
+    let offset = if dispatch {
+        vm.host_data::<Cell<ScrollOffset>>(&data)
+            .expect("MouseEvent has a dispatch position")
+            .get()
+    } else {
+        scroll_offset(vm, &data)?
+    };
+    let (client, scroll) = if horizontal {
+        ("clientX", offset.x)
+    } else {
+        ("clientY", offset.y)
+    };
+    let client = vm.get_property(data, client)?.as_number().unwrap_or(0.);
+    Ok(Value::Number(client + f64::from(scroll)))
 }
 
 pub(super) fn initialize_click(vm: &mut Vm, event: &Value) -> Result<(), JsError> {
@@ -231,6 +284,11 @@ pub(super) fn install(
                 }
             }
             Ok(Value::Undefined)
+        })?;
+    }
+    for (name, horizontal) in [("pageX", true), ("pageY", false)] {
+        getter(vm, mouse_proto.clone(), name, move |vm, this, _| {
+            page_position(vm, &this, horizontal)
         })?;
     }
     webidl::operation(

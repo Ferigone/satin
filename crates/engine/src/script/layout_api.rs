@@ -298,6 +298,18 @@ impl LayoutHost {
         }
         d.viewport = viewport;
     }
+    pub(super) fn event_scroll_offset(&self, vm: &mut Vm) -> Result<ScrollOffset, JsError> {
+        let viewport = self.viewport();
+        if viewport.scroll_x != 0. || viewport.scroll_y != 0. {
+            // A mutation may shrink the scrollable area and clamp the offset.
+            self.layout(Some(vm))?;
+        }
+        let viewport = self.viewport();
+        Ok(ScrollOffset {
+            x: viewport.scroll_x,
+            y: viewport.scroll_y,
+        })
+    }
     pub(super) fn viewport(&self) -> Viewport {
         self.0.borrow().viewport
     }
@@ -479,6 +491,7 @@ impl LayoutHost {
         })));
         let prototype = state.borrow().prototype.clone();
         let window = state.borrow().window.clone();
+        super::ui_events::set_window_viewport(vm, &window, host.clone())?;
         let document_root = state.borrow().document.root;
         let document = wrap(vm, state, Some(document_root))?;
         let s = state.clone();
