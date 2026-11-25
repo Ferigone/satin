@@ -12,11 +12,11 @@ const evidence = resolve('target/bbc-evidence');
 const tmp = await mkdtemp(join(tmpdir(),'satin-bbc-'));
 await mkdir(evidence,{recursive:true});
 const viewport = {width:1280,height:800};
-const urls = ['https://www.bbc.com/','https://www.bbc.com/news'];
+const urls = ['https://www.bbc.com/','https://www.bbc.com/news','https://www.bbc.com/news/articles/crpdw1qx7jgxo'];
 const safe = value => String(value ?? '').replace(/https?:\/\/[^\s"'<>]+/g, match => {
   try {const u=new URL(match); return u.origin+u.pathname;} catch {return '[url]';}
 }).slice(0,1000);
-const report = {commit:process.env.GITHUB_SHA, startedUtc:new Date().toISOString(), viewport, nativeWindow:{width:1280,height:922, chromeHeight:122, note:'Logical content equivalence assumes scale factor 1; screenshot must be reviewed'}, cases:[]};
+const report = {commit:process.env.GITHUB_SHA, startedUtc:new Date().toISOString(), viewport, nativeWindow:{width:1280,height:944, chromeHeight:122, statusHeight:22, note:'Verify measured content viewport, not just window size'}, cases:[]};
 const save = async () => {await writeFile(join(evidence,'summary.json'),JSON.stringify(report,null,2)); console.log(JSON.stringify(report));};
 try {
   const browser = await chromium.launch({executablePath:chrome,headless:true});
@@ -38,6 +38,7 @@ try {
         await page.waitForTimeout(3000);
         item.chrome.title=await page.title(); item.chrome.finalUrl=safe(page.url());
         await page.screenshot({path:join(evidence,'chrome-'+i+'-initial.png'),timeout:10000});
+        item.chrome.consentDialog=await page.locator('iframe[title="SP Consent Message"]:visible').count()>0;
         item.chrome.initialScroll=await page.evaluate(()=>scrollY);
         const scrollStart=performance.now();
         for(let j=0;j<8;j++)await page.keyboard.press('ArrowDown');
@@ -46,13 +47,13 @@ try {
         item.chrome.finalScroll=await page.evaluate(()=>scrollY);
         await page.screenshot({path:join(evidence,'chrome-'+i+'-scroll.png'),timeout:10000});
         item.chrome.articleCandidate=await page.locator('a[href*="/news/articles/"]:visible').first().getAttribute('href',{timeout:3000}).catch(()=>null);
-        if(item.chrome.articleCandidate){try{
+        if(item.chrome.articleCandidate&&!item.chrome.consentDialog){try{
           await page.locator('a[href*="/news/articles/"]:visible').first().click({timeout:5000});
           await page.waitForTimeout(1500);item.chrome.articleUrl=safe(page.url());
           await page.screenshot({path:join(evidence,'chrome-'+i+'-article.png'),timeout:10000});
           await page.goBack({waitUntil:'domcontentloaded',timeout:10000});
           item.chrome.backUrl=safe(page.url());
-        }catch(e){item.chrome.articleError=safe(e.message)}}
+        }catch(e){item.chrome.articleError=safe(e.message)}}else if(item.chrome.consentDialog){item.chrome.articleError='Consent dialog blocks ordinary navigation; separate direct article case is not a click pass';}
       }catch(e){item.chrome.error=safe(e.message)}finally{await ctx.close()}
       for(const phase of ['initial','scroll']){
         const actions=join(tmp,i+'-'+phase+'.json');
@@ -60,8 +61,8 @@ try {
         const result={phase};item.satin.push(result);
         const start=performance.now();
         try{
-          const {stdout,stderr}=await run(satin,['--url',url,'--profile',join(tmp,'satin-'+i+'-'+phase),'--smoke-window',join(evidence,'satin-'+i+'-'+phase+'.png'),'--smoke-actions',actions,'--width','1280','--height','922'],{timeout:120000,maxBuffer:8*1024*1024,windowsHide:true});
-          const j=JSON.parse(stdout.trim());result.version=j.version;result.finalUrl=safe(j.url);result.title=j.title;result.frames=j.frames_presented;result.windowSmoke=j.window_smoke;result.layoutLimited=j.layout_limited;result.paintLimited=j.paint_limited;result.diagnostics=j.javascript?.diagnostics?.slice(0,30).map(safe);result.stderr=safe(stderr);
+          const {stdout,stderr}=await run(satin,['--url',url,'--profile',join(tmp,'satin-'+i+'-'+phase),'--smoke-window',join(evidence,'satin-'+i+'-'+phase+'.png'),'--smoke-actions',actions,'--width','1280','--height','944'],{timeout:120000,maxBuffer:8*1024*1024,windowsHide:true,env:{...process.env,SATIN_QA_LAYOUT_LIMIT:'1'}});
+          const j=JSON.parse(stdout.trim());result.version=j.version;result.finalUrl=safe(j.url);result.title=j.title;result.frames=j.frames_presented;result.windowSmoke=j.window_smoke;result.layoutLimited=j.layout_limited;result.paintLimited=j.paint_limited;result.scrollY=j.scroll_y;result.contentViewport=j.content_viewport;result.layoutReasons=[...new Set(stderr.split(/\r?\n/).filter(l=>l.includes('SATIN_QA_LAYOUT_LIMIT')))].slice(0,30);result.diagnostics=j.javascript?.diagnostics?.slice(0,30).map(safe);result.stderr=safe(stderr);
         }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code}
         result.elapsedMs=performance.now()-start;
         await save();

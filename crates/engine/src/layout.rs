@@ -819,6 +819,7 @@ struct Builder<'a> {
     recursion: usize,
     work_remaining: usize,
     limited: bool,
+    qa_limit_traced: bool,
 }
 impl<'a> Builder<'a> {
     fn new(
@@ -860,6 +861,15 @@ impl<'a> Builder<'a> {
                 .saturating_add(512)
                 .min(1_000_000),
             limited: false,
+            qa_limit_traced: false,
+        }
+    }
+
+    // Temporary public-site diagnostics; never change the layout budget.
+    fn qa_trace_limit(&mut self, id: NodeId, reason: &str) {
+        if !self.qa_limit_traced && std::env::var_os("SATIN_QA_LAYOUT_LIMIT").is_some() {
+            self.qa_limit_traced = true;
+            eprintln!("SATIN_QA_LAYOUT_LIMIT reason={} tag={} node={} depth={} work_remaining={} dom_nodes={}", reason, self.page.document.tag(id), id.0, self.recursion, self.work_remaining, self.page.document.nodes.len());
         }
     }
 
@@ -1902,6 +1912,7 @@ impl Builder<'_> {
             false,
             AxisSize::from_style(container, false, None, metrics),
         );
+        if rows.limited || columns.limited { self.qa_trace_limit(id, "grid_intrinsic_tracks"); }
         self.limited |= rows.limited || columns.limited;
         let nodes = self.grid_nodes(id);
         let doc = &self.page.document;
@@ -1913,6 +1924,7 @@ impl Builder<'_> {
             [&rows, &columns],
             &mut self.work_remaining,
         ) else {
+            self.qa_trace_limit(id, "grid_intrinsic_placement");
             self.limited = true;
             return (0., 0.);
         };
@@ -1972,6 +1984,7 @@ impl Builder<'_> {
             },
         );
         let column_template = Axis::new(container, false, inline_size);
+        if row_template.limited || column_template.limited { self.qa_trace_limit(id, "grid_tracks"); }
         self.limited |= row_template.limited || column_template.limited;
         let nodes = self.grid_nodes(id);
         let doc = &self.page.document;
@@ -1984,6 +1997,7 @@ impl Builder<'_> {
             &mut self.work_remaining,
         );
         let Some(placement) = placement else {
+            self.qa_trace_limit(id, "grid_placement");
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
             for &child in &self.page.document.nodes[id.0].children {
@@ -2836,6 +2850,7 @@ impl Builder<'_> {
     }
     fn child(&mut self, id: NodeId, line: &mut Line<'_>, href: Option<Arc<str>>) {
         if self.recursion >= MAX_LAYOUT_RECURSION || self.work_remaining == 0 {
+            self.qa_trace_limit(id, if self.work_remaining == 0 { "work" } else { "depth" });
             self.flatten(id, line, href);
             return;
         }
@@ -2992,6 +3007,7 @@ impl Builder<'_> {
         c: Constraints,
     ) -> f32 {
         if self.recursion >= MAX_LAYOUT_RECURSION || self.work_remaining == 0 {
+            self.qa_trace_limit(id, if self.work_remaining == 0 { "work" } else { "depth" });
             let mut line = Line::new(
                 x,
                 y,
