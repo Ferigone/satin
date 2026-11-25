@@ -369,7 +369,7 @@ impl Vm {
                 body: Rc::new(Chunk {
                     strict: true,
                     ..Chunk::default()
-                }),
+                }).into(),
                 strict: true,
                 arrow: false,
                 kind: crate::parser::FunctionKind::Ordinary,
@@ -727,7 +727,7 @@ impl Vm {
         } else {
             unreachable!()
         };
-        let body = self.function_environment(
+        let (body, chunk) = self.function_environment(
             &code,
             parent,
             Invocation {
@@ -738,7 +738,7 @@ impl Vm {
                 this_initialized: !derived,
             },
         )?;
-        match self.run_chunk(&code.body, body)? {
+        match self.run_chunk(&chunk, body)? {
             Completion::Return(value) if value.as_object().is_some() => Ok(value),
             Completion::Return(value) if derived && !value.is_undefined() => Err(
                 JsError::type_error("Derived constructor returned a primitive"),

@@ -263,7 +263,10 @@ impl Bridge {
             EventKind::Seeked(time) => MediaUpdate::Seeked(time),
             EventKind::Time(time) => MediaUpdate::Time(time),
             EventKind::Ended => MediaUpdate::Ended,
-            EventKind::Frame(frame) => MediaUpdate::Frame(frame),
+            EventKind::Frame { pixels, sequence } => MediaUpdate::Frame { pixels, sequence },
+            EventKind::DecoderFrameStats { dropped, corrupted } => {
+                MediaUpdate::DecoderFrameStats { dropped, corrupted }
+            }
             EventKind::Error(error) => MediaUpdate::Error(error),
         };
         runtime.update_media(media_key(event.key), update)

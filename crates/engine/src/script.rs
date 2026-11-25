@@ -1082,7 +1082,7 @@ impl ScriptRuntime {
             });
         }
         report_unhandled(&mut self.vm, &self.state);
-        self.vm.collect_garbage();
+        self.collect_after_task(true);
     }
     /// Returns whether the link's default navigation is allowed.
     pub fn click(&mut self, node: NodeId) -> bool {
@@ -2880,6 +2880,35 @@ mod tests {
         }
         runtime.pump_with_network_errors().unwrap();
         assert!(runtime.vm.heap_cell_count() <= baseline + 4);
+        assert_eq!(
+            runtime.eval("catalog.length").unwrap(),
+            Value::from(9 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn classic_scripts_reuse_collection_thresholds_for_large_live_pages() {
+        let page = LoadedPage::from_html("https://example.test/", "<script>0</script>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let retained = runtime
+            .vm
+            .finish_buffer_string(vec![b'x' as u16; 9 * 1024 * 1024])
+            .unwrap();
+        runtime.vm.set_global("catalog", retained).unwrap();
+        let script = &page.scripts[0];
+        let run = |runtime: &mut ScriptRuntime| {
+            runtime.execute_classic(script.node, "0", &script.name, page.base.as_str(), false);
+        };
+
+        run(&mut runtime);
+        let orphan = runtime.vm.new_object();
+        run(&mut runtime);
+        assert!(runtime.vm.get_property(orphan.clone(), "x").is_ok());
+        while runtime.vm.heap_cell_count() < runtime.next_collection_cells {
+            runtime.vm.new_object();
+        }
+        run(&mut runtime);
+        assert!(runtime.vm.get_property(orphan, "x").is_err());
         assert_eq!(
             runtime.eval("catalog.length").unwrap(),
             Value::from(9 * 1024 * 1024)

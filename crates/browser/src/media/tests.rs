@@ -99,12 +99,12 @@ impl Harness {
                     self.playback.seeked = true;
                 }
                 EventKind::Time(position) => self.playback.position = position,
-                EventKind::Frame(frame) => {
+                EventKind::Frame { pixels: frame, .. } => {
                     self.playback.frames += 1;
                     self.playback.frame = Some(frame);
                 }
                 EventKind::Ended => self.playback.ended = true,
-                EventKind::Waiting => {}
+                EventKind::Waiting | EventKind::DecoderFrameStats { .. } => {}
                 EventKind::Error(error) => panic!("playback failed: {error}"),
             }
         }

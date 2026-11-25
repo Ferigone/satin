@@ -250,7 +250,7 @@ impl Vm {
         let promise = capability.promise.clone();
         let owner = invocation.function.as_object().unwrap();
         match self.function_environment(&code, parent, invocation) {
-            Ok(env) => self.start_async_body(owner, code.body.clone(), env, capability, false)?,
+            Ok((env, body)) => self.start_async_body(owner, body, env, capability, false)?,
             Err(error) => self.finish_async(capability, Err(error))?,
         }
         Ok(promise)
