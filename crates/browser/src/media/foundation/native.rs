@@ -25,6 +25,7 @@ use windows::{
             MF_MEDIA_ENGINE_EVENT_SEEKING, MF_MEDIA_ENGINE_EVENT_TIMEUPDATE,
             MF_MEDIA_ENGINE_EVENT_WAITING, MF_MEDIA_ENGINE_EXTENSION,
             MF_MEDIA_ENGINE_READY_HAVE_FUTURE_DATA, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+            MF_MEDIA_ENGINE_STATISTIC_FRAMES_DROPPED, MF_MEDIA_ENGINE_STATISTIC_FRAMES_CORRUPTED,
             MF_VERSION, MFARGB, MFCreateAttributes, MFCreateMFByteStreamOnStream, MFShutdown,
             MFStartup,
         },
@@ -32,6 +33,7 @@ use windows::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
             CoUninitialize,
         },
+        System::Com::StructuredStorage::PropVariantToUInt32,
         UI::Shell::SHCreateMemStream,
     },
     core::{BSTR, Error, Interface, Result, implement},
@@ -164,6 +166,8 @@ impl Player {
             imaging,
             input,
             surface: None,
+            frame_sequence: 0,
+            frame_stats: (0, 0),
             native_size: None,
             pending_seek: None,
             pending_rate: None,
@@ -212,6 +216,8 @@ pub(super) struct Player {
     imaging: IWICImagingFactory,
     input: Input,
     surface: Option<WicSurface>,
+    frame_sequence: u64,
+    frame_stats: (u32, u32),
     native_size: Option<(u32, u32)>,
     pending_seek: Option<f64>,
     pending_rate: Option<(u64, f64)>,
@@ -354,6 +360,9 @@ impl Player {
         output: &Shared,
         key: Key,
     ) -> std::result::Result<(), String> {
+        if matches!(signal, Signal::Time | Signal::Paused | Signal::Ended) {
+            self.update_frame_stats(output, key);
+        }
         let mut capture = false;
         let kind = match signal {
             Signal::StreamOpened => {
@@ -402,7 +411,7 @@ impl Player {
                     .frame(true, output, key)
                     .map_err(|error| error.to_string())?
                 {
-                    output.publish(key, EventKind::Frame(frame));
+                    output.publish(key, frame);
                 }
                 return Ok(());
             }
@@ -481,10 +490,29 @@ impl Player {
                 .frame(true, output, key)
                 .map_err(|error| error.to_string())?
         {
-            output.publish(key, EventKind::Frame(frame));
+            output.publish(key, frame);
         }
         output.publish(key, kind);
         Ok(())
+    }
+
+    fn update_frame_stats(&mut self, output: &Shared, key: Key) {
+        if !unsafe { self.engine.HasVideo().as_bool() } {
+            return;
+        }
+        let Ok(engine) = self.engine.cast::<IMFMediaEngineEx>() else {
+            return;
+        };
+        let statistic = |kind| unsafe {
+            let value = engine.GetStatistics(kind).ok()?;
+            PropVariantToUInt32(&value).ok()
+        };
+        let dropped = statistic(MF_MEDIA_ENGINE_STATISTIC_FRAMES_DROPPED).unwrap_or(self.frame_stats.0);
+        let corrupted = statistic(MF_MEDIA_ENGINE_STATISTIC_FRAMES_CORRUPTED).unwrap_or(self.frame_stats.1);
+        if (dropped, corrupted) != self.frame_stats {
+            self.frame_stats = (dropped, corrupted);
+            output.publish(key, EventKind::DecoderFrameStats { dropped, corrupted });
+        }
     }
 
     pub(super) fn needs_frame(&self) -> bool {
@@ -524,7 +552,7 @@ impl Player {
         force: bool,
         output: &Shared,
         key: Key,
-    ) -> Result<Option<Arc<image::RgbaImage>>> {
+    ) -> Result<Option<EventKind>> {
         let stream = matches!(self.input, Input::Stream(_));
         if (stream && !unsafe { self.engine.HasVideo().as_bool() })
             || (!stream
@@ -563,11 +591,11 @@ impl Player {
         if self.surface.is_none() {
             self.surface = Some(WicSurface::new(&self.imaging, width, height)?);
         }
-        self.surface
-            .as_ref()
-            .unwrap()
-            .copy_frame(&self.engine)
-            .map(Some)
+        let pixels = self.surface.as_ref().unwrap().copy_frame(&self.engine)?;
+        if status != S_FALSE || self.frame_sequence == 0 {
+            self.frame_sequence = self.frame_sequence.saturating_add(1);
+        }
+        Ok(Some(EventKind::Frame { pixels, sequence: self.frame_sequence }))
     }
 }
 

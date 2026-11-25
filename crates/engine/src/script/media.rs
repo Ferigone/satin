@@ -1,6 +1,7 @@
 //! Media element state. The application supplies decoded frames and playback
 //! events from its platform backend. Downloads use DocumentSession.
 mod mse;
+mod quality;
 
 use super::{
     ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, blobs, diagnostic, dispatch_checked,
@@ -121,7 +122,14 @@ pub enum MediaUpdate {
     Seeked(f64),
     Time(f64),
     Ended,
-    Frame(Arc<image::RgbaImage>),
+    Frame {
+        pixels: Arc<image::RgbaImage>,
+        sequence: u64,
+    },
+    DecoderFrameStats {
+        dropped: u32,
+        corrupted: u32,
+    },
     Error(String),
 }
 
@@ -159,6 +167,9 @@ struct Track {
     last_event_time: f64,
     has_audio: bool,
     decoded_frames: u64,
+    last_frame_sequence: u64,
+    decoder_drops: u32,
+    corrupted_frames: u32,
     error: Option<String>,
     plays: Vec<(RootId, RootId)>,
 }
@@ -189,6 +200,9 @@ impl Track {
             last_event_time: 0.,
             has_audio: false,
             decoded_frames: 0,
+            last_frame_sequence: 0,
+            decoder_drops: 0,
+            corrupted_frames: 0,
             error: None,
             plays: Vec::new(),
         }
@@ -793,6 +807,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
             Err(JsError::type_error("Illegal media constructor"))
         })?;
     }
+    quality::install(vm, state, &video)?;
     for name in [
         "currentSrc",
         "duration",
@@ -1241,9 +1256,16 @@ impl super::ScriptRuntime {
                 track.paused = true;
                 events = &["timeupdate", "pause", "ended"];
             }
-            MediaUpdate::Frame(frame) => {
+            MediaUpdate::DecoderFrameStats { dropped, corrupted } => {
+                track.decoder_drops = track.decoder_drops.max(dropped);
+                track.corrupted_frames = track.corrupted_frames.max(corrupted);
+            }
+            MediaUpdate::Frame { pixels: frame, sequence } => {
                 frame_updated = true;
-                track.decoded_frames = track.decoded_frames.saturating_add(1);
+                if sequence > track.last_frame_sequence {
+                    track.decoded_frames = track.decoded_frames.saturating_add(1);
+                    track.last_frame_sequence = sequence;
+                }
                 let frames = &state.canvases.frames;
                 relayout = match frames.get(id) {
                     Some(Frame::Bitmap(prior)) => prior.dimensions() != frame.dimensions(),

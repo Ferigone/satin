@@ -42,6 +42,8 @@ mod structured_clone;
 mod style_sheets;
 mod text_encoding;
 mod tree_walker;
+#[cfg(feature = "twitch-bootstrap-profile")]
+mod twitch_profile;
 mod url_api;
 mod webidl;
 mod workers;
@@ -151,6 +153,8 @@ struct State {
 }
 
 pub struct ScriptRuntime {
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    twitch_profile: Option<twitch_profile::Profile>,
     vm: Vm,
     state: Shared,
     fetch: fetch::FetchHost,
@@ -973,6 +977,8 @@ impl ScriptRuntime {
         let next_collection_bytes = vm.estimated_heap_bytes() + 1024 * 1024;
         let next_collection_cells = vm.limits().max_heap_objects / 2;
         Ok(Self {
+            #[cfg(feature = "twitch-bootstrap-profile")]
+            twitch_profile: None,
             vm,
             state,
             fetch,
@@ -1069,9 +1075,14 @@ impl ScriptRuntime {
         external: bool,
     ) {
         let state = self.state.clone();
-        let result = self
-            .vm
-            .with_task(|vm| run_classic(vm, &state, node, source, identifier, external, true));
+        let run = |vm: &mut Vm| run_classic(vm, &state, node, source, identifier, external, true);
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        let result = match self.twitch_profile {
+            Some(profile) => profile.run(&mut self.vm, identifier, run),
+            None => self.vm.with_task(run),
+        };
+        #[cfg(not(feature = "twitch-bootstrap-profile"))]
+        let result = self.vm.with_task(run);
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
@@ -1083,6 +1094,11 @@ impl ScriptRuntime {
             });
         }
         report_unhandled(&mut self.vm, &self.state);
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        if let Some(profile) = self.twitch_profile {
+            profile.collect(self);
+            return;
+        }
         self.collect_after_task(true);
     }
     /// Returns whether the link's default navigation is allowed.

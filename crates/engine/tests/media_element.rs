@@ -156,3 +156,45 @@ fn playback_speed_drives_native_media_and_resets_to_the_default_on_load() {
         Some(true)
     );
 }
+
+#[test]
+fn video_quality_snapshots_distinguish_new_redrawn_and_dropped_frames() {
+    use rust_browser_engine::script::MediaUpdate;
+    use std::sync::Arc;
+
+    let page = LoadedPage::from_html("https://example.test/", "<video id='v'></video><audio id='a'></audio>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let initial = runtime.eval(r#"
+        const v = document.getElementById("v");
+        const before = performance.now();
+        const original = v.getVideoPlaybackQuality();
+        const after = performance.now();
+        function throwsType(f) { try { f(); } catch (e) { return e instanceof TypeError; } return false; }
+        v.src = URL.createObjectURL(new Blob(["sample"], {type: "video/mp4"}));
+        original instanceof VideoPlaybackQuality && original.totalVideoFrames === 0 &&
+            original.creationTime >= before && original.creationTime <= after &&
+            v.getVideoPlaybackQuality() !== original &&
+            throwsType(() => new VideoPlaybackQuality()) &&
+            throwsType(() => v.getVideoPlaybackQuality.call(document.getElementById("a"))) &&
+            throwsType(() => Object.getOwnPropertyDescriptor(VideoPlaybackQuality.prototype, "totalVideoFrames").get.call({}))
+    "#).unwrap();
+    assert_eq!(initial.as_bool(), Some(true));
+    let commands = runtime.take_media_commands();
+    let [MediaCommand::Open { key, .. }, ..] = commands.as_slice() else { panic!("expected a media source"); };
+    let key = *key;
+    let pixels = Arc::new(image::RgbaImage::new(2, 2));
+    for sequence in [1, 4, 4] {
+        runtime.update_media(key, MediaUpdate::Frame { pixels: pixels.clone(), sequence });
+    }
+    runtime.update_media(key, MediaUpdate::DecoderFrameStats { dropped: 2, corrupted: 1 });
+    let result = runtime.eval(r#"
+        const measured = v.getVideoPlaybackQuality();
+        measured.totalVideoFrames === 6 && measured.droppedVideoFrames === 4 &&
+            measured.corruptedVideoFrames === 1 && original.totalVideoFrames === 0
+    "#).unwrap();
+    assert_eq!(result.as_bool(), Some(true));
+    assert_eq!(runtime.media_status()[0].decoded_frames, 2);
+    runtime.eval("v.load()").unwrap();
+    runtime.update_media(key, MediaUpdate::Frame { pixels, sequence: 5 });
+    assert_eq!(runtime.eval("v.getVideoPlaybackQuality().totalVideoFrames === 0 && measured.totalVideoFrames === 6").unwrap().as_bool(), Some(true));
+}

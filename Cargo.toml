@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/engine", "crates/browser", "crates/launcher", "crates/javascript", "crates/js-harness"]
+members = ["crates/engine", "crates/browser", "crates/launcher", "crates/javascript", "crates/js-harness", "crates/media-foundation"]
 resolver = "2"
 
 [workspace.package]

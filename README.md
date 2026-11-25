@@ -34,6 +34,8 @@ Satin can represent a sparse array with a length of 2³² − 1 and only a few s
 
 On the 2016 Test262 website’s 16,436 original cases, the standalone JavaScript engine passed **16,152**, up from **16,057** in alpha.37. All 95 newly passing cases and all 284 remaining nonpasses are identified in the [legacy Test262 comparison](docs/compatibility/legacy-test262.md). It also records what happened when the same fixtures ran inside browser iframes.
 
+On Windows, Media Source Extensions now query the installed Media Foundation backend for supported media types. Players can read total, dropped and corrupted frame counts through `getVideoPlaybackQuality()`. The optional `twitch-bootstrap-profile` Cargo feature lets developers measure JavaScript work during Twitch startup. End-to-end playback on public Twitch streams and YouTube videos still needs verification. [Media checks](docs/VERIFICATION.md#website-compatibility)
+
 ### Changes in alpha.37
 
 Pages with nested Grid and Flexbox containers can reuse layout measurements within a frame. Satin skips hidden subtrees when calculating intrinsic sizes and avoids measuring the same grid placement twice. A regression test covers percentage-height children whose parent changes between a definite and an indefinite height. Six CSS Grid reference tests that hit the previous work limit now render to completion. One matches its reference and five show pixel differences. All 1,967 tests that passed in alpha.36 still pass. [Static CSS results](docs/compatibility/css.md#alpha37-static-css-rerun)
