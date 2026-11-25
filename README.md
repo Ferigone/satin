@@ -28,7 +28,15 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
-## Changes in alpha.36
+## Changes in alpha.37
+
+Pages with nested Grid and Flexbox containers can reuse layout measurements within a frame. Satin skips hidden subtrees when calculating intrinsic sizes and avoids measuring the same grid placement twice. A regression test covers percentage-height children whose parent changes between a definite and an indefinite height.
+
+The JavaScript engine releases temporary compiler storage after validating functions nested in large strict-mode scripts. Between classic scripts it can collect unused objects when a large document’s heap grows. The array search methods `find`, `findIndex`, `findLast` and `findLastIndex` can stop at an early match on a large sparse array-like object. [JavaScript implementation and regression coverage](docs/JAVASCRIPT.md)
+
+For Media Source Extensions (MSE) live streams, the seekable range now uses the overlap of the buffered audio and video tracks. [MediaSource regressions](crates/engine/tests/media_source.rs)
+
+### CSS results from alpha.36
 
 Flex containers now wrap correctly with reversed axes, gaps and auto margins in the layouts covered by the regression suite. Selectors such as `article:has(+ article)` can match a following sibling. Stylesheets using `@supports` and scripts calling `CSS.supports()` now evaluate the same conditions.
 

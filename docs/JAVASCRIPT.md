@@ -28,6 +28,8 @@ Synchronous bytecode uses bounded Rust calls for nested chunks. A body that can 
 
 Available standard-library subsets include Object descriptor/prototype/key utilities; Function call/apply/bind; common Array construction, mutation, search, iteration and reduction methods; common String code-unit, search, slicing, splitting, literal replacement, case and trimming methods; Number/Boolean conversion; parseInt/parseFloat; Math; and core Error constructors. This list describes implemented paths, not complete coverage of each constructor or method.
 
+The Array methods `find`, `findIndex`, `findLast` and `findLastIndex` read the receiver’s length once and visit indices until the predicate matches. Sparse holes and inherited properties are observable during each visit. The VM charges work per visited index, so a match at the first visited index can complete even on an array-like object with a length of `Number.MAX_SAFE_INTEGER`.
+
 Objects enumerate numeric index keys before other string keys, then Symbol keys in insertion order. Object.keys/values/entries/getOwnPropertyNames and for-in omit Symbols; Object.getOwnPropertySymbols and Reflect.ownKeys expose the appropriate key kinds. Object.assign, defineProperties and freeze/seal include Symbol descriptors. Deleting and reinserting a key moves it to the end of its key category. Array length changes enforce writable length and non-configurable element restrictions. Native-generated TypeError/ReferenceError/etc. inherit their intrinsic subtype prototype; caught errors therefore retain constructor identity independently of a user-controlled `name` property. Throwing an arbitrary object or Symbol does not coerce it.
 
 ## Templates, patterns and short-circuit references
@@ -123,6 +125,8 @@ BigInt literals accept decimal, binary, octal, and hexadecimal digits and numeri
 ## Strings and object lifetime
 
 `JsString` owns reference-counted `[u16]` storage. `JsString::from_utf16` and `as_utf16` preserve isolated high and low surrogates. Lexing, concatenation, indexing, comparisons, substring operations and property keys preserve those code units. Conversion to Rust Unicode text is explicit: `to_string_lossy` is intended for host display. `eval`/Function source containing isolated surrogate code units is explicitly unsupported rather than silently decoded lossily.
+
+`String.prototype.localeCompare` and `Intl.Collator.prototype.compare` use the same ICU4X comparison. Locale and collation options apply to the comparison, canonical equivalents compare equal, and isolated surrogates remain distinguishable from one another and from U+FFFD. Non-ASCII comparison accounts for normalization work in the VM budget.
 
 String case methods preserve unpaired surrogates. `toLowerCase` and `toUpperCase` use the Unicode 17.0.0 mappings in Rust 1.99.1 and matching context data for final sigma. Regenerate the context table with [generate.py](../crates/javascript/src/string_case_data/generate.py) when updating these mappings. `toLocaleLowerCase` and `toLocaleUpperCase` use ICU4X and its Unicode 18.0.0 data. They read the requested locales and apply language-specific mappings, including Turkish dotted I and Lithuanian combining accents. [ECMA-402 case conversion](https://tc39.es/ecma402/#sec-transform-case)
 

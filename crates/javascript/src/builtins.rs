@@ -1459,38 +1459,6 @@ fn install_array(vm: &mut Vm) {
     }
     array_iteration::install(vm, &proto);
     array_methods::install(vm, &proto);
-    for name in ["find", "findIndex"] {
-        method(vm, proto.clone(), name, 1, move |vm, this, a| {
-            let object = vm.coerce_object(this)?;
-            let len = length(vm, object.clone())?;
-            let callback = arg(a, 0);
-            if !vm.is_callable(&callback) {
-                return Err(JsError::type_error("Array callback is not callable"));
-            }
-            for i in 0..len {
-                vm.tick()?;
-                let key = JsString::from(i.to_string());
-                let value = vm.get(object.clone(), &key)?;
-                let mapped = vm.invoke(
-                    callback.clone(),
-                    arg(a, 1),
-                    &[value.clone(), Value::from(i), object.clone()],
-                )?;
-                if mapped.is_truthy() {
-                    return Ok(if name == "find" {
-                        value
-                    } else {
-                        Value::from(i)
-                    });
-                }
-            }
-            Ok(if name == "find" {
-                Value::Undefined
-            } else {
-                Value::from(-1)
-            })
-        });
-    }
     method(vm, proto, "reverse", 0, |vm, this, _| {
         let object = vm.coerce_object(this)?;
         let len = length(vm, object.clone())?;
