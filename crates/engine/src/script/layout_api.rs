@@ -404,9 +404,9 @@ impl LayoutHost {
             let old = region.offset;
             let next = ScrollOffset {
                 x: x.map_or(old.x, |v| finite(v) + if relative { old.x } else { 0. })
-                    .clamp(0., region.max_x),
+                    .clamp(region.min_x, region.max_x),
                 y: y.map_or(old.y, |v| finite(v) + if relative { old.y } else { 0. })
-                    .clamp(0., region.max_y),
+                    .clamp(region.min_y, region.max_y),
             };
             if next != old {
                 d.offsets.insert(node, next);

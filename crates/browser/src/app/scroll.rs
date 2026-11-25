@@ -158,9 +158,9 @@ fn animations_enabled() -> bool {
     true
 }
 
-fn axis_step(value: f32, offset: f32, max: f32, allowed: bool) -> f32 {
+fn axis_step(value: f32, offset: f32, min: f32, max: f32, allowed: bool) -> f32 {
     if allowed {
-        (offset + value).clamp(0., max) - offset
+        (offset + value).clamp(min, max) - offset
     } else {
         0.
     }
@@ -171,10 +171,7 @@ impl App {
         let tab = &self.tabs[self.active];
         let layout = tab.layout.as_ref()?;
         if !self.pointer_in(self.window_regions(self.active).page)
-            || !layout
-                .scroll_regions
-                .iter()
-                .any(|r| r.max_x > 0. || r.max_y > 0.)
+            || !layout.scroll_regions.iter().any(|r| r.can_scroll())
         {
             return None;
         }
@@ -189,7 +186,7 @@ impl App {
                 && layout
                     .scroll_regions
                     .iter()
-                    .any(|r| r.node == node && (r.max_x > 0. || r.max_y > 0.))
+                    .any(|r| r.node == node && r.can_scroll())
             {
                 return Some(node);
             }
@@ -303,8 +300,20 @@ impl App {
                 && (overflow[0].user_scrollable() || overflow[1].user_scrollable())
                 && let Some(r) = layout.scroll_regions.iter().find(|r| r.node == node)
             {
-                let dx = axis_step(delta.x, r.offset.x, r.max_x, overflow[0].user_scrollable());
-                let dy = axis_step(delta.y, r.offset.y, r.max_y, overflow[1].user_scrollable());
+                let dx = axis_step(
+                    delta.x,
+                    r.offset.x,
+                    r.min_x,
+                    r.max_x,
+                    overflow[0].user_scrollable(),
+                );
+                let dy = axis_step(
+                    delta.y,
+                    r.offset.y,
+                    r.min_y,
+                    r.max_y,
+                    overflow[1].user_scrollable(),
+                );
                 if dx != 0. || dy != 0. {
                     let changed = if let Some(runtime) = &mut tab.runtime {
                         match runtime.scroll_element(node, dx, dy) {
@@ -339,12 +348,14 @@ impl App {
         let dx = axis_step(
             delta.x,
             tab.scroll_x,
+            0.,
             (layout.content_width - viewport.width).max(0.),
             layout.viewport_overflow[0].user_scrollable(),
         );
         let dy = axis_step(
             delta.y,
             tab.scroll,
+            0.,
             (layout.height - viewport.height).max(0.),
             layout.viewport_overflow[1].user_scrollable(),
         );
@@ -512,8 +523,10 @@ mod tests {
             wheel_delta(pixel, 2.),
             (ScrollOffset { x: -2., y: 4. }, false)
         );
-        assert_eq!(axis_step(20., 95., 100., true), 5.);
-        assert_eq!(axis_step(-20., 6., 100., true), -6.);
-        assert_eq!(axis_step(25., 0., 100., false), 0.);
+        assert_eq!(axis_step(20., 95., 0., 100., true), 5.);
+        assert_eq!(axis_step(-20., -95., -100., 0., true), -5.);
+        assert_eq!(axis_step(20., -5., -100., 0., true), 5.);
+        assert_eq!(axis_step(-20., 6., 0., 100., true), -6.);
+        assert_eq!(axis_step(25., 0., 0., 100., false), 0.);
     }
 }

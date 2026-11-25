@@ -372,6 +372,8 @@ pub enum FlexWrap {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
+    Left,
+    Right,
     FlexStart,
     FlexEnd,
     Start,
@@ -5032,6 +5034,8 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 "normal" | "stretch" => Align::Stretch,
                 "start" => Align::Start,
                 "end" => Align::End,
+                "left" if p == JustifyContent => Align::Left,
+                "right" if p == JustifyContent => Align::Right,
                 "flex-start" => Align::FlexStart,
                 "flex-end" => Align::FlexEnd,
                 "center" => Align::Center,
@@ -5192,6 +5196,10 @@ fn parse_transform_origin(source: &str) -> Option<[SpecifiedLength; 2]> {
     }
 }
 fn number(value: &str) -> Option<f32> {
+    // Rust also accepts a trailing decimal point, which is a separate CSS token.
+    if calc::number_end(value)? != value.len() {
+        return None;
+    }
     let n = value.parse::<f32>().ok()?;
     n.is_finite().then_some(n)
 }

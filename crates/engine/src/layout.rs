@@ -501,7 +501,7 @@ impl Layout {
             || layout
                 .scroll_regions
                 .iter()
-                .any(|r| r.max_x > 0. || r.max_y > 0.)
+                .any(ScrollRegion::can_scroll)
         {
             layout.scroll_flow = candidate;
         }
@@ -685,6 +685,8 @@ struct Constraints {
     width: Option<f32>,
     intrinsic_width: bool,
     height: Option<f32>,
+    // A column flex item may have a used height but no definite percentage basis.
+    indefinite_height: bool,
     containing_height: Option<f32>,
     flex_item: bool,
 }
@@ -885,6 +887,7 @@ struct FlexItem {
     node: NodeId,
     basis: f32, // Border-box base used for free-space accounting.
     inner_basis: f32,
+    indefinite_height: bool,
     min: f32,
     max: f32,
     grow: f32,
@@ -999,7 +1002,7 @@ fn flex_content_space(align: Align, reversed: bool, extra: f32, count: usize) ->
 
 fn alignment_space(align: Align, extra: f32, count: usize) -> (f32, f32) {
     match align {
-        Align::End | Align::FlexEnd => (extra, 0.),
+        Align::End | Align::FlexEnd | Align::Right => (extra, 0.),
         Align::Center => (extra / 2., 0.),
         _ if extra <= 0. => (0., 0.),
         Align::SpaceBetween if count > 1 => (0., extra / (count - 1) as f32),
@@ -1772,7 +1775,10 @@ fn grid_offsets(
     let extra = available - total;
     let (offset, spacing) = alignment_space(
         align,
-        if matches!(align, Align::Center | Align::End | Align::FlexEnd) {
+        if matches!(
+            align,
+            Align::Center | Align::End | Align::FlexEnd | Align::Right
+        ) {
             extra
         } else {
             extra.max(0.)
@@ -2423,6 +2429,14 @@ impl Builder<'_> {
             FlexDirection::RowReverse | FlexDirection::ColumnReverse
         );
         let reverse = reverse_direction ^ (row && container.rtl);
+        // Physical left/right map to inline start/end in rows. In columns
+        // both fall back to logical start, including column-reverse.
+        let justify = match container.justify_content {
+            Align::Left if row && container.rtl => Align::End,
+            Align::Right if row && !container.rtl => Align::End,
+            Align::Left | Align::Right => Align::Start,
+            align => align,
+        };
         let wrap = container.flex_wrap != FlexWrap::NoWrap;
         let reverse_wrap = container.flex_wrap == FlexWrap::WrapReverse;
         let reverse_cross = reverse_wrap ^ (!row && container.rtl);
@@ -2608,10 +2622,18 @@ impl Builder<'_> {
                 .max(min);
                 (basis.max(extra), min, max, Some(f))
             };
+            let used_basis = if s.flex_basis == Length::Auto {
+                s.height
+            } else {
+                s.flex_basis
+            };
             items.push(FlexItem {
                 node,
                 basis,
                 inner_basis: basis - extra,
+                indefinite_height: !row
+                    && height.is_none()
+                    && used_basis.resolve_with_basis(None, s.font_size).is_none(),
                 min,
                 max,
                 grow: if text { 0. } else { s.flex_grow },
@@ -2701,6 +2723,7 @@ impl Builder<'_> {
                             Constraints {
                                 width: Some(cross_width),
                                 height: Some(size),
+                                indefinite_height: item.indefinite_height,
                                 containing_height: height,
                                 flex_item: true,
                                 ..Constraints::default()
@@ -2772,12 +2795,7 @@ impl Builder<'_> {
             let (mut cursor, distributed_gap) = if autos > 0 && extra > 0. {
                 (0., 0.)
             } else {
-                flex_content_space(
-                    container.justify_content,
-                    reverse_direction,
-                    extra,
-                    group.len(),
-                )
+                flex_content_space(justify, reverse_direction, extra, group.len())
             };
             for (item, &size) in group.iter_mut().zip(&sizes) {
                 let s = &self.styles[item.node.0];
@@ -2822,6 +2840,7 @@ impl Builder<'_> {
                             Constraints {
                                 width: Some(if row { size } else { target }),
                                 height: Some(if row { target } else { size }),
+                                indefinite_height: item.indefinite_height,
                                 containing_height: height,
                                 flex_item: true,
                                 ..Constraints::default()
@@ -3142,6 +3161,7 @@ impl Builder<'_> {
                 .resolve_with_basis(c.containing_height, s.font_size)
                 .map(|v| to_content(v, m.extra_y(), s.box_sizing))
         });
+        let percentage_basis = explicit.filter(|_| !c.indefinite_height);
         if let Some(name) = self.page.document.attr(id, "id") {
             self.anchors.insert(name.into(), oy);
         }
@@ -3196,10 +3216,21 @@ impl Builder<'_> {
             h
         } else if matches!(s.display, Display::Flex | Display::InlineFlex) {
             self.queue_positioned_children(id, cx, cy, href.clone());
-            let block_size = match c.height {
+            let mut block_size = match c.height {
+                Some(_) if c.indefinite_height => AxisSize {
+                    preferred: None,
+                    minimum: explicit.unwrap(),
+                    maximum: explicit.unwrap(),
+                },
                 Some(border_height) => AxisSize::fixed((border_height - m.extra_y()).max(0.)),
                 None => AxisSize::from_style(s, true, c.containing_height, m),
             };
+            if tag == "fieldset" && block_size.preferred.is_none() {
+                // The anonymous flex content box is height:100%. It does not
+                // inherit the fieldset's min/max-height when height is auto.
+                block_size.minimum = 0.;
+                block_size.maximum = f32::INFINITY;
+            }
             self.flex(id, cx, cy, m.width, block_size, href.clone())
         } else if matches!(s.display, Display::Grid | Display::InlineGrid) {
             self.queue_positioned_children(id, cx, cy, href.clone());
@@ -3220,10 +3251,19 @@ impl Builder<'_> {
                     .unwrap_or(f32::INFINITY)
                     .max(minimum)
             };
-            let block = AxisSize {
-                preferred: explicit,
-                minimum,
-                maximum,
+            let block = if c.indefinite_height {
+                let used = explicit.unwrap_or(0.);
+                AxisSize {
+                    preferred: None,
+                    minimum: used,
+                    maximum: used,
+                }
+            } else {
+                AxisSize {
+                    preferred: explicit,
+                    minimum,
+                    maximum,
+                }
             };
             let inline = if c.intrinsic_width {
                 AxisSize::from_style(s, false, Some(available), m)
@@ -3238,7 +3278,7 @@ impl Builder<'_> {
                 || s.overflow.iter().any(|o| o.scrollable())
                 || self.page.document.nodes[id.0].parent == Some(self.page.document.root);
             let outer = independent.then(|| std::mem::take(&mut self.floats));
-            let mut line = Line::new(cx, cy, m.width, s, explicit);
+            let mut line = Line::new(cx, cy, m.width, s, percentage_basis);
             if matches!(tag, "input" | "button" | "select" | "textarea")
                 && let Some(label) = self
                     .page

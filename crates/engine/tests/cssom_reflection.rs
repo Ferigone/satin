@@ -253,11 +253,14 @@ fn flex_and_border_named_writes_use_the_live_inline_declaration() {
         var preserved = style["flex-wrap"] === "wrap" && style.getPropertyPriority("flex-wrap") === "important";
         style.flexWrap = "nowrap";
         style.flexGrow = "2";
+        style.flexGrow = "1.";
+        style.flexShrink = ".5";
+        style["flex-shrink"] = "1.";
         style["flex-direction"] = "column";
         style.borderTopColor = "red";
         style["border-left-color"] = "blue";
         var edited = cs.getPropertyValue("flex-wrap") === "nowrap" && style.getPropertyPriority("flex-wrap") === "" &&
-            cs.flexGrow === "2" && cs.flexDirection === "column" &&
+            cs.flexGrow === "2" && cs.flexShrink === "0.5" && cs.flexDirection === "column" &&
             style["border-top-color"] === "red" && style.borderLeftColor === "blue" &&
             cs.borderTopColor === "rgb(255, 0, 0)" && cs.borderLeftColor === "rgb(0, 0, 255)";
         style["flex-wrap"] = null;
