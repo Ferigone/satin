@@ -30,7 +30,7 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
 
 ## Changes in alpha.40
 
-The original 2016 Test262 website completed **16,436 of 16,436** cases in a single Satin browser-engine session. It reported **16,194 passed, 242 failed and zero failed to load**. At the previously reported stopping point it had run 8,276 cases with 188 failures. All 43 changes since the alpha.38 browser measurement were new passes. Opening Results after the run produced 4,911 rows and 4,826 links to test source. [Original website results and failure index](docs/compatibility/legacy-test262.md#full-run-all-in-alpha40)
+The native Windows browser completed all **16,436 tests** on the original 2016 Test262 website. The Run and Results tabs recorded **16,193 passed, 243 failed and zero failed to load**, 42 more passes than Windows alpha.39. A separate Linux browser-engine session recorded **16,194 passed and 242 failed**, with 188 failures at the previously reported stopping point of 8,276. Opening Results after that run produced 4,911 rows and 4,826 links to test source. [Windows evidence and per-case browser results](docs/compatibility/legacy-test262.md#full-run-all-in-alpha40)
 
 Large temporary JavaScript strings release their heap reservations when the last reference disappears. An iframe can use the instruction allowance of its enclosing timer or input event, with part of the task reserved so the parent can report an error and continue. Mouse events now expose page coordinates, which allows scripts handling clicks on large reports to read the pointer position without forcing a layout at zero scroll. [Legacy Test262 measurements](docs/compatibility/legacy-test262.md)
 

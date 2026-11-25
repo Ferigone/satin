@@ -2,6 +2,8 @@
 
 ## Full Run All in alpha.40
 
+In the Windows Server 2022 desktop browser, both Run and Results reported **16,436 executed, 16,193 passed, 243 failed and zero failed to load**. The earlier Windows alpha.39 build reported 16,151 passes and 285 failures on the same catalog. In alpha.40 the Results table contained 4,911 rows and 4,826 source links. The final screenshot and saved DOM agree. The browser also logged a task CPU limit and reported unrestricted layout and paint. The strict all-pass check returned exit code 1 after recording all 243 failures. [Windows screenshot](legacy-test262-windows-alpha40.png) · [Verified counters, diagnostics and checksums](legacy-test262-windows-alpha40.json) · [Raw Windows checkpoints](https://github.com/Ferigone/satin/actions/runs/45664169125/artifacts/15049242276)
+
 Satin’s browser engine loaded all four chapters of the pinned March 2016 website from a local HTTP server. The original controller received one result for each of the 16,436 cases, in catalog order. It called its completion hook after 26 minutes and 10 seconds, with no timer left pending. [Original website](https://github.com/v8/test262/tree/e1166500a0d26c8b90e704a31c6646992573f632/website) · [Measured source](https://github.com/Ferigone/satin/tree/fc9de7072128f91df6b509f28dee3c7c3d0f7cb2)
 
 | Linux x86_64 browser engine | Ran | Passed | Failed | Failed to load |
@@ -10,6 +12,8 @@ Satin’s browser engine loaded all four chapters of the pinned March 2016 websi
 | On the website’s completion callback | 16,436 | 16,194 | 242 | 0 |
 
 The driver exercised the Run, Run All and Results controls using native input dispatch in the browser engine. After completion, Results displayed the same run, pass and fail totals, with 4,911 rows in its top-level table and 4,826 source links. Opening Results added zero script diagnostics. The 43 cases that changed since the alpha.38 engine run all moved from fail to pass. Each of these also passed in the independent Chromium 151 reference. Among the remaining 242, Chromium passed 18, failed 220 and returned no verdict for four. The two fixtures discussed below show how the historical site’s HTML and JavaScript expectations affect the counts. [Indexed failures](legacy-test262-controller-failures-alpha40.jsonl.gz) · [Counts and comparisons](legacy-test262-controller-alpha40.json) · [Measurement driver](fixtures/legacy-test262-controller-alpha40.rs)
+
+The Windows failure log contains the same 242 cases as the Linux engine plus case **650**, `language/comments/S7.4_A5.js`. The additional identifier is unique in the upstream catalog. A separate native Linux run limited to selected cases also hit the child script CPU deadline on this fixture.
 
 Of the 242 failed callbacks, 50 explicitly reported a VM limit. These included 28 bytecode-depth limits, nine instruction limits, five native-work limits, four child CPU timeouts, three heap limits and one expression nesting limit. The remaining 192 also failed in Chromium. Of the 43 new passes, 36 exercise URI encoding or decoding, five exercise RegExp, one exercises a large array and one checks JavaScript comments.
 
