@@ -16,7 +16,7 @@ const urls = ['https://www.bbc.com/','https://www.bbc.com/news','https://www.bbc
 const safe = value => String(value ?? '').replace(/https?:\/\/[^\s"'<>]+/g, match => {
   try {const u=new URL(match); return u.origin+u.pathname;} catch {return '[url]';}
 }).slice(0,1000);
-const report = {commit:process.env.GITHUB_SHA, startedUtc:new Date().toISOString(), viewport, nativeWindow:{width:1280,height:944, chromeHeight:122, statusHeight:22, note:'Verify measured content viewport, not just window size'}, cases:[]};
+const report = {commit:process.env.GITHUB_SHA, startedUtc:new Date().toISOString(), viewport, nativeWindow:{width:1280,height:945, chromeHeight:122, statusHeight:22, note:'Verify measured content viewport, not just window size'}, cases:[]};
 const save = async () => {await writeFile(join(evidence,'summary.json'),JSON.stringify(report,null,2)); console.log(JSON.stringify(report));};
 try {
   const browser = await chromium.launch({executablePath:chrome,headless:true});
@@ -61,7 +61,7 @@ try {
         const result={phase};item.satin.push(result);
         const start=performance.now();
         try{
-          const {stdout,stderr}=await run(satin,['--url',url,'--profile',join(tmp,'satin-'+i+'-'+phase),'--smoke-window',join(evidence,'satin-'+i+'-'+phase+'.png'),'--smoke-actions',actions,'--width','1280','--height','944'],{timeout:120000,maxBuffer:8*1024*1024,windowsHide:true,env:{...process.env,SATIN_QA_LAYOUT_LIMIT:'1'}});
+          const {stdout,stderr}=await run(satin,['--url',url,'--profile',join(tmp,'satin-'+i+'-'+phase),'--smoke-window',join(evidence,'satin-'+i+'-'+phase+'.png'),'--smoke-actions',actions,'--width','1280','--height','945'],{timeout:120000,maxBuffer:8*1024*1024,windowsHide:true,env:{...process.env,SATIN_QA_LAYOUT_LIMIT:'1'}});
           const j=JSON.parse(stdout.trim());result.version=j.version;result.finalUrl=safe(j.url);result.title=j.title;result.frames=j.frames_presented;result.windowSmoke=j.window_smoke;result.layoutLimited=j.layout_limited;result.paintLimited=j.paint_limited;result.scrollY=j.scroll_y;result.contentViewport=j.content_viewport;result.layoutReasons=[...new Set(stderr.split(/\r?\n/).filter(l=>l.includes('SATIN_QA_LAYOUT_LIMIT')))].slice(0,30);result.diagnostics=j.javascript?.diagnostics?.slice(0,30).map(safe);result.stderr=safe(stderr);
         }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code}
         result.elapsedMs=performance.now()-start;

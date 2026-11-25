@@ -2257,7 +2257,18 @@ impl Builder<'_> {
                 } else {
                     None
                 };
-            if !text {
+            // The measuring pass already used the final inline size. A second
+            // pass is required only if the final block constraint can affect
+            // this box. Without an imposed stretch height or a percentage
+            // block-size constraint, its own explicit content height (and
+            // hence the basis passed to its descendants) is unchanged.
+            // Reuse the measured fragment rather than recursively formatting
+            // nested grids twice at every level.
+            let needs_final_layout = target_height.is_some()
+                || style.height.has_percent()
+                || style.min_height.has_percent()
+                || style.max_height.has_percent();
+            if !text && needs_final_layout {
                 fragment = self.fragment(
                     item.node,
                     area_width,
