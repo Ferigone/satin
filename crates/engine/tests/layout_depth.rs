@@ -9,6 +9,10 @@ fn parser_budget_depth_is_safe_on_one_mib_stack() {
         ("display:inline", false),
         ("display:flex", false),
         (
+            "display:flex;flex-flow:column wrap-reverse;max-height:45px",
+            false,
+        ),
+        (
             "display:flex;width:calc(100% - 1px);min-height:calc(1px + 0%)",
             true,
         ),

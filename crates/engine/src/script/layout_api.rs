@@ -2,7 +2,7 @@
 //! A write invalidates a revision; consecutive reads reuse the resulting layout.
 use super::*;
 use crate::{
-    css::{BoxSizing, Length, Overflow, Position, Style, TransformOp},
+    css::{BoxSizing, FlexDirection, FlexWrap, Length, Overflow, Position, Style, TransformOp},
     fonts::Fonts,
     layout::{Affine2D, Layout, Rect, ScrollOffset, Viewport},
 };
@@ -992,17 +992,47 @@ const PROPERTIES: &[(&str, &str)] = &[
     ("borderBottomWidth", "border-bottom-width"),
     ("borderLeftWidth", "border-left-width"),
 ];
+const FLEX_LONGHANDS: &[(&str, &str)] = &[
+    ("flexDirection", "flex-direction"),
+    ("flexWrap", "flex-wrap"),
+    ("flexGrow", "flex-grow"),
+    ("flexShrink", "flex-shrink"),
+    ("flexBasis", "flex-basis"),
+    ("order", "order"),
+];
+const BORDER_COLORS: &[(&str, &str)] = &[
+    ("borderTopColor", "border-top-color"),
+    ("borderRightColor", "border-right-color"),
+    ("borderBottomColor", "border-bottom-color"),
+    ("borderLeftColor", "border-left-color"),
+];
+
+fn additional_computed_longhands() -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    css::LOGICAL_BOX_LONGHANDS
+        .iter()
+        .chain(css::BOX_PAINT_LONGHANDS)
+        .chain(FLEX_LONGHANDS)
+        .chain(BORDER_COLORS)
+}
+
+pub(super) fn shared_style_properties()
+-> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    additional_computed_longhands()
+        .chain(css::LOGICAL_BOX_SHORTHANDS)
+        .chain(css::CORNER_OUTLINE_SHORTHANDS)
+        .chain(&[
+            ("listStyle", "list-style"),
+            ("flex", "flex"),
+            ("flexFlow", "flex-flow"),
+            ("borderColor", "border-color"),
+        ])
+}
+
 struct ComputedStyleNode(NodeId);
 
 fn logical_computed_style_prototype(vm: &mut Vm, host: &LayoutHost) -> Result<Value, JsError> {
     let prototype = vm.new_object();
-    for &(property, css_name) in css::LOGICAL_BOX_LONGHANDS
-        .iter()
-        .chain(css::LOGICAL_BOX_SHORTHANDS)
-        .chain(css::BOX_PAINT_LONGHANDS)
-        .chain(css::CORNER_OUTLINE_SHORTHANDS)
-        .chain(&[("listStyle", "list-style")])
-    {
+    for &(property, css_name) in shared_style_properties() {
         for name in [property, css_name] {
             let host = host.clone();
             getter(vm, prototype.clone(), name, move |vm, this, _| {
@@ -1079,16 +1109,14 @@ fn computed_style(
     vm.define_data_property(
         object.clone(),
         "length",
-        (PROPERTIES.len() + css::LOGICAL_BOX_LONGHANDS.len() + css::BOX_PAINT_LONGHANDS.len())
-            .into(),
+        (PROPERTIES.len() + additional_computed_longhands().count()).into(),
         false,
         false,
         true,
     )?;
     for (i, (_, name)) in PROPERTIES
         .iter()
-        .chain(css::LOGICAL_BOX_LONGHANDS)
-        .chain(css::BOX_PAINT_LONGHANDS)
+        .chain(additional_computed_longhands())
         .enumerate()
     {
         vm.define_data_property(
@@ -1129,6 +1157,34 @@ fn unresolved_percentage(v: Length) -> Option<String> {
         _ => unresolved_calculation(v),
     }
 }
+fn four_sides([a, b, c, d]: [&str; 4]) -> String {
+    if d != b {
+        format!("{a} {b} {c} {d}")
+    } else if c != a {
+        format!("{a} {b} {c}")
+    } else if b != a {
+        format!("{a} {b}")
+    } else {
+        a.to_owned()
+    }
+}
+
+fn flex_direction(value: FlexDirection) -> &'static str {
+    match value {
+        FlexDirection::Row => "row",
+        FlexDirection::RowReverse => "row-reverse",
+        FlexDirection::Column => "column",
+        FlexDirection::ColumnReverse => "column-reverse",
+    }
+}
+
+fn flex_wrap(value: FlexWrap) -> &'static str {
+    match value {
+        FlexWrap::NoWrap => "nowrap",
+        FlexWrap::Wrap => "wrap",
+        FlexWrap::WrapReverse => "wrap-reverse",
+    }
+}
 fn computed_radius(style: &Style, name: &str) -> String {
     let radii = style
         .border_radii
@@ -1139,18 +1195,7 @@ fn computed_radius(style: &Style, name: &str) -> String {
         corner.map(|v| unresolved_percentage(v).unwrap_or_else(|| length(v, 0., style.font_size)))
     });
     if name == "border-radius" {
-        let axis = |i: usize| {
-            let [a, b, c, d] = values.each_ref().map(|v| &v[i]);
-            if d != b {
-                format!("{a} {b} {c} {d}")
-            } else if c != a {
-                format!("{a} {b} {c}")
-            } else if b != a {
-                format!("{a} {b}")
-            } else {
-                a.to_string()
-            }
-        };
+        let axis = |i: usize| four_sides(values.each_ref().map(|v| v[i].as_str()));
         let x = axis(0);
         let y = axis(1);
         return if x == y { x } else { format!("{x} / {y}") };
@@ -1302,8 +1347,7 @@ impl Layout {
         };
         PROPERTIES
             .iter()
-            .chain(css::LOGICAL_BOX_LONGHANDS)
-            .chain(css::BOX_PAINT_LONGHANDS)
+            .chain(additional_computed_longhands())
             .map(|&(_, name)| (name, resolve(name)))
             .collect()
     }
@@ -1366,6 +1410,35 @@ fn resolved_values<'a>(
             | "border-top-right-radius"
             | "border-bottom-right-radius"
             | "border-bottom-left-radius" => computed_radius(style, name),
+            "flex-direction" => flex_direction(style.flex_direction).into(),
+            "flex-wrap" => flex_wrap(style.flex_wrap).into(),
+            "flex-flow" => format!(
+                "{} {}",
+                flex_direction(style.flex_direction),
+                flex_wrap(style.flex_wrap)
+            ),
+            "flex-grow" => style.flex_grow.to_string(),
+            "flex-shrink" => style.flex_shrink.to_string(),
+            "flex-basis" | "flex" => {
+                let basis = unresolved_percentage(style.flex_basis)
+                    .unwrap_or_else(|| length(style.flex_basis, 0., style.font_size));
+                if name == "flex" {
+                    format!("{} {} {basis}", style.flex_grow, style.flex_shrink)
+                } else {
+                    basis
+                }
+            }
+            "order" => style.order.to_string(),
+            "border-color" => {
+                let colors = style
+                    .border_colors
+                    .map(|edge| color(edge.unwrap_or(style.color)));
+                four_sides(colors.each_ref().map(String::as_str))
+            }
+            "border-top-color" => color(style.border_colors[0].unwrap_or(style.color)),
+            "border-right-color" => color(style.border_colors[1].unwrap_or(style.color)),
+            "border-bottom-color" => color(style.border_colors[2].unwrap_or(style.color)),
+            "border-left-color" => color(style.border_colors[3].unwrap_or(style.color)),
             "object-fit" => style.object_fit.as_css().into(),
             "object-position" => {
                 let [x, y] = style.object_position.map(|v| {

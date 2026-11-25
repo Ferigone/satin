@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Relational selectors use their anchor and follow DOM changes</title>
+<style>
+  .card { width: 30px; height: 20px; padding-top: 0 }
+  .card:has(> label input:checked, #absent) { width: 90px }
+  .card.card.card { width: 40px }
+  .card:where(:has(#toggle)) { height: 99px }
+  .card { height: 24px }
+  section:has(+ section .flag) { padding-top: 8px }
+</style>
+<main>
+  <section class="card" id="a"><label><input id="toggle" type="checkbox" checked></label></section>
+  <!-- adjacent element -->
+  <section class="card" id="b"><div><i class="flag"></i></div></section>
+  <section class="card" id="c"></section>
+</main>
+<output id="result"></output>
+<script>
+  var a = document.getElementById('a'), b = document.getElementById('b');
+  var toggle = document.getElementById('toggle'), flag = document.querySelector('.flag');
+  var result = document.getElementById('result');
+  function snapshot() {
+    var style = getComputedStyle(a);
+    return [style.width, style.height, style.paddingTop, document.querySelectorAll('.card:has(:checked)').length].join('/');
+  }
+  var before = snapshot();
+  toggle.checked = false;
+  var unchecked = snapshot();
+  document.getElementById('c').appendChild(flag);
+  var moved = snapshot();
+  result.setAttribute('data-live', [before, unchecked, moved].join('|'));
+  result.setAttribute('data-relative', [
+    a.matches(':has(~ section > .flag)'),
+    a.matches(':has(+ section > .flag)'),
+    b.matches(':has(+ section > .flag)'),
+    a.matches(':has(.card .flag)'),
+    a.matches(':has(:is(:has(*), label))'),
+    a.matches(':has(:where(:has(*)))'),
+    a.matches(':not(:has(.flag))'),
+    document.querySelectorAll('section:has(.flag):has(> i)').length
+  ].join('/'));
+</script>

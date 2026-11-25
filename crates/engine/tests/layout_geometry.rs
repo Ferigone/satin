@@ -201,6 +201,43 @@ fn row_flex_shrinks_wraps_orders_and_aligns() {
     close(rect(&p, &l, "wrap").height, 50.);
 }
 #[test]
+fn flex_line_wrapping_and_alignment_match_chromium() {
+    // Border rectangles relative to each flex container, Chromium 131.0.6778.0.
+    let (p, l) = layout_document(include_str!("fixtures/css_flex_line_alignment.html"), 800.);
+    assert!(!l.limited);
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for node in p.document.connected_nodes() {
+        let Some(reference) = p.document.attr(node, "data-rect") else {
+            continue;
+        };
+        let parent = p.document.nodes[node.0].parent.unwrap();
+        let container = l.rect_for(parent).unwrap();
+        let item = l.rect_for(node).unwrap();
+        let rect = [
+            item.x - container.x,
+            item.y - container.y,
+            item.width,
+            item.height,
+        ];
+        let expected: Vec<f32> = reference
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(expected.len(), rect.len());
+        if !rect.iter().zip(expected).all(|(a, b)| (a - b).abs() < 0.05) {
+            failures.push(format!(
+                "case {:?}, item {node:?}: expected {reference}, got {rect:?}",
+                p.document.attr(parent, "style"),
+            ));
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 63);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn flex_auto_margins_reverse_and_cross_stretch() {
     let (p, l) = layout(
         "<div style='display:flex;width:400px;height:100px;gap:10px'><div id='a' style='width:50px;margin-left:auto'></div><div id='b' style='width:50px'></div></div><div style='display:flex;flex-direction:row-reverse;width:300px;justify-content:space-between'><div id='c' style='width:50px;height:20px'></div><div id='d' style='width:70px;height:20px'></div></div>",

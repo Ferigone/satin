@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+body { margin: 0; font: 16px/20px sans-serif; }
+#parent { width: 320px; height: 200px; }
+#probe { border-style: solid; border-width: 0; outline-style: solid; outline-width: 0; position: relative; }
+</style>
+<div id="parent"><div id="probe"></div></div>
+<script>
+var probe = document.getElementById("probe");
+var resolved = getComputedStyle(probe);
+function measure(name, value) {
+    probe.removeAttribute("style");
+    var before = resolved.getPropertyValue(name);
+    var style = probe.style;
+    style.setProperty(name, value, "important");
+    var specified = style.getPropertyValue(name);
+    var after = resolved.getPropertyValue(name);
+    // An unmatched closing parenthesis is invalid even for a custom property.
+    style.setProperty(name, ")");
+    var preserved = specified !== "" && style.getPropertyValue(name) === specified &&
+        style.getPropertyPriority(name) === "important";
+    style.removeProperty(name);
+    var removed = style.getPropertyValue(name) === "";
+    return {before: before, after: after, specified: specified, edited: preserved && removed};
+}
+</script>
