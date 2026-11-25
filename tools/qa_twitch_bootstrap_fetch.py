@@ -43,3 +43,20 @@ with ThreadPoolExecutor(max_workers=5) as pool:
     rows=[r for r in pool.map(fetch,enumerate(p.sources)) if r]
 (root/"manifest").write_text("".join(rows))
 print("captured external assets",len(rows),"HTML size",len(page))
+
+# Only summarize the module's size, unique ordinary identifiers and frequent calls.
+# Exclude quoted strings and do not retain downloaded application sources as artifacts.
+import re
+from collections import Counter
+for m in [69861,174790,846451,261689,995497,925098,600424]:
+    for path in root.glob("*.js"):
+        source=path.read_text(encoding="utf-8")
+        match=re.search(r"(?:[,{])"+str(m)+r":(?:function\b|\([^)]{0,18}\)=>|\w{1,8}=>)",source)
+        if not match:continue
+        next_match=re.search(r"\},\d+:(?:function\b|\([^)]{0,18}\)=>|\w{1,8}=>)",source[match.end():])
+        body=source[match.end():match.end()+(next_match.start() if next_match else 100000)]
+        words=re.sub(r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"""," ",body)
+        print("MODULE",m,"bytes",len(body),"asset",path.name,
+              "calls",Counter(re.findall(r"\.([A-Za-z_$][\w$]+)\(",words)).most_common(9),
+              "names",Counter(re.findall(r"\b[A-Za-z_$][\w$]{6,}\b",words)).most_common(12))
+        break

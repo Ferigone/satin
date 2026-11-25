@@ -300,14 +300,20 @@ impl Vm {
         vm.realm_bootstrap_bytes = vm.estimated_heap_bytes();
         vm
     }
+    pub fn qa_factory(&self, entering: bool, id: u64) {
+        QA_STACK.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            if entering { stack.push(id); } else { stack.pop(); }
+        });
+    }
     pub fn qa_fuel(&self) -> u64 { self.remaining }
     pub fn qa_begin(&self) { QA_DATA.with(|cell| *cell.borrow_mut()=Some(Default::default())); }
     pub fn qa_finish(&self) {
         QA_DATA.with(|cell| { if let Some(hist)=cell.borrow_mut().take() {
             let mut list=hist.into_iter().collect::<Vec<_>>();
             list.sort_by_key(|(_, (total,_))| std::cmp::Reverse(*total));
-            for ((kind,path,line),(total,count)) in list {
-                println!("COST {kind} {path}:{line} {total} {count}");
+            for ((module,kind,path,line),(total,count)) in list {
+                println!("COST {kind}@{module} {path}:{line} {total} {count}");
             }
         } });
     }
@@ -4444,14 +4450,17 @@ mod task_limit_tests {
 }
 
 thread_local! {
-    static QA_DATA: std::cell::RefCell<Option<std::collections::HashMap<(&'static str,&'static str,u32), (u64,u64)>>> = Default::default();
+    static QA_DATA: std::cell::RefCell<Option<std::collections::HashMap<(u64,&'static str,&'static str,u32), (u64,u64)>>> = Default::default();
+    static QA_STACK: std::cell::RefCell<Vec<u64>> = Default::default();
 }
 #[track_caller]
 pub(crate) fn qa_charge(kind: &'static str, units: usize) {
+    let loc=std::panic::Location::caller();
     QA_DATA.with(|data| {
         if let Some(hist)=data.borrow_mut().as_mut() {
-            let loc=std::panic::Location::caller();
-            let e=hist.entry((kind,loc.file(),loc.line())).or_default();
+            let module=QA_STACK.with(|s|s.borrow().last().copied().unwrap_or_default());
+            let module=if matches!(module,69861|174790|846451|261689|995497|925098){module}else{0};
+            let e=hist.entry((module,kind,loc.file(),loc.line())).or_default();
             e.0+=units as u64;
             e.1+=1;
         }

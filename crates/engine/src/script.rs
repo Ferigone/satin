@@ -670,6 +670,7 @@ impl ScriptRuntime {
         });
         let callback=vm.new_native_function("__satinProfile",move|vm,_,a|{
             if let [Value::Number(enter),Value::Number(id),..]=a {
+                vm.qa_factory(*enter != 0.0, *id as u64);
                 println!("FACTORY {} {} {} {} {}",*enter as u64,*id as u64,vm.qa_fuel(),vm.estimated_heap_bytes(),vm.heap_cell_count());
             }
             Ok(Value::Undefined)
