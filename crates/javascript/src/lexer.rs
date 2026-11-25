@@ -47,18 +47,28 @@ struct SlashPosition {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SourceSpan {
-    buffer: Rc<[char]>,
+    buffer: Rc<Vec<char>>,
     range: std::ops::Range<usize>,
 }
 impl SourceSpan {
     pub fn chars(&self) -> &[char] { &self.buffer[self.range.clone()] }
     pub fn storage(&self) -> (usize, usize) {
-        (self.buffer.as_ptr() as usize, std::mem::size_of_val(&*self.buffer))
+        let bytes = std::mem::size_of::<Vec<char>>()
+            + self.buffer.capacity() * std::mem::size_of::<char>();
+        (Rc::as_ptr(&self.buffer) as usize, bytes)
     }
+
+    fn new(text: &str) -> Self {
+        // A shared Vec owns its allocation directly. Collecting into Rc<[char]>
+        // first built a Vec and then copied its entire buffer into an Rc slice.
+        let count = text.chars().count();
+        let mut chars = Vec::with_capacity(count);
+        chars.extend(text.chars());
+        Self { buffer: Rc::new(chars), range: 0..count }
+    }
+
     pub fn generated(text: &str) -> Rc<Self> {
-        let buffer: Rc<[char]> = text.chars().collect();
-        let range = 0..buffer.len();
-        Rc::new(Self { buffer, range })
+        Rc::new(Self::new(text))
     }
 }
 
@@ -71,6 +81,9 @@ impl std::ops::Deref for SourceSpan {
 }
 
 pub(crate) struct Lexer {
+    tokens_read: usize,
+    bodies_released: usize,
+    budget_recovered: usize,
     chars: SourceSpan,
     script_goal: bool,
     before_first_token: bool,
@@ -86,14 +99,15 @@ pub(crate) struct Lexer {
 }
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
-        let buffer: Rc<[char]> = source.chars().collect();
-        let range = 0..buffer.len();
-        Self::from_span(SourceSpan { buffer, range }, compilation_bytes, script_goal)
+        Self::from_span(SourceSpan::new(source), compilation_bytes, script_goal)
     }
 
     pub(crate) fn from_span(chars: SourceSpan, compilation_bytes: usize, script_goal: bool) -> Self {
         Self {
             chars,
+            tokens_read: 0,
+            bodies_released: 0,
+            budget_recovered: 0,
             script_goal,
             before_first_token: true,
             legacy_literal: false,
@@ -150,6 +164,8 @@ impl Lexer {
 
     pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
         // Up to three already-lexed tokens following the closing brace survive this body.
+        self.bodies_released += 1;
+        self.budget_recovered += before.saturating_sub(self.compilation_bytes).saturating_sub(retained);
         self.compilation_bytes = before;
         self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))
     }
@@ -162,6 +178,7 @@ impl Lexer {
     }
 
     pub(crate) fn next(&mut self) -> Token {
+        self.tokens_read += 1;
         let trivia = self.skip_trivia().and_then(|()| {
             let bytes = match self.peek(0) {
                 Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
@@ -773,4 +790,13 @@ fn cook_template(raw: &[u16]) -> Option<JsString> {
         }
     }
     Some(JsString::from_utf16(out))
+}
+
+impl Drop for Lexer {
+    fn drop(&mut self) {
+        if self.chars.len() >= 1_000_000 {
+            eprintln!("lexer diagnostics pos={} of {} tokens={} released_functions={} replaced_token_charges={} remaining={} line={} col={}",
+                self.pos, self.chars.len(), self.tokens_read, self.bodies_released, self.budget_recovered, self.compilation_bytes, self.line, self.column);
+        }
+    }
 }

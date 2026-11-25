@@ -28,6 +28,16 @@ urls = [
     "https://www.youtube.com/watch?v=jNQXAC9IVRw",
     "https://www.youtube.com/",
 ]
+pinned = "https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.LP0rdDSBWlc.2021.O/am=AAAAACAAAABAAKQE/d=1/rs=AGKMywH4xq65861j34StEblkBo123KARMA/m=kevlar_base_module,kevlar_main_module,kevlar_base_sync_mod_chunk"
+try:
+    data = fetch(pinned)
+    print("Pinned", pinned, "bytes", len(data), "sha256", sha256(data).hexdigest(), "prefix", data[:220], flush=True)
+    if len(data) >= 5_000_000 and not data.startswith(b"<"):
+        Path("/tmp/satin-desktop.js").write_bytes(data)
+        raise SystemExit(0)
+except OSError as e:
+    print("Pinned request failed", e, flush=True)
+
 for page in urls:
     try:
         raw = fetch(page)

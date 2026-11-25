@@ -321,10 +321,11 @@ impl Vm {
                 "Script source exceeds configured byte limit",
             ));
         }
-        // UTF-32 lexer input and decoded character data, including temporary
-        // UTF-16 buffers during literal conversion. The lexer accounts for
-        // per-token structural allocations as it consumes the source.
-        let input_bytes = source.len().saturating_mul(16).saturating_add(4096);
+        // One exact-capacity UTF-32 buffer is shared by the lexer and all source
+        // spans. Keep the separate allowance for decoded literal values and
+        // their temporary UTF-16 buffers; token structure is metered by the lexer.
+        let chars = source.chars().count().saturating_mul(std::mem::size_of::<char>());
+        let input_bytes = chars.saturating_add(source.len().saturating_mul(8)).saturating_add(4096);
         self.ensure_allocation(input_bytes)?;
         Ok(self
             .limits

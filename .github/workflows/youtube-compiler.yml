@@ -43,4 +43,14 @@ jobs:
           console.log({ tokens, closing });
           NODE
       - name: Compile the complete site script at the browser's 512 MiB heap budget
-        run: target/debug/examples/measure_script /tmp/satin-desktop.js
+        run: |
+          cp target/debug/examples/measure_script /tmp/satin-compiler-candidate
+          git fetch --depth=1 origin 57e1dbdb00c0c8eb830dcef2503ba46d92b81b19
+          git worktree add /tmp/satin-baseline FETCH_HEAD
+          mkdir -p /tmp/satin-baseline/crates/javascript/examples
+          cp crates/javascript/examples/measure_script.rs /tmp/satin-baseline/crates/javascript/examples/
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked -p rust-browser-javascript --example measure_script --manifest-path /tmp/satin-baseline/Cargo.toml
+          echo "alpha.35"
+          target/debug/examples/measure_script /tmp/satin-desktop.js || true
+          echo "candidate"
+          /tmp/satin-compiler-candidate /tmp/satin-desktop.js
