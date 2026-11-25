@@ -1107,26 +1107,24 @@ impl ScriptRuntime {
         state.borrow_mut().media.activate();
         let forms = self.forms.clone();
         forms.activate_picker_gesture();
-        let allowed = self
-            .vm
-            .with_task(|vm| {
-                let allowed = forms.activate(vm, node)?;
-                if allowed {
-                    media::default_click(vm, &state, node)?;
-                }
-                drain_microtask_queue(vm, &state)?;
-                Ok(allowed)
-            })
-            .unwrap_or_else(|error| {
-                report_error(
-                    &state,
-                    ConsolePhase::HostTask,
-                    Some("click"),
-                    &error,
-                    || error.to_string(),
-                );
-                false
-            });
+        let allowed = scheduler::run_input_task(&mut self.vm, |vm| {
+            let allowed = forms.activate(vm, node)?;
+            if allowed {
+                media::default_click(vm, &state, node)?;
+            }
+            drain_microtask_queue(vm, &state)?;
+            Ok(allowed)
+        })
+        .unwrap_or_else(|error| {
+            report_error(
+                &state,
+                ConsolePhase::HostTask,
+                Some("click"),
+                &error,
+                || error.to_string(),
+            );
+            false
+        });
         report_unhandled(&mut self.vm, &self.state);
         self.vm.collect_garbage();
         allowed
@@ -1259,7 +1257,7 @@ impl ScriptRuntime {
     ) -> Result<bool, JsError> {
         let forms = self.forms.clone();
         let state = self.state.clone();
-        let result = self.vm.with_task(|vm| {
+        let result = scheduler::run_input_task(&mut self.vm, |vm| {
             let consumed = action(&forms, vm)?;
             drain_microtask_queue(vm, &state)?;
             Ok(consumed)
@@ -3031,14 +3029,20 @@ mod tests {
             "<!doctype html><button id='button'>Go</button>",
         );
         let mut runtime = ScriptRuntime::new(&page).unwrap();
-        runtime.eval("var calls=0;var s='a'.repeat(200);var needle='a'.repeat(100)+'b';var b=document.getElementById('button');for(var i=0;i<128;i++)b.addEventListener('click',function(){calls++;s.indexOf(needle);});").unwrap();
+        // Each callback copies 320,000 code units. A single callback fits both
+        // task budgets; all 128 exceed even the native input allowance.
+        runtime.eval(r#"
+            var calls = 0, s = 'a'.repeat(200), b = document.getElementById('button');
+            function work() { calls++; s.repeat(1600); }
+            for (var i = 0; i < 128; i++) b.addEventListener('click', function() { work(); });
+        "#).unwrap();
         runtime.click(page.document.elements("button").next().unwrap());
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(
             calls > 1. && calls < 128.,
             "separate callbacks reset the budget: {calls}"
         );
-        runtime.eval("calls=0;var callback=function(){calls++;s.indexOf(needle);};for(var i=0;i<128;i++)queueMicrotask(callback);").unwrap();
+        runtime.eval("calls = 0; for (var i = 0; i < 128; i++) queueMicrotask(work);").unwrap();
         runtime.pump();
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(

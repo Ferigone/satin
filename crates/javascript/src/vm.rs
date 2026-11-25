@@ -1450,7 +1450,7 @@ impl Vm {
             {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
-            let property = self.stored_property(id, object, key);
+            let property = self.stored_argument_property(object, key);
             current = object.prototype;
             let indexed = object.indexed_properties.is_some();
             let named = object.named_properties.is_some();
@@ -1570,25 +1570,31 @@ impl Vm {
                 configurable: false,
             }));
         }
-        Ok(self.stored_property(id, o, key))
+        Ok(self.stored_argument_property(o, key))
     }
-    fn stored_property(&self, id: ObjectId, object: &Object, key: &JsString) -> Option<Property> {
-        let mut property = self.stored_argument_property(object, key)?;
-        if let ObjectKind::Function { code, .. } = &object.kind
-            && code.constructible() && !code.strict && key == &JsString::from("caller")
-            && let PropertyKind::Data { value, .. } = &mut property.kind
+    pub(crate) fn legacy_caller_for(&self, receiver: &Value) -> Result<Value, JsError> {
+        let id = receiver
+            .as_object()
+            .ok_or_else(|| JsError::type_error("Invalid caller receiver"))?;
+        if !matches!(&self.heap.object(id)?.kind, ObjectKind::Function { code, .. }
+            if code.constructible() && !code.strict)
         {
-            // Expose only the adjacent, non-strict interpreted caller from this realm.
-            // Native entry points and suspended executions are boundaries.
-            *value = self.legacy_calls.windows(2).rev()
-                .find(|frames| frames[1].function == id)
-                .filter(|frames| frames[0].visible
+            return Err(JsError::type_error("Restricted function property"));
+        }
+        // Native entry points, suspended execution, strict callers, and other realms
+        // end the observable call chain.
+        Ok(self
+            .legacy_calls
+            .windows(2)
+            .rev()
+            .find(|frames| frames[1].function == id)
+            .filter(|frames| {
+                frames[0].visible
                     && frames[0].depth + 1 == frames[1].depth
                     && frames[0].realm == self.realm.global_env
-                    && frames[1].realm == self.realm.global_env)
-                .map_or(Value::Null, |frames| Value::Object(frames[0].function));
-        }
-        Some(property)
+                    && frames[1].realm == self.realm.global_env
+            })
+            .map_or(Value::Null, |frames| Value::Object(frames[0].function)))
     }
 
     fn enter_legacy_call(&mut self, function: ObjectId, code: &Code) {
@@ -2777,7 +2783,20 @@ impl Vm {
             true,
         )?;
         if legacy_caller {
-            self.define_data_property(function.clone(), "caller", Value::Null, false, false, false)?;
+            // A changing value needs an accessor. A non-writable, non-configurable
+            // data property must return the same value for its entire lifetime.
+            self.define_property(
+                function.clone(),
+                "caller".into(),
+                Property {
+                    kind: PropertyKind::Accessor {
+                        get: self.realm.legacy_caller_getter.map(Value::Object),
+                        set: None,
+                    },
+                    enumerable: false,
+                    configurable: false,
+                },
+            )?;
         }
         if constructible {
             let prototype = self.new_object();

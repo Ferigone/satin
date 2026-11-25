@@ -15,8 +15,9 @@ use std::{
 
 const MAX_TIMERS: usize = 1024;
 const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
-const TIMER_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
-const TIMER_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
+const INPUT_TASK_INSTRUCTIONS: u64 = 32_000_000;
+const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
+const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -592,6 +593,28 @@ fn report_callback(
     }
 }
 
+/// The outer task owns the deadline and fuel, including nested event delivery
+/// and the subsequent microtask checkpoint.
+fn run_window_task<T>(
+    vm: &mut Vm,
+    instructions: u64,
+    callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
+) -> Result<T, JsError> {
+    vm.with_task_cpu_budget(
+        instructions,
+        WINDOW_TASK_CPU_BUDGET,
+        Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
+        callback,
+    )
+}
+
+pub(super) fn run_input_task<T>(
+    vm: &mut Vm,
+    callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
+) -> Result<T, JsError> {
+    run_window_task(vm, INPUT_TASK_INSTRUCTIONS, callback)
+}
+
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
     let yield_at = Instant::now() + FRAME_PERIOD;
     for _ in 0..32 {
@@ -603,23 +626,18 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
         };
         // Exception reporting and the microtask checkpoint use the same fuel
         // and deadline as the callback. Return to input/rendering after a long turn.
-        let result = vm.with_task_cpu_budget(
-            TIMER_TASK_INSTRUCTIONS,
-            TIMER_TASK_CPU_BUDGET,
-            Instant::now() + TIMER_TASK_WALL_TIMEOUT,
-            |vm| {
-                if let Some(owner) = &timer.owner {
-                    vm.with_realm(owner.realm, |vm| {
-                        let result = run_timer(vm, &timer, vm.global(), "about:blank");
-                        owner.report_script_error(vm, result)
-                    })?;
-                } else {
-                    let result = run_timer(vm, &timer, window, &url);
-                    report_callback(vm, state, result)?;
-                }
-                drain_microtask_queue(vm, state)
-            },
-        );
+        let result = run_window_task(vm, TIMER_TASK_INSTRUCTIONS, |vm| {
+            if let Some(owner) = &timer.owner {
+                vm.with_realm(owner.realm, |vm| {
+                    let result = run_timer(vm, &timer, vm.global(), "about:blank");
+                    owner.report_script_error(vm, result)
+                })?;
+            } else {
+                let result = run_timer(vm, &timer, window, &url);
+                report_callback(vm, state, result)?;
+            }
+            drain_microtask_queue(vm, state)
+        });
         state
             .borrow_mut()
             .scheduler
@@ -673,7 +691,9 @@ mod task_limit_tests {
         let page = LoadedPage::from_html("about:test", "<!doctype html>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
         let parked = runtime.vm.new_native_function("park", |vm, _, _| {
-            std::thread::sleep(super::TIMER_TASK_CPU_BUDGET + std::time::Duration::from_millis(50));
+            std::thread::sleep(
+                super::WINDOW_TASK_CPU_BUDGET + std::time::Duration::from_millis(50),
+            );
             vm.charge_work(1)?;
             Ok(Value::Undefined)
         });

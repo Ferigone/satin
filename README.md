@@ -28,6 +28,10 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.39
+
+Satin can run longer click, keyboard and form handlers under a bounded CPU deadline. This lets the legacy Test262 Results view build its table and register source links across thousands of rows. A synthetic event fired inside a handler shares the same task budget. The optional `caller` property on a non-strict JavaScript function now exposes a stable accessor while continuing to hide strict callers. [Legacy Test262 results and verification](docs/compatibility/legacy-test262.md)
+
 ## Changes in alpha.38
 
 Satin can represent a sparse array with a length of 2³² − 1 and only a few stored elements. Methods such as `map`, `filter` and `lastIndexOf` can skip empty ranges while preserving observable getter, proxy and callback behavior. Generator destructuring resumes across yields, and evaluated source preserves lone UTF-16 surrogates. Long strings release unused prefixes. Browser timers now measure CPU time so a descheduled tab can resume its callback.

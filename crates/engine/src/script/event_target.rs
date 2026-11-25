@@ -12,7 +12,8 @@ pub(super) const EVENT_TARGET_SLOT: u32 = 0;
 const CURRENT_TARGET_SLOT: u32 = 1;
 const CUSTOM_DETAIL_SLOT: u32 = 8;
 const MAX_LISTENERS: usize = 128;
-const DOM_LISTENER_LIMIT: usize = 4096;
+const DOM_TARGET_LISTENER_LIMIT: usize = 4096;
+const DOM_LISTENER_LIMIT: usize = 8192;
 const MAX_TYPE_UNITS: usize = 512;
 
 #[derive(Clone)]
@@ -236,7 +237,7 @@ fn remove(vm: &mut Vm, object: &Value, serial: u64) -> Result<(), JsError> {
             store_listener(
                 vm,
                 &table,
-                DOM_LISTENER_LIMIT + removed.slot,
+                DOM_TARGET_LISTENER_LIMIT + removed.slot,
                 Value::Undefined,
             )?;
         }
@@ -260,7 +261,7 @@ pub(super) fn clear_listeners(vm: &mut Vm, object: &Value) -> Result<(), JsError
             store_listener(
                 vm,
                 &table,
-                DOM_LISTENER_LIMIT + listener.slot,
+                DOM_TARGET_LISTENER_LIMIT + listener.slot,
                 Value::Undefined,
             )?;
         }
@@ -534,6 +535,7 @@ fn add(
     }
     let full = if let Some(count) = &data.dom_count {
         count.get() >= DOM_LISTENER_LIMIT
+            || data.listeners.borrow().len() >= DOM_TARGET_LISTENER_LIMIT
     } else {
         data.listeners.borrow().len() >= MAX_LISTENERS
     };
@@ -567,7 +569,7 @@ fn add(
     };
     store_listener(vm, &table, slot, callback)?;
     if abort.is_some() {
-        store_listener(vm, &table, DOM_LISTENER_LIMIT + slot, signal)?;
+        store_listener(vm, &table, DOM_TARGET_LISTENER_LIMIT + slot, signal)?;
     }
     data.free_slots.borrow_mut().pop();
     data.listeners.borrow_mut().push(Listener {

@@ -737,6 +737,10 @@ fn install_function(vm: &mut Vm) {
         thrower.properties.get_mut(&JsString::from(key)).unwrap().configurable = false;
     }
     thrower.extensible = false;
+    let legacy_caller = vm.new_native_function("get caller", |vm, receiver, _| {
+        vm.legacy_caller_for(&receiver)
+    });
+    vm.realm.legacy_caller_getter = legacy_caller.as_object();
     for name in ["caller", "arguments"] {
         vm.define_key(
             proto.clone(),

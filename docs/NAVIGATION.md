@@ -90,8 +90,8 @@ VM promise queue and propagate closure, errors, and cancellation. Streaming
 Fetch uploads remain open. [Streams Standard](https://streams.spec.whatwg.org/)
 
 Window, Document and DOM nodes inherit EventTarget. Listener tables are
-allocated on first registration and allow up to 4096 listeners per document
-realm. Object listeners, passive handling, once and AbortSignal use the same
+allocated on first registration. Each document realm supports up to 8,192
+listeners, with up to 4,096 on one DOM target. Object listeners, passive handling, once and AbortSignal use the same
 logic as standalone targets. Event and CustomEvent dispatch take a snapshot of
 the ancestor path before invoking author code. After dispatch, currentTarget
 and the composed path are cleared. Specialized event constructors, Shadow DOM

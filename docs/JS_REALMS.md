@@ -22,9 +22,11 @@ with the following script. Unsupported engine features also reach the child’s
 error handler. Operation-specific limits such as RegExp nesting and maximum
 string length also reach that handler while the parent task has resources.
 The parent and its children still share one overall task budget.
-A window timer and its microtasks can use up to 24 million instruction units
-and two seconds of thread CPU time on Windows and Linux. Time waiting for the
-operating system to schedule the VM does not consume its CPU allowance. A
+Window timer tasks allow up to 24 million instruction units. Native click,
+focus, keyboard and form input tasks allow up to 32 million. Nested handlers
+and the microtasks they queue draw from the same task budget. Both kinds of
+tasks allow two seconds of thread CPU time on Windows and Linux. Time waiting
+for the operating system to schedule the VM does not consume its CPU allowance. A
 separate 30-second wall-clock limit applies at the same cooperative execution
 checks. An embedded child reserves one quarter of the remaining CPU allowance
 for its caller to report a failed script and continue. Platforms without a thread CPU clock use a two-second wall-clock
