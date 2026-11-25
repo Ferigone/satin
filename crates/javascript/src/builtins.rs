@@ -845,13 +845,9 @@ fn install_function(vm: &mut Vm) {
         let name = match &vm.heap.object(id)?.kind {
             ObjectKind::Function { code, .. } => {
                 let source = code.source.clone();
-                let chars = source.chars();
-                vm.consume_work(chars.len())?;
-                let length = chars.iter().map(|c| c.len_utf16()).sum();
-                vm.ensure_string_allocation(length)?;
-                let mut units = Vec::with_capacity(length);
-                for &ch in chars { units.extend_from_slice(ch.encode_utf16(&mut [0; 2])); }
-                return vm.finish_string(units);
+                vm.consume_work(source.len())?;
+                vm.ensure_string_allocation(source.utf16_len(0..source.len()))?;
+                return vm.finish_string(source.utf16_range(0..source.len()));
             }
             ObjectKind::Native { initial_name, .. } => initial_name.clone(),
             _ => JsString::default(),

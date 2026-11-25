@@ -6,10 +6,12 @@ Git checkout: https://github.com/v8/test262 at e1166500a0d26c8b90e704a31c6646992
 import argparse
 import base64
 import concurrent.futures
+from contextlib import suppress
 import hashlib
 import json
 from pathlib import Path
 from queue import Empty, Queue
+import shutil
 import subprocess
 import threading
 
@@ -79,30 +81,48 @@ def requests(root):
     return records
 
 
-def read_replies(stream, replies):
-    for line in stream:
-        replies.put(line)
-    replies.put(b'')
+def exchange(proc, outgoing, incoming):
+    try:
+        while (payload := outgoing.get()) is not None:
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            if not line:
+                raise EOFError("worker exited before replying")
+            incoming.put(line)
+    except (OSError, EOFError) as err:
+        incoming.put(err)
+    finally:
+        with suppress(OSError):
+            proc.stdin.close()
+        proc.stdout.close()
 
 
-def run_case(command, timeout, request):
+def run_case(command, timeout, request, workers):
     proc = getattr(local, 'worker', None)
     if proc is None or proc.poll() is not None:
         proc = subprocess.Popen([command, '--worker'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         local.worker = proc
-        local.replies = Queue()
-        threading.Thread(target=read_replies, args=(proc.stdout, local.replies), daemon=True).start()
+        local.outgoing, local.incoming = Queue(), Queue()
+        thread = threading.Thread(target=exchange, args=(proc, local.outgoing, local.incoming), daemon=True)
+        thread.start()
+        workers.put((proc, local.outgoing, thread))
     try:
-        proc.stdin.write(json.dumps(request, separators=(',', ':')).encode() + b'\n')
-        proc.stdin.flush()
-        reply = json.loads(local.replies.get(timeout=timeout))
-        if reply.get('id') != request['id'] or reply.get('status') not in ('pass', 'fail', 'harness_error'):
+        # Start the deadline before writing. A stopped worker can fill a pipe
+        # before even a single large case has been delivered.
+        local.outgoing.put(json.dumps(request, separators=(',', ':')).encode() + b'\n')
+        line = local.incoming.get(timeout=timeout)
+        if isinstance(line, Exception):
+            raise line
+        reply = json.loads(line)
+        if not isinstance(reply, dict) or reply.get('id') != request['id'] or reply.get('status') not in ('pass', 'fail', 'harness_error'):
             raise ValueError('invalid worker reply')
         return reply
-    except (BrokenPipeError, Empty, ValueError) as err:
-        proc.kill()
-        proc.wait()
+    except (OSError, EOFError, Empty, ValueError) as err:
         reason = 'worker deadline exceeded' if isinstance(err, Empty) else str(err)
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
         return {'id': request['id'], 'status': 'harness_error', 'message': reason}
 
 
@@ -114,23 +134,50 @@ def main():
     parser.add_argument('--jobs', type=int, default=4)
     parser.add_argument('--timeout', type=int, default=10)
     parser.add_argument('--filter', help='only run paths containing this substring')
+    parser.add_argument('--require-all-pass', action='store_true',
+                        help='exit 1 if any selected case fails')
     args = parser.parse_args()
-    cases = requests(args.website)
-    if args.filter:
-        cases = [c for c in cases if args.filter in c['id']]
-    if not cases:
-        raise ValueError('empty selection')
+    if args.jobs <= 0 or args.timeout <= 0:
+        parser.error('--jobs and --timeout must be positive')
+    if not shutil.which(args.worker):
+        parser.error(f'worker executable was not found: {args.worker}')
+    try:
+        catalog = requests(args.website)
+    except (OSError, ValueError) as err:
+        parser.error(str(err))
+    selected = [(i, case) for i, case in enumerate(catalog, 1)
+                if not args.filter or args.filter in case['id']]
+    if not selected:
+        parser.error('empty selection')
     totals = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool, args.output.open('w') as dest:
-        for index, result in enumerate(pool.map(lambda c: run_case(args.worker, args.timeout, c), cases), 1):
-            result['index'] = index
-            dest.write(json.dumps(result, ensure_ascii=True, separators=(',', ':')) + '\n')
-            totals[result['status']] = totals.get(result['status'], 0) + 1
-            if index % 500 == 0:
-                dest.flush()
-                print(index, totals, flush=True)
+    workers = Queue()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool, args.output.open('w') as dest:
+            results = pool.map(lambda item: run_case(args.worker, args.timeout, item[1], workers), selected)
+            for completed, ((index, _), result) in enumerate(zip(selected, results), 1):
+                result['index'] = index
+                dest.write(json.dumps(result, ensure_ascii=True, separators=(',', ':')) + '\n')
+                totals[result['status']] = totals.get(result['status'], 0) + 1
+                if completed % 500 == 0:
+                    dest.flush()
+                    print(completed, totals, flush=True)
+    except OSError as err:
+        parser.exit(2, f'{parser.prog}: {err}\n')
+    finally:
+        while not workers.empty():
+            proc, outgoing, thread = workers.get_nowait()
+            outgoing.put(None)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            thread.join(timeout=2)
     print('Final', totals)
+    if totals.get('harness_error'):
+        return 2
+    return int(args.require_all_pass and totals.get('pass', 0) != len(selected))
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

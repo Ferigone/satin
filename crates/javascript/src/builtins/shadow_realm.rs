@@ -2,7 +2,7 @@
 //! through primitive copies or newly allocated, non-constructable callables.
 use super::{arg, constructor, method, replace_construct};
 use crate::{
-    ErrorKind, JsError, RealmId, Value, Vm, bytecode,
+    ErrorKind, JsError, RealmId, Value, Vm,
     heap::{EnvKind, Environment},
     vm::Completion,
 };
@@ -92,16 +92,9 @@ fn evaluate(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> 
             "ShadowRealm.evaluate requires a string",
         ));
     };
-    vm.consume_work(source.len().saturating_mul(2))?;
-    let source = String::from_utf16(source.as_utf16()).map_err(|_| {
-        JsError::new(
-            ErrorKind::UnsupportedFeature,
-            "Isolated surrogate code units in script source are unsupported",
-        )
-    })?;
     // Syntax errors from the source belong to the caller. A nested eval or
     // user exception after execution begins is caught at the realm boundary.
-    let chunk = bytecode::compile(&source, vm.compilation_budget(&source)?)?;
+    let chunk = vm.compile_eval_string(&source, false, crate::parser::EvalContext::default())?;
     vm.retain_compiled_chunk(&chunk)?;
     let value = vm
         .with_realm(realm, |vm| {

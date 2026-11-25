@@ -47,26 +47,49 @@ struct SlashPosition {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SourceSpan {
-    buffer: Rc<[char]>,
+    // ECMAScript source characters can be isolated UTF-16 surrogates.
+    buffer: Rc<[u32]>,
     range: std::ops::Range<usize>,
 }
 impl SourceSpan {
-    pub fn chars(&self) -> &[char] { &self.buffer[self.range.clone()] }
+    fn new(points: impl Iterator<Item = u32>) -> Self {
+        let buffer: Rc<[u32]> = points.collect();
+        let range = 0..buffer.len();
+        Self { buffer, range }
+    }
     pub fn storage(&self) -> (usize, usize) {
         (self.buffer.as_ptr() as usize, std::mem::size_of_val(&*self.buffer))
     }
     pub fn generated(text: &str) -> Rc<Self> {
-        let buffer: Rc<[char]> = text.chars().collect();
-        let range = 0..buffer.len();
-        Rc::new(Self { buffer, range })
+        Rc::new(Self::new(text.chars().map(u32::from)))
+    }
+    pub fn utf16_len(&self, range: std::ops::Range<usize>) -> usize {
+        self[range].iter().map(|&p| if p > 0xffff { 2 } else { 1 }).sum()
+    }
+    pub fn utf16_range(&self, range: std::ops::Range<usize>) -> Vec<u16> {
+        let mut units = Vec::with_capacity(self.utf16_len(range.clone()));
+        for &point in &self[range] {
+            push_source_point(&mut units, point);
+        }
+        units
+    }
+}
+
+fn push_source_point(units: &mut Vec<u16>, point: u32) {
+    if point <= 0xffff {
+        units.push(point as u16);
+    } else {
+        let n = point - 0x10000;
+        units.push((0xd800 + (n >> 10)) as u16);
+        units.push((0xdc00 + (n & 1023)) as u16);
     }
 }
 
 impl std::ops::Deref for SourceSpan {
-    type Target = [char];
+    type Target = [u32];
 
-    fn deref(&self) -> &[char] {
-        self.chars()
+    fn deref(&self) -> &[u32] {
+        &self.buffer[self.range.clone()]
     }
 }
 
@@ -86,9 +109,15 @@ pub(crate) struct Lexer {
 }
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
-        let buffer: Rc<[char]> = source.chars().collect();
-        let range = 0..buffer.len();
-        Self::from_span(SourceSpan { buffer, range }, compilation_bytes, script_goal)
+        Self::from_span(SourceSpan::new(source.chars().map(u32::from)), compilation_bytes, script_goal)
+    }
+
+    pub(crate) fn from_utf16(source: &[u16], compilation_bytes: usize) -> Self {
+        let points = char::decode_utf16(source.iter().copied()).map(|entry| match entry {
+            Ok(ch) => u32::from(ch),
+            Err(error) => u32::from(error.unpaired_surrogate()),
+        });
+        Self::from_span(SourceSpan::new(points), compilation_bytes, true)
     }
 
     pub(crate) fn from_span(chars: SourceSpan, compilation_bytes: usize, script_goal: bool) -> Self {
@@ -115,7 +144,10 @@ impl Lexer {
     pub fn position(&self) -> usize { self.pos }
 
     fn peek(&self, n: usize) -> Option<char> {
-        self.chars.get(self.pos + n).copied()
+        // Lone surrogates share the lexical classification of U+FFFD. Literal
+        // values and source reflection read the untouched code point instead.
+        self.chars.get(self.pos + n)
+            .map(|&p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER))
     }
     fn bump(&mut self) -> Option<char> {
         let c = self.peek(0)?;
@@ -205,11 +237,12 @@ impl Lexer {
                 self.bump();
                 continue;
             }
-            let prefix = &self.chars[self.pos..];
-            let html_comment = self.script_goal && (prefix.starts_with(&['<', '!', '-', '-']) ||
-                ((self.before_first_token || self.line != initial_line) && prefix.starts_with(&['-', '-', '>'])));
+            let prefix = |bytes: &[u8]| self.chars[self.pos..].iter().copied()
+                .take(bytes.len()).eq(bytes.iter().copied().map(u32::from));
+            let html_comment = self.script_goal && (prefix(b"<!--") ||
+                ((self.before_first_token || self.line != initial_line) && prefix(b"-->")));
             if (c == '/' && self.peek(1) == Some('/'))
-                || (self.pos == 0 && prefix.starts_with(&['#', '!'])) || html_comment {
+                || (self.pos == 0 && prefix(b"#!")) || html_comment {
 
                 while self
                     .peek(0)
@@ -410,17 +443,9 @@ impl Lexer {
         // The pattern compiler can emit many instructions from a single
         // JavaScript literal token. Bound that work separately before copying.
         self.reserve_compilation_bytes((self.pos - pattern_start).saturating_mul(512))?;
-        let utf16 = |slice: &[char]| {
-            let mut units = Vec::with_capacity(slice.len());
-            for ch in slice {
-                let mut pair = [0; 2];
-                units.extend_from_slice(ch.encode_utf16(&mut pair));
-            }
-            JsString::from_utf16(units)
-        };
         Ok((
-            utf16(&self.chars[pattern_start..pattern_end]),
-            utf16(&self.chars[flag_start..self.pos]),
+            JsString::from_utf16(self.chars.utf16_range(pattern_start..pattern_end)),
+            JsString::from_utf16(self.chars.utf16_range(flag_start..self.pos)),
         ))
     }
     fn template(&mut self, head: bool) -> Result<TokenKind, JsError> {
@@ -445,20 +470,18 @@ impl Lexer {
                     let c = self
                         .bump()
                         .ok_or_else(|| self.error("Unterminated template escape"))?;
-                    let mut buf = [0; 2];
                     if c == '\r' {
                         raw.push(10);
                     } else {
-                        raw.extend_from_slice(c.encode_utf16(&mut buf));
+                        push_source_point(&mut raw, self.chars[self.pos - 1]);
                     }
                 }
                 Some(_) => {
                     let c = self.bump().unwrap();
-                    let mut buf = [0; 2];
                     if c == '\r' {
                         raw.push(10);
                     } else {
-                        raw.extend_from_slice(c.encode_utf16(&mut buf));
+                        push_source_point(&mut raw, self.chars[self.pos - 1]);
                     }
                 }
             }
@@ -502,8 +525,7 @@ impl Lexer {
                 return Err(self.error("Line terminator in string literal"));
             }
             if c != '\\' {
-                let mut buf = [0; 2];
-                units.extend_from_slice(c.encode_utf16(&mut buf));
+                push_source_point(&mut units, self.chars[self.pos - 1]);
                 continue;
             }
             self.escaped_string = true;
@@ -568,10 +590,7 @@ impl Lexer {
                     }
                 }
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {}
-                other => {
-                    let mut buf = [0; 2];
-                    units.extend_from_slice(other.encode_utf16(&mut buf));
-                }
+                _ => push_source_point(&mut units, self.chars[self.pos - 1]),
             }
         }
     }
@@ -597,14 +616,14 @@ impl Lexer {
             self.number_suffix()?;
             let value = self.chars[digits..self.pos]
                 .iter()
-                .filter_map(|c| c.to_digit(radix))
+                .filter_map(|&p| char::from_u32(p)?.to_digit(radix))
                 .fold(0f64, |value, digit| {
                     value * f64::from(radix) + f64::from(digit)
                 });
             return Ok(TokenKind::Number(value));
         }
         let integers = self.digits(10)?;
-        let leading_zero = integers > 1 && self.chars[start] == '0';
+        let leading_zero = integers > 1 && self.chars[start] == u32::from('0');
         if self.peek(0) == Some('n') && integers != 0 {
             if leading_zero {
                 return Err(self.error("Decimal BigInt literals cannot have leading zeroes"));
@@ -614,12 +633,14 @@ impl Lexer {
         if leading_zero {
             self.legacy_literal = true;
             let digits = &self.chars[start..self.pos];
-            if digits.contains(&'_') {
+            if digits.contains(&u32::from('_')) {
                 return Err(self.error("Numeric separator after a leading zero"));
             }
-            if digits.iter().all(|c| c.is_digit(8)) {
+            if digits.iter().all(|&p| (u32::from('0')..=u32::from('7')).contains(&p)) {
                 self.number_suffix()?;
-                let value = digits.iter().fold(0.0, |n, c| n * 8.0 + f64::from(c.to_digit(8).unwrap()));
+                let value = digits.iter().fold(0.0, |n, c| {
+                    n * 8.0 + f64::from(c - u32::from('0'))
+                });
                 return Ok(TokenKind::Number(value));
             }
         }
@@ -638,10 +659,13 @@ impl Lexer {
         }
         self.number_suffix()?;
         let raw = &self.chars[start..self.pos];
-        if leading_zero && raw.contains(&'_') {
+        if leading_zero && raw.contains(&u32::from('_')) {
             return Err(self.error("Numeric separator after a leading zero"));
         }
-        let text: String = raw.iter().filter(|c| **c != '_').collect();
+        let text: String = raw.iter().copied()
+            .filter(|&p| p != u32::from('_'))
+            .filter_map(char::from_u32)
+            .collect();
         text.parse()
             .map(TokenKind::Number)
             .map_err(|_| self.error("Invalid numeric literal"))
@@ -680,7 +704,7 @@ impl Lexer {
         self.number_suffix()?;
         let digits: Vec<_> = self.chars[digits..end]
             .iter()
-            .filter(|c| **c != '_')
+            .filter(|c| **c != u32::from('_'))
             .map(|c| *c as u8)
             .collect();
         self.charge_bigint_source(crate::bigint::literal_work(&digits, radix))?;

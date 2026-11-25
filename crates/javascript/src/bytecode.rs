@@ -65,6 +65,11 @@ pub(crate) struct ScopePlan {
     pub annex_vars: Vec<JsString>,
     pub functions: Vec<(JsString, Rc<Code>, bool)>,
 }
+impl ScopePlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lexical.is_empty() && self.vars.is_empty() && self.functions.is_empty() && self.annex_vars.is_empty()
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Chunk {
     pub ops: Vec<Op>,
@@ -275,19 +280,17 @@ impl Op {
 
 pub(crate) fn compile(source: &str, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
     compile_eval(
-        source,
-        false,
-        parser::EvalContext::default(),
-        compilation_bytes,
+        crate::lexer::Lexer::new(source, compilation_bytes, true), source.len(),
+        false, parser::EvalContext::default(),
     )
 }
 pub(crate) fn compile_eval(
-    source: &str,
+    lexer: crate::lexer::Lexer,
+    source_bytes: usize,
     inherited_strict: bool,
     context: parser::EvalContext,
-    compilation_bytes: usize,
 ) -> Result<Rc<Chunk>, JsError> {
-    let body = parser::parse_script(source, context, compilation_bytes, inherited_strict)?;
+    let body = parser::parse_script(lexer, source_bytes, context, inherited_strict)?;
     let strict = inherited_strict || parser::has_strict_directive(&body);
     block(&body, true, strict)
 }

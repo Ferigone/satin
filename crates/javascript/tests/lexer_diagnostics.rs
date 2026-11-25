@@ -29,3 +29,29 @@ fn successful_hex_escapes_still_consume_all_digits() {
         .unwrap();
     assert_eq!(result, Value::from("ABC"));
 }
+
+#[test]
+fn eval_preserves_isolated_source_units_in_literals_comments_and_function_spans() {
+    let mut vm = Vm::new();
+    let source = r#"
+        let valid = true;
+        for (const unit of ["\uD800", "\uDBFF", "\uDC00", "\uDFFF", "\uFFFD", "😀"]) {
+            const fn = "function sample(){/*" + unit + "*/return '" + unit + "'}";
+            const value = eval("(" + fn + ")");
+            const literal = eval("/" + unit + "/");
+            const identity = eval("/\\" + unit + "/");
+            const cooked = eval("`" + unit + "`");
+            const raw = eval("String.raw`" + unit + "`");
+            valid = valid && value.toString() === fn && value() === unit &&
+                literal.source === unit && literal.test(unit) &&
+                identity.source === "\\" + unit &&
+                cooked === unit && raw === unit &&
+                eval("//" + unit + "\n42") === 42;
+        }
+        let invalid = false;
+        try { eval("let a" + String.fromCharCode(0xd800) + " = 1"); }
+        catch (e) { invalid = e instanceof SyntaxError; }
+        valid && invalid
+    "#;
+    assert_eq!(vm.eval(source).unwrap(), Value::Bool(true));
+}

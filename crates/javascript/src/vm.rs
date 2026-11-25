@@ -16,13 +16,16 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::dynamic_import::SourceReferrer;
 
 mod inspection;
 pub(crate) mod realm;
+mod task_deadline;
+
+use task_deadline::TaskDeadline;
 
 #[cfg(test)]
 mod global_environment_tests;
@@ -154,7 +157,7 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
-    task_deadline: Option<Instant>,
+    task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     pub(crate) call_depth: usize,
@@ -325,7 +328,10 @@ impl Vm {
         self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
     pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
-        if source.len() > self.limits.max_source_bytes {
+        self.compilation_budget_for_bytes(source.len())
+    }
+    fn compilation_budget_for_bytes(&self, bytes: usize) -> Result<usize, JsError> {
+        if bytes > self.limits.max_source_bytes {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Script source exceeds configured byte limit",
@@ -334,7 +340,7 @@ impl Vm {
         // UTF-32 lexer input and decoded character data, including temporary
         // UTF-16 buffers during literal conversion. The lexer accounts for
         // per-token structural allocations as it consumes the source.
-        let input_bytes = source.len().saturating_mul(16).saturating_add(4096);
+        let input_bytes = bytes.saturating_mul(16).saturating_add(4096);
         self.ensure_allocation(input_bytes)?;
         Ok(self
             .limits
@@ -348,7 +354,7 @@ impl Vm {
         }
         // The lexer reuses the already-retained span. Reserve transient decoded
         // literal buffers, then charge structural allocations against the free heap.
-        let scratch = code.source.chars().len().saturating_mul(8).saturating_add(4096);
+        let scratch = code.source.len().saturating_mul(8).saturating_add(4096);
         self.ensure_allocation(scratch)?;
         let budget = self.limits.max_heap_bytes
             .saturating_sub(self.estimated_heap_bytes())
@@ -388,7 +394,7 @@ impl Vm {
 
     /// An embedded parser may synchronously execute a child script while its
     /// caller is still on the stack. Set aside part of the *existing* task
-    /// instruction and heap headroom so the host can deliver a child resource
+    /// instruction, CPU and heap headroom so the host can deliver a child resource
     /// error and resume its caller. Work and live objects remain charged to
     /// the enclosing task. Host interruption and internal errors propagate.
     pub fn eval_embedded_script(
@@ -408,7 +414,12 @@ impl Vm {
         self.remaining -= reserved;
         self.limits.max_heap_objects -= reserved_cells;
         self.limits.max_heap_bytes -= reserved_bytes;
+        let child_deadline = self.task_deadline.as_ref().and_then(TaskDeadline::for_child);
+        let parent_deadline = child_deadline.and_then(|child| self.task_deadline.replace(child));
         let result = self.eval_with_identifier(source, identifier);
+        if let Some(parent) = parent_deadline {
+            self.task_deadline = Some(parent);
+        }
         self.remaining += reserved;
         self.limits.max_heap_objects = parent_cells;
         self.limits.max_heap_bytes = parent_bytes;
@@ -482,6 +493,37 @@ impl Vm {
     where
         F: FnOnce(&mut Vm) -> Result<T, JsError>,
     {
+        self.run_task(instructions, deadline.map(TaskDeadline::Wall), callback)
+    }
+
+    /// Charge only execution on this thread to the CPU allowance. The absolute
+    /// wall deadline also bounds blocked callbacks. Nested work shares both limits.
+    pub fn with_task_cpu_budget<T, F>(
+        &mut self,
+        instructions: u64,
+        cpu_budget: Duration,
+        wall_deadline: Instant,
+        callback: F,
+    ) -> Result<T, JsError>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, JsError>,
+    {
+        self.run_task(
+            instructions,
+            Some(TaskDeadline::for_thread(cpu_budget, wall_deadline)),
+            callback,
+        )
+    }
+
+    fn run_task<T, F>(
+        &mut self,
+        instructions: u64,
+        deadline: Option<TaskDeadline>,
+        callback: F,
+    ) -> Result<T, JsError>
+    where
+        F: FnOnce(&mut Vm) -> Result<T, JsError>,
+    {
         let outer = self.active == 0;
         if outer {
             self.check_interrupt()?;
@@ -502,14 +544,8 @@ impl Vm {
     }
 
     fn check_interrupt(&self) -> Result<(), JsError> {
-        if self
-            .task_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Task deadline exceeded",
-            ));
+        if let Some(message) = self.task_deadline.as_ref().and_then(TaskDeadline::exceeded) {
+            return Err(JsError::new(ErrorKind::ExecutionLimit, message));
         }
         if self
             .interrupt
@@ -2477,7 +2513,20 @@ impl Vm {
         Ok(())
     }
 
+    pub(crate) fn block_environment(&mut self, chunk: &Chunk, parent: EnvId) -> Result<EnvId, JsError> {
+        // A block without declarations introduces no bindings and cannot
+        // affect name resolution, including direct eval and escaping closures.
+        if chunk.scope.is_empty() {
+            return Ok(parent);
+        }
+        self.ensure_allocation(384)?;
+        Ok(self.heap.allocate_env(Environment::new(Some(parent), EnvKind::Block, None)))
+    }
+
     pub(crate) fn prepare(&mut self, scope: &ScopePlan, env: EnvId) -> Result<(), JsError> {
+        if scope.is_empty() {
+            return Ok(());
+        }
         let declarations = self.declaration_environment(env);
         for (name, _) in &scope.lexical {
             if self
@@ -3112,6 +3161,21 @@ impl Vm {
         };
         self.define_data_property(value, "name", Value::String(name), false, false, true)
     }
+    pub(crate) fn compile_eval_string(
+        &mut self,
+        source: &JsString,
+        strict: bool,
+        context: crate::parser::EvalContext,
+    ) -> Result<Rc<Chunk>, JsError> {
+        self.consume_work(source.len().saturating_mul(2))?;
+        // An isolated surrogate occupies three bytes in the same byte-based
+        // source budget used for well-formed UTF-8 script inputs.
+        let bytes = char::decode_utf16(source.as_utf16().iter().copied())
+            .map(|entry| entry.map_or(3, char::len_utf8)).sum();
+        let budget = self.compilation_budget_for_bytes(bytes)?;
+        let lexer = crate::lexer::Lexer::from_utf16(source.as_utf16(), budget);
+        bytecode::compile_eval(lexer, bytes, strict, context)
+    }
     pub(crate) fn direct_eval(
         &mut self,
         value: Value,
@@ -3121,19 +3185,8 @@ impl Vm {
         let Value::String(source) = value else {
             return Ok(value);
         };
-        self.consume_work(source.len().saturating_mul(2))?;
-        let source = String::from_utf16(source.as_utf16()).map_err(|_| {
-            JsError::new(
-                ErrorKind::UnsupportedFeature,
-                "Eval source containing isolated surrogate code units is not implemented",
-            )
-        })?;
-        let chunk = bytecode::compile_eval(
-            &source,
-            strict,
-            self.eval_context(env)?,
-            self.compilation_budget(&source)?,
-        )?;
+        let context = self.eval_context(env)?;
+        let chunk = self.compile_eval_string(&source, strict, context)?;
         self.retain_compiled_chunk(&chunk)?;
         if !self.can_enter_call() {
             return Err(JsError::new(
@@ -3872,9 +3925,7 @@ impl Vm {
                 }
             }
             Op::Block(block) => {
-                let scope =
-                    self.heap
-                        .allocate_env(Environment::new(Some(env), EnvKind::Block, None));
+                let scope = self.block_environment(block, env)?;
                 match self.run_chunk(block, scope)? {
                     Completion::Normal(v) => {
                         if v.is_some() {

@@ -45,3 +45,21 @@ fn resumable_for_copies_the_binding_after_the_initializer_resumes() {
         Value::from("initializing,1,0")
     );
 }
+
+#[test]
+fn blocks_without_declarations_do_not_allocate_iteration_environments() {
+    let mut vm = rust_browser_javascript::Vm::new();
+    vm.eval("var n = 0;").unwrap();
+    let initial = vm.heap_cell_count();
+    vm.eval("while(n < 300) { { n++; } }").unwrap();
+    assert!(vm.heap_cell_count() - initial < 30);
+    assert_eq!(vm.eval("n").unwrap(), rust_browser_javascript::Value::from(300));
+    assert_eq!(
+        vm.eval("function f(){ { eval('var seen = 7'); } return () => seen; } f()()").unwrap(),
+        rust_browser_javascript::Value::from(7)
+    );
+    assert_eq!(
+        vm.eval("var fs = []; for (let j=0; j<2; ++j) { { let saved=j; fs.push(() => saved); } } fs[0]() + fs[1]()").unwrap(),
+        rust_browser_javascript::Value::from(1)
+    );
+}

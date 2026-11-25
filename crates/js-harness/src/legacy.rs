@@ -44,55 +44,132 @@ pub(super) fn execute(request: Request, limits: VmLimits) -> Json {
     } else {
         request.source
     };
-    let evaluation = vm.eval_with_identifier(&source, id);
-    if let Err(error) = &evaluation
-        && matches!(error.kind, ErrorKind::ExecutionLimit | ErrorKind::HeapLimit)
-    {
-        return json!({"id":id,"status":"fail","message":"Satin exhausted its resource budget before the website reported a result","evaluation_error":error_json(error),"resource_limit":true});
-    }
-    let mut initial_error = None;
-    let result = (|| -> Result<(), JsError> {
-        if let Err(error) = evaluation {
-            initial_error = Some(error_json(&error));
-            let thrown = match error.thrown {
-                Some(ref value) => value.clone(),
-                None => vm.error_value(&error)?,
-            };
-            let message = Value::from(format!("{}: {}", error.kind.name(), error.message));
-            let handler = vm.get_global("onerror")?;
-            vm.call(
-                handler,
-                vm.global(),
-                &[
-                    message,
-                    Value::from(id.as_str()),
-                    Value::from(error.line.unwrap_or(0)),
-                    Value::from(error.column.unwrap_or(0)),
-                    thrown,
-                ],
-            )?;
+    let mut evaluation_error = None;
+    let mut phase = "script";
+    let run = vm.with_task(|vm| {
+        if let Err(error) = vm.eval_with_identifier(&source, id) {
+            evaluation_error = Some(error_json(&error));
+            report_uncaught(vm, error)?;
         }
-        // A browser performs a microtask checkpoint when each classic script returns.
+        phase = "microtask";
         for _ in 0..10_000 {
             if observation.borrow().is_some() || !vm.has_pending_jobs() {
                 break;
             }
-            vm.drain_jobs(1)?;
+            if let Err(error) = vm.drain_jobs(1) {
+                evaluation_error = Some(error_json(&error));
+                report_uncaught(vm, error)?;
+            }
+        }
+        if observation.borrow().is_none() && vm.has_pending_jobs() {
+            return Err(JsError::new(
+                ErrorKind::ExecutionLimit,
+                "Legacy microtask checkpoint exceeds 10000 jobs",
+            ));
         }
         if observation.borrow().is_none() && !request.async_test {
+            phase = "completion";
             vm.eval("if (typeof $DONE === 'function') $DONE()")?;
         }
         Ok(())
-    })();
-    if let Err(error) = result {
-        return json!({"id":id,"status":"harness_error","error":error_json(&error),"evaluation_error":initial_error});
+    });
+    if let Err(error) = run {
+        let resource = matches!(error.kind, ErrorKind::ExecutionLimit | ErrorKind::HeapLimit);
+        let execution_stop = resource || error.kind == ErrorKind::UnsupportedFeature;
+        let detail = error_json(&error);
+        return json!({
+            "id":id, "status": if execution_stop {"fail"} else {"harness_error"},
+            "verdict_source":"vm", "phase":phase, "resource_limit":resource,
+            "error":detail, "evaluation_error":evaluation_error.unwrap_or(detail),
+            "message":"The VM stopped before the website returned a verdict",
+        });
     }
     match observation.borrow_mut().take() {
-        Some((status, message)) => {
-            json!({"id":id,"status":status,"message":message,"evaluation_error":initial_error})
-        }
-        None => {
-            json!({"id":id,"status":"fail","message":"No completion callback after the job queue drained","evaluation_error":initial_error})
-        }
+        Some((status, message)) => json!({"id":id,"status":status,"message":message,
+            "verdict_source":"website-callback","evaluation_error":evaluation_error}),
+        None => json!({"id":id,"status":"fail","verdict_source":"vm",
+            "message":"No website completion callback after the job queue drained","evaluation_error":evaluation_error}),
+    }
+}
+
+fn report_uncaught(vm: &mut Vm, error: JsError) -> Result<(), JsError> {
+    if matches!(
+        error.kind,
+        ErrorKind::ExecutionLimit
+            | ErrorKind::HeapLimit
+            | ErrorKind::UnsupportedFeature
+            | ErrorKind::InternalError
+    ) {
+        return Err(error);
+    }
+    let message = if error.kind == ErrorKind::Thrown {
+        format!("Uncaught {}", error.message)
+    } else {
+        format!("Uncaught {}: {}", error.kind.name(), error.message)
+    };
+    let thrown = match error.thrown {
+        Some(ref value) => value.clone(),
+        None => vm.error_value(&error)?,
+    };
+    let handler = vm.get_global("onerror")?;
+    vm.call(
+        handler,
+        vm.global(),
+        &[
+            message.into(),
+            "about:blank".into(),
+            error.line.unwrap_or(0).into(),
+            error.column.unwrap_or(0).into(),
+            thrown,
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observe(source: &str, asynchronous: bool) -> Json {
+        let request = serde_json::from_value(json!({
+            "id":"case.js", "source":source, "async_test":asynchronous,
+            "setup":[{"name":"callbacks", "source":"
+                function $DONE(error) {
+                    testRun('case','case.js','','',error ? 'fail' : 'pass',error);
+                    testFinished();
+                }
+                window.onerror = function(message, url, line, col, error) { $DONE(error); };
+            "}]
+        }))
+        .unwrap();
+        execute(request, VmLimits::default())
+    }
+
+    #[test]
+    fn async_completion_needs_a_real_callback() {
+        let completed = observe("Promise.resolve().then(function(){ $DONE() });", true);
+        assert_eq!(completed["status"], "pass");
+        assert_eq!(completed["verdict_source"], "website-callback");
+
+        let silent = observe("Promise.resolve(1);", true);
+        assert_eq!(silent["status"], "fail");
+        assert_eq!(silent["verdict_source"], "vm");
+
+        let thrown = observe("throw new TypeError('err');", true);
+        assert_eq!(thrown["status"], "fail");
+        assert_eq!(thrown["verdict_source"], "website-callback");
+        assert_eq!(thrown["message"], "TypeError: err");
+    }
+
+    #[test]
+    fn exhausted_job_queue_budget_cannot_synthesize_a_passing_sync_callback() {
+        let result = observe(
+            "function spin(){ Promise.resolve().then(spin); } spin();",
+            false,
+        );
+        assert_eq!(result["status"], "fail");
+        assert_eq!(result["verdict_source"], "vm");
+        assert_eq!(result["phase"], "microtask");
+        assert_eq!(result["resource_limit"], true);
     }
 }
