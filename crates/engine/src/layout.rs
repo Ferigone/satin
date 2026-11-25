@@ -848,6 +848,19 @@ fn collapse_margins(a: f32, b: f32) -> f32 {
 fn is_css_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
+// Opt-in QA accounting: categorize the existing work budget without changing it.
+#[derive(Default)]
+struct QaLayoutWork {
+    child: usize,
+    block: usize,
+    placement: usize,
+    fragment_reuse: usize,
+    placement_hits: usize,
+    placement_misses: usize,
+    fragment_hits: usize,
+    fragment_misses: usize,
+    fragment_calls: Vec<u32>,
+}
 struct Builder<'a> {
     page: &'a LoadedPage,
     fonts: &'a Fonts,
@@ -876,6 +889,7 @@ struct Builder<'a> {
     work_remaining: usize,
     limited: bool,
     qa_limit_traced: bool,
+    qa_work: Option<QaLayoutWork>,
 }
 impl<'a> Builder<'a> {
     fn new(
@@ -922,6 +936,10 @@ impl<'a> Builder<'a> {
                 .min(1_000_000),
             limited: false,
             qa_limit_traced: false,
+            qa_work: std::env::var_os("SATIN_QA_LAYOUT_LIMIT").map(|_| QaLayoutWork {
+                fragment_calls: vec![0; page.document.nodes.len()],
+                ..QaLayoutWork::default()
+            }),
         }
     }
 
@@ -929,6 +947,23 @@ impl<'a> Builder<'a> {
     fn qa_trace_limit(&mut self, id: NodeId, reason: &str) {
         if !self.qa_limit_traced && std::env::var_os("SATIN_QA_LAYOUT_LIMIT").is_some() {
             self.qa_limit_traced = true;
+            if let Some(q) = &self.qa_work {
+                let mut top = Vec::<(u32, usize)>::with_capacity(9);
+                for (node, &calls) in q.fragment_calls.iter().enumerate() {
+                    if calls < 2 || (top.len() == 8 && calls <= top[7].0) {
+                        continue;
+                    }
+                    top.push((calls, node));
+                    top.sort_unstable_by(|a, b| b.cmp(a));
+                    top.truncate(8);
+                }
+                eprintln!("SATIN_QA_LAYOUT_LIMIT accounting child={} block={} placement={} fragment_reuse={} placement_hits={} placement_misses={} fragment_hits={} fragment_misses={} fragment_entries={} fragment_payload={} placement_entries={} placement_items={} hot_fragments={:?}",
+                    q.child, q.block, q.placement, q.fragment_reuse, q.placement_hits,
+                    q.placement_misses, q.fragment_hits, q.fragment_misses,
+                    self.fragment_cache.len(), self.fragment_cache_cost,
+                    self.grid_placements.len(), self.grid_placement_items,
+                    top.iter().map(|&(calls, node)| (calls, node, self.page.document.tag(NodeId(node)))).collect::<Vec<_>>());
+            }
             eprintln!("SATIN_QA_LAYOUT_LIMIT reason={} tag={} node={} depth={} work_remaining={} dom_nodes={}", reason, self.page.document.tag(id), id.0, self.recursion, self.work_remaining, self.page.document.nodes.len());
         }
     }
@@ -1911,19 +1946,28 @@ impl Builder<'_> {
         if let Some(placement) = self.grid_placements.get(&key) {
             let charge = 1 + placement.items.len() / 64;
             self.work_remaining = self.work_remaining.checked_sub(charge)?;
+            if let Some(q) = &mut self.qa_work {
+                q.placement += charge;
+                q.placement_hits += 1;
+            }
             return Some(Arc::clone(placement));
         }
         let nodes = self.grid_nodes(id);
         let doc = &self.page.document;
         let before = self.work_remaining;
-        let placement = Arc::new(grid_placement(
+        let placement = grid_placement(
             nodes,
             self.styles,
             |node| doc.nodes[node.0].kind.text_data().is_some(),
             &self.styles[id.0],
             [rows, columns],
             &mut self.work_remaining,
-        )?);
+        );
+        if let Some(q) = &mut self.qa_work {
+            q.placement += before.saturating_sub(self.work_remaining);
+            q.placement_misses += 1;
+        }
+        let placement = Arc::new(placement?);
         let items = placement.items.len();
         // Retain only successful, useful placements in a bounded frame-local
         // cache. A different auto-repeat count must perform placement anew.
@@ -2948,6 +2992,7 @@ impl Builder<'_> {
             return;
         }
         self.work_remaining -= 1;
+        if let Some(q) = &mut self.qa_work { q.child += 1; }
         self.recursion += 1;
         self.child_inner(id, line, href);
         self.recursion -= 1;
@@ -3113,6 +3158,7 @@ impl Builder<'_> {
             return (line.y - y).max(0.);
         }
         self.work_remaining -= 1;
+        if let Some(q) = &mut self.qa_work { q.block += 1; }
         self.recursion += 1;
         let height = self.block_inner(id, x, y, available, href, c);
         self.recursion -= 1;
@@ -3343,6 +3389,9 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        if let Some(q) = &mut self.qa_work {
+            q.fragment_calls[id.0] = q.fragment_calls[id.0].saturating_add(1);
+        }
         // Repeated grid/flex measure and stretch passes can revisit the same
         // subtree under identical constraints exponentially. Never reuse
         // measurements across different percentage bases or inherited links.
@@ -3363,9 +3412,14 @@ impl Builder<'_> {
             let charge = 1 + cost / 64;
             if self.work_remaining >= charge {
                 self.work_remaining -= charge;
+                if let Some(q) = &mut self.qa_work {
+                    q.fragment_reuse += charge;
+                    q.fragment_hits += 1;
+                }
                 return cached.clone();
             }
         }
+        if let Some(q) = &mut self.qa_work { q.fragment_misses += 1; }
         let work_before = self.work_remaining;
         let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
