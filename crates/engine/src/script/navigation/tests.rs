@@ -285,6 +285,23 @@ fn evaluate(runtime: &mut Option<ScriptRuntime>, expression: &str) -> Value {
 }
 
 #[test]
+fn external_classic_bundle_runs_within_the_remaining_document_budget() {
+    let (mut page, mut session, mut runtime) = start(
+        "<script src='large.js'></script><script src='overflow.js'></script>",
+    );
+    let source = format!("/*{}*/document.title='large bundle ran';", "x".repeat(3 * 1024 * 1024));
+    session.classic_bytes = DOCUMENT_CLASSIC_SCRIPT_LIMIT - source.len();
+    let large = session.next_resource().unwrap();
+    complete(&mut page, &mut session, &mut runtime, large.id, Some(("large.js", &source)));
+    let overflow = session.next_resource().unwrap();
+    complete(&mut page, &mut session, &mut runtime, overflow.id, Some(("overflow.js", "document.title='overflow';")));
+    assert_eq!(evaluate(&mut runtime, "document.title"), "large bundle ran".into());
+    let realm = runtime.unwrap();
+    assert_eq!(realm.executed_scripts(), 1);
+    assert!(realm.diagnostics().iter().any(|entry| entry.contains("Classic script source budget exceeded")));
+}
+
+#[test]
 fn detached_images_use_document_requests_and_ignore_replaced_sources() {
     let (mut page, mut session, mut runtime) = start(
         r#"<base href="/assets/"><script>

@@ -295,7 +295,7 @@ fn run(shared: &Arc<Shared>) {
             Work::Command(command) => {
                 let key = command.player_key().unwrap();
                 if let Some(player) = players.get_mut(&key)
-                    && let Err(error) = player.control(command)
+                    && let Err(error) = player.control(command, shared)
                 {
                     shared.publish(key, EventKind::Error(error.to_string()));
                     players.remove(&key);

@@ -71,8 +71,8 @@ fn descend(statement: &mut Stmt, blocked: &mut BTreeSet<JsString>) {
                 }
             });
         }
-        Stmt::If(_, yes, no) => {
-            for child in std::iter::once(yes).chain(no) {
+        Stmt::If(arms, no) => {
+            for child in arms.iter_mut().map(|(_, body)| body).chain(no.as_deref_mut()) {
                 mark_declaration(child, blocked);
                 descend(child, blocked);
             }

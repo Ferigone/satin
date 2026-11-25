@@ -340,7 +340,7 @@ fn placeholder_shown(doc: &Document, id: NodeId, control: Option<&Control>) -> b
         return !doc.nodes[id.0]
             .children
             .iter()
-            .any(|n| matches!(&doc.nodes[n.0].kind, NodeKind::Text(text) if !text.is_empty()));
+            .any(|n| matches!(&doc.nodes[n.0].kind, NodeKind::Text(text) | NodeKind::Cdata(text) if !text.is_empty()));
     }
     doc.attr(id, "value")
         .is_none_or(|value| value.is_empty() || sanitize(doc, id, value.into()).is_empty())
@@ -447,7 +447,7 @@ fn option_text(doc: &Document, id: NodeId) -> String {
         if html(doc, id, "script") {
             continue;
         }
-        if let NodeKind::Text(text) = &doc.nodes[id.0].kind {
+        if let Some(text) = doc.nodes[id.0].kind.text_data() {
             out.push_str(text);
         }
         pending.extend(doc.nodes[id.0].children.iter().rev().copied());
@@ -601,7 +601,7 @@ fn value_read_work(doc: &Document, data: &Data, id: NodeId) -> usize {
         let mut pending = vec![id];
         while let Some(id) = pending.pop() {
             work = work.saturating_add(1);
-            if let NodeKind::Text(text) = &doc.nodes[id.0].kind {
+            if let Some(text) = doc.nodes[id.0].kind.text_data() {
                 work = work.saturating_add(text.len());
             }
             pending.extend(doc.nodes[id.0].children.iter().copied());
@@ -1222,7 +1222,7 @@ fn bounded_text(doc: &Document, id: NodeId, limit: usize, work: &mut usize) -> S
         if html(doc, id, "script") {
             continue;
         }
-        if let NodeKind::Text(value) = &doc.nodes[id.0].kind {
+        if let Some(value) = doc.nodes[id.0].kind.text_data() {
             for ch in value.chars() {
                 if *work == 0 || units + ch.len_utf16() > limit {
                     break 'outer;

@@ -6,13 +6,17 @@ mod blobs;
 mod canvas;
 mod class_list;
 mod collections;
+mod custom_elements;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
+mod document_interface;
 mod dom_api;
+mod dom_implementation;
 mod element_interface;
 mod error_event;
 mod event_target;
+mod ui_events;
 mod fetch;
 mod file_list;
 mod form_data;
@@ -31,10 +35,13 @@ mod namespaces;
 mod navigation;
 mod navigator;
 mod scheduler;
+mod shadow_dom;
 mod storage;
 mod streams;
 mod structured_clone;
+mod style_sheets;
 mod text_encoding;
+mod tree_walker;
 mod url_api;
 mod webidl;
 mod workers;
@@ -79,11 +86,18 @@ type FormCloneHook = Rc<dyn Fn(&mut Vm, &[NodeId], usize) -> Result<(), JsError>
 
 struct State {
     document: Document,
+    custom_elements: Rc<RefCell<custom_elements::Registry>>,
     wrappers: HashMap<NodeId, Value>,
     styles: HashMap<NodeId, Value>,
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
     element_prototype: Value,
+    html_element_prototype: Value,
+    document_prototype: Value,
+    html_document_prototype: Value,
+    doctype_prototype: Value,
+    fragment_prototype: Value,
+    shadow_prototype: Value,
     iframe_prototype: Value,
     frames: frames::Frames,
     script_prototype: Value,
@@ -94,8 +108,14 @@ struct State {
     image_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
+    text_prototype: Value,
+    comment_prototype: Value,
+    cdata_prototype: Value,
+    processing_instruction_prototype: Value,
+    svg_element_prototype: Value,
     window: Value,
     event_prototype: Value,
+    mouse_event_prototype: Value,
     error_event_prototype: Value,
     reporting_error: bool,
     handlers: HashMap<(Option<NodeId>, String), (Value, RootId)>,
@@ -273,17 +293,46 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             && state.document.tag(id) == "input"
         {
             state.input_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Text(_)) {
+            state.text_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Cdata(_)) {
+            state.cdata_prototype.clone()
         } else if matches!(
             state.document.nodes[id.0].kind,
-            NodeKind::Text(_) | NodeKind::Comment(_)
+            NodeKind::ProcessingInstruction { .. }
         ) {
-            state.character_data_prototype.clone()
+            state.processing_instruction_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Comment(_)) {
+            state.comment_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
-            state.element_prototype.clone()
+            match state.document.namespace(id) {
+                crate::dom::Namespace::Html => state.html_element_prototype.clone(),
+                crate::dom::Namespace::Svg => state.svg_element_prototype.clone(),
+                _ => state.element_prototype.clone(),
+            }
+        } else if state.document.shadow_hosts.contains_key(&id) {
+            state.shadow_prototype.clone()
+        } else if state.document.is_html_document(id) {
+            state.html_document_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Doctype { .. }) {
+            state.doctype_prototype.clone()
+        } else if state.document.is_document(id) {
+            state.document_prototype.clone()
+        } else if matches!(state.document.nodes[id.0].kind, NodeKind::Document) {
+            state.fragment_prototype.clone()
         } else {
             state.prototype.clone()
         }
     };
+    wrap_new_node(vm, state, id, prototype)
+}
+
+fn wrap_new_node(
+    vm: &mut Vm,
+    state: &Shared,
+    id: NodeId,
+    prototype: Value,
+) -> Result<Value, JsError> {
     let value = vm.new_object_with_prototype(prototype)?;
     vm.mark_platform_object(&value)?;
     // Wrappers are cached for node identity, including detached nodes. Reclaimed
@@ -321,7 +370,8 @@ fn descendants(doc: &Document, root: NodeId) -> impl Iterator<Item = NodeId> + '
 fn kind_bytes(kind: &NodeKind) -> usize {
     match kind {
         NodeKind::Document => 0,
-        NodeKind::Text(value) | NodeKind::Comment(value) => value.len(),
+        NodeKind::Text(value) | NodeKind::Cdata(value) | NodeKind::Comment(value) => value.len(),
+        NodeKind::ProcessingInstruction { target, data } => target.len() + data.len(),
         NodeKind::Element { tag, attrs } => {
             tag.len()
                 + attrs
@@ -354,6 +404,13 @@ fn changed_bytes(state: &State, removed: usize, added: usize) -> Result<usize, J
         Ok(next)
     }
 }
+fn valid_attribute_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.bytes().any(|byte| {
+            matches!(byte, b' ' | b'\t' | b'\n' | 12 | b'\r' | 0 | b'/' | b'=' | b'>')
+        })
+}
+
 fn set_attribute(
     vm: &mut Vm,
     state: &Shared,
@@ -361,22 +418,26 @@ fn set_attribute(
     key: &str,
     value: Option<String>,
 ) -> Result<(), JsError> {
-    if key.is_empty()
-        || key.chars().any(|c| {
-            c.is_ascii_whitespace() || matches!(c, '\0' | '/' | '>' | '<' | '=' | '\'' | '"')
-        })
-    {
+    if !valid_attribute_name(key) {
         return Err(JsError::type_error("Invalid attribute name"));
     }
     let host = state;
     let mut state = host.borrow_mut();
     let present = value.is_some();
-    let key = if state.document.namespace(id) == crate::dom::Namespace::Html {
+    let key = if state.document.html_element_in_html_document(id) {
         key.to_ascii_lowercase()
     } else {
         key.to_owned()
     };
     let old = state.document.attr(id, &key);
+    let custom_reaction = custom_elements::attribute(
+        &state,
+        id,
+        &key,
+        old,
+        value.as_deref(),
+        state.document.attribute_namespace(id, &key),
+    );
     let changes_canvas_attribute = matches!(key.as_str(), "width" | "height")
         && (present || old.is_some())
         && state.document.attribute_namespace(id, &key).is_none();
@@ -410,7 +471,7 @@ fn set_attribute(
         if let Some(value) = value {
             attrs.insert(key.clone(), value);
         } else {
-            attrs.remove(&key);
+            attrs.shift_remove(&key);
         }
         let removed_namespace = state.document.attr(id, &key).is_none()
             && state
@@ -441,7 +502,11 @@ fn set_attribute(
             media::source_changed(vm, host, id)?;
         }
         mutation_observers::schedule(vm, host);
-        dynamic_scripts::attribute_changed(vm, host, id, &key, present)
+        dynamic_scripts::attribute_changed(vm, host, id, &key, present)?;
+        if let Some(reaction) = custom_reaction {
+            custom_elements::deliver(vm, host, reaction)?;
+        }
+        Ok(())
     } else {
         Err(JsError::type_error("Expected an Element"))
     }
@@ -459,53 +524,43 @@ fn set_text(vm: &mut Vm, host: &Shared, id: NodeId, value: String) -> Result<(),
     ) {
         return Ok(());
     }
-    let old = match &state.document.nodes[id.0].kind {
-        NodeKind::Text(value) | NodeKind::Comment(value) => value.len(),
-        _ => 0,
-    };
+    let old = state.document.nodes[id.0]
+        .kind
+        .character_data()
+        .map_or(0, String::len);
     let next_bytes = changed_bytes(&state, old, value.len())?;
-    match &state.document.nodes[id.0].kind {
-        NodeKind::Text(text) | NodeKind::Comment(text) => {
-            mutation_observers::note(
-                &state,
-                Mutation::CharacterData {
-                    target: id,
-                    old: text,
-                },
-            );
-            if let NodeKind::Text(text) | NodeKind::Comment(text) =
-                &mut state.document.nodes[id.0].kind
-            {
-                *text = value;
+    if let Some(old) = state.document.nodes[id.0].kind.character_data() {
+        mutation_observers::note(&state, Mutation::CharacterData { target: id, old });
+        *state.document.nodes[id.0]
+            .kind
+            .character_data_mut()
+            .unwrap() = value;
+    } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
+        if !value.is_empty() && state.document.nodes.len() >= NODE_LIMIT {
+            return Err(unsupported("DOM node budget exceeded"));
+        }
+        if state.mutations.borrow().active() {
+            for &child in &state.document.nodes[id.0].children {
+                mutation_observers::removing(&state, id, child, true);
             }
         }
-        NodeKind::Element { .. } => {
-            if !value.is_empty() && state.document.nodes.len() >= NODE_LIMIT {
-                return Err(unsupported("DOM node budget exceeded"));
-            }
-            if state.mutations.borrow().active() {
-                for &child in &state.document.nodes[id.0].children {
-                    mutation_observers::removing(&state, id, child, true);
-                }
-            }
-            let removed = std::mem::take(&mut state.document.nodes[id.0].children);
-            for child in &removed {
-                state.document.nodes[child.0].parent = None;
-            }
-            let added =
-                (!value.is_empty()).then(|| state.document.append(id, NodeKind::Text(value)));
-            mutation_observers::note(
-                &state,
-                Mutation::Children {
-                    target: id,
-                    added: added.as_slice(),
-                    removed: &removed,
-                    previous: None,
-                    next: None,
-                },
-            );
+        let removed = std::mem::take(&mut state.document.nodes[id.0].children);
+        for child in &removed {
+            state.document.nodes[child.0].parent = None;
         }
-        _ => return Ok(()),
+        let added = (!value.is_empty()).then(|| state.document.append(id, NodeKind::Text(value)));
+        mutation_observers::note(
+            &state,
+            Mutation::Children {
+                target: id,
+                added: added.as_slice(),
+                removed: &removed,
+                previous: None,
+                next: None,
+            },
+        );
+    } else {
+        return Ok(());
     }
     state.dom_bytes = next_bytes;
     mark_dirty(&mut state);
@@ -527,7 +582,7 @@ fn set_text_and_react(
         let node = &doc.nodes[id.0];
         vm.charge_work(node.children.len())?;
         match &node.kind {
-            NodeKind::Text(_) => node.parent,
+            NodeKind::Text(_) | NodeKind::Cdata(_) => node.parent,
             NodeKind::Element { .. } => Some(id),
             _ => None,
         }
@@ -610,29 +665,57 @@ impl ScriptRuntime {
         // The VM checks native stack headroom before every deeper bytecode entry.
         let mut vm = Vm::with_limits(VmLimits {
             max_bytecode_depth: 96,
+            max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
+        let document_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(document_prototype.clone());
+        let html_document_prototype = vm.new_object_with_prototype(document_prototype.clone())?;
+        vm.root(html_document_prototype.clone());
+        let doctype_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(doctype_prototype.clone());
+        let fragment_prototype = vm.new_object_with_prototype(prototype.clone())?;
+        vm.root(fragment_prototype.clone());
+        let shadow_prototype = vm.new_object_with_prototype(fragment_prototype.clone())?;
+        vm.root(shadow_prototype.clone());
         let element_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(element_prototype.clone());
-        let iframe_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let html_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        vm.root(html_element_prototype.clone());
+        let iframe_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(iframe_prototype.clone());
-        let script_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let script_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(script_prototype.clone());
-        let canvas_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let canvas_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(canvas_prototype.clone());
-        let media_prototypes = media::Prototypes::new(&mut vm, &element_prototype)?;
-        let input_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
+        let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
-        let image_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
         vm.root(character_data_prototype.clone());
         let window = vm.global();
         vm.forbid_private_elements(&window)?;
         let document_url = history.url();
+        let text_prototype = vm.new_object_with_prototype(character_data_prototype.clone())?;
+        let comment_prototype = vm.new_object_with_prototype(character_data_prototype.clone())?;
+        let cdata_prototype = vm.new_object_with_prototype(text_prototype.clone())?;
+        let processing_instruction_prototype =
+            vm.new_object_with_prototype(character_data_prototype.clone())?;
+        let svg_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
+        for prototype in [
+            &text_prototype,
+            &comment_prototype,
+            &cdata_prototype,
+            &processing_instruction_prototype,
+            &svg_element_prototype,
+        ] {
+            vm.root(prototype.clone());
+        }
         let root = document.root;
         let mut dynamic_scripts = dynamic_scripts::DynamicScripts::default();
         if !fresh_parser_snapshot {
@@ -647,6 +730,13 @@ impl ScriptRuntime {
             nodes: HashMap::new(),
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
+            html_element_prototype: html_element_prototype.clone(),
+            document_prototype: document_prototype.clone(),
+            html_document_prototype,
+            doctype_prototype,
+            fragment_prototype,
+            shadow_prototype,
+            custom_elements: Rc::default(),
             iframe_prototype: iframe_prototype.clone(),
             frames: frames::Frames::default(),
             script_prototype: script_prototype.clone(),
@@ -659,7 +749,13 @@ impl ScriptRuntime {
             character_data_prototype: character_data_prototype.clone(),
             window: window.clone(),
             event_prototype: Value::Undefined,
+            mouse_event_prototype: Value::Undefined,
             error_event_prototype: Value::Undefined,
+            text_prototype,
+            comment_prototype,
+            cdata_prototype,
+            processing_instruction_prototype,
+            svg_element_prototype,
             reporting_error: false,
             handlers: HashMap::new(),
             dirty: fresh_parser_snapshot,
@@ -702,30 +798,40 @@ impl ScriptRuntime {
         install_event_handlers(&mut vm, &state, window.clone())?;
         let document = wrap(&mut vm, &state, Some(root))?;
         vm.set_global("document", document.clone())?;
-        for name in ["window", "self", "globalThis"] {
+        for name in ["self", "globalThis"] {
             vm.set_global(name, window.clone())?;
         }
+        // The [LegacyUnforgeable] window accessor always returns this page's global.
+        let get_window = vm.new_native_function("get window", |vm, this, _| {
+            let global = vm.global();
+            if !this.is_nullish() && this != global {
+                return Err(JsError::type_error("Window receiver required"));
+            }
+            Ok(global)
+        });
+        let descriptor = vm.new_object_with_prototype(Value::Null)?;
+        vm.set_property(descriptor.clone(), "get", get_window)?;
+        vm.set_property(descriptor.clone(), "enumerable", true.into())?;
+        let object = vm.get_global("Object")?;
+        let define = vm.get_property(object, "defineProperty")?;
+        vm.call(
+            define,
+            Value::Undefined,
+            &[window.clone(), "window".into(), descriptor],
+        )?;
         navigator::install(&mut vm, &window)?;
         let console = devtools_console::install(&mut vm, &state)?;
         scheduler::install_timers(&mut vm, &state)?;
-        for name in ["body", "head", "documentElement"] {
-            let state = state.clone();
-            getter(&mut vm, document.clone(), name, move |vm, _, _| {
-                let id = {
-                    let state = state.borrow();
-                    document_part(&state.document, name)
-                };
-                wrap(vm, &state, id)
-            })?;
-        }
         let state_get = state.clone();
-        let get = vm.new_native_function("title", move |_, _, _| {
-            Ok(state_get.borrow().document.title().into())
+        let get = vm.new_native_function("title", move |_, this, _| {
+            let root = document_node(&state_get, &this)?;
+            Ok(state_get.borrow().document.title_in(root).into())
         });
         let state_set = state.clone();
-        let set = vm.new_native_function("title", move |vm, _, args| {
+        let set = vm.new_native_function("title", move |vm, this, args| {
+            let root = document_node(&state_set, &this)?;
             let value = text(vm, arg(args, 0))?;
-            let title = state_set.borrow().document.html_elements("title").next();
+            let title = state_set.borrow().document.title_element(root);
             let id = if let Some(title) = title {
                 title
             } else {
@@ -733,7 +839,7 @@ impl ScriptRuntime {
                 if state.document.nodes.len() >= NODE_LIMIT {
                     return Err(unsupported("DOM node budget exceeded"));
                 }
-                let Some(parent) = document_part(&state.document, "head") else {
+                let Some(parent) = document_part_in(&state.document, root, "head") else {
                     return Ok(Value::Undefined);
                 };
                 state.dom_bytes = changed_bytes(&state, 0, "title".len())?;
@@ -760,71 +866,30 @@ impl ScriptRuntime {
             set_text(vm, &state_set, id, value)?;
             Ok(Value::Undefined)
         });
-        vm.define_accessor(document.clone(), "title", Some(get), Some(set))?;
-        let state_ready = state.clone();
-        getter(&mut vm, document.clone(), "readyState", move |_, _, _| {
-            Ok(state_ready.borrow().ready_state.into())
-        })?;
-        let state_create = state.clone();
-        method(
+        vm.define_accessor(document_prototype.clone(), "title", Some(get), Some(set))?;
+        let dom_errors = dom_api::install(
             &mut vm,
-            document.clone(),
-            "createElement",
-            move |vm, _, args| {
-                let tag = text(vm, arg(args, 0))?.to_ascii_lowercase();
-                if tag.is_empty()
-                    || !tag
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
-                {
-                    return Err(JsError::type_error("Invalid element name"));
-                }
-                let id = new_detached(
-                    &state_create,
-                    NodeKind::Element {
-                        tag,
-                        attrs: Default::default(),
-                    },
-                )?;
-                wrap(vm, &state_create, Some(id))
-            },
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
         )?;
-        for name in ["createTextNode", "createComment"] {
-            let state_create = state.clone();
-            method(&mut vm, document.clone(), name, move |vm, _, args| {
-                let value = text(vm, arg(args, 0))?;
-                let kind = if name == "createTextNode" {
-                    NodeKind::Text(value)
-                } else {
-                    NodeKind::Comment(value)
-                };
-                let id = new_detached(&state_create, kind)?;
-                wrap(vm, &state_create, Some(id))
-            })?;
-        }
-        let state_id = state.clone();
-        method(
-            &mut vm,
-            document.clone(),
-            "getElementById",
-            move |vm, _, args| {
-                let name = text(vm, arg(args, 0))?;
-                let id = if name.is_empty() {
-                    None
-                } else {
-                    let state = state_id.borrow();
-                    descendants(&state.document, state.document.root)
-                        .find(|&id| state.document.attr(id, "id") == Some(&name))
-                };
-                wrap(vm, &state_id, id)
-            },
-        )?;
-        let dom_errors = dom_api::install(&mut vm, &state, prototype.clone(), document.clone())?;
+        document_interface::install(&mut vm, &state, document_prototype.clone(), &dom_errors)?;
+        tree_walker::install(&mut vm, &state, &document_prototype, &dom_errors)?;
+        style_sheets::install(&mut vm, &dom_errors)?;
         class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
-        namespaces::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        let node_lists =
-            collections::install(&mut vm, &state, prototype.clone(), document.clone())?;
-        navigation::install_parser_methods(&mut vm, &state, document.clone())?;
+        namespaces::install(
+            &mut vm,
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
+        )?;
+        let node_lists = collections::install(
+            &mut vm,
+            &state,
+            prototype.clone(),
+            document_prototype.clone(),
+        )?;
+        navigation::install_parser_methods(&mut vm, &state, document.clone(), &dom_errors)?;
         let file_lists = file_list::FileListHost::install(&mut vm)?;
         let forms = forms::FormHost::install(
             &mut vm,
@@ -863,7 +928,11 @@ impl ScriptRuntime {
         text_encoding::install(&mut vm)?;
         let abort = abort::AbortHost::install(&mut vm, Some(state.clone()))?;
         devtools_console::install_public_error(&mut vm, &state, console)?;
-        element_interface::install(&mut vm, prototype, element_prototype)?;
+        element_interface::install(&mut vm, &state, prototype, element_prototype, &dom_errors)?;
+        dom_implementation::install(&mut vm, &state)?;
+        shadow_dom::install(&mut vm, &state, &dom_errors)?;
+        element_interface::install_html(&mut vm, &state, html_element_prototype)?;
+        custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;
         let blobs = blobs::install(&mut vm, streams.clone())?;
@@ -1558,8 +1627,21 @@ fn report_unhandled(vm: &mut Vm, state: &Shared) {
     }
 }
 
+fn document_node(state: &Shared, value: &Value) -> Result<NodeId, JsError> {
+    let id = node(state, value)?;
+    if state.borrow().document.is_document(id) {
+        Ok(id)
+    } else {
+        Err(JsError::type_error("Expected a Document receiver"))
+    }
+}
+
 fn document_part(document: &Document, name: &str) -> Option<NodeId> {
-    let root = document.nodes[document.root.0]
+    document_part_in(document, document.root, name)
+}
+
+fn document_part_in(document: &Document, root: NodeId, name: &str) -> Option<NodeId> {
+    let root = document.nodes[root.0]
         .children
         .iter()
         .copied()
@@ -1739,6 +1821,24 @@ fn install_node(
     prototype: Value,
     element_prototype: &Value,
 ) -> Result<(), JsError> {
+    let host = state.clone();
+    webidl::operation(vm, prototype.clone(), "contains", 1, move |vm, this, args| {
+        let ancestor = node(&host, &this)?;
+        webidl::required(args, 1, "Node.contains")?;
+        if args[0].is_nullish() {
+            return Ok(false.into());
+        }
+        let mut next = Some(node(&host, &args[0])?);
+        let state = host.borrow();
+        while let Some(current) = next {
+            vm.charge_work(1)?;
+            if current == ancestor {
+                return Ok(true.into());
+            }
+            next = state.document.nodes[current.0].parent;
+        }
+        Ok(false.into())
+    })?;
     // FormHost installs the live value accessor; a reflected attribute here
     // would shadow it for every element.
     for (property, attr_name, owner) in [
@@ -1763,6 +1863,13 @@ fn install_node(
         });
         vm.define_accessor(owner.clone(), property, Some(get), Some(set))?;
     }
+    let connected = state.clone();
+    getter(vm, prototype.clone(), "isConnected", move |_, this, _| {
+        let id = node(&connected, &this)?;
+        let state = connected.borrow();
+        let doc = &state.document;
+        Ok(doc.connected_to(id, doc.node_document(id)).into())
+    })?;
     for property in [
         "parentNode",
         "parentElement",
@@ -1786,7 +1893,7 @@ fn install_node(
                     }),
                     "firstChild" => current.children.first().copied(),
                     "lastChild" => current.children.last().copied(),
-                    "ownerDocument" => (id != doc.root).then_some(doc.root),
+                    "ownerDocument" => (!doc.is_document(id)).then(|| doc.node_document(id)),
                     _ => current.parent.and_then(|parent| {
                         let children = &doc.nodes[parent.0].children;
                         let index = children.iter().position(|child| *child == id)?;
@@ -1819,16 +1926,18 @@ fn install_node(
             };
             let state = state.borrow();
             let (number, name) = match &state.document.nodes[id.0].kind {
-                NodeKind::Document if id != state.document.root => {
+                NodeKind::Document if !state.document.is_document(id) => {
                     (11, "#document-fragment".into())
                 }
                 NodeKind::Document => (9, "#document".into()),
                 NodeKind::Text(_) => (3, "#text".into()),
+                NodeKind::Cdata(_) => (4, "#cdata-section".into()),
+                NodeKind::ProcessingInstruction { target, .. } => (7, target.clone()),
                 NodeKind::Comment(_) => (8, "#comment".into()),
                 NodeKind::Doctype { name, .. } => (10, name.clone()),
                 NodeKind::Element { tag, .. } => (
                     1,
-                    if state.document.namespace(id) == crate::dom::Namespace::Html {
+                    if state.document.html_element_in_html_document(id) {
                         tag.to_ascii_uppercase()
                     } else {
                         tag.clone()
@@ -1842,6 +1951,26 @@ fn install_node(
             })
         })?;
     }
+    for name in ["hasAttributes", "getAttributeNames"] {
+        let state = state.clone();
+        webidl::operation(vm, element_prototype.clone(), name, 0, move |vm, this, _| {
+            let id = element(&state, &this)?;
+            let state = state.borrow();
+            let NodeKind::Element { attrs, .. } = &state.document.nodes[id.0].kind else {
+                unreachable!("element receiver was checked")
+            };
+            if name == "hasAttributes" {
+                return Ok((!attrs.is_empty()).into());
+            }
+            vm.charge_work(attrs.len())?;
+            let mut names = Vec::with_capacity(attrs.len());
+            for name in attrs.keys() {
+                vm.charge_work(name.len())?;
+                names.push(Value::from(name.as_str()));
+            }
+            Ok(vm.new_array(&names))
+        })?;
+    }
     for name in [
         "getAttribute",
         "setAttribute",
@@ -1853,7 +1982,7 @@ fn install_node(
         method(vm, owner, name, move |vm, this, args| {
             let id = element(&state, &this)?;
             let key = text(vm, arg(args, 0))?;
-            let key = if state.borrow().document.namespace(id) == crate::dom::Namespace::Html {
+            let key = if state.borrow().document.html_element_in_html_document(id) {
                 key.to_ascii_lowercase()
             } else {
                 key
@@ -1956,6 +2085,21 @@ fn install_character_data(
     node_prototype: Value,
     character_data_prototype: Value,
 ) -> Result<(), JsError> {
+    let length_state = state.clone();
+    getter(
+        vm,
+        character_data_prototype.clone(),
+        "length",
+        move |vm, this, _| {
+            let id = node(&length_state, &this)?;
+            let state = length_state.borrow();
+            let Some(value) = state.document.nodes[id.0].kind.character_data() else {
+                return Err(JsError::type_error("Expected CharacterData"));
+            };
+            vm.charge_work(value.len())?;
+            Ok((value.encode_utf16().count() as u32).into())
+        },
+    )?;
     for (property, prototype) in [
         ("nodeValue", node_prototype),
         ("data", character_data_prototype),
@@ -1964,8 +2108,8 @@ fn install_character_data(
         let get = vm.new_native_function(property, move |vm, this, _| {
             let id = node(&get_state, &this)?;
             let state = get_state.borrow();
-            match &state.document.nodes[id.0].kind {
-                NodeKind::Text(value) | NodeKind::Comment(value) => {
+            match state.document.nodes[id.0].kind.character_data() {
+                Some(value) => {
                     vm.charge_work(value.len())?;
                     Ok(value.clone().into())
                 }
@@ -1982,10 +2126,11 @@ fn install_character_data(
             } else {
                 text(vm, value)?
             };
-            if matches!(
-                set_state.borrow().document.nodes[id.0].kind,
-                NodeKind::Text(_) | NodeKind::Comment(_)
-            ) {
+            if set_state.borrow().document.nodes[id.0]
+                .kind
+                .character_data()
+                .is_some()
+            {
                 set_text_and_react(vm, &set_state, id, value)?;
             } else if property == "data" {
                 return Err(JsError::type_error("Expected CharacterData"));
@@ -2483,8 +2628,14 @@ fn dispatch_checked_with_mode(
     properties: &[(&str, Value)],
     mode: DispatchMode,
 ) -> Result<bool, JsError> {
-    let prototype = state.borrow().event_prototype.clone();
-    let object = vm.new_object_with_prototype(prototype)?;
+    let object = if kind == "click" {
+        let prototype = state.borrow().mouse_event_prototype.clone();
+        let object = vm.new_object_with_prototype(prototype)?;
+        ui_events::initialize_click(vm, &object)?;
+        object
+    } else {
+        vm.new_object_with_prototype(state.borrow().event_prototype.clone())?
+    };
     let event =
         event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, false], true)?;
     dispatch_prepared_with_mode(vm, state, target, event, properties, mode)

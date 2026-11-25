@@ -2,8 +2,9 @@
 //! namespaces that the DOM arena cannot represent instead of repairing XML as
 //! HTML or fetching entity/stylesheet resources.
 use super::{MAX_SVG_DEPTH, MAX_SVG_NODES};
-use crate::dom::{AttributeNamespace, Document, Namespace, NodeId, NodeKind};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::dom::xml_names::{name_char, name_start};
+use crate::dom::{AttributeNamespace, Attributes, Document, Namespace, NodeId, NodeKind};
+use std::collections::BTreeSet;
 
 pub const MAX_SVG_DOCUMENT_SOURCE: usize = 4 * 1024 * 1024;
 pub const MAX_SVG_DOCUMENT_STRINGS: usize = 8 * 1024 * 1024;
@@ -184,8 +185,8 @@ impl Parser<'_> {
         self.retain(result.len())?;
         Ok(result)
     }
-    fn attributes(&mut self, terminator: &str) -> Result<BTreeMap<String, String>> {
-        let mut attrs = BTreeMap::new();
+    fn attributes(&mut self, terminator: &str) -> Result<Attributes> {
+        let mut attrs = Attributes::new();
         loop {
             let start = self.offset;
             self.ws();
@@ -522,13 +523,6 @@ fn nc_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c != ':' && name_start(c))
         && chars.all(|c| c != ':' && name_char(c))
-}
-fn name_start(c: char) -> bool {
-    matches!(c, ':' | '_' | 'A'..='Z' | 'a'..='z' | '\u{c0}'..='\u{d6}' | '\u{d8}'..='\u{f6}' | '\u{f8}'..='\u{2ff}' | '\u{370}'..='\u{37d}' | '\u{37f}'..='\u{1fff}' | '\u{200c}'..='\u{200d}' | '\u{2070}'..='\u{218f}' | '\u{2c00}'..='\u{2fef}' | '\u{3001}'..='\u{d7ff}' | '\u{f900}'..='\u{fdcf}' | '\u{fdf0}'..='\u{fffd}' | '\u{10000}'..='\u{effff}')
-}
-fn name_char(c: char) -> bool {
-    name_start(c)
-        || matches!(c, '-' | '.' | '0'..='9' | '\u{b7}' | '\u{300}'..='\u{36f}' | '\u{203f}'..='\u{2040}')
 }
 fn xml_char(c: char) -> bool {
     matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')

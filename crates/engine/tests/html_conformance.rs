@@ -26,6 +26,9 @@ fn dump(document: &Document) -> String {
             NodeKind::Element { tag, attrs } => {
                 let namespace = match document.namespace(id) {
                     Namespace::Html => "",
+                    Namespace::Null => {
+                        unreachable!("HTML parsing never creates null-namespace elements")
+                    }
                     Namespace::Svg => "svg ",
                     Namespace::MathMl => "math ",
                 };
@@ -51,6 +54,9 @@ fn dump(document: &Document) -> String {
                 }
             }
             NodeKind::Text(text) => out.push_str(&format!("\"{text}\"\n")),
+            NodeKind::Cdata(_) | NodeKind::ProcessingInstruction { .. } => {
+                unreachable!("HTML parsing only creates Text and Comment nodes for this markup")
+            }
             NodeKind::Comment(text) => out.push_str(&format!("<!-- {text} -->\n")),
             NodeKind::Doctype {
                 name,

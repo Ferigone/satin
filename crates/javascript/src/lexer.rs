@@ -2,9 +2,11 @@ use std::rc::Rc;
 use crate::{ErrorKind, JsBigInt, JsError, JsString};
 
 const BIGINT_SOURCE_WORK: usize = 8_388_608;
-// Account for the token buffer, parser metadata and AST, and compiled code
-// while they coexist. String and source storage are reserved separately.
-const COMPILATION_BYTES_PER_TOKEN: usize = 640;
+// The parser retains three lookahead tokens, independently of source length.
+// Charge structural work for the AST and bytecode that coexist during compilation.
+// A closing delimiter finishes an already charged node. It has no node of its own.
+const STRUCTURAL_TOKEN_BYTES: usize = 384;
+const CLOSING_DELIMITER_BYTES: usize = 32;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
@@ -135,9 +137,13 @@ impl Lexer {
     }
 
     pub(crate) fn next(&mut self) -> Token {
-        let trivia = self
-            .reserve_compilation_bytes(COMPILATION_BYTES_PER_TOKEN)
-            .and_then(|()| self.skip_trivia());
+        let trivia = self.skip_trivia().and_then(|()| {
+            let bytes = match self.peek(0) {
+                Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
+                _ => STRUCTURAL_TOKEN_BYTES,
+            };
+            self.reserve_compilation_bytes(bytes)
+        });
         self.before_first_token = false;
         let start = self.pos;
         let line = self.line;

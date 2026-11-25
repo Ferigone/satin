@@ -63,6 +63,9 @@ impl Harness {
         for event in self.backend.drain() {
             assert_eq!(event.key, KEY);
             match event.kind {
+                EventKind::RateRejected { revision, actual } => {
+                    panic!("native media rejected speed change {revision}, retained {actual}")
+                }
                 EventKind::StreamOpened => self.playback.source_open = true,
                 EventKind::BufferUpdated {
                     buffer,
@@ -360,4 +363,36 @@ fn plays_mp4_from_bytes_pauses_and_seeks() {
         tab: KEY.tab,
         navigation: KEY.navigation,
     });
+}
+
+#[test]
+fn half_speed_changes_the_native_playback_clock() {
+    let mut harness = Harness::new();
+    harness.command(Command::Open {
+        key: KEY,
+        bytes: CLIP.into(),
+    });
+    harness.command(Command::Muted {
+        key: KEY,
+        muted: true,
+    });
+    harness.command(Command::PlaybackRate {
+        key: KEY,
+        revision: 1,
+        value: 0.5,
+    });
+    harness.command(Command::Play(KEY));
+    harness.until("half-speed playback starts", |media| {
+        media.playing && media.position > 0.2
+    });
+    let origin = harness.playback.position;
+    let start = Instant::now();
+    harness.until("one second of media at half speed", |media| {
+        media.position >= origin + 1.
+    });
+    let measured = (harness.playback.position - origin) / start.elapsed().as_secs_f64();
+    assert!(
+        (0.3..0.75).contains(&measured),
+        "observed {measured:.2}× speed"
+    );
 }

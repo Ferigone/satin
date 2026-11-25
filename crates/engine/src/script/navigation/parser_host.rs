@@ -101,6 +101,15 @@ pub(in crate::script) struct ParserHost {
     scripts: usize,
     sheets: usize,
     images: usize,
+    constructing: bool,
+    constructed: Option<ConstructedElement>,
+}
+
+struct ConstructedElement {
+    original: NodeId,
+    element: NodeId,
+    parent: NodeId,
+    before: Option<NodeId>,
 }
 
 impl ParserHost {
@@ -121,6 +130,8 @@ impl ParserHost {
             scripts: 0,
             sheets: 0,
             images: 0,
+            constructing: false,
+            constructed: None,
         }
     }
 
@@ -144,6 +155,10 @@ impl ParserHost {
             .as_ref()
             .map(|state| state.mutations.clone())
             .filter(|observers| observers.borrow().active());
+        let registry = state
+            .as_ref()
+            .map(|state| state.custom_elements.clone())
+            .filter(|registry| registry.borrow().has_definitions());
         let mut restored = Ok(());
         if let Some(state) = state.as_deref_mut() {
             if self.revision != Some(state.revision) || self.client.as_ref() != &state.url {
@@ -158,16 +173,39 @@ impl ParserHost {
                 .restore_document_from_host(std::mem::take(&mut state.document), state.dom_bytes);
         }
         self.stream
-            .set_mutation_sink(observers.as_ref().map(|observers| {
+            .set_mutation_sink((observers.is_some() || registry.is_some()).then(|| {
                 let observers = observers.clone();
+                let registry = registry.clone();
                 let sink: MutationSink = Box::new(move |document, change| {
-                    observers.borrow_mut().note(document, change);
+                    if let Some(registry) = &registry {
+                        mutation_observers::note_connections(registry, document, &change);
+                    }
+                    if let Some(observers) = &observers {
+                        observers.borrow_mut().note(document, change);
+                    }
                 });
                 sink
             }));
+        self.stream
+            .set_custom_element_test(registry.as_ref().map(|registry| {
+                let registry = registry.clone();
+                Box::new(move |name: &str| registry.borrow().has_definition(name)) as _
+            }));
         let before = self.stream.report();
-        let result = restored.and_then(|_| self.advance_owned(write, observers.as_deref()));
+        let result = restored.and_then(|_| {
+            if let Some(done) = self.constructed.take() {
+                self.stream.finish_custom_element(
+                    done.original,
+                    done.element,
+                    done.parent,
+                    done.before,
+                );
+                return Ok(Step::Yield);
+            }
+            self.advance_owned(write, observers.as_deref(), registry.as_deref())
+        });
         self.stream.set_mutation_sink(None);
+        self.stream.set_custom_element_test(None);
         if let Some(state) = state.as_deref_mut() {
             state.dom_bytes = self.stream.document_bytes();
             state.document = self.stream.take_document()?;
@@ -188,6 +226,7 @@ impl ParserHost {
         &mut self,
         write: Option<WriteId>,
         observers: Option<&RefCell<mutation_observers::Observers>>,
+        registry: Option<&RefCell<super::super::custom_elements::Registry>>,
     ) -> Result<Step, HtmlStreamError> {
         let slice_end = Instant::now() + Duration::from_millis(3);
         for index in 0..MAX_PARSE_STEPS {
@@ -229,6 +268,13 @@ impl ParserHost {
                 }
                 Ok(ParserEvent::Paused { .. }) => return Err(HtmlStreamError::ScriptMismatch),
                 Err(error) => return Err(error),
+            }
+            // Return the arena to the realm before invoking author code,
+            // and before the next token adds children to a newly connected host.
+            if self.stream.has_custom_element()
+                || registry.is_some_and(|registry| registry.borrow().pending())
+            {
+                return Ok(Step::Yield);
             }
             if index % 32 == 31 && Instant::now() >= slice_end {
                 break;
@@ -279,6 +325,81 @@ impl ParserHost {
             cors,
             integrity: integrity_attr(doc, node),
         })
+    }
+
+    /// The tree builder paused on the start tag. Invoke author code only
+    /// after returning the native arena to the realm and releasing both borrows.
+    pub(super) fn construct_element(
+        handle: &Rc<RefCell<Self>>,
+        vm: &mut Vm,
+        state: &Shared,
+    ) -> Result<(), JsError> {
+        let Some(pending) = handle.borrow_mut().stream.take_custom_element() else {
+            return Ok(());
+        };
+        handle.borrow_mut().constructing = true;
+        let result = (|| {
+            let wrapper = super::super::custom_elements::created(vm, state, pending.node)?;
+            let element = super::super::node(state, &wrapper)?;
+            let reactions = {
+                let mut state = state.borrow_mut();
+                let bytes = pending
+                    .attributes
+                    .iter()
+                    .map(|(name, value)| name.len() + value.len())
+                    .sum();
+                vm.charge_work(bytes)?;
+                let bytes = super::super::changed_bytes(&state, 0, bytes)?;
+                let mut reactions = Vec::new();
+                for (name, value) in pending.attributes {
+                    if let Some(reaction) = super::super::custom_elements::attribute(
+                        &state,
+                        element,
+                        &name,
+                        None,
+                        Some(&value),
+                        None,
+                    ) {
+                        reactions.push(reaction);
+                    }
+                    if state.mutations.borrow().active() {
+                        mutation_observers::note(
+                            &state,
+                            crate::dom::mutation::Mutation::Attribute {
+                                target: element,
+                                name: &name,
+                                namespace: None,
+                                old: None,
+                            },
+                        );
+                    }
+                    let crate::dom::NodeKind::Element { attrs, .. } =
+                        &mut state.document.nodes[element.0].kind
+                    else {
+                        unreachable!("constructed HTML element")
+                    };
+                    attrs.insert(name, value);
+                }
+                state.dom_bytes = bytes;
+                mark_dirty(&mut state);
+                reactions
+            };
+            // Every token attribute is present, but the element is still
+            // detached during these parser-created attribute callbacks.
+            for reaction in reactions {
+                super::super::custom_elements::deliver(vm, state, reaction)?;
+            }
+            Ok::<_, JsError>(element)
+        })();
+        let mut parser = handle.borrow_mut();
+        parser.constructing = false;
+        parser.constructed = Some(ConstructedElement {
+            original: pending.node,
+            element: result?,
+            parent: pending.parent,
+            before: pending.before,
+        });
+        Ok(())
     }
 
     fn discover(&mut self, progress: ParserProgress) {
@@ -440,6 +561,8 @@ impl ParserHost {
             restrict_document_policy(vm, state, policy);
             let step = step.map_err(parser_error)?;
             mutation_observers::schedule(vm, state);
+            Self::construct_element(handle, vm, state)?;
+            super::super::custom_elements::flush(vm, state)?;
             if let Step::Blocking(tag) = step {
                 let node = tag.node;
                 let external = tag.external();
@@ -557,7 +680,7 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     drop(state);
     super::super::frames::sweep(vm, host);
     mutation_observers::schedule(vm, host);
-    Ok(())
+    super::super::custom_elements::flush(vm, host)
 }
 
 fn require_document(host: &Shared, receiver: &Value) -> Result<(), JsError> {
@@ -567,13 +690,39 @@ fn require_document(host: &Shared, receiver: &Value) -> Result<(), JsError> {
     Ok(())
 }
 
-pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<(), JsError> {
+fn check_dynamic_markup(
+    vm: &mut Vm,
+    state: &Shared,
+    errors: &super::super::dom_api::Errors,
+) -> Result<(), JsError> {
+    if state
+        .borrow()
+        .parser
+        .upgrade()
+        .is_some_and(|parser| parser.borrow().constructing)
+    {
+        return Err(errors.exception(
+            vm,
+            "InvalidStateError",
+            "Dynamic markup insertion during parser custom element construction",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn install(
+    vm: &mut Vm,
+    state: &Shared,
+    document: Value,
+    errors: &super::super::dom_api::Errors,
+) -> Result<(), JsError> {
     let current = state.clone();
     super::super::getter(vm, document.clone(), "currentScript", move |vm, _, _| {
         let node = current.borrow().current_script;
         super::super::wrap(vm, &current, node)
     })?;
     let host = state.clone();
+    let open_errors = errors.clone();
     super::super::method(vm, document.clone(), "open", move |vm, receiver, args| {
         require_document(&host, &receiver)?;
         if args.len() >= 3 {
@@ -584,21 +733,19 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<()
         for value in args {
             vm.to_string(value)?;
         }
+        check_dynamic_markup(vm, &host, &open_errors)?;
         open(vm, &host)?;
         Ok(receiver)
     })?;
     let host = state.clone();
+    let close_errors = errors.clone();
     super::super::method(vm, document.clone(), "close", move |vm, receiver, _| {
         require_document(&host, &receiver)?;
-        let Some(parser) = host
-            .borrow()
-            .parser
-            .upgrade()
-            .filter(|parser| {
-                let parser = parser.borrow();
-                parser.stream.is_script_created() && parser.stream.has_insertion_point()
-            })
-        else {
+        check_dynamic_markup(vm, &host, &close_errors)?;
+        let Some(parser) = host.borrow().parser.upgrade().filter(|parser| {
+            let parser = parser.borrow();
+            parser.stream.is_script_created() && parser.stream.has_insertion_point()
+        }) else {
             return Ok(Value::Undefined);
         };
         parser.borrow_mut().stream.finish().map_err(parser_error)?;
@@ -616,6 +763,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<()
     })?;
     for (method, line_feed) in [("write", false), ("writeln", true)] {
         let host = state.clone();
+        let errors = errors.clone();
         super::super::method(vm, document.clone(), method, move |vm, receiver, args| {
             require_document(&host, &receiver)?;
             let mut string = String::new();
@@ -633,6 +781,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, document: Value) -> Result<()
             if line_feed {
                 string.push('\n');
             }
+            check_dynamic_markup(vm, &host, &errors)?;
             let (parser, ignore) = {
                 let host = host.borrow();
                 (host.parser.upgrade(), host.ignore_destructive_writes != 0)

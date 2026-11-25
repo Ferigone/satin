@@ -87,7 +87,7 @@ impl ScrollFlow {
                     continue;
                 }
                 let node = &b.page.document.nodes[id.0];
-                if let NodeKind::Text(text) = &node.kind {
+                if let Some(text) = node.kind.text_data() {
                     work = work.saturating_add(text.len());
                 }
                 stack.extend(node.children.iter().copied());

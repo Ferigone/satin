@@ -4,7 +4,7 @@ use super::{
     MAX_DOM_BYTES, MAX_INPUT_BYTES, MAX_NODES, MAX_OPEN_ELEMENTS,
     incremental::IncrementalTokenizer,
     tokenizer::Token,
-    tree_builder::{Tree, kind_bytes},
+    tree_builder::{CustomElementTest, PendingElement, Tree, kind_bytes},
 };
 use crate::dom::mutation::MutationSink;
 use crate::dom::{Document, Namespace, NodeId, NodeKind};
@@ -147,6 +147,25 @@ impl HtmlStream {
     }
     pub(crate) fn set_mutation_sink(&mut self, sink: Option<MutationSink>) {
         self.tree.mutation_sink = sink;
+    }
+    pub(crate) fn set_custom_element_test(&mut self, test: Option<CustomElementTest>) {
+        self.tree.custom_element_test = test;
+    }
+    pub(crate) fn take_custom_element(&mut self) -> Option<PendingElement> {
+        self.tree.pending_element.take()
+    }
+    pub(crate) fn has_custom_element(&self) -> bool {
+        self.tree.pending_element.is_some()
+    }
+    pub(crate) fn finish_custom_element(
+        &mut self,
+        original: NodeId,
+        element: NodeId,
+        parent: NodeId,
+        before: Option<NodeId>,
+    ) {
+        self.tree
+            .finish_custom_element(original, element, parent, before);
     }
     /// Retained arena strings, including names duplicated in namespace metadata.
     /// While leased, this is the count at the time of take_document().
@@ -381,6 +400,25 @@ impl HtmlStream {
                 return Err(HtmlStreamError::InvalidDocument);
             }
             parents[content.0] = Some(template);
+        }
+        for (&host, tree) in &doc.shadow_roots {
+            let root = tree.root;
+            if host.0 >= count
+                || root.0 >= count
+                || root == doc.root
+                || doc.namespace(host) != Namespace::Html
+                || !matches!(doc.nodes[host.0].kind, NodeKind::Element { .. })
+                || !matches!(doc.nodes[root.0].kind, NodeKind::Document)
+                || doc.nodes[root.0].parent.is_some()
+                || !contents.insert(root)
+                || doc.shadow_hosts.get(&root) != Some(&host)
+            {
+                return Err(HtmlStreamError::InvalidDocument);
+            }
+            parents[root.0] = Some(host);
+        }
+        if doc.shadow_roots.len() != doc.shadow_hosts.len() {
+            return Err(HtmlStreamError::InvalidDocument);
         }
         let mut depth = vec![0usize; count];
         let mut visiting = vec![false; count];

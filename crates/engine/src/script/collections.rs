@@ -102,8 +102,9 @@ impl Collection {
                 })
                 .collect(),
             filter => {
-                let html_document = document.scripting_enabled;
-                let quirks = document.quirks_mode == QuirksMode::Quirks;
+                let html_document = document.is_html_document(document.node_document(root));
+                let quirks = document.node_document(root) == document.root
+                    && document.quirks_mode == QuirksMode::Quirks;
                 let mut matches = Vec::new();
                 let mut pending: Vec<_> = document.nodes[root.0]
                     .children
@@ -616,7 +617,7 @@ pub(super) fn install(
                     Filter::Classes(tokens)
                 }
                 "getElementsByName" => {
-                    if root != host.state.borrow().document.root {
+                    if !host.state.borrow().document.is_document(root) {
                         return Err(JsError::type_error("Document receiver required"));
                     }
                     Filter::Name(input(vm, args[0].clone())?)

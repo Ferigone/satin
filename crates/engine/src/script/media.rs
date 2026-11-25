@@ -80,6 +80,11 @@ pub enum MediaCommand {
         key: MediaKey,
         time: f64,
     },
+    PlaybackRate {
+        key: MediaKey,
+        revision: u64,
+        value: f64,
+    },
     Volume {
         key: MediaKey,
         value: f64,
@@ -107,6 +112,10 @@ pub enum MediaUpdate {
     },
     Playing,
     Paused,
+    RateRejected {
+        revision: u64,
+        actual: f64,
+    },
     Waiting,
     Seeking,
     Seeked(f64),
@@ -144,6 +153,9 @@ struct Track {
     height: u32,
     muted: bool,
     volume: f64,
+    playback_rate: f64,
+    default_playback_rate: f64,
+    rate_revision: u64,
     last_event_time: f64,
     has_audio: bool,
     decoded_frames: u64,
@@ -171,6 +183,9 @@ impl Track {
             height: 0,
             muted,
             volume: 1.,
+            playback_rate: 1.,
+            default_playback_rate: 1.,
+            rate_revision: 0,
             last_event_time: 0.,
             has_audio: false,
             decoded_frames: 0,
@@ -444,7 +459,11 @@ fn attach_object_url(
         generation: track.key.generation.wrapping_add(1),
         node: id,
     };
-    state.media.check_command_room(3)?;
+    let rate = track.playback_rate;
+    let revision = track.rate_revision;
+    state
+        .media
+        .check_command_room(3 + usize::from(rate != 1.))?;
     let command = if let Some(blob) = vm.host_data::<blobs::Blob>(&object) {
         vm.charge_work(blob.bytes().len().div_ceil(64))?;
         MediaCommand::Open {
@@ -473,6 +492,13 @@ fn attach_object_url(
         MediaCommand::Volume { key, value: volume },
         MediaCommand::Muted { key, muted },
     ]);
+    if rate != 1. {
+        state.media.commands.push_back(MediaCommand::PlaybackRate {
+            key,
+            revision,
+            value: rate,
+        });
+    }
     Ok(true)
 }
 
@@ -496,6 +522,11 @@ pub(super) fn reset(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsErr
         let next_generation = track.key.generation.wrapping_add(1);
         let mut fresh = Track::new(id, track.muted);
         fresh.volume = track.volume;
+        fresh.playback_rate = track.default_playback_rate;
+        fresh.default_playback_rate = track.default_playback_rate;
+        let rate_changed = fresh.playback_rate != track.playback_rate;
+        state.media.check_command_room(usize::from(opened))?;
+        state.media.mse.reset_rate_changes(id, rate_changed)?;
         fresh.key.generation = next_generation;
         if opened {
             state.media.enqueue(MediaCommand::Close(old_key))?;
@@ -612,6 +643,55 @@ fn pause(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<(), JsError> {
     Ok(())
 }
 
+fn set_rate(vm: &mut Vm, host: &Shared, id: NodeId, name: &str, value: f64) -> Result<(), JsError> {
+    // The native media path supports forward playback. Reject rates outside the
+    // supported range before changing observable state or sending a command.
+    if !(0.25..=4.).contains(&value) {
+        let class = host.borrow().media.exception.clone();
+        return Err(abort::dom_exception_error(
+            vm,
+            class,
+            "NotSupportedError",
+            "Unsupported playback rate",
+        )?);
+    }
+    let mut state = host.borrow_mut();
+    let media_default = name == "defaultPlaybackRate";
+    let track = ensure_track(&mut state, id)?;
+    let prior = if media_default {
+        track.default_playback_rate
+    } else {
+        track.playback_rate
+    };
+    if prior == value {
+        return Ok(());
+    }
+    let key = track.key;
+    let send = track.opened && !media_default;
+    state.media.check_command_room(usize::from(send))?;
+    state.media.mse.queue_rate_change(id)?;
+    let track = state
+        .media
+        .tracks
+        .get_mut(&id)
+        .expect("track already exists");
+    if media_default {
+        track.default_playback_rate = value;
+    } else {
+        track.playback_rate = value;
+        track.rate_revision = track.rate_revision.wrapping_add(1);
+        let revision = track.rate_revision;
+        if send {
+            state.media.commands.push_back(MediaCommand::PlaybackRate {
+                key,
+                revision,
+                value,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn set_number(
     vm: &mut Vm,
     host: &Shared,
@@ -622,6 +702,9 @@ fn set_number(
     let value = vm.to_number(&value)?;
     if !value.is_finite() {
         return Err(JsError::type_error("Expected a finite media value"));
+    }
+    if matches!(name, "playbackRate" | "defaultPlaybackRate") {
+        return set_rate(vm, host, id, name, value);
     }
     if name == "volume" && !(0. ..=1.).contains(&value) {
         let class = host.borrow().media.exception.clone();
@@ -680,6 +763,8 @@ fn property(state: &super::State, id: NodeId, name: &str) -> Value {
         "videoWidth" => track.map_or(0, |track| track.width).into(),
         "videoHeight" => track.map_or(0, |track| track.height).into(),
         "volume" => track.map_or(1., |track| track.volume).into(),
+        "playbackRate" => track.map_or(1., |track| track.playback_rate).into(),
+        "defaultPlaybackRate" => track.map_or(1., |track| track.default_playback_rate).into(),
         "muted" => track
             .map_or_else(
                 || state.document.attr(id, "muted").is_some(),
@@ -730,7 +815,13 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
             Ok(property(&ctx.borrow(), id, name))
         })?;
     }
-    for name in ["volume", "muted", "currentTime"] {
+    for name in [
+        "volume",
+        "muted",
+        "currentTime",
+        "playbackRate",
+        "defaultPlaybackRate",
+    ] {
         let ctx = state.clone();
         let get = vm.new_native_function(name, move |_, this, _| {
             let id = receiver(&ctx, &this)?;
@@ -869,6 +960,7 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
             "onseeked",
             "ondurationchange",
             "onvolumechange",
+            "onratechange",
         ],
     )
 }
@@ -1002,6 +1094,13 @@ impl super::ScriptRuntime {
                 muted: track.muted,
             },
         ];
+        if track.playback_rate != 1. {
+            commands.push(MediaCommand::PlaybackRate {
+                key,
+                value: track.playback_rate,
+                revision: track.rate_revision,
+            });
+        }
         if seek {
             commands.push(MediaCommand::Seek {
                 key,
@@ -1104,6 +1203,15 @@ impl super::ScriptRuntime {
                 plays = std::mem::take(&mut track.plays);
             }
             MediaUpdate::Playing | MediaUpdate::Paused => {}
+            MediaUpdate::RateRejected { revision, actual } => {
+                if track.rate_revision == revision
+                    && actual.is_finite()
+                    && actual != track.playback_rate
+                {
+                    track.playback_rate = actual;
+                    events = &["ratechange"];
+                }
+            }
             MediaUpdate::Waiting => {
                 if !track.paused {
                     // The current frame may still be displayed, but there isn't

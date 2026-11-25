@@ -1,10 +1,10 @@
 //! Focused invariants alongside the unchanged primary html5lib corpus. Expected
 //! behavior follows WHATWG HTML 13.2.6.5 and the fragment parsing algorithm.
+use rust_browser_engine::dom::Attributes;
 use rust_browser_engine::{
     dom::{AttributeNamespace, Document, Namespace, NodeId, NodeKind},
     html::{self, FragmentContext},
 };
-use std::collections::BTreeMap;
 
 fn id(document: &Document, value: &str) -> NodeId {
     document
@@ -156,7 +156,7 @@ fn foreign_fragments_use_context_namespace_attributes_and_data_state() {
     );
 
     context.tag = "annotation-xml";
-    let attrs = BTreeMap::from([("encoding".into(), "APPLICATION/XHTML+XML".into())]);
+    let attrs = Attributes::from([("encoding".into(), "APPLICATION/XHTML+XML".into())]);
     context.attrs = Some(&attrs);
     let document = html::parse_fragment_with_context("<custom/><svg><g/></svg>", context);
     assert_eq!(

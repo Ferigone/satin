@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+indexmap = { version = "2", features = ["serde"] }
 rust-browser-javascript = { path = "../javascript" }
 url = "2.5"
 encoding_rs = "0.8"

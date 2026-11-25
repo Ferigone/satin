@@ -1,10 +1,10 @@
+use rust_browser_engine::dom::Attributes;
 use rust_browser_engine::{
     dom::{Document, Namespace, NodeId, NodeKind},
     html::{
         self, HtmlStream, HtmlStreamError, ParserEvent, ParserScript, ParserScriptKind, WriteId,
     },
 };
-use std::collections::BTreeMap;
 
 fn to_script(parser: &mut HtmlStream) -> ParserScript {
     loop {
@@ -309,7 +309,7 @@ fn leased_dom_mutations_keep_open_element_ids_and_detached_insertion_targets() {
         body,
         NodeKind::Element {
             tag: "aside".into(),
-            attrs: BTreeMap::from([("id".into(), "added".into())]),
+            attrs: Attributes::from([("id".into(), "added".into())]),
         },
     );
     parser.restore_document(doc).unwrap();

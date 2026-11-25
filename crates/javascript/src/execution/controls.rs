@@ -14,7 +14,7 @@ pub(super) enum Resume {
     Pass,
     Label,
     Initialize,
-    Select,
+    Select(usize),
     WithObject,
     BranchBody,
     Return,
@@ -140,7 +140,7 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
         Op::Block(body) => Advance::child(body, new_scope(vm, env)?, Resume::Pass),
         Op::Label(_, body) => Advance::child(body, env, Resume::Label),
         Op::With(test, _) => Advance::child(test, env, Resume::WithObject),
-        Op::Branch(test, ..) => Advance::child(test, env, Resume::Select),
+        Op::Branch(arms, _) => Advance::child(&arms[0].0, env, Resume::Select(0)),
         Op::While(..) => LoopState::new(env).test(vm, op)?,
         Op::DoWhile(..) => LoopState::new(env).body(vm, op)?,
         Op::For {
@@ -200,7 +200,7 @@ pub(super) fn after_child(
             resume,
             Resume::Initialize
                 | Resume::WithObject
-                | Resume::Select
+                | Resume::Select(_)
                 | Resume::Return
                 | Resume::Throw
                 | Resume::EachSource
@@ -239,12 +239,14 @@ pub(super) fn after_child(
             let scope = vm.with_scope(env, expression(completed)?)?;
             Ok(Advance::child(body, scope, Resume::BranchBody))
         }
-        Resume::Select => {
-            let Op::Branch(_, yes, no) = op else {
+        Resume::Select(index) => {
+            let Op::Branch(arms, no) = op else {
                 unreachable!()
             };
             let chosen = if expression(completed)?.is_truthy() {
-                Some(yes)
+                Some(&arms[index].1)
+            } else if let Some((next_test, _)) = arms.get(index + 1) {
+                return Ok(Advance::child(next_test, env, Resume::Select(index + 1)));
             } else {
                 no.as_ref()
             };

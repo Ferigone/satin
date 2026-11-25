@@ -1,6 +1,66 @@
 use super::*;
 
 #[test]
+fn parser_constructs_custom_elements_before_attributes_and_connection() {
+    let (_, _, mut runtime) = start(
+        r#"<!doctype html><script>
+        var trace = [];
+        class SiteBadge extends HTMLElement {
+            constructor() {
+                super();
+                trace.push(this.parentNode === null && !this.hasAttribute('a') ? 'detached' : 'attached');
+                try { document.write('unexpected') } catch (e) { trace.push(e.name); }
+            }
+            static get observedAttributes() { return ['a', 'b']; }
+            attributeChangedCallback(name) {
+                trace.push([name, this.isConnected, this.getAttribute('a'), this.getAttribute('b')].join('/'));
+            }
+            connectedCallback() { trace.push(this.firstChild === null ? 'before-children' : 'after-children'); }
+        }
+        customElements.define('site-badge', SiteBadge);
+        </script><site-badge b="two" a="one"><b></b></site-badge><script>
+        trace.push(document.querySelector('site-badge').firstChild.tagName);
+        </script>"#,
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "trace.join('|')"),
+        "detached|InvalidStateError|b/false/one/two|a/false/one/two|before-children|B".into()
+    );
+}
+
+#[test]
+fn custom_element_reactions_run_at_the_parser_token_and_before_dom_methods_return() {
+    let (_, _, mut runtime) = start(
+        r#"<!doctype html><script>
+        var trace = [];
+        class SiteMenu extends HTMLElement {
+            connectedCallback() { trace.push('+' + this.id + (this.firstChild ? ':full' : ':empty')); }
+            disconnectedCallback() { trace.push('-' + this.id); }
+        }
+        customElements.define('site-menu', SiteMenu);
+        </script><site-menu id="parsed"><b></b></site-menu><script>
+        var menu = document.getElementById('parsed');
+        trace.push(menu instanceof SiteMenu ? 'parsed' : 'unupgraded');
+        document.body.appendChild(menu);
+        menu.remove();
+        document.write('<site-menu id="written"></site-menu>');
+        trace.push('returned');
+        var section = document.createElement('section');
+        var child = document.createElementNS('http://www.w3.org/1999/xhtml', 'site-menu');
+        child.id = 'dynamic';
+        section.appendChild(child);
+        trace.push(child instanceof SiteMenu ? 'created' : 'unupgraded');
+        document.body.appendChild(section);
+        section.textContent = '';
+        </script>"#,
+    );
+    assert_eq!(
+        evaluate(&mut runtime, "trace.join('|')"),
+        "+parsed:empty|parsed|-parsed|+parsed:full|-parsed|+written:empty|returned|created|+dynamic:empty|-dynamic".into()
+    );
+}
+
+#[test]
 fn lifecycle_listener_checkpoints_run_before_the_next_listener_and_delay_window_load() {
     let (mut page, mut session, mut runtime) = start(
         r#"<!doctype html><script>

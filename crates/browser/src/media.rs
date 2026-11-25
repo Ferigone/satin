@@ -62,6 +62,11 @@ pub(crate) enum Command {
         key: Key,
         time: f64,
     },
+    PlaybackRate {
+        key: Key,
+        revision: u64,
+        value: f64,
+    },
     Volume {
         key: Key,
         value: f64,
@@ -92,6 +97,7 @@ impl Command {
             | Self::Play(key)
             | Self::Pause(key)
             | Self::Seek { key, .. }
+            | Self::PlaybackRate { key, .. }
             | Self::Volume { key, .. }
             | Self::Muted { key, .. }
             | Self::Close(key) => Some(key),
@@ -129,6 +135,10 @@ pub(crate) enum EventKind {
     Ready,
     Playing,
     Paused,
+    RateRejected {
+        revision: u64,
+        actual: f64,
+    },
     Waiting,
     Seeking,
     Seeked(f64),

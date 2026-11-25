@@ -164,7 +164,7 @@ impl Data {
                             continue;
                         }
                         let node = &document.nodes[id.0];
-                        if let NodeKind::Text(text) = &node.kind {
+                        if let Some(text) = node.kind.text_data() {
                             work = work.saturating_add(text.len());
                         }
                         stack.extend(node.children.iter().copied());
@@ -481,21 +481,6 @@ impl LayoutHost {
         let window = state.borrow().window.clone();
         let document_root = state.borrow().document.root;
         let document = wrap(vm, state, Some(document_root))?;
-        let s = state.clone();
-        getter(vm, document.clone(), "defaultView", move |_, this, _| {
-            if node(&s, &this)? != document_root {
-                return Err(JsError::type_error("Expected a Document receiver"));
-            }
-            Ok(s.borrow().window.clone())
-        })?;
-        let s = state.clone();
-        getter(vm, document.clone(), "compatMode", move |_, this, _| {
-            if node(&s, &this)? != document_root {
-                return Err(JsError::type_error("Expected a Document receiver"));
-            }
-            let quirks = s.borrow().document.quirks_mode == crate::dom::QuirksMode::Quirks;
-            Ok(if quirks { "BackCompat" } else { "CSS1Compat" }.into())
-        })?;
         let s = state.clone();
         getter(vm, document, "scrollingElement", move |vm, _, _| {
             let element = scrolling_element(&s.borrow().document);

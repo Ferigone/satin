@@ -1,6 +1,8 @@
 //! A bounded, independently implemented CSS subset. Selectors and declarations
 //! are compiled once per layout; matching does not tokenize or allocate strings.
 mod calc;
+mod cssom_rules;
+pub(crate) use cssom_rules::constructed_rules;
 pub(crate) mod canvas_font;
 mod grid;
 mod inspection;
@@ -1725,7 +1727,7 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
         } else if bytes.get(i).is_some_and(|b| {
             b.is_ascii_alphabetic() || matches!(b, b'_' | b'-' | b'\\') || *b >= 128
         }) {
-            part.tag = Some(identifier(source, &mut i)?.to_ascii_lowercase());
+            part.tag = Some(identifier(source, &mut i)?);
             specificity.add(Specificity(0, 0, 1));
         }
         loop {
@@ -1917,7 +1919,7 @@ fn compile_selector(source: &str, depth: usize) -> Option<Selector> {
 fn attribute_test(source: &str) -> Option<Test> {
     let mut i = 0;
     let source = trim_boundary(source);
-    let name = identifier(source, &mut i)?.to_ascii_lowercase();
+    let name = identifier(source, &mut i)?;
     let rest = trim_boundary(&source[i..]);
     if rest.is_empty() {
         return Some(Test::Attr {
@@ -2221,6 +2223,14 @@ impl Selector {
         }
     }
 }
+fn ascii_folded(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 impl Compound {
     fn matches(
         &self,
@@ -2230,7 +2240,11 @@ impl Compound {
         form_state: &dyn Fn(NodeId, FormPseudoClass) -> bool,
     ) -> bool {
         let tag = doc.tag(id);
-        if tag.is_empty() || self.tag.as_ref().is_some_and(|t| t != tag) {
+        if tag.is_empty()
+            || self.tag.as_ref().is_some_and(|t| {
+                t != tag && !(doc.html_element_in_html_document(id) && t.eq_ignore_ascii_case(tag))
+            })
+        {
             return false;
         }
         self.tests.iter().all(|test| match test {
@@ -2243,10 +2257,16 @@ impl Compound {
                 op,
                 value,
                 insensitive,
-            } => doc
-                .attr(id, name)
-                .is_some_and(|actual| attribute_matches(actual, value, *op, *insensitive)),
-            Test::Root => doc.nodes[id.0].parent.is_some_and(|p| p == doc.root),
+            } => {
+                let name = if doc.html_element_in_html_document(id) {
+                    ascii_folded(name)
+                } else {
+                    Cow::Borrowed(name.as_str())
+                };
+                doc.attr(id, &name)
+                    .is_some_and(|actual| attribute_matches(actual, value, *op, *insensitive))
+            }
+            Test::Root => doc.nodes[id.0].parent.is_some_and(|p| doc.is_document(p)),
             // The stylesheet is evaluated in the document tree, outside a shadow root.
             Test::ShadowHost | Test::PseudoElement => false,
             Test::Empty => doc.nodes[id.0]
@@ -2254,7 +2274,7 @@ impl Compound {
                 .iter()
                 .all(|&n| match &doc.nodes[n.0].kind {
                     crate::dom::NodeKind::Element { .. } => false,
-                    crate::dom::NodeKind::Text(s) => s.is_empty(),
+                    crate::dom::NodeKind::Text(s) | crate::dom::NodeKind::Cdata(s) => s.is_empty(),
                     _ => true,
                 }),
             Test::Link => matches!(tag, "a" | "area") && doc.attr(id, "href").is_some(),
@@ -2842,7 +2862,11 @@ impl Stylesheet {
             }) {
                 result.classes.entry(class.clone()).or_default().push(index);
             } else if let Some(tag) = &right.tag {
-                result.tags.entry(tag.clone()).or_default().push(index);
+                result
+                    .tags
+                    .entry(tag.to_ascii_lowercase())
+                    .or_default()
+                    .push(index);
             } else {
                 result.universal.push(index);
             }
@@ -2866,7 +2890,7 @@ impl Stylesheet {
         for &i in &self.universal {
             visit(i);
         }
-        if let Some(indices) = self.tags.get(doc.tag(id)) {
+        if let Some(indices) = self.tags.get(ascii_folded(doc.tag(id)).as_ref()) {
             for &i in indices {
                 visit(i);
             }

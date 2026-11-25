@@ -1871,7 +1871,17 @@ impl Vm {
         object.properties.remove(key);
         Ok(true)
     }
-    pub(crate) fn set_prototype(
+    /// Keep a host object's prototype fixed while allowing new own properties.
+    pub fn make_prototype_immutable(&mut self, object: &Value) -> Result<(), JsError> {
+        let id = object
+            .as_object()
+            .ok_or_else(|| JsError::type_error("Expected an object"))?;
+        self.heap.object_mut(id)?.immutable_prototype = true;
+        Ok(())
+    }
+
+    /// Set a prototype using the ordinary ECMAScript invariants, including extensibility.
+    pub fn set_prototype(
         &mut self,
         target: ObjectId,
         prototype: Option<ObjectId>,
@@ -1893,7 +1903,8 @@ impl Vm {
         if object.prototype == prototype {
             return Ok(true);
         }
-        if target == self.realm.object_prototype || !object.extensible {
+        if object.immutable_prototype || target == self.realm.object_prototype || !object.extensible
+        {
             return Ok(false);
         }
         let mut current = prototype;
@@ -3799,12 +3810,14 @@ impl Vm {
                     .run_chunk(body, scope)?
                     .update_empty(Some(Value::Undefined)));
             }
-            Op::Branch(test, yes, no) => {
-                let selected = if self.expression_value(test, env)?.is_truthy() {
-                    Some(yes)
-                } else {
-                    no.as_ref()
-                };
+            Op::Branch(arms, no) => {
+                let mut selected = no.as_ref();
+                for (test, body) in arms.iter() {
+                    if self.expression_value(test, env)?.is_truthy() {
+                        selected = Some(body);
+                        break;
+                    }
+                }
                 return Ok(if let Some(selected) = selected {
                     self.run_chunk(selected, env)?
                         .update_empty(Some(Value::Undefined))

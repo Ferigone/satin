@@ -69,3 +69,90 @@ fn only_actual_volume_and_mute_changes_dispatch_volumechange() {
         runtime.diagnostics()
     );
 }
+
+#[test]
+fn playback_speed_drives_native_media_and_resets_to_the_default_on_load() {
+    use rust_browser_engine::script::MediaUpdate;
+
+    let page = LoadedPage::from_html("https://example.test/", "<video id='clip' muted></video>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let state = runtime.eval(r#"
+        const clip = document.getElementById("clip");
+        const events = [];
+        clip.onratechange = event => events.push(event.target === clip && !event.bubbles);
+        const initial = clip.playbackRate === 1 && clip.defaultPlaybackRate === 1;
+        clip.defaultPlaybackRate = 1.5;
+        const defaultOnly = clip.playbackRate === 1;
+        clip.src = URL.createObjectURL(new Blob(["sample"], {type: "video/mp4"}));
+        const reset = clip.playbackRate === 1.5;
+        clip.playbackRate = "2";
+        clip.playbackRate = 2;
+        let rejected = false;
+        try { clip.playbackRate = -1; } catch (error) { rejected = error.name === "NotSupportedError"; }
+        let nonfinite = false;
+        try { clip.playbackRate = NaN; } catch (error) { nonfinite = error instanceof TypeError; }
+        initial && defaultOnly && reset && rejected && nonfinite && events.length === 0 &&
+            clip.playbackRate === 2 && clip.defaultPlaybackRate === 1.5
+    "#).unwrap();
+    assert_eq!(state.as_bool(), Some(true));
+    let rates: Vec<_> = runtime
+        .take_media_commands()
+        .into_iter()
+        .filter_map(|command| {
+            if let MediaCommand::PlaybackRate {
+                key,
+                revision,
+                value,
+            } = command
+            {
+                Some((key, revision, value))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let [(key, default, 1.5), (_, current, 2.)] = rates.as_slice() else {
+        panic!("expected default and active speed commands")
+    };
+    runtime.pump();
+    assert_eq!(
+        runtime
+            .eval("events.join(',') === 'true,true'")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    runtime.update_media(
+        *key,
+        MediaUpdate::RateRejected {
+            revision: *default,
+            actual: 1.,
+        },
+    );
+    assert_eq!(
+        runtime.eval("clip.playbackRate === 2").unwrap().as_bool(),
+        Some(true)
+    );
+    runtime.update_media(
+        *key,
+        MediaUpdate::RateRejected {
+            revision: *current,
+            actual: 1.,
+        },
+    );
+    assert_eq!(
+        runtime
+            .eval("clip.playbackRate === 1 && events.length === 3")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    runtime.eval("clip.load()").unwrap();
+    assert_eq!(
+        runtime
+            .eval("clip.playbackRate === 1.5 && clip.defaultPlaybackRate === 1.5")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+}

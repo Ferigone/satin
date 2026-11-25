@@ -183,6 +183,10 @@ fn caption(doc: &Document, id: NodeId) -> String {
             result.push('>');
             result
         }
+        NodeKind::Cdata(s) => format!("<![CDATA[{}]]>", preview(s, 100)),
+        NodeKind::ProcessingInstruction { target, data } => {
+            format!("<?{} {}?>", preview(target, 48), preview(data, 100))
+        }
         NodeKind::Text(s) => format!("\"{}\"", preview(s.trim_start(), 120)),
         NodeKind::Comment(s) => format!("<!-- {} -->", preview(s, 100)),
     }
@@ -206,7 +210,8 @@ fn find(doc: &Document, id: NodeId, needle: &str) -> bool {
             }
             matches(tag) || attrs.iter().take(64).any(|(k, v)| matches(k) || matches(v))
         }
-        NodeKind::Text(s) | NodeKind::Comment(s) => matches(s),
+        NodeKind::Text(s) | NodeKind::Cdata(s) | NodeKind::Comment(s) => matches(s),
+        NodeKind::ProcessingInstruction { target, data } => matches(target) || matches(data),
         NodeKind::Doctype { name, .. } => matches(name),
         NodeKind::Document => matches("#document"),
     }
@@ -231,7 +236,7 @@ fn visible(doc: &Document, toggled: &HashSet<NodeId>, query: &str) -> (Vec<TreeR
         }
         visited += 1;
         let node = &doc.nodes[row.id.0];
-        if !matches!(&node.kind, NodeKind::Text(s) if s.trim().is_empty())
+        if !node.kind.text_data().is_some_and(|s| s.trim().is_empty())
             && (query.is_empty() || find(doc, row.id, &needle))
         {
             rows.push(row);
@@ -398,7 +403,10 @@ impl Elements {
         } else {
             lines.push(Line::value(format!("{} child nodes", node.children.len())));
             match &node.kind {
-                NodeKind::Comment(s) | NodeKind::Text(s) => {
+                NodeKind::Comment(s)
+                | NodeKind::Text(s)
+                | NodeKind::Cdata(s)
+                | NodeKind::ProcessingInstruction { data: s, .. } => {
                     lines.push(Line::value(preview(s, TEXT_LIMIT)))
                 }
                 NodeKind::Doctype {

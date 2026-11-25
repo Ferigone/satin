@@ -1,14 +1,9 @@
-//! Decimal formatting for ECMAScript's bounded precision and fraction digits.
+//! Number formatting for ECMAScript radix, precision and fraction digits.
 use super::{arg, integer, method, number_this};
 use crate::{ErrorKind, JsError, Value, Vm, vm::number_string};
 use num_bigint::BigUint;
 
-// An IEEE binary fraction m / 2^s is the decimal integer m * 5^s scaled
-// by 10^-s. This avoids rounding the binary number twice, even at 100 digits.
-fn decimal(value: f64) -> (String, i32) {
-    if value == 0.0 {
-        return ("0".into(), 0);
-    }
+fn binary_parts(value: f64) -> (u64, i32) {
     let bits = value.abs().to_bits();
     let exponent = ((bits >> 52) & 2047) as i32;
     let fraction = bits & ((1 << 52) - 1);
@@ -18,6 +13,83 @@ fn decimal(value: f64) -> (String, i32) {
         fraction | (1 << 52)
     };
     let shift = exponent.max(1) - 1023 - 52;
+    (significand, shift)
+}
+
+/// Format the shortest radix significand which rounds back to the input.
+/// Work in quarter-ULPs so that the asymmetric midpoint at powers of two
+/// and both boundaries of subnormal numbers are represented exactly.
+pub(super) fn non_decimal(value: f64, radix: u32) -> String {
+    let magnitude = value.abs();
+    let mut result = if magnitude.fract() == 0.0 && magnitude < (1u64 << 53) as f64 {
+        BigUint::from(magnitude as u64).to_str_radix(radix)
+    } else {
+        let (significand, shift) = binary_parts(magnitude);
+        let unit_shift = shift - 2;
+        let unit = BigUint::from(1u32) << unit_shift.max(0) as usize;
+        let mut denominator = BigUint::from(1u32) << (-unit_shift).max(0) as usize;
+        let mut numerator = &unit * (significand << 2);
+        let mut upper_margin = &unit << 1usize;
+        let mut lower_margin = if significand == 1 << 52 && shift > -1074 {
+            unit
+        } else {
+            upper_margin.clone()
+        };
+        let inclusive = significand % 2 == 0;
+
+        // Skip leading or trailing zero positions using an exact magnitude
+        // estimate. The first division starts at the largest significant digit.
+        let mut place = if numerator >= denominator {
+            (&numerator / &denominator).to_radix_be(radix).len() as i32 - 1
+        } else {
+            1 - (&denominator / &numerator).to_radix_be(radix).len() as i32
+        };
+        let scale = BigUint::from(radix).pow(place.unsigned_abs());
+        if place >= 0 {
+            denominator *= scale;
+        } else {
+            numerator *= &scale;
+            upper_margin *= &scale;
+            lower_margin *= scale;
+        }
+
+        loop {
+            let mut digits = &numerator / &denominator;
+            let below = &numerator - &digits * &denominator;
+            let above = &denominator - &below;
+            let down = below < lower_margin || (inclusive && below == lower_margin);
+            let up = above < upper_margin || (inclusive && above == upper_margin);
+            if down || up {
+                if up && (!down || above < below || (above == below && digits.bit(0))) {
+                    digits += 1u32;
+                }
+                let mut out = digits.to_str_radix(radix);
+                if place < 0 {
+                    out = fixed(out, (-place) as usize);
+                } else {
+                    out.extend(std::iter::repeat_n('0', place as usize));
+                }
+                break out;
+            }
+            numerator *= radix;
+            lower_margin *= radix;
+            upper_margin *= radix;
+            place -= 1;
+        }
+    };
+    if value < 0.0 {
+        result.insert(0, '-');
+    }
+    result
+}
+
+// An IEEE binary fraction m / 2^s is the decimal integer m * 5^s scaled
+// by 10^-s. This avoids rounding the binary number twice, even at 100 digits.
+fn decimal(value: f64) -> (String, i32) {
+    if value == 0.0 {
+        return ("0".into(), 0);
+    }
+    let (significand, shift) = binary_parts(value);
     let integer = BigUint::from(significand);
     let digits = if shift < 0 {
         (integer * BigUint::from(5u32).pow((-shift) as u32)).to_str_radix(10)

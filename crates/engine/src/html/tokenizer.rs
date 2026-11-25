@@ -1,6 +1,6 @@
 //! WHATWG HTML tokenization states; UTF-8 input is already newline-normalized.
 use super::decode_entities;
-use std::collections::BTreeMap;
+use crate::dom::Attributes;
 
 pub(super) fn space(b: u8) -> bool {
     matches!(b, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
@@ -9,8 +9,7 @@ pub(super) fn space(b: u8) -> bool {
 #[derive(Clone, Debug)]
 pub(super) struct Tag {
     pub name: String,
-    pub attrs: BTreeMap<String, String>,
-    pub merge_attribute_order: Vec<String>,
+    pub attrs: Attributes,
     pub self_closing: bool,
 }
 
@@ -18,8 +17,7 @@ impl Tag {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.into(),
-            attrs: BTreeMap::new(),
-            merge_attribute_order: Vec::new(),
+            attrs: Attributes::new(),
             self_closing: false,
         }
     }
@@ -329,12 +327,7 @@ impl<'a> Tokenizer<'a> {
                     value = self.source[start..self.pos].replace('\0', "\u{fffd}");
                 }
             }
-            if let std::collections::btree_map::Entry::Vacant(entry) = tag.attrs.entry(name) {
-                // These tags can add attributes to elements already in the
-                // DOM. An observer sees those additions in token order.
-                if matches!(tag.name.as_str(), "html" | "body") {
-                    tag.merge_attribute_order.push(entry.key().clone());
-                }
+            if let indexmap::map::Entry::Vacant(entry) = tag.attrs.entry(name) {
                 entry.insert(decode_entities(&value, true));
             }
         }
