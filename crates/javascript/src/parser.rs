@@ -63,6 +63,7 @@ pub(crate) struct Function {
     pub name: Option<JsString>,
     pub params: Vec<Parameter>,
     pub body: Vec<Stmt>,
+    pub validated: Option<std::rc::Rc<crate::bytecode::Code>>,
     pub arrow: bool,
     pub kind: FunctionKind,
     pub strict: bool,
@@ -256,9 +257,54 @@ pub(crate) fn parse_script(
     compilation_bytes: usize,
     inherited_strict: bool,
 ) -> Result<Vec<Stmt>, JsError> {
+    let mut p = script_parser(Lexer::new(source, compilation_bytes, true), context);
+    // In a large, known-strict script validate and release one nested body at
+    // a time. A function that is never called must still pass all early errors.
+    let large = source.len() >= 64 * 1024;
+    p.defer_strict_functions = large && inherited_strict;
+    let mut in_prologue = true;
+    let mut body = Vec::new();
+    while !p.is_eof() {
+        let statement = p.statement()?;
+        if in_prologue {
+            match &statement {
+                Stmt::Expression(Expr::Literal(Value::String(s))) => {
+                    if large && s == &JsString::from("use strict") {
+                        p.defer_strict_functions = true;
+                    }
+                }
+                Stmt::EscapedStringStatement(_) => {}
+                _ => in_prologue = false,
+            }
+        }
+        body.push(statement);
+    }
+    if p.legacy_literals != 0 && (inherited_strict || has_strict_directive(&body)) {
+        return Err(p.error("Legacy literal in strict code"));
+    }
+    annex::mark(&mut body, []);
+    Ok(body)
+}
+
+pub(crate) fn reparse_ordinary_function(
+    source: &crate::lexer::SourceSpan,
+    compilation_bytes: usize,
+) -> Result<Function, JsError> {
+    let lexer = Lexer::from_span(source.clone(), compilation_bytes, true);
+    let mut p = script_parser(lexer, EvalContext::default());
+    p.expect("function")?;
+    let function = p.function(0, false, false)?;
+    if !p.is_eof() {
+        return Err(p.error("Unexpected token after function"));
+    }
+    Ok(function)
+}
+
+fn script_parser(lexer: Lexer, context: EvalContext) -> Parser {
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
-        lexer: Lexer::new(source, compilation_bytes, true),
+        lexer,
+        defer_strict_functions: false,
         function_depth: 0,
         legacy_literals: 0,
         last_end: 0,
@@ -282,15 +328,7 @@ pub(crate) fn parse_script(
         yield_count: 0,
     };
     p.fill();
-    let mut body = Vec::new();
-    while !p.is_eof() {
-        body.push(p.statement()?);
-    }
-    if p.legacy_literals != 0 && (inherited_strict || has_strict_directive(&body)) {
-        return Err(p.error("Legacy literal in strict code"));
-    }
-    annex::mark(&mut body, []);
-    Ok(body)
+    p
 }
 pub(crate) fn has_strict_directive(body: &[Stmt]) -> bool {
     for stmt in body {
@@ -336,6 +374,7 @@ struct Parser {
     // Current token followed by up to two lookahead tokens.
     tokens: VecDeque<Token>,
     lexer: Lexer,
+    defer_strict_functions: bool,
     function_depth: usize,
     legacy_literals: usize,
     last_end: usize,
@@ -1036,6 +1075,7 @@ impl Parser {
         }
     }
     fn function(&mut self, start: usize, is_async: bool, require_name: bool) -> Result<Function, JsError> {
+        let before = self.lexer.remaining_compilation_bytes();
         let kind = self.function_kind(is_async);
         let old_counts = (self.await_count, self.yield_count);
         let name = if !self.at("(") {
@@ -1074,6 +1114,20 @@ impl Parser {
             let params = self.parameters()?;
             let mut f = self.function_body(start, name, params, false, kind)?;
             f.self_binding = !require_name && f.name.is_some();
+            if self.defer_strict_functions
+                && self.function_depth == 1
+                && kind == FunctionKind::Ordinary
+                && self.private_scopes.is_empty()
+                && self.eval_private_names.is_empty()
+                && f.params.iter().all(simple_parameter)
+            {
+                self.check_ast(Ast::Function(&f))?;
+                let (code, retained) = crate::bytecode::validate_deferred_function(&f)?;
+                f.body = Vec::new();
+                f.params = Vec::new();
+                f.validated = Some(code);
+                self.lexer.finish_deferred_function(before, retained)?;
+            }
             Ok(f)
         })();
         (
@@ -1159,6 +1213,7 @@ impl Parser {
             name,
             params,
             body,
+            validated: None,
             arrow,
             kind,
             strict,
@@ -2158,6 +2213,7 @@ enum Ast<'a> {
     Statement(&'a Stmt),
     Pattern(&'a Pattern),
     Class(&'a Class),
+    Function(&'a Function),
 }
 
 /// Iterative inspection is intentional: a depth guard must not itself recurse.
@@ -2172,6 +2228,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
         let child_depth = depth + 1;
         match node {
             Ast::Class(class) => push_class_ast(class, child_depth, &mut pending),
+            Ast::Function(function) => push_function_ast(function, child_depth, &mut pending),
             Ast::Pattern(pattern) => match pattern {
                 Pattern::Name(_) => {}
                 Pattern::Target(target) => pending.push((Ast::Expression(target), child_depth)),
@@ -2250,18 +2307,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     }
                 }
                 Expr::Function(function) => {
-                    pending.extend(
-                        function
-                            .body
-                            .iter()
-                            .map(|s| (Ast::Statement(s), child_depth)),
-                    );
-                    pending.extend(
-                        function
-                            .params
-                            .iter()
-                            .map(|p| (Ast::Pattern(&p.pattern), child_depth)),
-                    );
+                    push_function_ast(function, child_depth, &mut pending);
                 }
                 Expr::Member(a, b) | Expr::Binary(_, a, b) | Expr::Assign(_, a, b) => {
                     pending.push((Ast::Expression(a), child_depth));
@@ -2314,18 +2360,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.extend(body.iter().map(|s| (Ast::Statement(s), child_depth)))
                 }
                 Stmt::Function(function) | Stmt::DefaultFunction(function) => {
-                    pending.extend(
-                        function
-                            .body
-                            .iter()
-                            .map(|s| (Ast::Statement(s), child_depth)),
-                    );
-                    pending.extend(
-                        function
-                            .params
-                            .iter()
-                            .map(|p| (Ast::Pattern(&p.pattern), child_depth)),
-                    );
+                    push_function_ast(function, child_depth, &mut pending);
                 }
                 Stmt::Variable(_, declarations) => {
                     for (pattern, value) in declarations {
@@ -2454,6 +2489,11 @@ fn reserved(s: &str) -> bool {
     )
 }
 
+fn push_function_ast<'a>(function: &'a Function, depth: usize, pending: &mut Vec<(Ast<'a>, usize)>) {
+    pending.extend(function.body.iter().map(|s| (Ast::Statement(s), depth)));
+    pending.extend(function.params.iter().map(|p| (Ast::Pattern(&p.pattern), depth)));
+}
+
 fn push_class_ast<'a>(class: &'a Class, depth: usize, pending: &mut Vec<(Ast<'a>, usize)>) {
     pending.extend(class.heritage.iter().map(|e| (Ast::Expression(e), depth)));
     for element in &class.elements {
@@ -2462,13 +2502,7 @@ fn push_class_ast<'a>(class: &'a Class, depth: usize, pending: &mut Vec<(Ast<'a>
                 if let ClassKey::Public(key) = key {
                     pending.push((Ast::Expression(key), depth));
                 }
-                pending.extend(
-                    function
-                        .params
-                        .iter()
-                        .map(|p| (Ast::Pattern(&p.pattern), depth)),
-                );
-                pending.extend(function.body.iter().map(|s| (Ast::Statement(s), depth)));
+                push_function_ast(function, depth, pending);
             }
             ClassElement::Field { key, value, .. } => {
                 if let ClassKey::Public(key) = key {
