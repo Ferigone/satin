@@ -30,7 +30,7 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
 
 ## Changes in alpha.37
 
-Pages with nested Grid and Flexbox containers can reuse layout measurements within a frame. Satin skips hidden subtrees when calculating intrinsic sizes and avoids measuring the same grid placement twice. A regression test covers percentage-height children whose parent changes between a definite and an indefinite height.
+Pages with nested Grid and Flexbox containers can reuse layout measurements within a frame. Satin skips hidden subtrees when calculating intrinsic sizes and avoids measuring the same grid placement twice. A regression test covers percentage-height children whose parent changes between a definite and an indefinite height. Six CSS Grid reference tests that hit the previous work limit now render to completion. One matches its reference and five show pixel differences. All 1,967 tests that passed in alpha.36 still pass. [Static CSS results](docs/compatibility/css.md#alpha37-static-css-rerun)
 
 The JavaScript engine releases temporary compiler storage after validating functions nested in large strict-mode scripts. Between classic scripts it can collect unused objects when a large document’s heap grows. The array search methods `find`, `findIndex`, `findLast` and `findLastIndex` can stop at an early match on a large sparse array-like object. [JavaScript implementation and regression coverage](docs/JAVASCRIPT.md)
 
@@ -42,7 +42,7 @@ Flex containers now wrap correctly with reversed axes, gaps and auto margins in 
 
 Satin paints all 148 absolute CSS color keywords and accepts `hwb()`, `oklab()`, `oklch()` and Display P3 colors. It converts these colors to 8-bit sRGB for display.
 
-On the same 6,536 eligible static CSS reference comparisons, the number passing rose from 1,726 in alpha.35 to 1,967. The audit records 52 previously passing comparisons that now fail, along with excluded cases and results for 823 individual property names. [CSS measurements and per-case results](docs/compatibility/css.md)
+On the same 6,536 eligible static CSS reference comparisons, the number passing rose from 1,726 in alpha.35 to 1,967 in alpha.36. The alpha.36 audit records 52 previously passing comparisons that then failed, along with excluded cases and results for 823 individual property names. [CSS measurements and per-case results](docs/compatibility/css.md)
 
 ## Compatibility roadmap
 
@@ -66,7 +66,7 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 | Staging | 2,528 / 2,791 | 90.58% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
-| Static CSS reftests | 1,967 / 6,536 | 30.09% | [Eligible screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md) |
+| Static CSS reftests | 1,968 / 6,536 | 30.11% | [Alpha.37 static screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md#alpha37-static-css-rerun) |
 | HTML tokenizer | 7,028 / 7,036 | 99.89% | [html5lib initial-state variants](crates/engine/data/html5lib/README.md) |
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |

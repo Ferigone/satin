@@ -1,12 +1,28 @@
 # CSS compatibility measurements
 
-Measured on Linux x86_64 on 2026-11-25, against Satin `57e1dbd` (alpha.35) and [the CSS implementation measured here](https://github.com/Ferigone/satin/commit/8f8882f3d68d8eaaf8112194dac75f7ca61658c6). Both runs used Rust 1.99.1, the same system fonts and the same source pages. The candidate workspace test suite on Linux recorded 1,403 passes, zero failures and three pre-existing opt-in checks. The upstream [WPT revision is pinned to `9b8b1be`](https://github.com/web-platform-tests/wpt/tree/9b8b1beec730060783726b7c538b21e25e63b1f4/css).
+The alpha.35–alpha.36 audit ran on Linux x86_64 on 2026-11-25, against Satin `57e1dbd` (alpha.35) and [the CSS implementation released in alpha.36](https://github.com/Ferigone/satin/commit/8f8882f3d68d8eaaf8112194dac75f7ca61658c6). Both runs used Rust 1.99.1, the same system fonts and the same source pages. The candidate workspace test suite on Linux recorded 1,403 passes, zero failures and three pre-existing opt-in checks. The upstream [WPT revision is pinned to `9b8b1be`](https://github.com/web-platform-tests/wpt/tree/9b8b1beec730060783726b7c538b21e25e63b1f4/css).
 
-## Rendering
+## Alpha.37 static CSS rerun
+
+On 2026-11-25 the alpha.37 renderer completed six Grid comparisons that had reached the engine work limit in alpha.36. The orthogonal writing-mode subgrid case matched its reference. The other five produced pixel differences. All 1,967 previous passes held and one work-limit error remains.
+
+| Static screen result | Alpha.36 | Alpha.37 |
+| --- | ---: | ---: |
+| Pixel relation satisfied | 1,967 | 1,968 |
+| Pixel relation failed | 4,426 | 4,431 |
+| Identical single-color canvases | 136 | 136 |
+| Renderer or work-limit error | 7 | 1 |
+| Outside the static adapter | 19,782 | 19,782 |
+
+Both measurements used the same Linux host, fonts, 800 × 600 viewport and pinned WPT manifest. All 26,318 entries had the same test paths and references. The six changes raise the pass rate from 30.09% to 30.11% across 6,536 eligible comparisons. The remaining sections preserve the alpha.35–alpha.36 measurements.
+
+To reproduce the alpha.37 run, use the pixel-renderer steps under [Reproduce](#reproduce) at the [measured candidate commit](https://github.com/Ferigone/satin/commit/7d5477a24b8876a5ee24ad717a5ffce6a541d8bd). To reconstruct all alpha.37 statuses, read the `candidate` column of the [alpha.36 archive](css-reftest-outcomes.tsv.gz), then replace the six statuses identified by test path with the `after` values in the [machine-readable delta](css-reftest-alpha37-delta.json). It records the measured revisions, tree, viewport and manifest checksum. The alpha.36 renderer source matches the [alpha.36 release commit](https://github.com/Ferigone/satin/commit/f437b715d3d370c2d57164136f58fc0f996527ef).
+
+## Alpha.35 and alpha.36 rendering
 
 The WPT manifest lists 40,145 test entries in `css/`. It contains 26,318 screen reftests, 8,316 JavaScript testharness entries, 1,236 crash tests, 1,150 manual tests, 415 print reftests and 2,710 visual tests. The screen comparison ran every entry eligible under the static HTML filters, 6,536 test/reference comparisons. The remaining test types have independent execution requirements.
 
-| Outcome | Alpha.35 | With CSS changes |
+| Outcome | Alpha.35 | Alpha.36 |
 | --- | ---: | ---: |
 | Pixel relation satisfied | 1,726 | 1,967 |
 | Pixel relation failed | 4,626 | 4,426 |
@@ -48,7 +64,7 @@ On the pinned WPT negative-overflow-002 page, all 24 horizontal cases passed whe
 
 The runner classified all 8,316 WPT `css/` testharness entries. It started 3,964 synchronous HTML documents using the original WPT harness, helpers and assertions in a fresh Satin page runtime. Original resources were loaded from the pinned checkout. The reporting hook records declared results, diagnostics and harness completion. Unsupported variants, non-HTML documents, asynchronous fixtures and missing infrastructure are marked separately. A partially executed or errored page can emit subtest results before stopping. [Per-page and per-subtest outcomes (TSV.GZ)](css-testharness-outcomes.tsv.gz)
 
-| Measure | Alpha.35 | With CSS changes |
+| Measure | Alpha.35 | Alpha.36 |
 | --- | ---: | ---: |
 | Pages with a completed harness | 3,473 | 3,472 |
 | Pages with partial results | 265 | 269 |
@@ -75,7 +91,7 @@ python3 tools/css-parsing-wpt.py wpt target/debug/examples/css_parsing_wpt css-p
 
 ## WPT inventory and screen comparisons by directory
 
-All directories with CSS test entries are listed. The first two counts give the full WPT inventory and the number of screen reftests. The baseline column counts successful screen comparisons on alpha.35. The remaining columns refer to the candidate.
+All directories with CSS test entries are listed. The first two counts give the full WPT inventory and the number of screen reftests. The baseline column counts successful screen comparisons on alpha.35. The remaining columns refer to alpha.36.
 
 | Directory | All WPT | Screen reftests | Baseline passes | Pass | Fail | Single color | Error | Skipped |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

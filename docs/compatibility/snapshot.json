@@ -19,10 +19,10 @@
     {
       "label": "Static CSS reftests",
       "date": "2026-11-25",
-      "satinRevision": "8f8882f3d68d8eaaf8112194dac75f7ca61658c6",
-      "pass": 1967, "total": 6536,
-      "scope": "Eligible screen comparisons in the pinned WPT CSS tree",
-      "source": "docs/compatibility/css.md"
+      "satinRevision": "7d5477a24b8876a5ee24ad717a5ffce6a541d8bd",
+      "pass": 1968, "total": 6536,
+      "scope": "Alpha.37 static screen comparisons in the pinned WPT CSS tree",
+      "source": "docs/compatibility/css.md#alpha37-static-css-rerun"
     }
   ],
   "web": [
