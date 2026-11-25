@@ -686,6 +686,20 @@ struct Constraints {
     containing_height: Option<f32>,
     flex_item: bool,
 }
+impl Constraints {
+    // With both border-box dimensions imposed, block_inner never consults
+    // the parent's block-size basis: explicit height comes from height,
+    // min/max height clamping is skipped and replaced auto-width is bypassed.
+    // Descendants receive this box's own explicit content height instead.
+    // Keep the basis for every other case, including percentage auto sizes.
+    fn fragment_height_basis_key(self) -> Option<u32> {
+        if self.width.is_some() && self.height.is_some() {
+            None
+        } else {
+            self.containing_height.map(f32::to_bits)
+        }
+    }
+}
 // Exact, frame-local fragment memoization. CSS styles, DOM and resource
 // snapshots are immutable for the lifetime of this Builder.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -3340,7 +3354,7 @@ impl Builder<'_> {
                 available: available.to_bits(),
                 width: c.width.map(f32::to_bits),
                 height: c.height.map(f32::to_bits),
-                containing_height: c.containing_height.map(f32::to_bits),
+                containing_height: c.fragment_height_basis_key(),
                 intrinsic_width: c.intrinsic_width,
                 flex_item: c.flex_item,
                 href: href.clone(),
@@ -4456,5 +4470,33 @@ impl Builder<'_> {
         };
         self.intrinsic[id.0] = Some(result);
         result
+    }
+}
+
+#[cfg(test)]
+mod fragment_height_basis_tests {
+    use super::Constraints;
+
+    #[test]
+    fn only_fully_imposed_dimensions_ignore_parent_height_in_fragment_key() {
+        let a = Constraints {
+            width: Some(100.),
+            height: Some(40.),
+            containing_height: Some(80.),
+            flex_item: true,
+            ..Constraints::default()
+        };
+        let b = Constraints { containing_height: Some(120.), ..a };
+        assert_eq!(a.fragment_height_basis_key(), b.fragment_height_basis_key());
+        assert_eq!(a.fragment_height_basis_key(), None);
+        for partial in [
+            Constraints { height: None, ..a },
+            Constraints { width: None, ..a },
+        ] {
+            assert_eq!(partial.fragment_height_basis_key(), Some(80f32.to_bits()));
+            assert_ne!(partial.fragment_height_basis_key(),
+                Constraints { containing_height: Some(120.), ..partial }
+                    .fragment_height_basis_key());
+        }
     }
 }
