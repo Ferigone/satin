@@ -198,7 +198,7 @@ fn late_completion_does_not_finish_a_new_append_after_abort() {
     runtime
         .eval(
             r#"
-        const buffer = source.addSourceBuffer("video/mp4");
+        const buffer = source.addSourceBuffer('video/mp4; codecs="avc1.42C01E"');
         buffer.appendBuffer(new Uint8Array(1));
         buffer.abort();
         buffer.appendBuffer(new Uint8Array(2));
