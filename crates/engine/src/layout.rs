@@ -670,7 +670,7 @@ impl<'a> Line<'a> {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Fragment {
     commands: TrackedCommands,
     positioned: Vec<positioning::Positioned>,
@@ -690,6 +690,61 @@ struct Constraints {
     containing_height: Option<f32>,
     flex_item: bool,
 }
+impl Constraints {
+    // With both border-box dimensions imposed, block_inner never consults
+    // the parent's block-size basis: explicit height comes from height,
+    // min/max height clamping is skipped and replaced auto-width is bypassed.
+    // The box establishes its own percentage basis (or none for an indefinite flex item).
+    // Keep the basis for every other case, including percentage auto sizes.
+    fn fragment_height_basis_key(self) -> Option<u32> {
+        if self.width.is_some() && self.height.is_some() {
+            None
+        } else {
+            self.containing_height.map(f32::to_bits)
+        }
+    }
+}
+// Exact, frame-local fragment memoization. CSS styles, DOM and resource
+// snapshots are immutable for the lifetime of this Builder.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FragmentKey {
+    node: NodeId,
+    available: u32,
+    width: Option<u32>,
+    height: Option<u32>,
+    containing_height: Option<u32>,
+    indefinite_height: bool,
+    intrinsic_width: bool,
+    flex_item: bool,
+    href: Option<Arc<str>>,
+}
+
+impl Fragment {
+    // Bound both the cache's retained payload and the work of cloning it.
+    // Text runs own glyph vectors, and anchors own their strings.
+    fn cache_cost(&self) -> Option<usize> {
+        let mut cost = self
+            .commands
+            .len()
+            .saturating_mul(8)
+            .saturating_add(self.positioned.len())
+            .saturating_add(self.links.len())
+            .saturating_add(self.elements.len())
+            .saturating_add(1);
+        for command in self.commands.iter() {
+            match command {
+                DrawCommand::Text { run, .. } => cost = cost.saturating_add(run.glyphs.len()),
+                DrawCommand::Control { .. } => return None,
+                _ => {}
+            }
+        }
+        for name in self.anchors.keys() {
+            cost = cost.saturating_add(name.len()).saturating_add(1);
+        }
+        (cost <= 4096).then_some(cost)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BoxMetrics {
     margin: [f32; 4],
@@ -817,7 +872,11 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
+    fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
+    fragment_cache_cost: usize,
     grid_text: HashMap<NodeId, GridText>,
+    grid_placements: HashMap<(NodeId, [usize; 3], [usize; 3]), Arc<GridPlacement>>,
+    grid_placement_items: usize,
     floats: floats::FloatContext,
     float_work_remaining: usize,
     recursion: usize,
@@ -846,7 +905,11 @@ impl<'a> Builder<'a> {
             anchors: HashMap::new(),
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
+            fragment_cache: HashMap::new(),
+            fragment_cache_cost: 0,
             grid_text: HashMap::new(),
+            grid_placements: HashMap::new(),
+            grid_placement_items: 0,
             floats: floats::FloatContext::default(),
             float_work_remaining: page
                 .document
@@ -1858,6 +1921,47 @@ impl Builder<'_> {
         });
         nodes
     }
+    // Placement depends on the immutable frame's item order, line names and
+    // expanded track topology, not on the resolved track sizes. Intrinsic
+    // and final grid passes can share it when automatic repeats agree.
+    fn grid_placement_cached(
+        &mut self,
+        id: NodeId,
+        rows: &Axis<'_>,
+        columns: &Axis<'_>,
+    ) -> Option<Arc<GridPlacement>> {
+        let key = (id, rows.placement_key(), columns.placement_key());
+        if let Some(placement) = self.grid_placements.get(&key) {
+            let charge = 1 + placement.items.len() / 64;
+            self.work_remaining = self.work_remaining.checked_sub(charge)?;
+            return Some(Arc::clone(placement));
+        }
+        let nodes = self.grid_nodes(id);
+        let doc = &self.page.document;
+        let before = self.work_remaining;
+        let placement = Arc::new(grid_placement(
+            nodes,
+            self.styles,
+            |node| doc.nodes[node.0].kind.text_data().is_some(),
+            &self.styles[id.0],
+            [rows, columns],
+            &mut self.work_remaining,
+        )?);
+        let items = placement.items.len();
+        // Retain only successful, useful placements in a bounded frame-local
+        // cache. A different auto-repeat count must perform placement anew.
+        if !self.limited
+            && !rows.limited
+            && !columns.limited
+            && before.saturating_sub(self.work_remaining) > 1 + items / 64
+            && self.grid_placements.len() < 512
+            && self.grid_placement_items.saturating_add(items) <= 16384
+        {
+            self.grid_placement_items += items;
+            self.grid_placements.insert(key, Arc::clone(&placement));
+        }
+        Some(placement)
+    }
     fn grid_inline_contribution(&mut self, item: GridItem, width: f32) -> GridContribution {
         let (min_content, max_content) = self.intrinsic_width(item.node);
         if self.page.document.nodes[item.node.0]
@@ -1933,16 +2037,7 @@ impl Builder<'_> {
             AxisSize::from_style(container, false, None, metrics),
         );
         self.limited |= rows.limited || columns.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let Some(placement) = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&rows, &columns],
-            &mut self.work_remaining,
-        ) else {
+        let Some(placement) = self.grid_placement_cached(id, &rows, &columns) else {
             self.limited = true;
             return (0., 0.);
         };
@@ -2003,17 +2098,8 @@ impl Builder<'_> {
         );
         let column_template = Axis::new(container, false, inline_size);
         self.limited |= row_template.limited || column_template.limited;
-        let nodes = self.grid_nodes(id);
-        let doc = &self.page.document;
-        let placement = grid_placement(
-            nodes,
-            self.styles,
-            |node| doc.nodes[node.0].kind.text_data().is_some(),
-            container,
-            [&row_template, &column_template],
-            &mut self.work_remaining,
-        );
-        let Some(placement) = placement else {
+        let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template)
+        else {
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
             for &child in &self.page.document.nodes[id.0].children {
@@ -2273,7 +2359,18 @@ impl Builder<'_> {
                 } else {
                     None
                 };
-            if !text {
+            // The measuring pass already used the final inline size. A second
+            // pass is required only if the final block constraint can affect
+            // this box. Without an imposed stretch height or a percentage
+            // block-size constraint, its own explicit content height (and
+            // hence the basis passed to its descendants) is unchanged.
+            // Reuse the measured fragment rather than recursively formatting
+            // nested grids twice at every level.
+            let needs_final_layout = target_height.is_some()
+                || style.height.has_percent()
+                || style.min_height.has_percent()
+                || style.max_height.has_percent();
+            if !text && needs_final_layout {
                 fragment = self.fragment(
                     item.node,
                     area_width,
@@ -3341,6 +3438,31 @@ impl Builder<'_> {
         href: Option<Arc<str>>,
         c: Constraints,
     ) -> Fragment {
+        // Repeated grid/flex measure and stretch passes can revisit the same
+        // subtree under identical constraints exponentially. Never reuse
+        // measurements across different percentage bases or inherited links.
+        let key = (c.flex_item
+            && !self.page.document.nodes[id.0].children.is_empty()
+            && href.as_ref().is_none_or(|url| url.len() <= 4096))
+        .then(|| FragmentKey {
+            node: id,
+            available: available.to_bits(),
+            width: c.width.map(f32::to_bits),
+            height: c.height.map(f32::to_bits),
+            containing_height: c.fragment_height_basis_key(),
+            indefinite_height: c.indefinite_height,
+            intrinsic_width: c.intrinsic_width,
+            flex_item: c.flex_item,
+            href: href.clone(),
+        });
+        if let Some((cached, cost)) = key.as_ref().and_then(|key| self.fragment_cache.get(key)) {
+            let charge = 1 + cost / 64;
+            if self.work_remaining >= charge {
+                self.work_remaining -= charge;
+                return cached.clone();
+            }
+        }
+        let work_before = self.work_remaining;
         let outer_floats = std::mem::take(&mut self.floats);
         let old = Fragment {
             commands: std::mem::take(&mut self.commands),
@@ -3375,7 +3497,7 @@ impl Builder<'_> {
         } else {
             m.width + m.extra_x() + m.margin[1] + m.margin[3]
         };
-        Fragment {
+        let fragment = Fragment {
             commands: std::mem::replace(&mut self.commands, old.commands),
             positioned: std::mem::replace(&mut self.positioned, old.positioned),
             links: std::mem::replace(&mut self.links, old.links),
@@ -3383,7 +3505,26 @@ impl Builder<'_> {
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
             width,
             height,
+        };
+        // Do not cache a fallback or partial result. Only retain fragments
+        // whose measured work exceeds their reuse charge; cap aggregate
+        // retained payload, including the inherited href in the key.
+        if !self.limited
+            && self.work_remaining > 0
+            && self.fragment_cache.len() < 256
+            && let Some(key) = key
+            && let Some(cost) = fragment.cache_cost()
+        {
+            let cost = cost.saturating_add(key.href.as_ref().map_or(0, |url| url.len()));
+            if work_before.saturating_sub(self.work_remaining) > 1 + cost / 64
+                && self.fragment_cache_cost.saturating_add(cost) <= 32768
+                && !self.fragment_cache.contains_key(&key)
+            {
+                self.fragment_cache.insert(key, (fragment.clone(), cost));
+                self.fragment_cache_cost += cost;
+            }
         }
+        fragment
     }
     fn append_fragment(&mut self, mut f: Fragment, x: f32, y: f32) {
         for command in &mut f.commands {
@@ -4217,6 +4358,15 @@ impl Builder<'_> {
                 if self.intrinsic[node.0].is_some() {
                     continue;
                 }
+                // display:none removes the entire subtree from intrinsic sizing.
+                // Descendants can still have grid/flex computed styles, so walking
+                // them first wastes placement work on boxes that cannot contribute.
+                if self.styles[node.0].display == Display::None
+                    && self.page.document.nodes[node.0].kind.text_data().is_none()
+                {
+                    self.intrinsic[node.0] = Some((0., 0.));
+                    continue;
+                }
                 if ready {
                     self.intrinsic_node(node);
                 } else {
@@ -4417,5 +4567,75 @@ impl Builder<'_> {
         };
         self.intrinsic[id.0] = Some(result);
         result
+    }
+}
+
+#[cfg(test)]
+mod fragment_height_basis_tests {
+    use super::{Builder, Constraints, Fonts, Layout, LoadedPage, Viewport};
+
+    #[test]
+    fn cached_flex_item_respects_percentage_height_definiteness() {
+        let page = LoadedPage::from_html(
+            "about:flex",
+            "<!doctype html><main><div style='height:50%'><span></span></div></main>",
+        );
+        let fonts = Fonts::new().unwrap();
+        let viewport = Viewport::default();
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport);
+        let mut builder = Builder::new(&page, &fonts, &layout.computed_styles, viewport);
+        let item = page.document.elements("main").next().unwrap();
+        let child = page.document.elements("div").next().unwrap();
+        let constraints = Constraints {
+            width: Some(100.),
+            height: Some(40.),
+            flex_item: true,
+            ..Constraints::default()
+        };
+        for (indefinite_height, expected) in [(false, 20.), (true, 0.), (false, 20.)] {
+            let fragment = builder.fragment(
+                item,
+                100.,
+                None,
+                Constraints {
+                    indefinite_height,
+                    ..constraints
+                },
+            );
+            let element = fragment.elements.iter().find(|e| e.node == child).unwrap();
+            assert_eq!(element.rect.height, expected);
+        }
+        assert_eq!(builder.fragment_cache.len(), 2);
+    }
+
+    #[test]
+    fn only_fully_imposed_dimensions_ignore_parent_height_in_fragment_key() {
+        let a = Constraints {
+            width: Some(100.),
+            height: Some(40.),
+            containing_height: Some(80.),
+            flex_item: true,
+            ..Constraints::default()
+        };
+        let b = Constraints {
+            containing_height: Some(120.),
+            ..a
+        };
+        assert_eq!(a.fragment_height_basis_key(), b.fragment_height_basis_key());
+        assert_eq!(a.fragment_height_basis_key(), None);
+        for partial in [
+            Constraints { height: None, ..a },
+            Constraints { width: None, ..a },
+        ] {
+            assert_eq!(partial.fragment_height_basis_key(), Some(80f32.to_bits()));
+            assert_ne!(
+                partial.fragment_height_basis_key(),
+                Constraints {
+                    containing_height: Some(120.),
+                    ..partial
+                }
+                .fragment_height_basis_key()
+            );
+        }
     }
 }

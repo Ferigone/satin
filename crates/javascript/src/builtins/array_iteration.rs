@@ -27,6 +27,16 @@ pub(super) fn install(vm: &mut Vm, proto: &Value) {
             reduce(vm, this, args, right)
         });
     }
+    for (name, right, return_index) in [
+        ("find", false, false),
+        ("findIndex", false, true),
+        ("findLast", true, false),
+        ("findLastIndex", true, true),
+    ] {
+        method(vm, proto.clone(), name, 1, move |vm, this, args| {
+            find(vm, this, args, right, return_index)
+        });
+    }
 }
 
 fn prepare(vm: &mut Vm, this: Value, args: &[Value]) -> Result<(Value, u64, Value), JsError> {
@@ -112,4 +122,37 @@ fn reduce(vm: &mut Vm, this: Value, args: &[Value], right: bool) -> Result<Value
         });
     }
     accumulator.ok_or_else(|| JsError::type_error("Reduce of empty array without initial value"))
+}
+
+fn find(
+    vm: &mut Vm,
+    this: Value,
+    args: &[Value],
+    right: bool,
+    return_index: bool,
+) -> Result<Value, JsError> {
+    let (object, length, callback) = prepare(vm, this, args)?;
+    let this_arg = arg(args, 1);
+    // FindViaPredicate uses Get, not HasProperty: holes still call the
+    // predicate, and every indexed lookup is observable on exotic receivers.
+    for offset in 0..length {
+        vm.tick()?;
+        let index = if right { length - 1 - offset } else { offset };
+        let key = JsString::from(index.to_string());
+        let value = vm.get(object.clone(), &key)?;
+        let index = Value::from(index as f64);
+        let matched = vm.invoke(
+            callback.clone(),
+            this_arg.clone(),
+            &[value.clone(), index.clone(), object.clone()],
+        )?;
+        if matched.is_truthy() {
+            return Ok(if return_index { index } else { value });
+        }
+    }
+    Ok(if return_index {
+        Value::from(-1)
+    } else {
+        Value::Undefined
+    })
 }

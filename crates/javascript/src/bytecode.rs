@@ -86,7 +86,7 @@ pub(crate) struct Code {
     pub mapped_arguments: bool,
     pub mapped_indices: Vec<usize>,
     pub length: usize,
-    pub body: Rc<Chunk>,
+    pub body: std::cell::OnceCell<Rc<Chunk>>,
     pub strict: bool,
     pub arrow: bool,
     pub kind: FunctionKind,
@@ -339,10 +339,18 @@ fn scope_storage(scope: &ScopePlan) -> usize {
 
 /// Count the storage retained by compiled code, including spare vector capacity.
 /// Code, chunks and source buffers may be reachable from more than one root.
-pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc<Chunk>>) -> usize {
+pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, chunks: Vec<Rc<Chunk>>) -> usize {
+    retained_size(roots, chunks, None)
+}
+
+pub(crate) fn retained_size(
+    roots: Vec<Rc<Code>>,
+    mut chunks: Vec<Rc<Chunk>>,
+    shared_source: Option<usize>,
+) -> usize {
     let mut functions = roots;
     let mut seen_functions = BTreeSet::new();
-    let mut seen_sources = BTreeSet::new();
+    let mut seen_sources: BTreeSet<usize> = shared_source.into_iter().collect();
     let mut seen_chunks = BTreeSet::new();
     const RC_COUNTS: usize = 2 * std::mem::size_of::<usize>();
     let mut bytes = 0usize;
@@ -362,7 +370,7 @@ pub(crate) fn retained_size_with_chunks(roots: Vec<Rc<Code>>, mut chunks: Vec<Rc
                     + code.param_names.iter().map(JsString::allocation_bytes).sum::<usize>()
                     + code.name.as_ref().map_or(0, JsString::allocation_bytes),
             );
-            chunks.push(code.body.clone());
+            chunks.extend(code.body.get().cloned());
             for parameter in &code.params {
                 bytes =
                     bytes.saturating_add(pattern_retained_size(&parameter.pattern, &mut chunks));
@@ -801,7 +809,25 @@ fn parameter_expressions(pattern: &Pattern) -> bool {
     }
     false
 }
+pub(crate) fn validate_deferred_function(f: &Function) -> Result<(Rc<Code>, usize), JsError> {
+    let mut code = compile_function(f, true)?;
+    // Lower the entire body now for early errors. Until its first invocation,
+    // only callable metadata and the original shared source slice are needed.
+    Rc::get_mut(&mut code).unwrap().body.take();
+    let retained = retained_size(vec![code.clone()], vec![], Some(f.source.storage().0))
+        .saturating_add(std::mem::size_of::<Function>());
+    Ok((code, retained))
+}
+
+pub(crate) fn recompile_body(code: &Code, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
+    let f = parser::reparse_ordinary_function(&code.source, compilation_bytes)?;
+    block(&f.body, true, code.strict)
+}
+
 fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, JsError> {
+    if let Some(code) = &f.validated {
+        return Ok(code.clone());
+    }
     let strict = inherited_strict || f.strict;
     if strict && !f.method && f.name.as_ref().is_some_and(invalid_strict_binding) {
         return Err(syntax("Invalid strict-mode function name"));
@@ -859,7 +885,7 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
             .iter()
             .take_while(|p| !p.rest && !matches!(p.pattern, Pattern::Default(..)))
             .count(),
-        body,
+        body: body.into(),
         strict,
         arrow: f.arrow,
         kind: f.kind,

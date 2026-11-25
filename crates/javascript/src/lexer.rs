@@ -62,8 +62,16 @@ impl SourceSpan {
     }
 }
 
+impl std::ops::Deref for SourceSpan {
+    type Target = [char];
+
+    fn deref(&self) -> &[char] {
+        self.chars()
+    }
+}
+
 pub(crate) struct Lexer {
-    chars: Rc<[char]>,
+    chars: SourceSpan,
     script_goal: bool,
     before_first_token: bool,
     legacy_literal: bool,
@@ -78,8 +86,14 @@ pub(crate) struct Lexer {
 }
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
+        let buffer: Rc<[char]> = source.chars().collect();
+        let range = 0..buffer.len();
+        Self::from_span(SourceSpan { buffer, range }, compilation_bytes, script_goal)
+    }
+
+    pub(crate) fn from_span(chars: SourceSpan, compilation_bytes: usize, script_goal: bool) -> Self {
         Self {
-            chars: source.chars().collect(),
+            chars,
             script_goal,
             before_first_token: true,
             legacy_literal: false,
@@ -95,7 +109,8 @@ impl Lexer {
     }
 
     pub fn span(&self, start: usize, end: usize) -> Rc<SourceSpan> {
-        Rc::new(SourceSpan { buffer: self.chars.clone(), range: start..end })
+        let base = self.chars.range.start;
+        Rc::new(SourceSpan { buffer: self.chars.buffer.clone(), range: base + start..base + end })
     }
     pub fn position(&self) -> usize { self.pos }
 
@@ -129,6 +144,16 @@ impl Lexer {
         }
         error
     }
+    pub(crate) fn remaining_compilation_bytes(&self) -> usize {
+        self.compilation_bytes
+    }
+
+    pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
+        // Up to three already-lexed tokens following the closing brace survive this body.
+        self.compilation_bytes = before;
+        self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))
+    }
+
     fn reserve_compilation_bytes(&mut self, bytes: usize) -> Result<(), JsError> {
         self.compilation_bytes = self.compilation_bytes.checked_sub(bytes).ok_or_else(|| {
             JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted")
@@ -302,9 +327,10 @@ impl Lexer {
             let ch = if next == '\\' {
                 escaped = true;
                 self.bump();
-                if self.bump() != Some('u') {
+                if self.peek(0) != Some('u') {
                     return Err(self.error("Expected a Unicode escape in an identifier"));
                 }
+                self.bump();
                 let point = if self.peek(0) == Some('{') {
                     self.bump();
                     let mut point = self.hex(1)?;
@@ -450,10 +476,15 @@ impl Lexer {
     fn hex(&mut self, n: usize) -> Result<u32, JsError> {
         let mut value = 0;
         for _ in 0..n {
-            let c = self.bump().ok_or_else(|| self.error("Incomplete escape"))?;
-            value = value * 16
-                + c.to_digit(16)
-                    .ok_or_else(|| self.error("Invalid hexadecimal escape"))?;
+            let c = self
+                .peek(0)
+                .ok_or_else(|| self.error("Incomplete escape"))?;
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| self.error("Invalid hexadecimal escape"))?;
+            // Leave the cursor at the offending character on failure, including CRLF.
+            self.bump();
+            value = value * 16 + digit;
         }
         Ok(value)
     }

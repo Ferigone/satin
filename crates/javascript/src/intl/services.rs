@@ -18,6 +18,34 @@ fn requested(vm:&mut Vm,args:&[Value],coerce:bool)->Result<(Locale,Value),JsErro
 fn base(l:&Locale)->String { locale::lookup(l).unwrap_or_else(||"en-US".into()) }
 pub(super) fn unicode_type(s:&str)->bool {s.split('-').all(|p|(3..=8).contains(&p.len())&&p.bytes().all(|c|c.is_ascii_alphanumeric()))}
 struct Collation{coll:CollatorBorrowed<'static>, locale:String,usage:String,co:String,sensitivity:String,numeric:bool,first:String,punctuation:bool}
+impl Collation {
+    fn compare(&self, vm: &mut Vm, left: &JsString, right: &JsString) -> ResultValue {
+        let (left, right) = (left.as_utf16(), right.as_utf16());
+        let units = left.len().saturating_add(right.len());
+        vm.charge_work(units)?;
+        if left == right {
+            return Ok(0.into());
+        }
+        // Non-ASCII text can require canonical reordering and scratch storage in ICU.
+        if left.iter().chain(right).any(|&unit| unit > 0x7f) {
+            vm.charge_work(units.saturating_mul(8 + units.ilog2() as usize))?;
+            vm.ensure_allocation(units.saturating_mul(64))?;
+        }
+        let order = self.coll.compare_utf16(left, right).then_with(|| {
+            // ICU treats isolated surrogates as U+FFFD. Preserve the identity of
+            // those code units when ICU's locale-sensitive comparison yields a tie.
+            fn replacements(input: &[u16]) -> impl Iterator<Item = u16> + '_ {
+                char::decode_utf16(input.iter().copied()).filter_map(|ch| match ch {
+                    Err(err) => Some(err.unpaired_surrogate()),
+                    Ok(char::REPLACEMENT_CHARACTER) => Some(0xfffd),
+                    _ => None,
+                })
+            }
+            replacements(left).cmp(replacements(right))
+        });
+        Ok((order as i32).into())
+    }
+}
 fn new_collator(vm:&mut Vm,args:&[Value],proto:ObjectId)->ResultValue{
     let ll=locale::list(vm,arg(args,0))?;
     let opts=options(vm,arg(args,1),true)?;
@@ -157,8 +185,7 @@ fn install_string_methods(vm: &mut Vm) {
         if this.is_nullish(){return Err(JsError::type_error("String method requires a receiver"))}
         let a=vm.to_string(&this)?;let b=vm.to_string(&arg(args,0))?;
         let coll=new_collator(vm,args.get(1..).unwrap_or_default(),prototype(vm,"Collator"))?;
-        let f=slots::<Collation>(vm,&coll)?; vm.charge_work(a.len()+b.len())?;
-        Ok((f.coll.compare_utf16(a.as_utf16(),b.as_utf16()) as i32).into())
+        slots::<Collation>(vm,&coll)?.compare(vm, &a, &b)
     });
     for (name,upper) in [("toLocaleLowerCase",false),("toLocaleUpperCase",true)]{
         method(vm,p.clone(),name,0,move|vm,this,args|{
@@ -188,8 +215,8 @@ pub(super) fn install(vm:&mut Vm,intl:Value){
         let c=slots::<Collation>(vm,&this)?;
         if let Some(f)=vm.host_slot(&this,0){return Ok(f)}
         let f=vm.native("",2,false,Rc::new(move|vm,_,args|{
-            let a=vm.to_string(&arg(args,0))?;let b=vm.to_string(&arg(args,1))?;vm.charge_work(a.len()+b.len())?;
-            Ok((c.coll.compare_utf16(a.as_utf16(),b.as_utf16()) as i32).into())
+            let a=vm.to_string(&arg(args,0))?;let b=vm.to_string(&arg(args,1))?;
+            c.compare(vm, &a, &b)
         }));
         vm.set_host_slot(this,0,f.clone())?;Ok(f)
     });

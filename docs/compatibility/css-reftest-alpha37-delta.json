@@ -1,0 +1,70 @@
+{
+  "date": "2026-11-25",
+  "platform": "Linux x86_64",
+  "wptRevision": "9b8b1beec730060783726b7c538b21e25e63b1f4",
+  "manifestSha256": "9ac259ce07a43bd66304fc6c8a73277afebeff1418cced979fe8d280c247fd28",
+  "viewport": [
+    800,
+    600
+  ],
+  "baseline": {
+    "version": "0.1.0-alpha.36",
+    "releaseCommit": "f437b715d3d370c2d57164136f58fc0f996527ef",
+    "measuredSourceCommit": "8f8882f3d68d8eaaf8112194dac75f7ca61658c6",
+    "outcomes": "css-reftest-outcomes.tsv.gz",
+    "column": "candidate",
+    "counts": {
+      "SKIP": 19782,
+      "FAIL": 4426,
+      "PASS": 1967,
+      "INCONCLUSIVE": 136,
+      "ERROR": 7
+    }
+  },
+  "candidate": {
+    "version": "0.1.0-alpha.37",
+    "sourceCommit": "7d5477a24b8876a5ee24ad717a5ffce6a541d8bd",
+    "sourceTree": "d6da3b8d4ecf40307dee12228f52be36c727e558",
+    "counts": {
+      "SKIP": 19782,
+      "FAIL": 4431,
+      "PASS": 1968,
+      "INCONCLUSIVE": 136,
+      "ERROR": 1
+    }
+  },
+  "eligible": 6536,
+  "classified": 26318,
+  "changes": [
+    {
+      "test": "css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/column-subgrid-orthogonal-writing-mode-004.html",
+      "before": "ERROR",
+      "after": "FAIL"
+    },
+    {
+      "test": "css/css-grid/grid-lanes/subgrid/grid-subgridded-to-grid-lanes/row-subgrid-orthogonal-writing-mode-004.tentative.html",
+      "before": "ERROR",
+      "after": "FAIL"
+    },
+    {
+      "test": "css/css-grid/subgrid/orthogonal-writing-mode-005.html",
+      "before": "ERROR",
+      "after": "PASS"
+    },
+    {
+      "test": "css/css-grid/subgrid/repeat-auto-fill-002.html",
+      "before": "ERROR",
+      "after": "FAIL"
+    },
+    {
+      "test": "css/css-grid/subgrid/repeat-auto-fill-003.html",
+      "before": "ERROR",
+      "after": "FAIL"
+    },
+    {
+      "test": "css/css-grid/subgrid/repeat-auto-fill-004.html",
+      "before": "ERROR",
+      "after": "FAIL"
+    }
+  ]
+}

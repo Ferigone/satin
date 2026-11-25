@@ -332,6 +332,25 @@ impl Vm {
             .saturating_sub(self.estimated_heap_bytes())
             .saturating_sub(input_bytes))
     }
+    pub(crate) fn materialize_body(&mut self, code: &Code) -> Result<Rc<Chunk>, JsError> {
+        if let Some(body) = code.body.get() {
+            return Ok(body.clone());
+        }
+        // The lexer reuses the already-retained span. Reserve transient decoded
+        // literal buffers, then charge structural allocations against the free heap.
+        let scratch = code.source.chars().len().saturating_mul(8).saturating_add(4096);
+        self.ensure_allocation(scratch)?;
+        let budget = self.limits.max_heap_bytes
+            .saturating_sub(self.estimated_heap_bytes())
+            .saturating_sub(scratch);
+        let body = bytecode::recompile_body(code, budget)?;
+        let retained = bytecode::retained_size(vec![], vec![body.clone()], Some(code.source.storage().0));
+        self.ensure_allocation(retained)?;
+        self.code_bytes = self.code_bytes.saturating_add(retained);
+        let _ = code.body.set(body.clone());
+        Ok(body)
+    }
+
     pub(crate) fn retain_compiled_chunk(&mut self, chunk: &Rc<Chunk>) -> Result<(), JsError> {
         let bytes = bytecode::retained_size_with_chunks(Vec::new(), vec![chunk.clone()]);
         self.ensure_allocation(bytes)?;
@@ -2752,8 +2771,8 @@ impl Vm {
                     }
                     FunctionKind::Ordinary => {}
                 }
-                let body_env = vm.function_environment(&code, parent, invocation)?;
-                vm.run_chunk(&code.body, body_env)
+                let (body_env, body) = vm.function_environment(&code, parent, invocation)?;
+                vm.run_chunk(&body, body_env)
                     .and_then(|completion| match completion {
                         Completion::Return(v) => Ok(v),
                         Completion::Normal(_) => Ok(Value::Undefined),
@@ -2915,7 +2934,7 @@ impl Vm {
         };
         self.call_depth += 1;
         let result = self.with_referrer(referrer, |vm| {
-            let env = vm.function_environment(
+            let (env, body) = vm.function_environment(
                 &code,
                 parent,
                 Invocation {
@@ -2926,7 +2945,7 @@ impl Vm {
                     this_initialized: true,
                 },
             )?;
-            vm.run_chunk(&code.body, env).and_then(|c| match c {
+            vm.run_chunk(&body, env).and_then(|c| match c {
                 Completion::Return(v) => Ok(v),
                 Completion::Normal(_) => Ok(Value::Undefined),
                 _ => Err(JsError::new(

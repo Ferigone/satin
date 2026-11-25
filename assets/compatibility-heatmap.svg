@@ -64,11 +64,11 @@
     <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">12 / 12</text>
   </g>
 <g transform="translate(524 266)">
-    <title>Static CSS reftests · 30.09% · 1,967 / 6,536</title>
+    <title>Static CSS reftests · 30.11% · 1,968 / 6,536</title>
     <rect width="244" height="84" rx="7" fill="#503723"/>
     <text x="14" y="24" font-size="16" fill="#f5f2ec" font-weight="600" text-anchor="start">Static CSS reftests</text>
-    <text x="13" y="57" font-size="30" fill="#ffc491" font-weight="650" text-anchor="start">30.09%</text>
-    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">1,967 / 6,536</text>
+    <text x="13" y="57" font-size="30" fill="#ffc491" font-weight="650" text-anchor="start">30.11%</text>
+    <text x="15" y="75" font-size="13" fill="#e0dad1" font-weight="400" text-anchor="start">1,968 / 6,536</text>
   </g>
   <text x="20" y="389" font-size="20" fill="#f6f3ed" font-weight="650" text-anchor="start">HTML &amp; graphics</text>
 <text x="768" y="389" font-size="13" fill="#b7b5b1" font-weight="450" text-anchor="end">Pinned test cases</text>
