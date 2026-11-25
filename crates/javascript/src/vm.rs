@@ -300,6 +300,39 @@ impl Vm {
         vm.realm_bootstrap_bytes = vm.estimated_heap_bytes();
         vm
     }
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    pub fn qa_factory(&self, entering: bool, id: u64) {
+        QA_STACK.with_borrow_mut(|stack| {
+            if entering {
+                stack.push(id);
+            } else {
+                stack.pop();
+            }
+        });
+    }
+
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    pub fn qa_fuel(&self) -> u64 {
+        self.remaining
+    }
+
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    pub fn qa_begin(&self) {
+        QA_STACK.with_borrow_mut(Vec::clear);
+        QA_DATA.with_borrow_mut(|histogram| *histogram = Some(Default::default()));
+    }
+
+    #[cfg(feature = "twitch-bootstrap-profile")]
+    pub fn qa_finish(&self) {
+        if let Some(histogram) = QA_DATA.with_borrow_mut(Option::take) {
+            let mut rows: Vec<_> = histogram.into_iter().collect();
+            rows.sort_by_key(|(_, (total, _))| std::cmp::Reverse(*total));
+            for ((module, kind, path, line), (total, count)) in rows {
+                println!("COST {kind}@{module} {path}:{line} {total} {count}");
+            }
+        }
+    }
+
     pub fn limits(&self) -> &VmLimits {
         &self.limits
     }
@@ -693,7 +726,10 @@ impl Vm {
             Ok(())
         }
     }
+    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
     pub(crate) fn reserve_allocation(&mut self, bytes: usize) -> Result<(), JsError> {
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        qa_charge("reserve_allocation", bytes);
         self.ensure_allocation(bytes)?;
         self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
         Ok(())
@@ -1190,13 +1226,19 @@ impl Vm {
         }
         self.code_bytes = bytecode::retained_size_with_chunks(codes, chunks);
     }
+    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
     pub(crate) fn reserve_binding(&mut self, key: &JsString) -> Result<(), JsError> {
         let bytes = 192usize.saturating_add(key.len().saturating_mul(2));
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        qa_charge("reserve_binding", bytes);
         self.ensure_allocation(bytes)?;
         self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
         Ok(())
     }
+    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
     pub(crate) fn tick(&mut self) -> Result<(), JsError> {
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        qa_charge("tick", 1);
         if self.initializing {
             return Ok(());
         }
@@ -1219,7 +1261,10 @@ impl Vm {
         }
         Ok(())
     }
+    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
+        #[cfg(feature = "twitch-bootstrap-profile")]
+        qa_charge("consume_work", units);
         self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
@@ -4440,4 +4485,34 @@ mod task_limit_tests {
         assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
         assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
     }
+}
+
+#[cfg(feature = "twitch-bootstrap-profile")]
+type ProfileHistogram =
+    std::collections::HashMap<(u64, &'static str, &'static str, u32), (u64, u64)>;
+
+#[cfg(feature = "twitch-bootstrap-profile")]
+thread_local! {
+    static QA_DATA: std::cell::RefCell<Option<ProfileHistogram>> = Default::default();
+    static QA_STACK: std::cell::RefCell<Vec<u64>> = Default::default();
+}
+
+#[cfg(feature = "twitch-bootstrap-profile")]
+#[track_caller]
+pub(crate) fn qa_charge(kind: &'static str, units: usize) {
+    let location = std::panic::Location::caller();
+    QA_DATA.with_borrow_mut(|histogram| {
+        if let Some(histogram) = histogram.as_mut() {
+            let module = QA_STACK.with_borrow(|stack| stack.last().copied().unwrap_or_default());
+            let module = match module {
+                69861 | 174790 | 846451 | 261689 | 995497 | 925098 => module,
+                _ => 0,
+            };
+            let (total, count) = histogram
+                .entry((module, kind, location.file(), location.line()))
+                .or_default();
+            *total += units as u64;
+            *count += 1;
+        }
+    });
 }

@@ -8,6 +8,9 @@ license.workspace = true
 name = "rust_browser_javascript"
 path = "src/lib.rs"
 
+[features]
+twitch-bootstrap-profile = []
+
 [dependencies]
 icu_normalizer = "=2.4.0"
 regex-automata = { version = "=0.4.13", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
