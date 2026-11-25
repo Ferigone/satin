@@ -41,7 +41,7 @@ for page in urls:
             parts = urlsplit(script)
             if parts.hostname not in {"www.youtube.com", "www.gstatic.com", "www.youtube-nocookie.com"}:
                 continue
-            if "/jsbin/desktop_polymer" not in parts.path and "/jsbin/desktop_kevlar" not in parts.path:
+            if not any(part in parts.path for part in ("/jsbin/desktop_polymer", "/jsbin/desktop_kevlar", "ytmainappweb.kevlar_base.")):
                 continue
             data = fetch(script)
             print("Script", script, "bytes", len(data), "sha256", sha256(data).hexdigest(), flush=True)
