@@ -1,6 +1,7 @@
 //! Owned bytecode frames for execution that can suspend at await or yield.
 mod controls;
 mod delegation;
+mod destructuring;
 
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
@@ -25,6 +26,7 @@ struct Frame {
     waiting: Option<Resume>,
     awaiting_control: bool,
     delegate: Option<delegation::Delegation>,
+    patterns: Vec<destructuring::ActivePattern>,
 }
 
 pub(crate) struct Execution {
@@ -93,6 +95,7 @@ impl Frame {
             waiting: None,
             awaiting_control: false,
             delegate: None,
+            patterns: Vec::new(),
         }
     }
     fn absorb(&mut self, value: Option<Value>) {
@@ -135,6 +138,9 @@ impl Execution {
             for item in &frame.operands {
                 visit_operand(item, &mut visit);
             }
+            for pattern in &frame.patterns {
+                pattern.visit(&mut visit);
+            }
             if let Some(waiting) = &frame.waiting {
                 waiting.visit(&mut visit);
             }
@@ -160,6 +166,8 @@ impl Execution {
                                 _ => 0,
                             })
                             .sum::<usize>()
+                        + frame.patterns.capacity() * size_of::<destructuring::ActivePattern>()
+                        + frame.patterns.iter().map(|p| p.extra_bytes()).sum::<usize>()
                         + frame.waiting.as_ref().map_or(0, Resume::extra_bytes)
                 })
                 .sum::<usize>()
@@ -438,6 +446,7 @@ impl Vm {
                         Advance::Finish(completion) => completion.update_empty(frame.result.take()),
                         _ => unreachable!(),
                     });
+                    let flow = destructuring::close_patterns(self, &mut frame.patterns, flow);
                     frames.pop();
                     completed = Some(flow);
                 }
@@ -472,6 +481,11 @@ impl Vm {
         self.tick()?;
         let op = &frame.chunk.ops[frame.pc];
         frame.pc += 1;
+        if let Op::Pattern(step) = op {
+            let step = *step;
+            destructuring::step(self, frame, step)?;
+            return Ok(Advance::Keep);
+        }
         if matches!(op, Op::Await) {
             let value = self.pop_value(&mut frame.operands)?;
             return Ok(Advance::Await(self.promise_for_await(value)?));

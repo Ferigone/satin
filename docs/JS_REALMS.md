@@ -16,14 +16,19 @@ releases the host root. JavaScript references to its Window or exported
 functions can keep the realm alive.
 
 A script written into a child frame receives a bounded share of the current
-task’s remaining instructions and heap capacity. If it exhausts that share,
+task’s remaining instructions, heap capacity and available thread CPU time. If it exhausts that share,
 the child’s error handler receives the failure and the parser can continue
 with the following script. Unsupported engine features also reach the child’s
 error handler. Operation-specific limits such as RegExp nesting and maximum
 string length also reach that handler while the parent task has resources.
 The parent and its children still share one overall task budget.
 A window timer and its microtasks can use up to 24 million instruction units
-and have a two-second cooperative deadline. Synchronous child parser scripts
+and two seconds of thread CPU time on Windows and Linux. Time waiting for the
+operating system to schedule the VM does not consume its CPU allowance. A
+separate 30-second wall-clock limit applies at the same cooperative execution
+checks. An embedded child reserves one quarter of the remaining CPU allowance
+for its caller to report a failed script and continue. Platforms without a thread CPU clock use a two-second wall-clock
+deadline. Synchronous child parser scripts
 remain bounded to at most the ordinary per-script limit. After a long timer,
 the scheduler returns to input and rendering before starting another timer.
 

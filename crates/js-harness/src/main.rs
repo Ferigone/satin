@@ -1,6 +1,7 @@
 //! A process boundary for conformance tests. Every request gets a fresh Rust VM.
 //! Node/Python orchestrators must never evaluate the test source themselves.
 mod dynamic_host;
+mod legacy;
 mod missing_host;
 mod module_host;
 
@@ -28,6 +29,9 @@ struct Request {
     setup: Vec<Setup>,
     #[serde(default)]
     strict: bool,
+    #[serde(default)]
+    legacy_website: bool,
+    diagnostic_profile: Option<legacy::DiagnosticProfile>,
     #[serde(default)]
     parse_only: bool,
     #[serde(default)]
@@ -192,6 +196,13 @@ fn execute(request: Request) -> Json {
             .clamp(1, 100_000_000),
         ..VmLimits::default()
     };
+    if request.legacy_website {
+        return legacy::execute(request, limits);
+    }
+    if request.diagnostic_profile.is_some() {
+        return json!({"id":request.id, "outcome":"error", "phase":"host",
+            "error":{"kind":"InvalidRequest", "message":"diagnostic_profile requires legacy_website"}});
+    }
     let mut vm = Vm::with_limits(limits);
     let logs = Rc::new(RefCell::new(Vec::<String>::new()));
     let async_status = Rc::new(RefCell::new(AsyncStatus::default()));
@@ -429,6 +440,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             source: std::fs::read_to_string(&args[1])?,
             setup: vec![],
             strict: false,
+            legacy_website: false,
+            diagnostic_profile: None,
             parse_only: args[0] == "--check-file",
             async_test: false,
             max_instructions: None,
@@ -468,6 +481,8 @@ mod tests {
             source: source.into(),
             setup: vec![],
             strict: false,
+            legacy_website: false,
+            diagnostic_profile: None,
             parse_only: false,
             async_test,
             max_instructions: Some(100000),
@@ -478,6 +493,23 @@ mod tests {
             dynamic_files: None,
             link_only: false,
         })
+    }
+    #[test]
+    fn diagnostic_profile_is_legacy_only_and_records_the_effective_limits() {
+        let execute_json = |data| execute(serde_json::from_value(data).unwrap());
+        let mut input = json!({"id":"profile", "source":"", "diagnostic_profile":"web-vm-alpha37"});
+        assert_eq!(execute_json(input.clone())["error"]["kind"], "InvalidRequest");
+        input["legacy_website"] = true.into();
+        input["max_instructions"] = 100_000_001u64.into();
+        let result = execute_json(input.clone());
+        let settings = &result["diagnostic_profile"];
+        assert_eq!(settings["name"], "web-vm-alpha37");
+        assert_eq!(settings["max_instructions"], 100_000_000);
+        assert_eq!(settings["max_heap_objects"], 524_288);
+        assert_eq!(settings["max_bytecode_depth"], 96);
+        assert_eq!(settings["shared_array_buffer"], false);
+        input.as_object_mut().unwrap().remove("diagnostic_profile");
+        assert!(execute_json(input).get("diagnostic_profile").is_none());
     }
     #[test]
     fn eval_script_runs_global_script_code_and_returns_its_completion() {
@@ -656,6 +688,8 @@ mod tests {
                     source: "function Test262Error(message){this.message=message;}".into(),
                 }],
                 strict: false,
+                legacy_website: false,
+                diagnostic_profile: None,
                 parse_only: false,
                 async_test: true,
                 max_instructions: Some(100000),
@@ -687,6 +721,8 @@ mod tests {
             id:"synchronous sentinel".into(),
             source:"var sentinel=new Test262Error('iterator abrupt completion');Promise.reject(sentinel);".into(),
             setup:vec![Setup{name:"sta contract".into(),source:"function Test262Error(message){this.message=message;}".into()}],
+            legacy_website: false,
+            diagnostic_profile: None,
             strict:false,parse_only:false,async_test:false,max_instructions:Some(100000),timeout_ms:None,module_goal:false,module_files:vec![],module_edges:vec![],dynamic_files:None,link_only:false,
         });
         assert_eq!(result["outcome"], "ok");
@@ -700,6 +736,8 @@ mod tests {
                 source: source.into(),
                 setup: vec![],
                 strict: false,
+                legacy_website: false,
+                diagnostic_profile: None,
                 parse_only: false,
                 async_test: false,
                 max_instructions: Some(100_000),

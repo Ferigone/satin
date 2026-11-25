@@ -1,6 +1,8 @@
 //! Typed stack bytecode. Structured control instructions contain other compiled
 //! chunks; expressions use a conventional operand/reference stack and jumps.
 mod classes;
+mod assignment_patterns;
+pub(crate) use assignment_patterns::PatternStep;
 use crate::{
     ErrorKind, JsError, JsString, Value,
     parser::{
@@ -62,6 +64,11 @@ pub(crate) struct ScopePlan {
     pub vars: Vec<JsString>,
     pub annex_vars: Vec<JsString>,
     pub functions: Vec<(JsString, Rc<Code>, bool)>,
+}
+impl ScopePlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lexical.is_empty() && self.vars.is_empty() && self.functions.is_empty() && self.annex_vars.is_empty()
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Chunk {
@@ -152,6 +159,7 @@ pub(crate) enum Op {
     Object,
     ObjectSpread,
     Destructure(Rc<PatternCode>),
+    Pattern(PatternStep),
     TemplateObject(Rc<TemplateSite>),
     TemplateAppend(JsString),
     OptionalCheck(usize, bool),
@@ -272,19 +280,17 @@ impl Op {
 
 pub(crate) fn compile(source: &str, compilation_bytes: usize) -> Result<Rc<Chunk>, JsError> {
     compile_eval(
-        source,
-        false,
-        parser::EvalContext::default(),
-        compilation_bytes,
+        crate::lexer::Lexer::new(source, compilation_bytes, true), source.len(),
+        false, parser::EvalContext::default(),
     )
 }
 pub(crate) fn compile_eval(
-    source: &str,
+    lexer: crate::lexer::Lexer,
+    source_bytes: usize,
     inherited_strict: bool,
     context: parser::EvalContext,
-    compilation_bytes: usize,
 ) -> Result<Rc<Chunk>, JsError> {
-    let body = parser::parse_script(source, context, compilation_bytes, inherited_strict)?;
+    let body = parser::parse_script(lexer, source_bytes, context, inherited_strict)?;
     let strict = inherited_strict || parser::has_strict_directive(&body);
     block(&body, true, strict)
 }
@@ -577,7 +583,26 @@ fn require_non_suspending(chunk: Rc<Chunk>, context: &str) -> Result<Rc<Chunk>, 
     Ok(chunk)
 }
 
+enum PatternSuspension {
+    Reject,
+    Track(bool),
+}
+impl PatternSuspension {
+    fn expression(&mut self, chunk: Rc<Chunk>, context: &str) -> Result<Rc<Chunk>, JsError> {
+        match self {
+            Self::Reject => require_non_suspending(chunk, context),
+            Self::Track(found) => {
+                *found |= chunk.can_suspend;
+                Ok(chunk)
+            }
+        }
+    }
+}
+
 fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, JsError> {
+    pattern_code(pattern, strict, &mut PatternSuspension::Reject)
+}
+fn pattern_code(pattern: &Pattern, strict: bool, suspension: &mut PatternSuspension) -> Result<Rc<PatternCode>, JsError> {
     Ok(Rc::new(match pattern {
         Pattern::Name(name) => {
             if strict && invalid_strict_binding(name) {
@@ -588,11 +613,11 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
         Pattern::Target(target) => match &**target {
             Expr::Member(object, key) => {
                 let key =
-                    require_non_suspending(expression(key, strict)?, "a destructuring target")?;
+                    suspension.expression(expression(key, strict)?, "a destructuring target")?;
                 if matches!(object.as_ref(), Expr::Super) {
                     PatternCode::SuperTarget(key)
                 } else {
-                    let object = require_non_suspending(
+                    let object = suspension.expression(
                         expression(object, strict)?,
                         "a destructuring target",
                     )?;
@@ -600,15 +625,15 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
                 }
             }
             Expr::PrivateMember(object, name) => PatternCode::PrivateTarget(
-                require_non_suspending(expression(object, strict)?, "a destructuring target")?,
+                suspension.expression(expression(object, strict)?, "a destructuring target")?,
                 name.clone(),
             ),
-            e if !strict && crate::parser::call_assignment_target(e) => PatternCode::CallTarget(require_non_suspending(expression(e, strict)?, "an iteration target")?),
+            e if !strict && crate::parser::call_assignment_target(e) => PatternCode::CallTarget(suspension.expression(expression(e, strict)?, "an iteration target")?),
             _ => return Err(syntax("Invalid assignment target")),
         },
         Pattern::Default(target, value) => PatternCode::Default {
-            target: compile_pattern(target, strict)?,
-            value: require_non_suspending(
+            target: pattern_code(target, strict, suspension)?,
+            value: suspension.expression(
                 if let Pattern::Name(name) = target.as_ref() {
                     named_expression(value, strict, name)?
                 } else {
@@ -621,12 +646,12 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
             let mut elements = Vec::with_capacity(items.len());
             for item in items {
                 elements.push(match item {
-                    Some(item) => Some(compile_pattern(item, strict)?),
+                    Some(item) => Some(pattern_code(item, strict, suspension)?),
                     None => None,
                 });
             }
             let rest = match rest {
-                Some(rest) => Some(compile_pattern(rest, strict)?),
+                Some(rest) => Some(pattern_code(rest, strict, suspension)?),
                 None => None,
             };
             PatternCode::Array(elements, rest)
@@ -634,11 +659,11 @@ fn compile_pattern(pattern: &Pattern, strict: bool) -> Result<Rc<PatternCode>, J
         Pattern::Object(properties, rest) => {
             let mut entries = Vec::with_capacity(properties.len());
             for (key, pattern, _) in properties {
-                let key = require_non_suspending(expression(key, strict)?, "a destructuring key")?;
-                entries.push((key, compile_pattern(pattern, strict)?));
+                let key = suspension.expression(expression(key, strict)?, "a destructuring key")?;
+                entries.push((key, pattern_code(pattern, strict, suspension)?));
             }
             let rest = match rest {
-                Some(rest) => Some(compile_pattern(rest, strict)?),
+                Some(rest) => Some(pattern_code(rest, strict, suspension)?),
                 None => None,
             };
             PatternCode::Object(entries, rest)
@@ -1342,6 +1367,8 @@ enum Emit<'a> {
     Reference(&'a Expr, bool),
     Instruction(Op),
     Sequence(&'a [Expr]),
+    PatternReference(&'a Pattern),
+    PatternAssign(&'a Pattern),
     ShortCircuit(&'static str, &'a Expr),
     Patch(usize, &'static str),
     Conditional(&'a [(Expr, Expr)], &'a Expr),
@@ -1359,6 +1386,10 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
     let mut pending = vec![E(e)];
     while let Some(task) = pending.pop() {
         match task {
+            Emit::PatternReference(pattern) => {
+                assignment_patterns::reference(pattern, &mut pending, out);
+            }
+            Emit::PatternAssign(pattern) => assignment_patterns::assign(pattern, &mut pending, out),
             Emit::Optional(branches, call) => {
                 branches.borrow_mut().push(out.len());
                 out.push(Op::OptionalCheck(0, call));
@@ -1546,6 +1577,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     }
                 }
                 Expr::Literal(value) => out.push(Op::Push(value.clone())),
+                Expr::JoinedString(units) => out.push(Op::Push(Value::String(JsString::from_utf16(units.clone())))),
                 Expr::RegExp(program) => out.push(Op::RegExp(program.clone())),
                 Expr::Identifier(name) => {
                     check_identifier(name, strict)?;
@@ -1643,10 +1675,16 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Spread(_) => {
                     return Err(syntax("Spread is only valid in an array or argument list"));
                 }
-                Expr::Destructure(pattern, value) => pending.extend([
-                    I(Op::Destructure(compile_pattern(pattern, strict)?)),
-                    E(value),
-                ]),
+                Expr::Destructure(pattern, value) => {
+                    let mut suspension = PatternSuspension::Track(false);
+                    let code = pattern_code(pattern, strict, &mut suspension)?;
+                    if matches!(suspension, PatternSuspension::Track(true)) {
+                        // Keep the original assignment result below the pattern's operands.
+                        pending.extend([Emit::PatternAssign(pattern), I(Op::Dup), E(value)]);
+                    } else {
+                        pending.extend([I(Op::Destructure(code)), E(value)]);
+                    }
+                }
                 Expr::Function(function) => {
                     out.push(Op::Function(compile_function(function, strict)?))
                 }

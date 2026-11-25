@@ -658,7 +658,7 @@ fn parser_error(error: HtmlStreamError) -> JsError {
 #[cfg(test)]
 mod tests {
     use crate::{loader::LoadedPage, script::ScriptRuntime};
-    use rust_browser_javascript::{ErrorKind, Value};
+    use rust_browser_javascript::{ErrorKind, JsError, Value};
 
     #[test]
     fn initial_iframe_writes_classic_scripts_and_calls_parent_functions() {
@@ -737,6 +737,43 @@ mod tests {
         ));
     }
 
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn child_cpu_timeout_reports_and_a_following_frame_finishes() {
+        let page = LoadedPage::from_html("https://example.test/", "<body></body>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let burn = runtime.vm.new_native_function("burnCpu", |vm, _, _| loop {
+            std::hint::spin_loop();
+            vm.charge_work(0)?;
+        });
+        runtime.vm.set_global("burnCpu", burn).unwrap();
+        runtime.eval(r#"
+            var trace = [];
+            function runFrame(source) {
+                var frame = document.createElement('iframe');
+                document.body.appendChild(frame);
+                var child = frame.contentWindow;
+                child.document.open();
+                child.burnCpu = burnCpu;
+                child.done = () => trace.push('done');
+                child.onerror = (message) => { trace.push(message); return true };
+                child.document.write('<script>' + source + '</script>');
+                frame.remove();
+            }
+            setTimeout(() => {
+                runFrame('burnCpu()');
+                setTimeout(() => runFrame('done()'), 0);
+            }, 0);
+        "#).unwrap();
+        runtime.pump();
+        runtime.pump();
+        assert_eq!(
+            runtime.eval("trace.join('|')").unwrap(),
+            Value::from("Uncaught ExecutionLimit: Child script CPU budget exceeded|done")
+        );
+        assert!(runtime.diagnostics().is_empty(), "{:?}", runtime.diagnostics());
+    }
+
     #[test]
     fn child_operation_limits_report_the_original_error_and_resume_its_caller() {
         let page = LoadedPage::from_html("https://example.test/", "<iframe></iframe>");
@@ -762,6 +799,10 @@ mod tests {
     fn unsupported_child_script_reports_to_window_onerror_before_the_following_script() {
         let page = LoadedPage::from_html("https://example.test/", "<iframe></iframe>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let unavailable = runtime.vm.new_native_function("unavailable", |_, _, _| {
+            Err(JsError::new(ErrorKind::UnsupportedFeature, "Unavailable test operation"))
+        });
+        runtime.vm.set_global("unavailable", unavailable).unwrap();
         let value = runtime.eval(r#"
             var child = document.querySelector('iframe').contentWindow, d = child.document;
             d.open();
@@ -771,7 +812,8 @@ mod tests {
                 return true;
             };
             child.finish = function () { observed += 'next'; };
-            d.write('<script>try { eval(String.fromCharCode(39, 55296, 39)); } catch (e) { finish(); }</script>');
+            child.unavailable = unavailable;
+            d.write('<script>try { unavailable(); } catch (e) { finish(); }</script>');
             d.write('<script>finish()</script>');
             observed;
         "#).unwrap();

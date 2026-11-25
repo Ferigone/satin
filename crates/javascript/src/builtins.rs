@@ -518,6 +518,7 @@ pub(crate) fn own_property_descriptor_value(
 }
 pub(crate) enum Definition {
     Ordinary(Property),
+    ArrayLength(crate::proxy::PartialDescriptor),
     Proxy(crate::proxy::PartialDescriptor),
     Typed(NumericIndex, TypedDescriptor),
     Named(Option<Value>),
@@ -566,14 +567,14 @@ impl Definition {
                 }
                 Ok(success)
             }
-            Self::Ordinary(mut property) => {
-                if !throw
-                    && key == PropertyKey::from("length")
-                    && matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. })
-                    && let PropertyKind::Data { value, .. } = &mut property.kind
-                {
-                    *value = Value::Number(vm.to_number(value)?);
+            Self::ArrayLength(descriptor) => {
+                let success = descriptor.apply_array_length(vm, id)?;
+                if !success && throw {
+                    return Err(JsError::type_error("Cannot redefine array length"));
                 }
+                Ok(success)
+            }
+            Self::Ordinary(property) => {
                 match vm.define_key(target, key, property) {
                     Ok(()) => Ok(true),
                     Err(error) if !throw && error.kind == ErrorKind::TypeError => Ok(false),
@@ -597,6 +598,13 @@ pub(crate) fn descriptor(
         return Ok(Definition::Proxy(crate::proxy::PartialDescriptor::read(
             vm, descriptor,
         )?));
+    }
+    if key == &PropertyKey::from("length")
+        && matches!(vm.heap.object(id)?.kind, ObjectKind::Array { .. })
+    {
+        return Ok(Definition::ArrayLength(
+            crate::proxy::PartialDescriptor::read(vm, descriptor)?,
+        ));
     }
     if let PropertyKey::String(name) = key
         && matches!(vm.heap.object(id)?.kind, ObjectKind::TypedArray(_))
@@ -724,10 +732,11 @@ fn install_function(vm: &mut Vm) {
         Rc::new(|_, _, _| Err(JsError::type_error("Restricted function property"))),
     );
     vm.realm.throw_type_error = throw_type_error.as_object();
-    vm.heap
-        .object_mut(throw_type_error.as_object().unwrap())
-        .unwrap()
-        .extensible = false;
+    let thrower = vm.heap.object_mut(throw_type_error.as_object().unwrap()).unwrap();
+    for key in ["length", "name"] {
+        thrower.properties.get_mut(&JsString::from(key)).unwrap().configurable = false;
+    }
+    thrower.extensible = false;
     for name in ["caller", "arguments"] {
         vm.define_key(
             proto.clone(),
@@ -836,13 +845,9 @@ fn install_function(vm: &mut Vm) {
         let name = match &vm.heap.object(id)?.kind {
             ObjectKind::Function { code, .. } => {
                 let source = code.source.clone();
-                let chars = source.chars();
-                vm.consume_work(chars.len())?;
-                let length = chars.iter().map(|c| c.len_utf16()).sum();
-                vm.ensure_string_allocation(length)?;
-                let mut units = Vec::with_capacity(length);
-                for &ch in chars { units.extend_from_slice(ch.encode_utf16(&mut [0; 2])); }
-                return vm.finish_string(units);
+                vm.consume_work(source.len())?;
+                vm.ensure_string_allocation(source.utf16_len(0..source.len()))?;
+                return vm.finish_string(source.utf16_range(0..source.len()));
             }
             ObjectKind::Native { initial_name, .. } => initial_name.clone(),
             _ => JsString::default(),
@@ -944,6 +949,21 @@ pub(crate) fn create_dynamic_function(
     })?;
     vm.dynamic_function(&params.join(","), &body, new_target, kind)
 }
+const MAX_SAFE_LENGTH: u64 = (1 << 53) - 1;
+
+fn array_like_length(vm: &mut Vm, object: Value) -> Result<u64, JsError> {
+    let value = vm.get_property(object, "length")?;
+    Ok(integer(vm, value)?.clamp(0.0, MAX_SAFE_LENGTH as f64) as u64)
+}
+
+fn relative_index(index: f64, len: u64) -> u64 {
+    if index < 0.0 {
+        (len as f64 + index).max(0.0) as u64
+    } else {
+        index.min(len as f64) as u64
+    }
+}
+
 fn length(vm: &mut Vm, object: Value) -> Result<usize, JsError> {
     let value = vm.get_property(object, "length")?;
     let n = vm.to_number(&value)?;
@@ -984,8 +1004,8 @@ fn create_array(vm: &mut Vm, args: &[Value], prototype: crate::ObjectId) -> Resu
 fn move_indexed_property(
     vm: &mut Vm,
     object: &Value,
-    from: usize,
-    to: usize,
+    from: u64,
+    to: u64,
 ) -> Result<(), JsError> {
     vm.tick()?;
     let from = JsString::from(from.to_string());
@@ -1000,16 +1020,9 @@ fn move_indexed_property(
 }
 
 fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, JsError> {
-    const MAX_SAFE_LENGTH: u64 = (1 << 53) - 1;
     let object = vm.coerce_object(receiver)?;
-    let length_value = vm.get_property(object.clone(), "length")?;
-    let len = integer(vm, length_value)?.clamp(0.0, MAX_SAFE_LENGTH as f64) as u64;
-    let relative_start = integer(vm, arg(args, 0))?;
-    let start = if relative_start < 0.0 {
-        (len as f64 + relative_start).max(0.0) as u64
-    } else {
-        relative_start.min(len as f64) as u64
-    };
+    let len = array_like_length(vm, object.clone())?;
+    let start = relative_index(integer(vm, arg(args, 0))?, len);
     let removed_count = match args.len() {
         0 => 0,
         1 => len - start,
@@ -1022,27 +1035,20 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
             "Array splice exceeds maximum safe length",
         ));
     }
-    // Check the traversal and result bounds before species creation or mutation.
-    let limit = u64::from(vm.limits.max_array_length);
-    if len > limit {
+    let inserted = items.len() as u64;
+    let tail_count = if inserted == removed_count {
+        0
+    } else {
+        len - start - removed_count
+    };
+    let visits = removed_count + tail_count + len.saturating_sub(new_len) + inserted;
+    if visits > u64::from(vm.limits.max_array_length) {
         return Err(JsError::new(
             ErrorKind::ExecutionLimit,
-            "Array-like length budget exhausted",
-        ));
-    }
-    if new_len > limit {
-        return Err(JsError::new(
-            ErrorKind::ExecutionLimit,
-            "Array length budget exhausted",
+            "Array splice traversal budget exhausted",
         ));
     }
     let removed = vm.array_species_create(object.clone(), removed_count)?;
-    let (len, start, removed_count, new_len) = (
-        len as usize,
-        start as usize,
-        removed_count as usize,
-        new_len as usize,
-    );
 
     for i in 0..removed_count {
         vm.tick()?;
@@ -1052,13 +1058,13 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
             vm.define_data_property(removed.clone(), &i.to_string(), value, true, true, true)?;
         }
     }
-    vm.set_property(removed.clone(), "length", Value::from(removed_count))?;
+    vm.set_property(removed.clone(), "length", Value::from(removed_count as f64))?;
 
     let tail = start + removed_count..len;
-    match items.len().cmp(&removed_count) {
+    match inserted.cmp(&removed_count) {
         Ordering::Less => {
             for from in tail {
-                move_indexed_property(vm, &object, from, from - removed_count + items.len())?;
+                move_indexed_property(vm, &object, from, from - removed_count + inserted)?;
             }
             for i in (new_len..len).rev() {
                 vm.tick()?;
@@ -1067,16 +1073,20 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
         }
         Ordering::Greater => {
             for from in tail.rev() {
-                move_indexed_property(vm, &object, from, from - removed_count + items.len())?;
+                move_indexed_property(vm, &object, from, from - removed_count + inserted)?;
             }
         }
         Ordering::Equal => {}
     }
     for (i, item) in items.iter().enumerate() {
         vm.tick()?;
-        vm.set_property(object.clone(), &(start + i).to_string(), item.clone())?;
+        vm.set_property(
+            object.clone(),
+            &(start + i as u64).to_string(),
+            item.clone(),
+        )?;
     }
-    vm.set_property(object, "length", Value::from(new_len))?;
+    vm.set_property(object, "length", Value::from(new_len as f64))?;
     Ok(removed)
 }
 
@@ -1233,23 +1243,23 @@ fn install_array(vm: &mut Vm) {
     method(vm, proto.clone(), "splice", 2, splice_array);
     method(vm, proto.clone(), "push", 1, |vm, this, a| {
         let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
-        if len.saturating_add(a.len()) > vm.limits.max_array_length as usize {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Array length budget exhausted",
+        let len = array_like_length(vm, object.clone())?;
+        let new_len = len + a.len() as u64;
+        if new_len > MAX_SAFE_LENGTH {
+            return Err(JsError::type_error(
+                "Array push exceeds maximum safe length",
             ));
         }
         for (i, value) in a.iter().enumerate() {
             vm.tick()?;
-            vm.set_property(object.clone(), &(len + i).to_string(), value.clone())?;
+            vm.set_property(object.clone(), &(len + i as u64).to_string(), value.clone())?;
         }
-        vm.set_property(object, "length", Value::from(len + a.len()))?;
-        Ok(Value::from(len + a.len()))
+        vm.set_property(object, "length", Value::from(new_len as f64))?;
+        Ok(Value::from(new_len as f64))
     });
     method(vm, proto.clone(), "pop", 0, |vm, this, _| {
         let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
+        let len = array_like_length(vm, object.clone())?;
         if len == 0 {
             vm.set_property(object, "length", Value::from(0))?;
             return Ok(Value::Undefined);
@@ -1257,28 +1267,22 @@ fn install_array(vm: &mut Vm) {
         let key = JsString::from((len - 1).to_string());
         let value = vm.get(object.clone(), &key)?;
         vm.delete(object.clone(), &key, true)?;
-        vm.set_property(object, "length", Value::from(len - 1))?;
+        vm.set_property(object, "length", Value::from((len - 1) as f64))?;
         Ok(value)
     });
     method(vm, proto.clone(), "shift", 0, |vm, this, _| {
         let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
+        let len = array_like_length(vm, object.clone())?;
+        if len == 0 {
+            vm.set_property(object, "length", Value::from(0))?;
+            return Ok(Value::Undefined);
+        }
         let value = vm.get_property(object.clone(), "0")?;
         for i in 1..len {
-            vm.tick()?;
-            let from = JsString::from(i.to_string());
-            let to = JsString::from((i - 1).to_string());
-            if vm.has(&object, &from)? {
-                let v = vm.get(object.clone(), &from)?;
-                vm.set(object.clone(), &to, v, true)?;
-            } else {
-                vm.delete(object.clone(), &to, true)?;
-            }
+            move_indexed_property(vm, &object, i, i - 1)?;
         }
-        if len > 0 {
-            vm.delete(object.clone(), &(len - 1).to_string().into(), true)?;
-        }
-        vm.set_property(object, "length", Value::from(len.saturating_sub(1)))?;
+        vm.delete(object.clone(), &(len - 1).to_string().into(), true)?;
+        vm.set_property(object, "length", Value::from((len - 1) as f64))?;
         Ok(value)
     });
     method(vm, proto.clone(), "unshift", 1, |vm, this, a| {
@@ -1338,15 +1342,15 @@ fn install_array(vm: &mut Vm) {
     });
     method(vm, proto.clone(), "slice", 2, |vm, this, a| {
         let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
-        let start = relative(integer(vm, arg(a, 0))?, len);
+        let len = array_like_length(vm, object.clone())?;
+        let start = relative_index(integer(vm, arg(a, 0))?, len);
         let end = if arg(a, 1).is_undefined() {
             len
         } else {
-            relative(integer(vm, arg(a, 1))?, len)
+            relative_index(integer(vm, arg(a, 1))?, len)
         };
         let count = end.saturating_sub(start);
-        let array = vm.array_species_create(object.clone(), count as u64)?;
+        let array = vm.array_species_create(object.clone(), count)?;
         for i in 0..count {
             vm.tick()?;
             let key = JsString::from((start + i).to_string());
@@ -1355,7 +1359,7 @@ fn install_array(vm: &mut Vm) {
                 vm.define_data_property(array.clone(), &i.to_string(), v, true, true, true)?;
             }
         }
-        vm.set_property(array.clone(), "length", Value::from(count))?;
+        vm.set_property(array.clone(), "length", Value::from(count as f64))?;
         Ok(array)
     });
     method(vm, proto.clone(), "concat", 1, |vm, this, a| {
@@ -1429,8 +1433,15 @@ fn install_array(vm: &mut Vm) {
     for (name, includes) in [("indexOf", false), ("includes", true)] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {
             let object = vm.coerce_object(this)?;
-            let len = length(vm, object.clone())?;
-            let start = relative(integer(vm, arg(a, 1))?, len);
+            let len = array_like_length(vm, object.clone())?;
+            if len == 0 {
+                return Ok(if includes {
+                    Value::Bool(false)
+                } else {
+                    Value::from(-1)
+                });
+            }
+            let start = relative_index(integer(vm, arg(a, 1))?, len);
             let needle = arg(a, 0);
             for i in start..len {
                 vm.tick()?;
@@ -1445,7 +1456,7 @@ fn install_array(vm: &mut Vm) {
                         return Ok(if includes {
                             Value::Bool(true)
                         } else {
-                            Value::from(i)
+                            Value::from(i as f64)
                         });
                     }
                 }
@@ -1461,24 +1472,35 @@ fn install_array(vm: &mut Vm) {
     array_methods::install(vm, &proto);
     method(vm, proto, "reverse", 0, |vm, this, _| {
         let object = vm.coerce_object(this)?;
-        let len = length(vm, object.clone())?;
+        let len = array_like_length(vm, object.clone())?;
         for i in 0..len / 2 {
             vm.tick()?;
             let left = JsString::from(i.to_string());
             let right = JsString::from((len - i - 1).to_string());
-            let has_left = vm.has(&object, &left)?;
-            let has_right = vm.has(&object, &right)?;
-            let a = vm.get(object.clone(), &left)?;
-            let b = vm.get(object.clone(), &right)?;
-            if has_right {
-                vm.set(object.clone(), &left, b, true)?;
+            let lower = if vm.has(&object, &left)? {
+                Some(vm.get(object.clone(), &left)?)
             } else {
-                vm.delete(object.clone(), &left, true)?;
-            }
-            if has_left {
-                vm.set(object.clone(), &right, a, true)?;
+                None
+            };
+            let upper = if vm.has(&object, &right)? {
+                Some(vm.get(object.clone(), &right)?)
             } else {
-                vm.delete(object.clone(), &right, true)?;
+                None
+            };
+            match (lower, upper) {
+                (Some(a), Some(b)) => {
+                    vm.set(object.clone(), &left, b, true)?;
+                    vm.set(object.clone(), &right, a, true)?;
+                }
+                (None, Some(b)) => {
+                    vm.set(object.clone(), &left, b, true)?;
+                    vm.delete(object.clone(), &right, true)?;
+                }
+                (Some(a), None) => {
+                    vm.delete(object.clone(), &left, true)?;
+                    vm.set(object.clone(), &right, a, true)?;
+                }
+                (None, None) => {}
             }
         }
         Ok(object)
@@ -1871,14 +1893,14 @@ fn install_string(vm: &mut Vm) {
                 crate::regexp::reject_regexp(vm, &needle)?;
             }
             let needle = vm.to_string(&needle)?;
-            let position = if name == "endsWith" || name == "lastIndexOf" {
-                if arg(a, 1).is_undefined() {
-                    s.len()
-                } else {
-                    integer(vm, arg(a, 1))?.max(0.0).min(s.len() as f64) as usize
-                }
+            let pos = arg(a, 1);
+            let position = if name == "lastIndexOf" {
+                let n = vm.to_number(&pos)?;
+                if n.is_nan() { s.len() } else { n.clamp(0.0, s.len() as f64) as usize }
+            } else if name == "endsWith" && pos.is_undefined() {
+                s.len()
             } else {
-                integer(vm, arg(a, 1))?.max(0.0).min(s.len() as f64) as usize
+                integer(vm, pos)?.clamp(0.0, s.len() as f64) as usize
             };
             let found = match name {
                 "startsWith" => {

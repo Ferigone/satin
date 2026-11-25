@@ -466,6 +466,7 @@ export function parseOptions(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    if (arg === '--require-all-pass') { options.requireAllPass = true; continue; }
     if (arg === '--native') { options.native = true; continue; }
     if (!Object.hasOwn(keys, arg) && arg !== '--chromium') throw new Error(`Unknown option: ${arg}`);
     const value = argv[++i];
@@ -474,7 +475,7 @@ export function parseOptions(argv) {
     else options[keys[arg]] = arg.endsWith('-ms') ? Number(value) : value;
   }
   if (options.nativeChapterManifest) {
-    if (options.satin || options.native || options.chromium.length || options.until !== undefined ||
+    if (options.satin || options.native || options.requireAllPass || options.chromium.length || options.until !== undefined ||
         options.chapter !== undefined || options.timeoutMs !== undefined || (argv.includes('--satin-run-ms') || argv.includes('--site-url'))) {
       throw new Error('--native-chapter-manifest is read-only and cannot be combined with browser capture options');
     }
@@ -489,10 +490,11 @@ export function parseOptions(argv) {
     options.chapter = options.chapter.replace(/^json\/([^/]+?)(?:\.json)?$/, '$1');
     if (!options.chapter.trim() || options.chapter.includes('/')) throw new Error('Expected a chapter name or json/NAME.json');
   }
-  options.until ??= options.chapter ? 'complete' : 'first';
+  if (options.requireAllPass && options.until === 'first') throw new Error('--require-all-pass requires a complete run');
+  options.until ??= options.requireAllPass || options.chapter ? 'complete' : 'first';
   const longRun = options.until === 'complete' && !['harness', 'annexB'].includes(options.chapter);
   options.timeoutMs ??= longRun ? 21_600_000 : 420_000;
-  if (options.satin && (options.chapter || argv.includes('--until'))) options.native = true;
+  if (options.satin && (options.requireAllPass || options.chapter || argv.includes('--until'))) options.native = true;
   if ((!options.satin && !options.chromium.length) || (options.native && !options.satin) ||
       !['first', 'complete'].includes(options.until) ||
       !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 21_600_000 ||
@@ -502,9 +504,18 @@ export function parseOptions(argv) {
   return options;
 }
 
+export function allCasesPassed(run) {
+  if (run.websiteRun !== 'complete') return false;
+  const counters = run.snapshots?.results?.counters;
+  if (!counters || !Number.isSafeInteger(run.selection?.planned) || run.selection.planned < 1) return false;
+  const exact = (value, expected) => value === expected || count(value) === expected;
+  return ['planned', 'ran', 'pass'].every(key => exact(counters[key], run.selection.planned)) &&
+    ['fail', 'failedToLoad'].every(key => exact(counters[key], 0));
+}
+
 async function main(argv) {
   if (argv.includes('--help')) {
-    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--chapter NAME|json/NAME.json] [--until first|complete] [--timeout-ms MS] [--site-url URL] [--output DIR]');
+    console.log('node tools/test262/website.mjs [--satin FILE [--native] [--satin-run-ms MS]] [--chromium FILE ...] [--chapter NAME|json/NAME.json] [--until first|complete] [--require-all-pass] [--timeout-ms MS] [--site-url URL] [--output DIR]');
     console.log('node tools/test262/website.mjs --native-chapter-manifest MANIFEST_JSON [--output DIR] (read-only coordinator intake)');
     return;
   }
@@ -542,19 +553,22 @@ async function main(argv) {
     }
   }
   await Promise.all(jobs.map(job => record(...job)));
+  if (options.requireAllPass) {
+    for (const run of Object.values(report.runs)) run.allCasesPassed = allCasesPassed(run);
+  }
   const path = resolve(output, 'report.json');
   await writeFile(path, JSON.stringify(report, null, 2) + '\n');
   console.log(JSON.stringify({
     report: path,
     runs: Object.fromEntries(Object.entries(report.runs).map(([name, run]) => [name, {
-      websiteRun: run.websiteRun, firstFailedStage: run.firstFailedStage, firstDiagnostic: run.firstDiagnostic,
+      websiteRun: run.websiteRun, allCasesPassed: run.allCasesPassed, firstFailedStage: run.firstFailedStage, firstDiagnostic: run.firstDiagnostic,
       selection: run.selection,
       counters: run.snapshots?.results?.counters ?? run.snapshots?.complete?.counters ?? run.lastObserved?.counters ?? run.snapshots?.paused?.counters ??
         run.snapshots?.['first-result']?.counters ?? run.load?.dom?.counters,
       error: run.probeError ?? run.error,
     }])),
   }));
-  if (Object.values(report.runs).some(run => run.websiteRun === 'unverified')) process.exitCode = 1;
+  if (Object.values(report.runs).some(run => run.websiteRun === 'unverified' || run.allCasesPassed === false)) process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

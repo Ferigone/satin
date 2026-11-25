@@ -111,3 +111,61 @@ fn exact_buffers_and_borrowed_slices_charge_one_copy() {
         Value::from(4094)
     );
 }
+
+#[test]
+fn materialized_strings_release_unreferenced_append_prefixes() {
+    let mut vm = Vm::new();
+    vm.eval(
+        r#"
+        var strings = [], prefixes = [];
+        function build(id) {
+            var result = 'a'.repeat(1000);
+            for (var i = 0; i < 25; i++) {
+                result += String.fromCharCode(i ? 65 + i : id);
+                if (i === 5) prefixes.push(result);
+            }
+            strings.push(result);
+            return result.charCodeAt(1024);
+        }
+    "#,
+    )
+    .unwrap();
+    vm.collect_garbage();
+    let baseline = vm.estimated_heap_bytes();
+    for id in 0..64 {
+        assert_eq!(vm.eval(&format!("build({id})")).unwrap(), Value::from(89));
+    }
+    assert_eq!(
+        vm.eval("prefixes.every((s, i) => s.length === 1006 && s.charCodeAt(1000) === i)")
+            .unwrap(),
+        Value::Bool(true)
+    );
+    vm.collect_garbage();
+    let retained = vm.estimated_heap_bytes() - baseline;
+    // Both arrays intentionally retain distinct strings; each needs about 2 KiB.
+    // The temporary prefix strings used to assemble each result are unobservable.
+    assert!(retained < 512 * 1024, "retained {retained} bytes");
+}
+
+#[test]
+fn ten_thousand_short_appends_share_storage_and_preserve_intermediate_values() {
+    let mut vm = Vm::new();
+    assert_eq!(
+        vm.eval(
+            r#"
+        let text = '', snapshot, mixed;
+        for (let i = 0; i < 10000; i++) {
+            text += '.';
+            if (i === 34) {
+                snapshot = text;
+                mixed = text + '\ud800';
+                if (mixed.charCodeAt(35) !== 0xd800) throw 'lost code unit';
+            }
+        }
+        snapshot === '.'.repeat(35) && mixed.length === 36 && text === '.'.repeat(10000)
+    "#
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}

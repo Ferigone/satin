@@ -15,7 +15,8 @@ use std::{
 
 const MAX_TIMERS: usize = 1024;
 const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
-const TIMER_TASK_TIMEOUT: Duration = Duration::from_secs(2);
+const TIMER_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
+const TIMER_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -602,9 +603,10 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
         };
         // Exception reporting and the microtask checkpoint use the same fuel
         // and deadline as the callback. Return to input/rendering after a long turn.
-        let result = vm.with_task_limits(
+        let result = vm.with_task_cpu_budget(
             TIMER_TASK_INSTRUCTIONS,
-            Some(Instant::now() + TIMER_TASK_TIMEOUT),
+            TIMER_TASK_CPU_BUDGET,
+            Instant::now() + TIMER_TASK_WALL_TIMEOUT,
             |vm| {
                 if let Some(owner) = &timer.owner {
                     vm.with_realm(owner.realm, |vm| {
@@ -664,6 +666,28 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
 mod task_limit_tests {
     use crate::{LoadedPage, script::ScriptRuntime};
     use rust_browser_javascript::Value;
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn one_shot_timer_chain_survives_a_parked_callback() {
+        let page = LoadedPage::from_html("about:test", "<!doctype html>");
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let parked = runtime.vm.new_native_function("park", |vm, _, _| {
+            std::thread::sleep(super::TIMER_TASK_CPU_BUDGET + std::time::Duration::from_millis(50));
+            vm.charge_work(1)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("park", parked).unwrap();
+        runtime.eval("var ticks = 0; setTimeout(() => { park(); ++ticks; setTimeout(() => ++ticks, 0) }, 0)").unwrap();
+        runtime.pump();
+        runtime.pump();
+        assert_eq!(runtime.eval("ticks").unwrap(), Value::Number(2.));
+        assert!(
+            runtime.diagnostics().is_empty(),
+            "{:?}",
+            runtime.diagnostics()
+        );
+    }
 
     #[test]
     fn only_a_scheduled_timer_gets_the_extended_task_allowance() {

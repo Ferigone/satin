@@ -1,5 +1,5 @@
 use std::{
-    cell::OnceCell,
+    cell::{OnceCell, RefCell},
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
@@ -16,7 +16,7 @@ enum StringStorage {
     },
     Flat(Box<[u16]>),
     Appended {
-        prefix: JsString,
+        prefix: RefCell<Option<JsString>>,
         suffix: [u16; INLINE_UNITS],
         suffix_len: u8,
         len: usize,
@@ -59,9 +59,23 @@ impl JsString {
         match self.0.as_ref() {
             StringStorage::Inline { units, len } => &units[..*len as usize],
             StringStorage::Flat(units) => units,
-            StringStorage::Appended { len, flattened, .. } => flattened.get_or_init(|| {
+            StringStorage::Appended {
+                len,
+                prefix,
+                suffix,
+                suffix_len,
+                flattened,
+                ..
+            } => flattened.get_or_init(|| {
+                // The contiguous representation owns every code unit. Other
+                // JavaScript values retain any prefixes that are still observable.
+                let prefix = prefix
+                    .borrow_mut()
+                    .take()
+                    .expect("unflattened string prefix");
                 let mut units = Vec::with_capacity(*len);
-                self.copy_units(&mut units);
+                prefix.copy_units(&mut units);
+                units.extend_from_slice(&suffix[..*suffix_len as usize]);
                 units.into_boxed_slice()
             }),
         }
@@ -96,27 +110,50 @@ impl JsString {
         other.copy_units(&mut units);
         Self::from_utf16(units)
     }
-    pub(crate) fn can_append(&self, other: &Self) -> bool {
-        other.len() <= INLINE_UNITS && self.depth() < MAX_APPEND_DEPTH
-    }
-    pub(crate) fn append(self, other: &Self) -> Self {
-        let len = self.len() + other.len();
-        let depth = self.depth() + 1;
-        let suffix_len = other.len();
+    /// Share the existing prefix and fill the last inline suffix before adding
+    /// another node. The second result is the number of copied code units.
+    pub(crate) fn append_short(&self, other: &Self) -> Option<(Self, usize)> {
+        if other.len() > INLINE_UNITS {
+            return None;
+        }
         let mut suffix = [0; INLINE_UNITS];
-        suffix[..suffix_len].copy_from_slice(other.as_utf16());
-        Self(Rc::new(StringStorage::Appended {
-            prefix: self,
+        let mut used = 0;
+        let mut base = self.clone();
+        if let StringStorage::Appended {
+            prefix,
+            suffix: previous,
+            suffix_len,
+            ..
+        } = self.0.as_ref()
+        {
+            let previous_len = *suffix_len as usize;
+            if previous_len + other.len() <= INLINE_UNITS {
+                if let Some(prefix) = prefix.borrow().as_ref() {
+                    base = prefix.clone();
+                    suffix[..previous_len].copy_from_slice(&previous[..previous_len]);
+                    used = previous_len;
+                }
+            }
+        }
+        let depth = base.depth() + 1;
+        if depth > MAX_APPEND_DEPTH {
+            return None;
+        }
+        let suffix_len = used + other.len();
+        suffix[used..suffix_len].copy_from_slice(other.as_utf16());
+        let result = Self(Rc::new(StringStorage::Appended {
+            prefix: RefCell::new(Some(base)),
             suffix,
             suffix_len: suffix_len as u8,
-            len,
+            len: self.len() + other.len(),
             depth,
             flattened: OnceCell::new(),
-        }))
+        }));
+        Some((result, suffix_len))
     }
-    pub(crate) fn prefix(&self) -> Option<&Self> {
+    pub(crate) fn prefix(&self) -> Option<Self> {
         match self.0.as_ref() {
-            StringStorage::Appended { prefix, .. } => Some(prefix),
+            StringStorage::Appended { prefix, .. } => prefix.borrow().clone(),
             _ => None,
         }
     }
@@ -138,7 +175,11 @@ impl JsString {
             if let Some(units) = flattened.get() {
                 out.extend_from_slice(units);
             } else {
-                prefix.copy_units(out);
+                prefix
+                    .borrow()
+                    .as_ref()
+                    .expect("unflattened string prefix")
+                    .copy_units(out);
                 out.extend_from_slice(&suffix[..*suffix_len as usize]);
             }
         } else {

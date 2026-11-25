@@ -225,6 +225,20 @@ impl Vm {
             _ => Ok(None),
         }
     }
+    pub(crate) fn collect_pattern_rest(&mut self, iterator: &mut crate::iterator::IteratorRecord) -> Result<Value, JsError> {
+        let mut values = Vec::new();
+        while let Some(value) = self.iterator_step(iterator)? {
+            if values.len() >= self.limits.max_array_length as usize {
+                return Err(JsError::new(
+                    ErrorKind::ExecutionLimit,
+                    "Destructuring rest length budget exhausted",
+                ));
+            }
+            self.reserve_allocation(std::mem::size_of::<Value>() * 2)?;
+            values.push(value);
+        }
+        self.try_new_array(&values)
+    }
     pub(crate) fn bind_pattern(
         &mut self,
         pattern: &PatternCode,
@@ -317,18 +331,7 @@ impl Vm {
                     }
                     if let Some(rest) = rest {
                         let reference = self.pattern_reference(rest, env, mode)?;
-                        let mut values = Vec::new();
-                        while let Some(value) = self.iterator_step(&mut iterator)? {
-                            if values.len() >= self.limits.max_array_length as usize {
-                                return Err(JsError::new(
-                                    ErrorKind::ExecutionLimit,
-                                    "Destructuring rest length budget exhausted",
-                                ));
-                            }
-                            self.reserve_allocation(std::mem::size_of::<Value>() * 2)?;
-                            values.push(value);
-                        }
-                        let array = self.try_new_array(&values)?;
+                        let array = self.collect_pattern_rest(&mut iterator)?;
                         self.bind_pattern(rest, array, env, mode, strict, reference)?;
                     }
                     Ok(Value::Undefined)
