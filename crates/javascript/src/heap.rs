@@ -402,8 +402,11 @@ impl Heap {
     pub(crate) const EMPTY_CELL_BYTES: usize = 256;
     pub(crate) const REALM_CORE_BYTES: usize = std::mem::size_of::<RealmIntrinsics>() + 128;
 
+    #[track_caller]
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
-        self.estimated_bytes = self.estimated_bytes.saturating_add(cell_bytes(&cell));
+        let bytes = cell_bytes(&cell);
+        crate::vm::qa_charge("cell",bytes);
+        self.estimated_bytes = self.estimated_bytes.saturating_add(bytes);
         if matches!(&cell, Cell::Object(object) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
         {
             self.weak_collections += 1;
@@ -501,6 +504,7 @@ impl Heap {
             _ => panic!("internal invariant: reachable environment"),
         }
     }
+    #[track_caller]
     pub fn allocate_env(&mut self, env: Environment) -> EnvId {
         EnvId(self.allocate(Cell::Environment(env)))
     }

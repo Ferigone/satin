@@ -300,6 +300,18 @@ impl Vm {
         vm.realm_bootstrap_bytes = vm.estimated_heap_bytes();
         vm
     }
+    pub fn qa_fuel(&self) -> u64 { self.remaining }
+    pub fn qa_begin(&self) { QA_DATA.with(|cell| *cell.borrow_mut()=Some(Default::default())); }
+    pub fn qa_finish(&self) {
+        QA_DATA.with(|cell| { if let Some(hist)=cell.borrow_mut().take() {
+            let mut list=hist.into_iter().collect::<Vec<_>>();
+            list.sort_by_key(|(_, (total,_))| std::cmp::Reverse(*total));
+            for ((kind,path,line),(total,count)) in list {
+                println!("COST {kind} {path}:{line} {total} {count}");
+            }
+        } });
+    }
+
     pub fn limits(&self) -> &VmLimits {
         &self.limits
     }
@@ -674,7 +686,9 @@ impl Vm {
             Ok(())
         }
     }
+    #[track_caller]
     pub(crate) fn reserve_allocation(&mut self, bytes: usize) -> Result<(), JsError> {
+        qa_charge("reserve_allocation",bytes);
         self.ensure_allocation(bytes)?;
         self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
         Ok(())
@@ -1171,13 +1185,17 @@ impl Vm {
         }
         self.code_bytes = bytecode::retained_size_with_chunks(codes, chunks);
     }
+    #[track_caller]
     pub(crate) fn reserve_binding(&mut self, key: &JsString) -> Result<(), JsError> {
+        qa_charge("reserve_binding",192+key.len()*2);
         let bytes = 192usize.saturating_add(key.len().saturating_mul(2));
         self.ensure_allocation(bytes)?;
         self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
         Ok(())
     }
+    #[track_caller]
     pub(crate) fn tick(&mut self) -> Result<(), JsError> {
+        qa_charge("tick",1);
         if self.initializing {
             return Ok(());
         }
@@ -1200,7 +1218,9 @@ impl Vm {
         }
         Ok(())
     }
+    #[track_caller]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
+        qa_charge("consume_work",units);
         self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
@@ -4421,4 +4441,19 @@ mod task_limit_tests {
         assert_eq!(failure.kind, ErrorKind::ExecutionLimit);
         assert_eq!(vm.eval("4 + 3").unwrap(), 7.into());
     }
+}
+
+thread_local! {
+    static QA_DATA: std::cell::RefCell<Option<std::collections::HashMap<(&'static str,&'static str,u32), (u64,u64)>>> = Default::default();
+}
+#[track_caller]
+pub(crate) fn qa_charge(kind: &'static str, units: usize) {
+    QA_DATA.with(|data| {
+        if let Some(hist)=data.borrow_mut().as_mut() {
+            let loc=std::panic::Location::caller();
+            let e=hist.entry((kind,loc.file(),loc.line())).or_default();
+            e.0+=units as u64;
+            e.1+=1;
+        }
+    });
 }

@@ -1,0 +1,45 @@
+name: Public Twitch bootstrap profile
+on:
+  pull_request:
+    branches: [perf/twitch-bootstrap-alpha36]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      RUST_MIN_STACK: 16777216
+      MALLOC_ARENA_MAX: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch public script sources
+        run: python tools/qa_twitch_bootstrap_fetch.py
+      - name: Verify allocation-triggered collections
+        run: cargo test --locked -p rust-browser-engine --lib classic_scripts_reuse_collection_thresholds_for_large_live_pages
+      - name: Build diagnostic replay
+        run: |
+          cargo test --locked -p rust-browser-engine --test twitch_bootstrap_profile --no-run --message-format=json > /tmp/satin-cargo.json
+          python -c 'import json; from pathlib import Path; v=[json.loads(l) for l in Path("/tmp/satin-cargo.json").read_text().splitlines()]; print(next(x["executable"] for x in v if x.get("executable") and x["target"]["name"]=="twitch_bootstrap_profile"))' > /tmp/satin-qa-bin
+      - name: Compare collection policies at normal production fuel
+        run: |
+          export QA_FUEL=1000000
+          for mode in old new; do
+            if [[ "$mode" = old ]]; then export QA_ALWAYS_COLLECT=1; else unset QA_ALWAYS_COLLECT; fi
+            /usr/bin/time -v "$(cat /tmp/satin-qa-bin)" --test-threads=1 --nocapture > "/tmp/satin-qa-$mode.log" 2>&1
+            python tools/qa_twitch_bootstrap_summary.py "/tmp/satin-qa-$mode.log"
+          done
+      - name: Count bootstrap costs in the bounded diagnostic task
+        run: |
+          QA_FUEL=16000000 QA_MODULES=1 /usr/bin/time -v "$(cat /tmp/satin-qa-bin)" --test-threads=1 --nocapture > /tmp/satin-qa-modules.log 2>&1
+          python tools/qa_twitch_bootstrap_summary.py /tmp/satin-qa-modules.log
+      - name: Preserve aggregate metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twitch-vm-profile
+          path: /tmp/satin-qa-*.log
+          retention-days: 3

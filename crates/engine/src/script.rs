@@ -668,6 +668,13 @@ impl ScriptRuntime {
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
+        let callback=vm.new_native_function("__satinProfile",move|vm,_,a|{
+            if let [Value::Number(enter),Value::Number(id),..]=a {
+                println!("FACTORY {} {} {} {} {}",*enter as u64,*id as u64,vm.qa_fuel(),vm.estimated_heap_bytes(),vm.heap_cell_count());
+            }
+            Ok(Value::Undefined)
+        });
+        vm.set_global("__satinProfile",callback)?;
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
@@ -1068,9 +1075,16 @@ impl ScriptRuntime {
         external: bool,
     ) {
         let state = self.state.clone();
-        let result = self
-            .vm
-            .with_task(|vm| run_classic(vm, &state, node, source, identifier, external, true));
+        let core = identifier.contains("assets.twitch.tv/assets/core-");
+        let budget = if core { std::env::var("QA_FUEL").ok().and_then(|v|v.parse().ok()).unwrap_or(1_000_000) } else { self.vm.limits().max_instructions };
+        if core { self.vm.qa_begin(); }
+        let t=Instant::now();
+        let result = self.vm.with_task_limits(budget,Some(t+std::time::Duration::from_secs(120)),|vm|run_classic(vm,&state,node,source,identifier,external,true));
+        if core { 
+            self.vm.qa_finish();
+            let error=result.as_ref().err().map(|e|(&e.kind,&e.message));
+            println!("CORE elapsed={:?} budget={budget} remaining={} bytes={} cells={} error={error:?}",t.elapsed(),self.vm.qa_fuel(),self.vm.estimated_heap_bytes(),self.vm.heap_cell_count());
+        }
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
@@ -1082,7 +1096,9 @@ impl ScriptRuntime {
             });
         }
         report_unhandled(&mut self.vm, &self.state);
-        self.collect_after_task(true);
+        let t=Instant::now();
+        if std::env::var_os("QA_ALWAYS_COLLECT").is_some(){self.vm.collect_garbage();}else{self.collect_after_task(true);}
+        eprintln!("GC {:.6}",t.elapsed().as_secs_f64());
     }
     /// Returns whether the link's default navigation is allowed.
     pub fn click(&mut self, node: NodeId) -> bool {
