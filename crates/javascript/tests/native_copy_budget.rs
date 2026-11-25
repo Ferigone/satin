@@ -111,3 +111,38 @@ fn exact_buffers_and_borrowed_slices_charge_one_copy() {
         Value::from(4094)
     );
 }
+
+#[test]
+fn materialized_strings_release_unreferenced_append_prefixes() {
+    let mut vm = Vm::new();
+    vm.eval(
+        r#"
+        var strings = [], prefixes = [];
+        function build(id) {
+            var result = 'a'.repeat(1000);
+            for (var i = 0; i < 25; i++) {
+                result += String.fromCharCode(i ? 65 + i : id);
+                if (i === 5) prefixes.push(result);
+            }
+            strings.push(result);
+            return result.charCodeAt(1024);
+        }
+    "#,
+    )
+    .unwrap();
+    vm.collect_garbage();
+    let baseline = vm.estimated_heap_bytes();
+    for id in 0..64 {
+        assert_eq!(vm.eval(&format!("build({id})")).unwrap(), Value::from(89));
+    }
+    assert_eq!(
+        vm.eval("prefixes.every((s, i) => s.length === 1006 && s.charCodeAt(1000) === i)")
+            .unwrap(),
+        Value::Bool(true)
+    );
+    vm.collect_garbage();
+    let retained = vm.estimated_heap_bytes() - baseline;
+    // Both arrays intentionally retain distinct strings; each needs about 2 KiB.
+    // The temporary prefix strings used to assemble each result are unobservable.
+    assert!(retained < 512 * 1024, "retained {retained} bytes");
+}

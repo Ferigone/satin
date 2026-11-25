@@ -755,7 +755,7 @@ impl Vm {
         self.ensure_allocation(Self::source_allocation(bytes))
     }
     fn account_string(&mut self, string: &JsString) -> Result<(), JsError> {
-        let mut part = Some(string);
+        let mut part = Some(string.clone());
         while let Some(string) = part {
             let bytes = string.allocation_bytes();
             let old = self
@@ -1220,7 +1220,7 @@ impl Vm {
             .saturating_add(self.template_objects.len() * 128);
         self.string_bytes = 0;
         for s in &strings {
-            let mut part = Some(s);
+            let mut part = Some(s.clone());
             while let Some(string) = part {
                 let bytes = string.allocation_bytes();
                 if self

@@ -1,5 +1,5 @@
 use std::{
-    cell::OnceCell,
+    cell::{OnceCell, RefCell},
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
@@ -16,7 +16,7 @@ enum StringStorage {
     },
     Flat(Box<[u16]>),
     Appended {
-        prefix: JsString,
+        prefix: RefCell<Option<JsString>>,
         suffix: [u16; INLINE_UNITS],
         suffix_len: u8,
         len: usize,
@@ -59,9 +59,23 @@ impl JsString {
         match self.0.as_ref() {
             StringStorage::Inline { units, len } => &units[..*len as usize],
             StringStorage::Flat(units) => units,
-            StringStorage::Appended { len, flattened, .. } => flattened.get_or_init(|| {
+            StringStorage::Appended {
+                len,
+                prefix,
+                suffix,
+                suffix_len,
+                flattened,
+                ..
+            } => flattened.get_or_init(|| {
+                // The contiguous representation owns every code unit. Other
+                // JavaScript values retain any prefixes that are still observable.
+                let prefix = prefix
+                    .borrow_mut()
+                    .take()
+                    .expect("unflattened string prefix");
                 let mut units = Vec::with_capacity(*len);
-                self.copy_units(&mut units);
+                prefix.copy_units(&mut units);
+                units.extend_from_slice(&suffix[..*suffix_len as usize]);
                 units.into_boxed_slice()
             }),
         }
@@ -106,7 +120,7 @@ impl JsString {
         let mut suffix = [0; INLINE_UNITS];
         suffix[..suffix_len].copy_from_slice(other.as_utf16());
         Self(Rc::new(StringStorage::Appended {
-            prefix: self,
+            prefix: RefCell::new(Some(self)),
             suffix,
             suffix_len: suffix_len as u8,
             len,
@@ -114,9 +128,9 @@ impl JsString {
             flattened: OnceCell::new(),
         }))
     }
-    pub(crate) fn prefix(&self) -> Option<&Self> {
+    pub(crate) fn prefix(&self) -> Option<Self> {
         match self.0.as_ref() {
-            StringStorage::Appended { prefix, .. } => Some(prefix),
+            StringStorage::Appended { prefix, .. } => prefix.borrow().clone(),
             _ => None,
         }
     }
@@ -138,7 +152,11 @@ impl JsString {
             if let Some(units) = flattened.get() {
                 out.extend_from_slice(units);
             } else {
-                prefix.copy_units(out);
+                prefix
+                    .borrow()
+                    .as_ref()
+                    .expect("unflattened string prefix")
+                    .copy_units(out);
                 out.extend_from_slice(&suffix[..*suffix_len as usize]);
             }
         } else {
