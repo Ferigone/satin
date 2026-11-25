@@ -482,3 +482,23 @@ fn intrinsic_and_final_dense_grid_share_placement_within_work_budget() {
     assert!((rect.y - 310.).abs() < 0.05 && (rect.height - 10.).abs() < 0.05, "{rect:?}");
     assert_eq!(layout.link_at(10., 315.), Some("about:next"));
 }
+
+#[test]
+fn hidden_subtree_does_not_spend_intrinsic_grid_placement_budget() {
+    let fonts = Fonts::new().unwrap();
+    let mut html = String::from(
+        "<!doctype html><style>body{margin:0}.outer{display:grid;width:100px;grid-template-columns:100px}.hidden{display:none}.dense{display:grid;grid-template-columns:100px;grid-auto-rows:10px;grid-auto-flow:row dense}</style><div class='outer'><div><div class='hidden'><div class='dense'>",
+    );
+    for _ in 0..128 {
+        html.push_str("<div></div>");
+    }
+    html.push_str("</div></div><a id='visible' href='about:next' style='display:block;height:20px'>next</a></div></div>");
+    let page = LoadedPage::from_html("about:grid", &html);
+    let layout = Layout::build(&page, &fonts, 800.);
+    assert!(!layout.limited, "a display:none subtree must not consume intrinsic grid placement work");
+    let visible = page.document.connected_nodes()
+        .find(|&id| page.document.attr(id, "id") == Some("visible")).unwrap();
+    let rect = layout.rect_for(visible).unwrap();
+    assert!((rect.width - 100.).abs() < 0.05 && (rect.height - 20.).abs() < 0.05, "{rect:?}");
+    assert_eq!(layout.link_at(10., 5.), Some("about:next"));
+}
