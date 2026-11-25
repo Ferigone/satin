@@ -30,7 +30,7 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
 
 ## Changes in alpha.39
 
-Satin can run longer click, keyboard and form handlers under a bounded CPU deadline. This lets the legacy Test262 Results view build its table and register source links across thousands of rows. A synthetic event fired inside a handler shares the same task budget. The optional `caller` property on a non-strict JavaScript function now exposes a stable accessor while continuing to hide strict callers. [Legacy Test262 results and verification](docs/compatibility/legacy-test262.md)
+Satin can run longer click, keyboard and form handlers under a bounded CPU deadline. A regression test registers listeners on 8,192 separate elements and verifies that removing a listener frees a slot. In a native-window replay with 16,436 preloaded Test262 results, the page displayed the total count but reached the JavaScript heap limit before populating the results table. A synthetic event fired inside a handler shares the same task budget. The optional `caller` property on a non-strict JavaScript function now exposes a stable accessor while continuing to hide strict callers. [Legacy Test262 results and verification](docs/compatibility/legacy-test262.md)
 
 ## Changes in alpha.38
 
