@@ -1,5 +1,36 @@
 # Legacy browser Test262 results
 
+## Full Run All in alpha.40
+
+Satin’s browser engine loaded all four chapters of the pinned March 2016 website from a local HTTP server. The original controller received one result for each of the 16,436 cases, in catalog order. It called its completion hook after 26 minutes and 10 seconds, with no timer left pending. [Original website](https://github.com/v8/test262/tree/e1166500a0d26c8b90e704a31c6646992573f632/website) · [Measured source](https://github.com/Ferigone/satin/tree/fc9de7072128f91df6b509f28dee3c7c3d0f7cb2)
+
+| Linux x86_64 browser engine | Ran | Passed | Failed | Failed to load |
+| --- | ---: | ---: | ---: | ---: |
+| At `Set/prototype/size/size.js` | 8,276 | 8,088 | 188 | 0 |
+| On the website’s completion callback | 16,436 | 16,194 | 242 | 0 |
+
+The driver exercised the Run, Run All and Results controls using native input dispatch in the browser engine. After completion, Results displayed the same run, pass and fail totals, with 4,911 rows in its top-level table and 4,826 source links. Opening Results added zero script diagnostics. The 43 cases that changed since the alpha.38 engine run all moved from fail to pass. Each of these also passed in the independent Chromium 151 reference. Among the remaining 242, Chromium passed 18, failed 220 and returned no verdict for four. The two fixtures discussed below show how the historical site’s HTML and JavaScript expectations affect the counts. [Indexed failures](legacy-test262-controller-failures-alpha40.jsonl.gz) · [Counts and comparisons](legacy-test262-controller-alpha40.json) · [Measurement driver](fixtures/legacy-test262-controller-alpha40.rs)
+
+Of the 242 failed callbacks, 50 explicitly reported a VM limit. These included 28 bytecode-depth limits, nine instruction limits, five native-work limits, four child CPU timeouts, three heap limits and one expression nesting limit. The remaining 192 also failed in Chromium. Of the 43 new passes, 36 exercise URI encoding or decoding, five exercise RegExp, one exercises a large array and one checks JavaScript comments.
+
+For an independent repeat, serve the pinned website at `http://127.0.0.1:8000/default.html` using the server instructions below. Run these commands from a Satin checkout containing this report. The temporary worktree keeps the compiler inputs pinned while the indexer compares the callbacks against the checked-in catalogs.
+
+```sh
+satin_checkout=$(pwd)
+run_dir=$(mktemp -d)
+git worktree add --detach "$run_dir/satin" fc9de7072128f91df6b509f28dee3c7c3d0f7cb2
+mkdir -p "$run_dir/satin/crates/engine/examples" "$run_dir/observed"
+cp docs/compatibility/fixtures/legacy-test262-controller-alpha40.rs \
+  "$run_dir/satin/crates/engine/examples/legacy_test262_controller.rs"
+cargo run --release --locked --manifest-path "$run_dir/satin/Cargo.toml" \
+  -p rust-browser-engine --example legacy_test262_controller -- \
+  http://127.0.0.1:8000/default.html "$run_dir/observed" 2> "$run_dir/observed/progress.log"
+python3 "$satin_checkout/tools/test262/legacy-controller-index.py" \
+  "$run_dir/observed" "$run_dir/alpha40-failures.jsonl.gz"
+```
+
+## Earlier browser and standalone measurements
+
 The March 23, 2016 Test262 website lists **16,436 cases** across its harness, language, Annex B and built-ins chapters. One alpha.38 browser-engine session completed all four chapters with **16,151 passed, 285 failed and 0 failed to load**. Running every case in a fresh Satin JavaScript VM produced **16,152 passes in alpha.38 and 16,057 in alpha.37**. All 95 changes from a nonpass to a pass are identifiable by their original Run All index and path. Every case that passed in alpha.37 passed again in this measurement. [Pinned website catalog](https://github.com/v8/test262/blob/e1166500a0d26c8b90e704a31c6646992573f632/website/json/default.json) · [Per-case comparison (TSV.GZ)](legacy-test262-alpha38.tsv.gz)
 
 | Isolated VM on Linux x86_64 | Passed | Other outcomes | Total |
@@ -12,6 +43,10 @@ Of the 95 additional passes, 46 are Array cases, 21 Function, 12 language expres
 An independent Chromium 151 run used the original browser runner in selections with a watchdog. It produced 16,101 passes, 331 failures and four cases with no verdict. All 191 cases that reached a failing assertion in the alpha.38 isolated VM also failed in Chromium. Of the 93 cases that stopped at a VM limit, 61 passed in Chromium, 28 failed there and four returned no verdict. The unmodified Chromium Run All itself stalled at case 1,680.
 
 With the explicit `web-vm-alpha37` diagnostic profile and 100,000,000 instructions per script, the alpha.38 worker passed 16,210. That run used a 512 MiB heap and a 100-second external timeout. The same 191 cases reached a failed assertion and 35 stopped at a VM limit. All 58 changes were improvements. Of the cases Chromium passed, three still stopped in this diagnostic: the 32-deep function parser fixture and the two URI decoders that each test over a million UTF-16 pairs. The indexed comparison records the Chromium result and the diagnostic worker result for every case. [Chromium and diagnostic VM outcomes (TSV.GZ)](legacy-test262-reference-alpha38.tsv.gz)
+
+## Full Windows run in alpha.39
+
+On Windows Server 2022, the native Satin window completed the original Run All and displayed **16,436 run, 16,151 passed, 285 failed and zero failed to load**. Its Run and Results counters agreed. The Run tab’s failure log held 285 rows. The separate table on the Results tab was empty. The measured build at `f6efbb39` and the public alpha.39 tag differ only in the README. [Windows recording and checkpoints](https://github.com/Ferigone/satin/actions/runs/45660908569/artifacts/15048006166) · [Source comparison](https://github.com/Ferigone/satin/compare/f6efbb39c94bbe654ccf3cd5728b9a57e946db81...147279aa93199d55106410f1cb7490da91e0dce2)
 
 ## Native Results in alpha.40
 
