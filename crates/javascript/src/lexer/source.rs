@@ -1,8 +1,12 @@
 use std::{ops::Range, rc::Rc};
 
+mod packed;
+use packed::PackedSource;
+
 #[derive(Clone, Debug)]
 enum SourceStorage {
     Ascii(Rc<[u8]>),
+    Packed(Rc<PackedSource>),
     // ECMAScript source text created from a JS string can contain isolated
     // UTF-16 surrogates. Keep their numeric values instead of replacing them.
     CodePoints(Rc<[u32]>),
@@ -21,6 +25,9 @@ impl SourceSpan {
                 buffer: SourceStorage::Ascii(Rc::from(source.as_bytes())),
                 range: 0..source.len(),
             }
+        } else if let Some(data) = PackedSource::from_text(source) {
+            let len = data.len();
+            Self { buffer: SourceStorage::Packed(Rc::new(data)), range: 0..len }
         } else {
             Self::from_points(source.chars().map(u32::from))
         }
@@ -35,6 +42,7 @@ impl SourceSpan {
     pub(crate) fn storage(&self) -> (usize, usize) {
         match &self.buffer {
             SourceStorage::Ascii(data) => (data.as_ptr() as usize, data.len()),
+            SourceStorage::Packed(data) => (Rc::as_ptr(data) as usize, data.storage_bytes()),
             SourceStorage::CodePoints(data) => (data.as_ptr() as usize, std::mem::size_of_val(&**data)),
         }
     }
@@ -60,6 +68,7 @@ impl SourceSpan {
         let index = self.range.start + index;
         Some(match &self.buffer {
             SourceStorage::Ascii(data) => u32::from(data[index]),
+            SourceStorage::Packed(data) => data.point(index),
             SourceStorage::CodePoints(data) => data[index],
         })
     }
@@ -68,17 +77,21 @@ impl SourceSpan {
         assert!(range.end <= self.len());
         let start = self.range.start + range.start;
         let end = self.range.start + range.end;
-        let (ascii, wide): (&[u8], &[u32]) = match &self.buffer {
-            SourceStorage::Ascii(data) => (&data[start..end], &[]),
-            SourceStorage::CodePoints(data) => (&[], &data[start..end]),
+        let (ascii, wide, packed): (&[u8], &[u32], Option<&PackedSource>) = match &self.buffer {
+            SourceStorage::Ascii(data) => (&data[start..end], &[], None),
+            SourceStorage::CodePoints(data) => (&[], &data[start..end], None),
+            SourceStorage::Packed(data) => (&[], &[], Some(data.as_ref())),
         };
         ascii.iter().copied().map(u32::from).chain(wide.iter().copied())
+            .chain(packed.into_iter().flat_map(move |source| (start..end).map(move |index| source.point(index))))
     }
 
     pub(crate) fn utf16_len(&self, range: Range<usize>) -> usize {
         match &self.buffer {
             SourceStorage::Ascii(_) => range.len(),
-            SourceStorage::CodePoints(_) => self.points(range).map(|p| if p > 0xffff { 2 } else { 1 }).sum(),
+            SourceStorage::CodePoints(_) | SourceStorage::Packed(_) => {
+                self.points(range).map(|p| if p > 0xffff { 2 } else { 1 }).sum()
+            }
         }
     }
 
