@@ -62,6 +62,14 @@ pub(super) fn parse(source: &str) -> Option<Color> {
         }
         _ => return None,
     };
+    Some(linear_srgb_to_color(linear, (alpha * 255.).round() as u8))
+}
+
+pub(super) fn encoded_srgb_to_color(rgb: [f64; 3], alpha: u8) -> Color {
+    linear_srgb_to_color(profile_to_srgb("srgb", rgb), alpha)
+}
+
+fn linear_srgb_to_color(linear: [f64; 3], alpha: u8) -> Color {
     let [r, g, b] = linear.map(|linear| {
         let encoded = if linear <= 0.0031308 {
             12.92 * linear
@@ -70,7 +78,7 @@ pub(super) fn parse(source: &str) -> Option<Color> {
         };
         (encoded.clamp(0., 1.) * 255. + 1e-12).round() as u8
     });
-    Some(Color(r, g, b, (alpha * 255.).round() as u8))
+    Color(r, g, b, alpha)
 }
 
 fn profile_to_srgb(space: &str, rgb: [f64; 3]) -> [f64; 3] {

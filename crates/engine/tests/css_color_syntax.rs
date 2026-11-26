@@ -68,6 +68,64 @@ fn invalid_functional_colors_do_not_override_a_painted_fallback() {
 }
 
 #[test]
+fn extended_range_hsl_paints_like_its_srgb_equivalent() {
+    // WPT 9b8b1beec730, css/css-color/hsl-009.html through hsl-011.html.
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "color(srgb 0.462304 0.462304 1.556896)",
+            &["hsl(60deg, 5701%, 100.96%)", "hsl(60 5701% 100.96%)"],
+        ),
+        (
+            "color(srgb 0.60146 0.60146 -0.61846)",
+            &["hsl(240 7176% -0.85%)"],
+        ),
+        ("color(srgb -0.2 1.2 -0.2)", &["hsl(120 140% 50%)"]),
+        (
+            "color(srgb 0.50000001 0.50000001 1.50000001)",
+            &["hsl(60 5000000000% 100.000001%)"],
+        ),
+        ("#999999", &["hsl(30, -50%, 60%)"]),
+        ("#008000", &["hsl(120 100% 25%)"]),
+        ("#ff3333", &["hsla(0turn, 100%, 50%, 80%)"]),
+        ("#ff0000", &["hsl(120, 140% 50%)"]),
+    ];
+    const WIDTH: u32 = 16;
+    let mut html =
+        String::from("<style>body{margin:0;background:white}div{height:4px;width:8px}</style>");
+    let mut rows = 0;
+    for (reference, inputs) in cases {
+        for value in std::iter::once(reference).chain(inputs.iter()) {
+            html.push_str(&format!(
+                "<div style='background-color:red;background-color:{value}'></div>"
+            ));
+            rows += 1;
+        }
+    }
+    let page = LoadedPage::from_html("https://css-color.test/", &html);
+    let mut fonts = Fonts::new().unwrap();
+    let layout = Layout::build(&page, &fonts, WIDTH as f32);
+    let mut canvas = Canvas::new(WIDTH, rows * 4, layout.background);
+    canvas.document(&layout, &mut fonts, 0., 0.);
+    assert!(!layout.limited && !canvas.limited);
+    let pixel = |row: usize| canvas.pixels[(row * 4 + 2) * WIDTH as usize + 2];
+    assert_ne!(pixel(0), 0xffffff, "the hsl-009 reference is not white");
+    assert_ne!(
+        pixel(0),
+        0xff0000,
+        "the hsl-009 reference is not fallback red"
+    );
+    let mut row = 0;
+    for (reference, inputs) in cases {
+        let expected = pixel(row);
+        row += 1;
+        for input in *inputs {
+            assert_eq!(pixel(row), expected, "{input} vs {reference}");
+            row += 1;
+        }
+    }
+}
+
+#[test]
 fn named_colors_and_hwb_resolve_to_srgb_in_paint() {
     let cases = [
         ("DarkSlateGrey", 0x2f4f4f),

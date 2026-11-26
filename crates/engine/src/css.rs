@@ -5564,9 +5564,33 @@ pub fn color(value: &str) -> Option<Color> {
         let (values, opacity) = functional_color_components(inner, rgb)?;
         let a = opacity.map_or(Some(255), alpha)?;
         if !rgb {
-            let h = hue_degrees(values[0])? as f32;
-            let s = (number(values[1].strip_suffix('%')?)? / 100.).clamp(0., 1.);
-            let l = (number(values[2].strip_suffix('%')?)? / 100.).clamp(0., 1.);
+            let h = hue_degrees(values[0])?;
+            let saturation_token = values[1].strip_suffix('%')?;
+            let lightness_token = values[2].strip_suffix('%')?;
+            let saturation = number(saturation_token)?.max(0.);
+            let lightness = number(lightness_token)?;
+            if saturation >= 100. || lightness <= 0. || lightness >= 100. {
+                // CSS Color 4 keeps upper saturation and both lightness extremes.
+                // Re-read boundary values in f64: rounding lightness to an
+                // endpoint before multiplying can erase chroma. The f32
+                // parses above still bound the accepted inputs.
+                let s = color_number(saturation_token)?.max(0.) / 100.;
+                let l = color_number(lightness_token)? / 100.;
+                if s > 1. || !(0. ..=1.).contains(&l) {
+                    let amplitude = s * l.min(1. - l);
+                    let channel = |offset: f64| {
+                        let k = (offset + h / 30.) % 12.;
+                        l - amplitude * (k - 3.).min(9. - k).clamp(-1., 1.)
+                    };
+                    return Some(oklab::encoded_srgb_to_color(
+                        [channel(0.), channel(8.), channel(4.)],
+                        a,
+                    ));
+                }
+            }
+            let h = h as f32;
+            let s = saturation / 100.;
+            let l = lightness / 100.;
             let c = (1. - (2. * l - 1.).abs()) * s;
             let h = h.rem_euclid(360.) / 60.;
             let x = c * (1. - (h.rem_euclid(2.) - 1.).abs());
