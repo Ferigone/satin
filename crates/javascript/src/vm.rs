@@ -4494,53 +4494,59 @@ impl Vm {
                 let value = self.expression_value(e, env)?;
                 return Err(self.thrown_error(value)?);
             }
-            Op::Try(body, catch, finally) => {
-                let mut completion = self.run_chunk(body, env);
-                if let Err(error) = &completion {
-                    if error.uncatchable() {
-                        return completion;
-                    }
-                    if let Some((name, handler)) = catch {
-                        let value = if let Some(value) = &error.thrown {
-                            value.clone()
-                        } else {
-                            self.error_value(error)?
-                        };
-                        let scope = self.heap.allocate_env(Environment::new(
-                            Some(env),
-                            if matches!(name.as_deref(), Some(bytecode::PatternCode::Name(_))) { EnvKind::SimpleCatch } else { EnvKind::Block },
-                            None,
-                        ));
-                        if let Some(name) = name {
-                            self.declare_pattern(name, scope, true, true)?;
-                        }
-                        completion = if let Some(pattern) = name {
-                            self.bind_pattern(
-                                pattern,
-                                value,
-                                scope,
-                                PatternMode::Parameter,
-                                strict,
-                                None,
-                            )
-                            .and_then(|_| self.run_chunk(handler, scope))
-                        } else {
-                            self.run_chunk(handler, scope)
-                        };
-                    }
-                }
-                if let Some(finally) = finally {
-                    match self.run_chunk(finally, env) {
-                        Ok(Completion::Normal(_)) => {}
-                        other => completion = other,
-                    }
-                }
-                return completion.map(|value| value.update_empty(Some(Value::Undefined)));
-            }
+            Op::Try(..) => return self.run_try_op(op, env, strict),
             _ => unreachable!(),
         }
         Ok(Completion::Normal(result))
     }
+
+    // Keep catch environment and completion temporaries off other recursive
+    // control-op frames, including in unoptimized builds.
+    #[inline(never)]
+    fn run_try_op(&mut self, op: &Op, env: EnvId, strict: bool) -> Result<Completion, JsError> {
+        let Op::Try(body, catch, finally) = op else {
+            unreachable!()
+        };
+        let mut completion = self.run_chunk(body, env);
+        if let Err(error) = &completion {
+            if error.uncatchable() {
+                return completion;
+            }
+            if let Some((name, handler)) = catch {
+                let value = if let Some(value) = &error.thrown {
+                    value.clone()
+                } else {
+                    self.error_value(error)?
+                };
+                let scope = self.heap.allocate_env(Environment::new(
+                    Some(env),
+                    if matches!(name.as_deref(), Some(bytecode::PatternCode::Name(_))) {
+                        EnvKind::SimpleCatch
+                    } else {
+                        EnvKind::Block
+                    },
+                    None,
+                ));
+                if let Some(name) = name {
+                    self.declare_pattern(name, scope, true, true)?;
+                }
+                completion = if let Some(pattern) = name {
+                    self.bind_pattern(pattern, value, scope, PatternMode::Parameter, strict, None)
+                        .and_then(|_| self.run_chunk(handler, scope))
+                } else {
+                    self.run_chunk(handler, scope)
+                };
+            }
+        }
+        if let Some(finally) = finally {
+            match self.run_chunk(finally, env) {
+                Ok(Completion::Normal(_)) => {}
+                other => completion = other,
+            }
+        }
+        completion.map(|value| value.update_empty(Some(Value::Undefined)))
+    }
+
     pub fn error_value(&mut self, error: &JsError) -> Result<Value, JsError> {
         let prototype = self
             .realm
