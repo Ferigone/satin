@@ -12,8 +12,11 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectDirectory 'dis
 $browser = Get-Item -LiteralPath (Join-Path $ReleaseDirectory 'rust-browser.exe')
 $launcher = Get-Item -LiteralPath (Join-Path $ReleaseDirectory 'rust-browser-launcher.exe')
 $OutputDirectory = (New-Item -ItemType Directory -Path $OutputDirectory -Force).FullName
-$updateAsset = Join-Path $OutputDirectory 'satin-windows-x64.exe'
+$updateAsset = Join-Path $OutputDirectory 'satin-windows-x64-opt-in.exe'
 $installAsset = Join-Path $OutputDirectory 'Satin-windows-x64.zip'
+if (Test-Path -LiteralPath (Join-Path $OutputDirectory 'satin-windows-x64.exe')) {
+    throw 'The output directory contains a legacy auto-update asset. Use a clean directory.'
+}
 Copy-Item -LiteralPath $browser.FullName -Destination $updateAsset -Force
 
 Add-Type -AssemblyName System.IO.Compression
@@ -51,6 +54,8 @@ Satin for Windows x64
 
 Extract the archive to a folder and double-click Install.cmd.
 After setup, use the Satin desktop shortcut to launch the browser.
+Use this archive to upgrade from alpha.44 or older; those builds will
+not automatically download this release.
 '@
 
 $zipStream = [IO.File]::Open([IO.Path]::GetFullPath($installAsset), [IO.FileMode]::Create)

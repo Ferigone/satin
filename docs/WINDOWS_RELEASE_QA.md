@@ -76,11 +76,19 @@ speedup or a meaningful memory change beyond this fixture.
   that version. `--version` on the staged release browser and its launcher
   should report the same version. The launcher requires a staged
   `current.json` and browser under `versions/` to forward `--version`.
-- `scripts/PackageRelease.ps1` emits `satin-windows-x64.exe` (browser only for
+- `scripts/PackageRelease.ps1` emits `satin-windows-x64-opt-in.exe` (browser only for
   in-app updates), `Satin-windows-x64.zip` (browser, launcher and installer
   scripts) and `SHA256SUMS.txt`. Check that the ZIP's browser entry and
   standalone executable are byte-identical, the ZIP has both Windows x64
   executables, and both hashes match `SHA256SUMS.txt`.
+  `scripts/VerifyReleasePackage.ps1` performs these checks, verifies PE32+
+  and exercises both `--version` paths using a new scratch directory. It
+  never runs the installer.
+- Do not publish `satin-windows-x64.exe` as an alias. It is the asset consumed
+  by alpha.44's automatic updater and would trigger an upgrade without consent.
+  Existing alpha.44 installations must upgrade explicitly from the ZIP.
+  Alpha.45 and later opt-in clients accept only the new asset name via the
+  verified official release URL.
 - `.github/workflows/release.yml` verifies PRs targeting `master`, pushes to
   `master`, and `v*` tags. Only a push in `Ferigone/satin` can run the
   contents-write publish job after verification. A **master push with an

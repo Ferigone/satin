@@ -27,7 +27,8 @@ mod restart;
 pub(crate) use restart::{Restart, StartupSignal};
 
 const RELEASES: &str = "https://api.github.com/repos/Ferigone/satin/releases";
-const ASSET_NAME: &str = "satin-windows-x64.exe";
+// Releases in this channel must not match alpha.44's automatic updater.
+const ASSET_NAME: &str = "satin-windows-x64-opt-in.exe";
 const BINARY_NAME: &str = "rust-browser.exe";
 const LAUNCHER_NAME: &str = "RustBrowser.exe";
 const INSTALL_PRODUCT: &str = "RustBrowser";
@@ -1980,13 +1981,25 @@ mod tests {
             "https://release-assets.githubusercontent.com:444/a",
             "https://release-assets.githubusercontent.com.example.org/a",
             "https://example.org@release-assets.githubusercontent.com/a",
-            "https://github.com/Ferigone/other/releases/download/v0.2.0/satin-windows-x64.exe",
+            "https://github.com/Ferigone/other/releases/download/v0.2.0/satin-windows-x64-opt-in.exe",
         ] {
             assert!(
                 !release_redirect(&Url::parse(address).unwrap()),
                 "{address}"
             );
         }
+    }
+
+    #[test]
+    fn opt_in_channel_does_not_accept_legacy_update_assets() {
+        let current = Version::parse("0.1.0-alpha.44").unwrap();
+        let tag = "v0.1.0-alpha.45";
+        let mut release = release(tag, tag, Some(format!("sha256:{}", "ab".repeat(32))));
+        let asset = &mut release.assets[0];
+        asset.name = "satin-windows-x64.exe".into();
+        asset.browser_download_url =
+            format!("https://github.com/Ferigone/satin/releases/download/{tag}/{}", asset.name);
+        assert!(candidate(release, &current).is_none());
     }
 
     #[test]

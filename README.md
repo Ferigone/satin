@@ -28,6 +28,19 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.45
+
+- Quiet Cinder adds a compact Windows tab strip, a redesigned start page, a
+  horizontally scrollable favorites bar, and Quiet mode.
+- The native UI includes tab duplication, reopening, dragging and session-only
+  pins, browsing history (`Ctrl+H`), and read-only site information. This is an
+  alpha redesign, not complete parity with the reference prototype.
+- Installed builds check for updates at startup. A badge in the address bar
+  lets the user choose when to download and when to restart. Updating from
+  alpha.44 or earlier requires the ZIP installer; those builds do not see the
+  new opt-in update asset.
+- Improved support for legacy comma-separated HSL color syntax.
+
 ## Changes in alpha.44
 
 On MDN’s row subgrid example, twelve cells now share the intended two rows. At both 390 and 1280 CSS pixels wide, the cells measure 98 px high and the final cell begins at y = 213 px, matching Chromium. Alpha.43 placed that cell in a third row at y = 245.67 px. The pinned screen suite rose from 1,993 to 2,003 passes out of 6,536 pairs and the supplemental linked-Ahem suite rose from 316 to 320 out of 1,388. [Screenshots, per-case outcomes and runner limits](docs/compatibility/css.md#row-subgrid-development)

@@ -46,12 +46,14 @@ jobs:
             throw "Tag $env:GITHUB_REF_NAME does not match installed version v$version."
           }
           ./scripts/PackageRelease.ps1
+          ./scripts/VerifyReleasePackage.ps1 -PackageDirectory dist/windows-x64 `
+            -EvidenceDirectory target/release-package-check -Version $version
           "version=$version" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: satin-windows-x64
           path: |
-            dist/windows-x64/satin-windows-x64.exe
+            dist/windows-x64/satin-windows-x64-opt-in.exe
             dist/windows-x64/Satin-windows-x64.zip
             dist/windows-x64/SHA256SUMS.txt
           if-no-files-found: error
@@ -123,7 +125,8 @@ jobs:
               throw "Existing draft $tag belongs to another release."
             }
           } else {
-            $options = @('--repo', $repo, '--draft', '--title', "Satin $version", '--generate-notes', '--notes', $marker)
+            $notes = "$marker`n`n**Windows x64:** Use ``Satin-windows-x64.zip`` for first-time installation or a manual upgrade from alpha.44 and earlier. Installed opt-in clients offer the separate update asset and ask before downloading or restarting."
+            $options = @('--repo', $repo, '--draft', '--title', "Satin $version", '--generate-notes', '--notes', $notes)
             if ($version.PreReleaseLabel) { $options += '--prerelease' }
             if ($tagExists) { $options += '--verify-tag' } else { $options += @('--target', $commit) }
             Invoke-Gh release create $tag @options | Write-Host
@@ -131,7 +134,7 @@ jobs:
             $draft = Invoke-Gh api "$releaseApi/$id" | ConvertFrom-Json
           }
 
-          $files = @('satin-windows-x64.exe', 'Satin-windows-x64.zip', 'SHA256SUMS.txt')
+          $files = @('satin-windows-x64-opt-in.exe', 'Satin-windows-x64.zip', 'SHA256SUMS.txt')
           foreach ($name in $files) {
             $path = Join-Path 'dist/windows-x64' $name
             $file = Get-Item -LiteralPath $path
@@ -145,5 +148,9 @@ jobs:
             if ($asset.state -ne 'uploaded' -or $asset.size -ne $file.Length -or $asset.digest -cne $digest) {
               throw "GitHub returned a different size or SHA-256 for $name."
             }
+          }
+          $draft = Invoke-Gh api "$releaseApi/$($draft.id)" | ConvertFrom-Json
+          if ($draft.assets | Where-Object name -CEQ 'satin-windows-x64.exe') {
+            throw 'The draft contains the legacy automatic-update asset; do not publish it.'
           }
           Invoke-Gh release edit $tag --repo $repo --draft=false | Write-Host
