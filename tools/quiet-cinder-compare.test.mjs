@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { crc32, deflateSync } from 'node:zlib';
-import { comparisonCase, viewports, states } from './quiet-cinder-cases.mjs';
+import { clippedCenter, comparisonCase, viewports, states } from './quiet-cinder-cases.mjs';
 import { compare, decodePng, measure } from './quiet-cinder-compare.mjs';
 
 function chunk(type, body) {
@@ -110,6 +110,9 @@ test('each budget is independent, and a flat reference is invalid even if identi
 });
 
 test('all planned viewports and states have bounded, nontrivial crops', () => {
+  assert.deepEqual(viewports, {
+    desktop: [1280, 800], narrow: [640, 480], 'narrow-390': [390, 800],
+  });
   for (const [viewport, size] of Object.entries(viewports)) {
     for (const state of states) {
       const spec = comparisonCase(`${viewport}/${state}`);
@@ -124,6 +127,19 @@ test('all planned viewports and states have bounded, nontrivial crops', () => {
   assert.equal(comparisonCase('desktop/downloads').dataScope, 'design-only-demo-data');
   assert.equal(comparisonCase('desktop/address').dataScope, 'requires-matched-data');
   assert.throws(() => comparisonCase('desktop/idle/extra'), /unknown case/);
+});
+
+test('390px tab hover intersects the clipped reference label, not the adjacent control', () => {
+  const viewport = { left: 0, top: 0, right: 390, bottom: 800 };
+  const tabList = { left: 48, top: 6, right: 205, bottom: 37 };
+  const label = { left: 196, top: 13.5, right: 232, bottom: 30 };
+  assert.deepEqual(clippedCenter(label, viewport, tabList), [200, 21]);
+  assert.equal(clippedCenter(label, { ...tabList, right: 196 }), null);
+  assert.deepEqual(clippedCenter(label, { ...tabList, right: 196.5 }), [196, 21]);
+  const { crops } = comparisonCase('narrow-390/tab-hover');
+  const { rect: [x, y, w, h] } = crops.find(crop => crop.name === 'inactive-tab');
+  assert.ok(x <= 200 && 200 < x + w && y <= 21 && 21 < y + h);
+  assert.ok(x + w < 209, 'tight hover crop excludes the new-tab control');
 });
 
 test('CLI reports crop differences that barely affect the frame and emits a readable heatmap', async () => {
@@ -161,10 +177,44 @@ test('reference CLI rejects unpinned input before launching or writing capture a
     const wrong = join(dir, 'wrong.html'), artifacts = join(dir, 'not-created');
     await writeFile(wrong, '<!doctype html><title>Wrong design</title>');
     const cli = fileURLToPath(new URL('./quiet-cinder-reference.mjs', import.meta.url));
-    const result = spawnSync(process.execPath, [cli, join(dir, 'missing.exe'), wrong, artifacts], { encoding: 'utf8' });
+    const result = spawnSync(process.execPath, [cli, join(dir, 'missing.exe'), wrong, artifacts, 'narrow-390/tab-hover'], { encoding: 'utf8' });
     assert.equal(result.status, 2);
     assert.match(result.stderr, /SHA-256 differs/);
     await assert.rejects(readFile(join(artifacts, 'reference.json')), { code: 'ENOENT' });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('390x800 exact-size comparison accepts that size only; unsupported states remain gaps', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'satin-quiet-cinder-390-'));
+  try {
+    const cli = fileURLToPath(new URL('./quiet-cinder-compare.mjs', import.meta.url));
+    const invoke = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+    const ref = join(dir, 'reference.png'), native = join(dir, 'native.png');
+    const v = x => x % 2 ? 50 : 20;
+    const correct = writeTestImage(image(390, 800, v));
+    await writeFile(ref, correct);
+    await writeFile(native, correct);
+    const matched = invoke('narrow-390/idle', ref, native);
+    assert.equal(matched.status, 0, matched.stderr);
+    assert.deepEqual(JSON.parse(matched.stdout).size, [390, 800]);
+    const oldViewport = invoke('narrow/idle', ref, native);
+    assert.equal(oldViewport.status, 2);
+    assert.match(oldViewport.stderr, /reference .* expected 640×480/);
+    for (const [w, h] of [[640, 800], [390, 799]]) {
+      await writeFile(native, writeTestImage(image(w, h, v)));
+      const wrongSize = invoke('narrow-390/idle', ref, native);
+      assert.equal(wrongSize.status, 2);
+      assert.match(wrongSize.stderr, /native .* expected 390×800/);
+    }
+    const gap = invoke('narrow-390/quiet', '--gap', 'native focus mode unavailable');
+    assert.equal(gap.status, 3);
+    assert.deepEqual(JSON.parse(gap.stdout), {
+      case: 'narrow-390/quiet', size: [390, 800], dataScope: 'ui-state', status: 'gap',
+      reason: 'native focus mode unavailable',
+    });
+    assert.equal(invoke('narrow-390/quiet', '--gap', ' ').status, 2);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DESIGN_SHA256, viewports, states } from './quiet-cinder-cases.mjs';
+import { clippedCenter, comparisonCase, DESIGN_SHA256, viewports, states } from './quiet-cinder-cases.mjs';
 import { decodePng } from './quiet-cinder-compare.mjs';
 
 const locale = 'pl-PL', timezone = 'Europe/Warsaw';
@@ -88,18 +88,30 @@ async function capture(cdp, info, page, viewport, state, output) {
       if (exceptionDetails) throw new Error(`prototype observation failed: ${exceptionDetails.text}`);
       return result.value;
     };
-    const move = (x, y) => send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    let pointer;
+    const move = async (x, y) => {
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+      pointer = [x, y];
+    };
     const park = () => move(2, height - 2);
-    const center = selector => js(`(() => {
-      const target = document.querySelector(${JSON.stringify(selector)});
-      if (!target) throw new Error('missing target');
-      const {x,y,width,height} = target.getBoundingClientRect();
-      return [Math.floor(x+width/2), Math.floor(y+height/2)];
-    })()`);
+    const center = async (selectors, clip = null) => {
+      const point = await js(`(() => {
+        const clipping = ${JSON.stringify(clip)};
+        const viewportRect = {left: 0, top: 0, right: innerWidth, bottom: innerHeight};
+        const bounds = clipping ? [viewportRect, document.querySelector(clipping).getBoundingClientRect()] : [viewportRect];
+        for (const selector of ${JSON.stringify(selectors)}) {
+          const target = document.querySelector(selector);
+          if (!target) continue;
+          const p = (${clippedCenter.toString()})(target.getBoundingClientRect(), ...bounds);
+          if (p && document.elementFromPoint(...p)?.closest(selector) === target) return p;
+        }
+        return null;
+      })()`);
+      assert.ok(point, `could not hit ${selectors.join(' or ')}: missing, clipped, or covered`);
+      return point;
+    };
     const click = async selector => {
-      const [x, y] = await center(selector);
-      assert.ok(await js(`document.elementFromPoint(${x},${y})?.closest(${JSON.stringify(selector)}) != null`),
-        `cannot click ${selector}: outside viewport or obscured`);
+      const [x, y] = await center([selector]);
       await move(x, y);
       for (const type of ['mousePressed', 'mouseReleased']) {
         await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
@@ -131,7 +143,9 @@ async function capture(cdp, info, page, viewport, state, output) {
       const d = document.body.dataset;
       return b.x === 0 && b.y === 0 && b.width === ${width} && b.height === ${height} &&
         innerWidth === ${width} && innerHeight === ${height} && devicePixelRatio === 1 &&
-        visualViewport.scale === 1 && document.documentElement.lang === 'pl' &&
+        visualViewport.scale === 1 && visualViewport.width === ${width} && visualViewport.height === ${height} &&
+        document.querySelector('#reload-button').getBoundingClientRect().width === ${width <= 410 ? 25 : 31} &&
+        document.documentElement.lang === 'pl' &&
         navigator.language === '${locale}' &&
         Intl.DateTimeFormat().resolvedOptions().locale === '${locale}' &&
         Intl.DateTimeFormat().resolvedOptions().timeZone === '${timezone}' &&
@@ -146,8 +160,13 @@ async function capture(cdp, info, page, viewport, state, output) {
 
     let expected = '!document.querySelector("#layer .popup") && !document.querySelector("#browser").classList.contains("is-quiet")';
     if (state === 'tab-hover') {
-      await move(...await center(`${tab} .tab-label`));
+      // At 390 a sliver of the inactive tab can remain after the label clips.
+      // Hover that face, not the neighboring + button, without scrolling.
+      const targets = [`${tab} .tab-label`];
+      if (viewport === 'narrow-390') targets.push(tab);
+      await move(...await center(targets, '#tabs .tab-list'));
       expected += ` && document.querySelector('${tab}').matches(':hover[aria-selected=false]') &&
+        document.querySelector('#tabs .tab-list').scrollLeft === 0 &&
         document.querySelector('#tab-peek').hidden && getComputedStyle(document.querySelector('${tab} .tab-x')).opacity === '1'`;
     } else if (state === 'quiet') {
       await click('#quiet-button');
@@ -165,7 +184,7 @@ async function capture(cdp, info, page, viewport, state, output) {
       await click(menu);
       await waitFor('browser menu', () => js(visible(privacy)));
       if (state === 'menu-hover') {
-        await move(...await center(privacy));
+        await move(...await center([privacy], '#layer .popup'));
         expected = `document.querySelector('${privacy}').matches(':hover')`;
       } else {
         await park();
@@ -187,7 +206,8 @@ async function capture(cdp, info, page, viewport, state, output) {
     await js('new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))');
     assert.ok(await js(expected), `did not reach ${state}`);
     const landmarks = await js(`Object.fromEntries([
-      '#browser', '#tabs', '#top-tab-2', '#toolbar', '#address-form', '#favorites',
+      '#browser', '#tabs', '#tabs .tab-list', '#top-tab-2', '#top-tab-2 .tab-label', '#top-tab-2 .tab-x',
+      '#toolbar', '#reload-button', '#menu-button', '#address-form', '#favorites',
       '.home-wordmark', '.start-search', '#layer .popup',
       '#layer .menu-row[data-act="privacy"]', '.internal-head', '.settings-nav',
       '.setting .toggle', '.data-list .data-row',
@@ -208,7 +228,7 @@ async function capture(cdp, info, page, viewport, state, output) {
     assert.deepEqual([image.width, image.height], [width, height]);
     const filename = `${viewport}-${state}.png`;
     await writeFile(join(output, filename), bytes, { flag: 'wx' });
-    return { viewport, state, filename, size: [width, height], sha256: sha256(bytes), landmarks, fonts };
+    return { viewport, state, filename, size: [width, height], pointer, sha256: sha256(bytes), landmarks, fonts };
   } finally {
     await cdp.send('Target.disposeBrowserContext', { browserContextId });
   }
@@ -219,7 +239,7 @@ async function main([executable, design, dir, selectedCase, ...extra]) {
     throw new Error('usage: node tools/quiet-cinder-reference.mjs CHROMIUM.exe Satin-Quiet-Cinder.html OUT_DIR [CASE]');
   }
   const cases = Object.keys(viewports).flatMap(viewport => states.map(state => `${viewport}/${state}`));
-  if (selectedCase && !cases.includes(selectedCase)) throw new Error(`unknown case ${selectedCase}`);
+  if (selectedCase) comparisonCase(selectedCase);
   const bytes = await readFile(design);
   assert.equal(sha256(bytes), DESIGN_SHA256, 'prototype SHA-256 differs from the pinned design');
   await mkdir(dir, { recursive: true });

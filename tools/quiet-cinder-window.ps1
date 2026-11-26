@@ -1,7 +1,7 @@
 # Optional visible-window capture, for hover states not supported by --smoke-actions.
 param(
     [Parameter(Mandatory = $true)][int]$SatinPid,
-    [Parameter(Mandatory = $true)][ValidateSet('desktop', 'narrow')][string]$Viewport,
+    [Parameter(Mandatory = $true)][string]$Viewport,
     [switch]$Resize,
     [string]$Png,
     [ValidateRange(0, 30)][int]$DelaySeconds = 4
@@ -9,6 +9,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ([bool]$Resize -eq [bool]$Png) { throw 'Use exactly one of -Resize or -Png.' }
+$viewports = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'quiet-cinder-viewports.json') | ConvertFrom-Json
+$size = $viewports.PSObject.Properties | Where-Object { $_.Name -ceq $Viewport } | Select-Object -ExpandProperty Value
+if (-not $size) { throw "Unknown viewport '$Viewport'. Expected $($viewports.PSObject.Properties.Name -join ', ')." }
+$width, $height = $size
 if (-not ('QuietCinder.Window' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -66,7 +70,6 @@ namespace QuietCinder {
 '@
 }
 
-if ($Viewport -eq 'desktop') { $width = 1280; $height = 800 } else { $width = 640; $height = 480 }
 $process = Get-Process -Id $SatinPid
 $hwnd = $process.MainWindowHandle
 if ($Resize) { [QuietCinder.Window]::Resize($hwnd, $width, $height) }

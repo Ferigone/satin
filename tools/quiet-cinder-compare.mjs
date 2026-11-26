@@ -166,10 +166,16 @@ export function compare(spec, reference, native) {
 
 async function main(args) {
   if (args.length < 3 || args.length > 4) {
-    throw new Error('usage: node tools/quiet-cinder-compare.mjs CASE CHROMIUM.png SATIN.png [DIFF.png]');
+    throw new Error('usage: node tools/quiet-cinder-compare.mjs CASE CHROMIUM.png SATIN.png [DIFF.png] | CASE --gap "reason"');
   }
   const [name, refPath, nativePath, diffPath] = args;
   const spec = comparisonCase(name);
+  if (refPath === '--gap') {
+    const reason = nativePath.trim();
+    if (!reason || args.length !== 3) throw new Error('--gap requires one non-empty reason, no PNG inputs');
+    console.log(JSON.stringify({ case: name, size: spec.size, dataScope: spec.dataScope, status: 'gap', reason }, null, 2));
+    return 3;
+  }
   const [refBytes, nativeBytes] = await Promise.all([readFile(refPath), readFile(nativePath)]);
   const reference = decodePng(refBytes), native = decodePng(nativeBytes);
   const result = compare(spec, reference, native);
