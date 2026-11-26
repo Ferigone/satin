@@ -988,6 +988,63 @@ fn integer(vm: &mut Vm, value: Value) -> Result<f64, JsError> {
     let n = vm.to_number(&value)?;
     Ok(if n.is_nan() { 0.0 } else { n.trunc() })
 }
+
+fn search_array(
+    vm: &mut Vm,
+    receiver: Value,
+    args: &[Value],
+    backwards: bool,
+) -> Result<Value, JsError> {
+    let object = vm.coerce_object(receiver)?;
+    let length = vm.get_property(object.clone(), "length")?;
+    // A generic receiver may have a large length but need only a few visits.
+    let length = integer(vm, length)?.clamp(0.0, 9_007_199_254_740_991.0) as u64;
+    if length == 0 {
+        return Ok(Value::from(-1));
+    }
+    let from = if backwards && args.len() < 2 {
+        f64::INFINITY
+    } else {
+        integer(vm, arg(args, 1))?
+    };
+    let start = if from < 0.0 {
+        length as f64 + from
+    } else {
+        from
+    };
+    let (mut index, end) = if backwards {
+        if start < 0.0 {
+            return Ok(Value::from(-1));
+        }
+        (start.min((length - 1) as f64) as u64, 0)
+    } else {
+        if start >= length as f64 {
+            return Ok(Value::from(-1));
+        }
+        (start.max(0.0) as u64, length - 1)
+    };
+    let needle = arg(args, 0);
+    loop {
+        vm.tick()?;
+        let key = JsString::from(index.to_string());
+        if vm.has(&object, &key)? {
+            let element = vm.get(object.clone(), &key)?;
+            vm.charge_bigint_comparison(&element, &needle)?;
+            if element == needle {
+                return Ok(Value::from(index as f64));
+            }
+        }
+        if index == end {
+            return Ok(Value::from(-1));
+        }
+        if backwards {
+            index -= 1;
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn relative(n: f64, len: usize) -> usize {
     if n < 0.0 {
         (len as f64 + n).max(0.0) as usize
@@ -1497,7 +1554,12 @@ fn install_array(vm: &mut Vm) {
         vm.set_property(array.clone(), "length", Value::from(offset))?;
         Ok(array)
     });
-    for (name, includes) in [("indexOf", false), ("includes", true)] {
+    for (name, backwards) in [("indexOf", false), ("lastIndexOf", true)] {
+        method(vm, proto.clone(), name, 1, move |vm, this, a| {
+            search_array(vm, this, a, backwards)
+        });
+    }
+    for (name, includes) in [("includes", true)] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {
             let object = vm.coerce_object(this)?;
             let len = array_like_length(vm, object.clone())?;
