@@ -39,6 +39,7 @@ use winit::{
 };
 
 pub(crate) mod address_bar;
+mod address_popup;
 mod bookmark_menu;
 mod bookmarks;
 mod chrome_menu;
@@ -49,7 +50,10 @@ mod quiet_cinder;
 mod scroll;
 mod settings;
 mod tab_strip;
-use self::address_bar::{AddressBar, Movement};
+use self::address_bar::{
+    AddressBar, Movement,
+    suggestions::{Direction as SuggestionDirection, Suggestions},
+};
 use self::bookmark_menu::Menu;
 use crate::testing::{
     Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, CheckpointSample,
@@ -171,6 +175,8 @@ fn physical_rect(scale: f32, rect: Rect) -> Rect {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Address,
+    Suggestion(usize),
+    SuggestionBackground,
     Back,
     Forward,
     Reload,
@@ -197,6 +203,10 @@ enum Action {
 }
 
 impl Action {
+    fn address_suggestion(self) -> bool {
+        matches!(self, Self::Suggestion(_) | Self::SuggestionBackground)
+    }
+
     fn caption(self) -> bool {
         matches!(self, Self::Minimize | Self::Maximize | Self::CloseWindow)
     }
@@ -445,6 +455,8 @@ pub(crate) fn run(
         devtools_focused: false,
         modifiers: ModifiersState::empty(),
         address: AddressBar::default(),
+        address_suggestions: Suggestions::default(),
+        suggestion_scroll: 0.,
         address_focus: false,
         preedit: false,
         select_popup: None,
@@ -547,6 +559,8 @@ struct App {
     devtools_focused: bool,
     modifiers: ModifiersState,
     address: AddressBar,
+    address_suggestions: Suggestions,
+    suggestion_scroll: f32,
     address_focus: bool,
     preedit: bool,
     select_popup: Option<SelectPopup>,
@@ -805,6 +819,9 @@ impl App {
         if self.devtools_focused != focused {
             self.devtools_focused = focused;
             self.preedit = false;
+            if focused {
+                self.dismiss_address_suggestions();
+            }
             if let Some(window) = &self.window {
                 window.set_ime_allowed(self.settings_panel.is_none());
             }
@@ -841,6 +858,7 @@ impl App {
 
     fn window_geometry_changed(&mut self) {
         self.wheel = None;
+        self.hits.retain(|(_, action)| !action.address_suggestion());
         self.tab_hits_current = false;
         self.caption_pressed = None;
         self.last_title_press = None;
@@ -1087,6 +1105,7 @@ impl App {
         let _ = self.profile.save(&session);
     }
     fn sync_address(&mut self) {
+        self.dismiss_address_suggestions();
         let tab = &self.tabs[self.active];
         self.address.set_text(if tab.is_home() {
             String::new()
@@ -1400,7 +1419,7 @@ impl App {
         self.select_popup = None;
         self.address_focus = true;
         self.address.select_all();
-        self.redraw();
+        self.refresh_address_suggestions();
     }
 
     fn activate(&mut self, index: usize) {
@@ -1431,11 +1450,22 @@ impl App {
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        if action != Action::Address && !action.address_suggestion() {
+            self.dismiss_address_suggestions();
+        }
         if !action.in_menu() {
             self.chrome_menu = None;
         }
         match action {
             Action::Address => self.focus_address(),
+            Action::Suggestion(index) => {
+                if self.suggestions_visible()
+                    && let Some(row) = self.address_suggestions.rows().get(index)
+                {
+                    self.navigate(row.target().to_owned(), true);
+                }
+            }
+            Action::SuggestionBackground => {}
             Action::Back => self.traverse_history(self.active, -1),
             Action::Forward => self.traverse_history(self.active, 1),
             Action::Reload => {
@@ -1628,7 +1658,7 @@ impl App {
             return;
         }
         if self.address.insert(text) {
-            self.redraw();
+            self.refresh_address_suggestions();
         }
     }
     fn run_shortcut(&mut self, command: Command, event_loop: &ActiveEventLoop) {
@@ -1689,6 +1719,7 @@ impl App {
             && self.settings_panel.is_none()
             && self.chrome_menu.is_none()
             && self.history_menu.is_none()
+            && !self.suggestions_visible()
             && let Some(d) = &self.tabs[self.active].download
         {
             d.cancel.cancel();
@@ -1825,7 +1856,7 @@ impl App {
                             && cb.set_text(value).is_ok()
                         {
                             self.address.delete_selection();
-                            self.redraw();
+                            self.refresh_address_suggestions();
                         }
                         return;
                     }
@@ -1896,6 +1927,9 @@ impl App {
         match key {
             Key::Named(NamedKey::Escape) => {
                 if self.address_focus {
+                    if self.dismiss_address_suggestions() {
+                        return;
+                    }
                     self.address_focus = false;
                     self.sync_address();
                 } else if self.tabs[self.active].loading {
@@ -1904,11 +1938,32 @@ impl App {
                 self.redraw();
             }
             Key::Named(NamedKey::Enter) if self.address_focus => {
-                self.navigate(omnibox_target(self.address.text()), true)
+                if self.preedit || repeat {
+                    return;
+                }
+                let target = self
+                    .address_suggestions
+                    .selected_target()
+                    .filter(|_| self.suggestions_visible())
+                    .map_or_else(|| omnibox_target(self.address.text()), str::to_owned);
+                self.navigate(target, true);
             }
             Key::Named(edit @ (NamedKey::Backspace | NamedKey::Delete)) if self.address_focus => {
-                self.address.delete(edit == NamedKey::Backspace);
-                self.redraw();
+                if !self.preedit {
+                    self.address.delete(edit == NamedKey::Backspace);
+                    self.refresh_address_suggestions();
+                }
+            }
+            Key::Named(direction @ (NamedKey::ArrowUp | NamedKey::ArrowDown))
+                if self.address_focus =>
+            {
+                if self.modifiers.is_empty() && !self.preedit {
+                    self.step_address_suggestions(if direction == NamedKey::ArrowUp {
+                        SuggestionDirection::Previous
+                    } else {
+                        SuggestionDirection::Next
+                    });
+                }
             }
             Key::Named(
                 direction @ (NamedKey::ArrowLeft
@@ -2261,6 +2316,7 @@ impl App {
         self.draw_toolbar(canvas, width);
         self.draw_favorites(canvas, width);
         self.draw_footer(canvas, width, height, dock_visible);
+        self.draw_address_suggestions(canvas, width, height);
         self.draw_chrome_menu(canvas, width);
         self.draw_history_menu(canvas, width);
     }
@@ -3055,6 +3111,7 @@ impl App {
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
                 Action::TabListItem(_) => matches!(self.chrome_menu, Some(Menu::Tabs(_))),
+                action if action.address_suggestion() => self.suggestions_visible(),
                 _ => true,
             };
             (current && self.pointer_in(*rect)).then_some(*action)
@@ -3137,6 +3194,9 @@ impl App {
         if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
             return;
         }
+        if !action.is_some_and(|action| action == Action::Address || action.address_suggestion()) {
+            self.dismiss_address_suggestions();
+        }
         let dismissed_menu = self.chrome_menu.is_some() && !action.is_some_and(Action::in_menu);
         if dismissed_menu {
             self.chrome_menu = None;
@@ -3145,7 +3205,7 @@ impl App {
         let regions = self.window_regions(self.active);
         if let Some(bounds) = regions.dock
             && self.pointer_in(bounds)
-            && !action.is_some_and(Action::in_menu)
+            && !action.is_some_and(|a| a.in_menu() || a.address_suggestion())
         {
             // An outside click dismisses an overlapping browser menu; it must
             // not also activate a dock control underneath.
@@ -3255,10 +3315,14 @@ impl App {
             return;
         }
         let regions = self.window_regions(self.active);
-        let divider = regions
-            .dock
-            .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
-        let inspecting = regions.dock.is_some()
+        let chrome = self.chrome_action_at_pointer();
+        let over_suggestions = chrome.is_some_and(Action::address_suggestion);
+        let divider = !over_suggestions
+            && regions
+                .dock
+                .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
+        let inspecting = !over_suggestions
+            && regions.dock.is_some()
             && self.devtools.as_ref().is_some_and(|d| d.picking)
             && self.pointer_in(regions.page);
         if self.resizing_dock || divider || inspecting {
@@ -3274,7 +3338,6 @@ impl App {
             self.redraw();
             return;
         }
-        let chrome = self.chrome_action_at_pointer();
         let link = if chrome.is_none() {
             self.pointer_link()
         } else {
@@ -3292,6 +3355,7 @@ impl App {
                     Some(Action::Address) => CursorIcon::Text,
                     Some(Action::Back) if !history.can_traverse(-1) => CursorIcon::Default,
                     Some(Action::Forward) if !history.can_traverse(1) => CursorIcon::Default,
+                    Some(Action::SuggestionBackground) => CursorIcon::Default,
                     Some(action) if action.caption() => CursorIcon::Default,
                     Some(_) => CursorIcon::Pointer,
                     None if self.hover.is_some() => CursorIcon::Pointer,
@@ -4104,6 +4168,7 @@ impl ApplicationHandler<()> for App {
             WindowEvent::Focused(false) => {
                 self.caption_pressed = None;
                 self.settings_cancel_pointer();
+                self.dismiss_address_suggestions();
                 self.wheel = None;
                 self.resizing_dock = false;
                 self.preedit = false;
@@ -4143,6 +4208,9 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
                 self.preedit = self.settings_panel.is_none() && !text.is_empty();
+                if self.preedit && self.address_focus {
+                    self.dismiss_address_suggestions();
+                }
             }
             WindowEvent::Ime(Ime::Disabled) => self.preedit = false,
             WindowEvent::CursorMoved { position, .. } => {
@@ -4191,7 +4259,12 @@ impl ApplicationHandler<()> for App {
                     && let Some(window) = &self.window
                 {
                     window.show_window_menu(LogicalPosition::new(self.mouse.0, self.mouse.1));
-                } else if button == MouseButton::Middle && self.settings_panel.is_none() {
+                } else if button == MouseButton::Middle
+                    && self.settings_panel.is_none()
+                    && !self
+                        .chrome_action_at_pointer()
+                        .is_some_and(Action::address_suggestion)
+                {
                     if self.tab_hits_current
                         && matches!(self.chrome_menu, None)
                         && let Some(Action::Select(index) | Action::Close(index)) =
@@ -4211,6 +4284,12 @@ impl ApplicationHandler<()> for App {
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_panel.is_some() || self.history_menu.is_some() {
+                    return;
+                }
+                if self
+                    .chrome_action_at_pointer()
+                    .is_some_and(Action::address_suggestion)
+                {
                     return;
                 }
                 let (delta, detent) = scroll::wheel_delta(delta, self.scale);

@@ -164,6 +164,12 @@ impl<'a> SuggestionPopup<'a> {
         (index < self.rows.len()).then_some(index)
     }
 
+    pub(in crate::app) fn visible_targets(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
+        (self.index_at(self.scroll)..self.rows.len()).map_while(|index| {
+            intersect(self.row_bounds(index), self.clip).map(|bounds| (index, bounds))
+        })
+    }
+
     /// Bring the selected row into view, aligning its top if it cannot fit.
     pub(in crate::app) fn reveal(&self, index: usize) -> Option<f32> {
         self.rows.get(index)?;
@@ -407,6 +413,17 @@ mod tests {
         assert_eq!(popup.hit(20., 84.), Some(1));
         assert_eq!(popup.hit(20., 137.), Some(2));
         assert_eq!(popup.reveal(0), Some(0.));
+        let targets: Vec<_> = popup.visible_targets().collect();
+        assert_eq!(
+            targets,
+            [
+                (1, rect(17., 84., 286., 19.)),
+                (2, rect(17., 103., 286., 35.))
+            ]
+        );
+        for (index, row) in targets {
+            assert_eq!(popup.hit(row.x, row.y), Some(index));
+        }
     }
 
     #[test]

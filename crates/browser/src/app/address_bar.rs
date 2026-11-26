@@ -1,6 +1,8 @@
 use std::ops::Range;
 
+#[path = "address_bar/chrome.rs"]
 pub(super) mod chrome;
+#[path = "address_bar/suggestions.rs"]
 pub(super) mod suggestions;
 
 const MAX_ADDRESS_BYTES: usize = 16_384;
