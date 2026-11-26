@@ -962,6 +962,7 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 }
 
 const PROPERTIES: &[(&str, &str)] = &[
+    ("gridTemplateColumns", "grid-template-columns"),
     ("webkitLineClamp", "-webkit-line-clamp"),
     ("webkitBoxOrient", "-webkit-box-orient"),
     ("display", "display"),
@@ -1420,6 +1421,15 @@ fn resolved_values<'a>(
                 .replace("inlineflex", "inline-flex")
                 .replace("inlinegrid", "inline-grid")
                 .replace("listitem", "list-item"),
+            "grid-template-columns" if style.grid_template_columns.subgrid => {
+                if let Some(span) = layout.subgrid_spans.get(&id) {
+                    format!("subgrid{}", " []".repeat(span + 1))
+                } else if matches!(style.display, css::Display::Grid | css::Display::InlineGrid) {
+                    "none".into()
+                } else {
+                    "subgrid".into()
+                }
+            }
             "list-style-type" => style.marker.as_css().to_owned(),
             "opacity" => style.opacity.to_string(),
             "visibility" => style.visibility.as_css().into(),

@@ -58,6 +58,7 @@ pub(crate) struct GridAutoRepeat {
 #[derive(Clone, Debug)]
 pub struct GridTemplate<L = Length> {
     pub(crate) tracks: Vec<GridTrack<L>>,
+    pub(crate) subgrid: bool,
     pub(crate) names: Arc<BTreeMap<usize, Vec<Arc<str>>>>,
     pub(crate) repeat: Option<Arc<GridAutoRepeat>>,
 }
@@ -66,6 +67,7 @@ impl<L> Default for GridTemplate<L> {
     fn default() -> Self {
         Self {
             tracks: Vec::new(),
+            subgrid: false,
             names: Arc::default(),
             repeat: None,
         }
@@ -496,6 +498,16 @@ pub(super) fn parse_tracks(source: &str) -> Option<SpecifiedTemplate> {
     list(source, TrackList::Template).map(SpecifiedTemplate::new)
 }
 
+pub(super) fn parse_columns(source: &str) -> Option<SpecifiedTemplate> {
+    if source.trim().eq_ignore_ascii_case("subgrid") {
+        return Some(SpecifiedTemplate::Shared(Arc::new(GridTemplate {
+            subgrid: true,
+            ..Default::default()
+        })));
+    }
+    parse_tracks(source)
+}
+
 pub(super) fn parse_auto_tracks(source: &str) -> Option<SpecifiedTracks> {
     let tracks = list(source, TrackList::Auto)?.tracks;
     Some(if tracks_need_context(&tracks) {
@@ -529,6 +541,7 @@ fn compute_template(
 ) -> Arc<GridTemplate> {
     Arc::new(GridTemplate {
         tracks: compute_tracks(&template.tracks, root_font, viewport, font),
+        subgrid: template.subgrid,
         names: template.names.clone(),
         repeat: template.repeat.clone(),
     })
@@ -661,7 +674,7 @@ pub(super) fn parse_template(
     if !tokens.iter().any(|token| matches!(token, Token::String(_))) {
         return Some((
             parse_tracks(rows)?,
-            parse_tracks(columns?)?,
+            parse_columns(columns?)?,
             GridAreas::default(),
         ));
     }

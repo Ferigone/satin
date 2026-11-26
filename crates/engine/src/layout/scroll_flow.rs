@@ -9,6 +9,7 @@ pub(crate) struct ScrollFlow {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
+    subgrid_spans: HashMap<NodeId, usize>,
     link_cache: positioning::LinkCache,
     limited: bool,
     pub(super) replay_work: usize,
@@ -46,6 +47,7 @@ impl ScrollFlow {
             elements: b.elements.clone(),
             links: b.links.clone(),
             anchors: b.anchors.clone(),
+            subgrid_spans: b.subgrid_spans.clone(),
             link_cache: b.link_cache.borrow().clone(),
             limited: b.limited,
             replay_work: Self::replay_work(b),
@@ -109,6 +111,7 @@ impl ScrollFlow {
         b.links = self.links.clone();
         b.elements = self.elements.clone();
         b.anchors = self.anchors.clone();
+        b.subgrid_spans.clone_from(&self.subgrid_spans);
         b.link_cache = self.link_cache.clone().into();
         b.limited = self.limited;
         if let Some(p) = &self.positioned {

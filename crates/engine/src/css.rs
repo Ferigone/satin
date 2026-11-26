@@ -588,7 +588,7 @@ impl Default for Style {
             justify_content: Align::Stretch,
             align_items: Align::Stretch,
             align_self: Align::Auto,
-            gap: [Length::Px(0.); 2],
+            gap: [Length::Auto; 2],
             order: 0,
             grid_template_columns: EMPTY_TEMPLATE.get_or_init(Arc::default).clone(),
             grid_template_rows: EMPTY_TEMPLATE.get_or_init(Arc::default).clone(),
@@ -3521,7 +3521,11 @@ impl Stylesheet {
         if style.position.out_of_flow() {
             style.float = Float::None;
         }
-        if style.position.out_of_flow() || style.float != Float::None {
+        let blockifies_children = matches!(
+            parent.display,
+            Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
+        );
+        if style.position.out_of_flow() || style.float != Float::None || blockifies_children {
             style.display = match style.display {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
@@ -4279,6 +4283,14 @@ fn targets(name: &str) -> Vec<Property> {
         "grid-template-columns" => vec![GridTemplateColumns],
         "grid-template-rows" => vec![GridTemplateRows],
         "grid-template-areas" => vec![GridTemplateAreas],
+        "grid" => vec![
+            GridTemplateRows,
+            GridTemplateColumns,
+            GridTemplateAreas,
+            GridAutoRows,
+            GridAutoColumns,
+            GridAutoFlow,
+        ],
         "grid-template" => vec![GridTemplateRows, GridTemplateColumns, GridTemplateAreas],
         "grid-auto-columns" => vec![GridAutoColumns],
         "grid-auto-rows" => vec![GridAutoRows],
@@ -4389,6 +4401,51 @@ fn declaration_tokens(source: &str) -> String {
     } else {
         clean
     }
+}
+
+fn implicit_grid(value: &str) -> Option<[Value; 6]> {
+    let sides = split_top(value, b'/');
+    let [rows, columns] = sides.as_slice() else {
+        return None;
+    };
+    for (automatic, explicit, axis) in [
+        (*rows, *columns, GridAutoFlow::Row),
+        (*columns, *rows, GridAutoFlow::Column),
+    ] {
+        let tokens = whitespace_tokens(automatic);
+        let mut pos = 0;
+        let mut flow = false;
+        let mut dense = false;
+        for token in &tokens {
+            if token.eq_ignore_ascii_case("auto-flow") && !flow {
+                flow = true;
+            } else if token.eq_ignore_ascii_case("dense") && !dense {
+                dense = true;
+            } else {
+                break;
+            }
+            pos += 1;
+        }
+        if !flow {
+            continue;
+        }
+        let auto_tracks = if pos == tokens.len() {
+            Value::Initial
+        } else {
+            Value::Tracks(grid::parse_auto_tracks(&tokens[pos..].join(" "))?)
+        };
+        let mut values = std::array::from_fn(|_| Value::Initial);
+        if axis == GridAutoFlow::Row {
+            values[1] = Value::GridTemplate(grid::parse_columns(explicit)?);
+            values[3] = auto_tracks;
+        } else {
+            values[0] = Value::GridTemplate(grid::parse_tracks(explicit)?);
+            values[4] = auto_tracks;
+        }
+        values[5] = Value::GridFlow { axis, dense };
+        return Some(values);
+    }
+    None
 }
 
 fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
@@ -4507,8 +4564,13 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
             .zip(lines.into_iter().map(Value::GridLine))
             .collect();
     }
-    if name == "grid-template" {
+    if matches!(name, "grid-template" | "grid") {
         let Some((rows, columns, areas)) = grid::parse_template(value) else {
+            if name == "grid"
+                && let Some(values) = implicit_grid(value)
+            {
+                return properties.into_iter().zip(values).collect();
+            }
             return vec![];
         };
         return properties
@@ -4517,6 +4579,9 @@ fn parse_assignment(name: &str, source: &str) -> Vec<(Property, Value)> {
                 Value::GridTemplate(rows),
                 Value::GridTemplate(columns),
                 Value::GridAreas(Arc::new(areas)),
+                Value::Initial,
+                Value::Initial,
+                Value::Initial,
             ])
             .collect();
     }
@@ -5124,7 +5189,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
         }
         RowGap | ColumnGap => {
             if v == "normal" {
-                Some(Value::Length(Length::Px(0.).into()))
+                Some(Value::Length(Length::Auto.into()))
             } else {
                 nonnegative_length(v, false).map(Value::Length)
             }
@@ -5135,9 +5200,8 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "break-word" | "anywhere" | "break-all" => true,
             _ => return None,
         })),
-        GridTemplateColumns | GridTemplateRows => {
-            grid::parse_tracks(value).map(Value::GridTemplate)
-        }
+        GridTemplateColumns => grid::parse_columns(value).map(Value::GridTemplate),
+        GridTemplateRows => grid::parse_tracks(value).map(Value::GridTemplate),
         GridTemplateAreas => grid::parse_areas(value).map(Arc::new).map(Value::GridAreas),
         GridAutoColumns | GridAutoRows => grid::parse_auto_tracks(value).map(Value::Tracks),
         GridColumnStart | GridColumnEnd | GridRowStart | GridRowEnd => {
