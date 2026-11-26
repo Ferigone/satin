@@ -46,6 +46,7 @@ impl App {
     pub(super) fn suggestions_visible(&self) -> bool {
         self.address_focus
             && !self.preedit
+            && self.site_info.is_none()
             && !self.devtools_focused
             && self.chrome_menu.is_none()
             && self.history_menu.is_none()

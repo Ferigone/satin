@@ -6,8 +6,6 @@ use super::{
     physical_rect, resize_cursor, rounded_chrome_rect, scaled_rect,
 };
 use crate::updater::{UpdateAction, Updates, View};
-use std::collections::HashSet;
-use winit::{event::ElementState, keyboard::PhysicalKey};
 
 const PANEL_WIDTH: f32 = 350.;
 
@@ -24,8 +22,11 @@ fn panel_rect(width: f32, anchor: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::quiet_cinder;
-    use winit::keyboard::KeyCode;
+    use crate::app::{chrome_keys::OwnedKeys, quiet_cinder};
+    use winit::{
+        event::ElementState,
+        keyboard::{KeyCode, PhysicalKey},
+    };
 
     #[test]
     fn offer_and_restart_have_distinct_hits_inside_both_panels() {
@@ -97,54 +98,6 @@ fn primary_rect(bounds: Rect, action: UpdateAction) -> Rect {
     scaled_rect(1., x, bounds.y + 71., width, 34.)
 }
 
-/// A key consumed by the flyout must not repeat into another surface after
-/// dismissal, including when releasing Alt changes the repeated logical key.
-#[derive(Default)]
-pub(super) struct OwnedKeys {
-    held: HashSet<PhysicalKey>,
-    captured: HashSet<PhysicalKey>,
-}
-
-impl OwnedKeys {
-    fn capture_held(&mut self) {
-        self.captured.extend(self.held.iter().copied());
-    }
-
-    pub(super) fn blocks(
-        &mut self,
-        physical: PhysicalKey,
-        state: ElementState,
-        repeat: bool,
-        synthetic: bool,
-        owns_key: bool,
-    ) -> bool {
-        if state == ElementState::Released {
-            if !synthetic {
-                self.held.remove(&physical);
-                self.captured.remove(&physical);
-            }
-            return true;
-        }
-        if synthetic {
-            return owns_key || self.captured.contains(&physical);
-        }
-        self.held.insert(physical);
-        if repeat {
-            if owns_key {
-                self.captured.insert(physical);
-            }
-            return self.captured.contains(&physical);
-        }
-        // A fresh physical press is new intent, even if a release went to
-        // another window while this window was unfocused.
-        self.captured.remove(&physical);
-        if owns_key {
-            self.captured.insert(physical);
-        }
-        false
-    }
-}
-
 impl App {
     pub(super) fn update_view(&self) -> Option<View> {
         self.updater.as_ref()?.view(self.update_panel)
@@ -174,8 +127,9 @@ impl App {
         if self.update_panel {
             self.dismiss_update_panel();
         } else if self.settings_panel.is_none() && self.update_view().is_some() {
+            self.dismiss_site_info();
             self.update_panel = true;
-            self.update_keys.capture_held();
+            self.chrome_keys.capture_held();
             self.update_ime_blocked = true;
             self.tab_hits_current = false;
             self.clear_update_primary();

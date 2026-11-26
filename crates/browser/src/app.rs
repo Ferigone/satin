@@ -42,6 +42,7 @@ pub(crate) mod address_bar;
 mod address_popup;
 mod bookmark_menu;
 mod bookmarks;
+mod chrome_keys;
 mod chrome_menu;
 mod chrome_motion;
 mod downloads_ui;
@@ -52,6 +53,7 @@ mod navigation_error;
 mod quiet_cinder;
 mod scroll;
 mod settings;
+mod site_info;
 mod tab_behavior;
 mod tab_strip;
 mod visit_store;
@@ -186,6 +188,9 @@ fn physical_rect(scale: f32, rect: Rect) -> Rect {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
     Address,
+    SiteInfo,
+    SiteInfoClose,
+    SiteInfoSurface,
     Suggestion(usize),
     SuggestionBackground,
     Back,
@@ -594,6 +599,9 @@ pub(crate) fn run(
         suggestion_scroll: 0.,
         address_focus: false,
         preedit: false,
+        site_info: None,
+        site_info_ime_blocked: false,
+        chrome_keys: chrome_keys::OwnedKeys::default(),
         select_popup: None,
         hits: vec![],
         tab_hits_current: false,
@@ -653,8 +661,6 @@ pub(crate) fn run(
             .flatten(),
         #[cfg(all(windows, target_arch = "x86_64"))]
         update_panel: false,
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        update_keys: update_ui::OwnedKeys::default(),
         #[cfg(all(windows, target_arch = "x86_64"))]
         update_ime_blocked: false,
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -747,6 +753,9 @@ struct App {
     suggestion_scroll: f32,
     address_focus: bool,
     preedit: bool,
+    site_info: Option<site_info::Panel>,
+    site_info_ime_blocked: bool,
+    chrome_keys: chrome_keys::OwnedKeys,
     select_popup: Option<SelectPopup>,
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
@@ -772,8 +781,6 @@ struct App {
     updater: Option<crate::updater::Updates>,
     #[cfg(all(windows, target_arch = "x86_64"))]
     update_panel: bool,
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    update_keys: update_ui::OwnedKeys,
     #[cfg(all(windows, target_arch = "x86_64"))]
     update_ime_blocked: bool,
     #[cfg(all(windows, target_arch = "x86_64"))]
@@ -824,6 +831,7 @@ impl App {
         let pointer = (self.pointer_in(bounds)
             && self.settings_panel.is_none()
             && self.history_menu.is_none()
+            && self.site_info.is_none()
             && self.chrome_menu.is_none()
             && self.downloads_panel.is_none()
             && self.frame_resize_at_pointer().is_none())
@@ -831,7 +839,9 @@ impl App {
         DockFrame {
             bounds,
             scale: self.scale,
-            focused: self.devtools_focused && self.downloads_panel.is_none(),
+            focused: self.devtools_focused
+                && self.downloads_panel.is_none()
+                && self.site_info.is_none(),
             pointer,
             tab: tab.id,
             document_navigation: tab.document_navigation,
@@ -1052,6 +1062,7 @@ impl App {
             dock.picking = false;
         }
         self.dismiss_history_menu();
+        self.dismiss_site_info();
         self.dismiss_downloads();
         self.chrome_menu = None;
         self.select_popup = None;
@@ -1094,6 +1105,9 @@ impl App {
         if !opened.http_status().is_some_and(|code| (200..300).contains(&code)) {
             self.tabs[index].visit_pending = false;
         }
+        if index == self.active {
+            self.dismiss_site_info();
+        }
         let history = self.tabs[index].history.clone();
         let storage = self.tabs[index].storage.clone();
         match DocumentSession::start_in_tab(opened, history, storage) {
@@ -1112,6 +1126,7 @@ impl App {
     fn fail_page(&mut self, index: usize, error: &str) {
         self.sync_console(index);
         if index == self.active {
+            self.dismiss_site_info();
             self.select_popup = None;
             self.hover = None;
         }
@@ -1278,8 +1293,11 @@ impl App {
             && tab.url != page.url
         {
             tab.url.clone_from(&page.url);
-            if index == self.active && !self.address_focus {
-                self.sync_address();
+            if index == self.active {
+                self.dismiss_site_info();
+                if !self.address_focus {
+                    self.sync_address();
+                }
             }
             self.save();
             changed = true;
@@ -1475,6 +1493,7 @@ impl App {
         restore: Option<HistoryScroll>,
     ) {
         if index == self.active {
+            self.dismiss_site_info();
             self.select_popup = None;
         }
         let url = match normalize_url(&input) {
@@ -1575,6 +1594,9 @@ impl App {
         self.save();
     }
     fn apply_history_transition(&mut self, index: usize, transition: HistoryTransition) {
+        if index == self.active {
+            self.dismiss_site_info();
+        }
         let tab = &mut self.tabs[index];
         if let Some(runtime) = &mut tab.runtime {
             if let Err(error) = runtime.apply_history_transition(transition) {
@@ -1717,6 +1739,7 @@ impl App {
         if index >= self.tabs.len() {
             return;
         }
+        self.dismiss_site_info();
         self.tab_hits_current = false;
         self.active = index;
         self.reveal_active_tab();
@@ -1739,6 +1762,9 @@ impl App {
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        if action != Action::SiteInfo {
+            self.dismiss_site_info();
+        }
         if action != Action::Address && !action.address_suggestion() {
             self.dismiss_address_suggestions();
         }
@@ -1756,6 +1782,8 @@ impl App {
             #[cfg(all(windows, target_arch = "x86_64"))]
             Action::UpdateSurface => {}
             Action::Address => self.focus_address(),
+            Action::SiteInfo => self.toggle_site_info(),
+            Action::SiteInfoClose | Action::SiteInfoSurface => {}
             Action::Suggestion(index) => {
                 if self.suggestions_visible()
                     && let Some(row) = self.address_suggestions.rows().get(index)
@@ -1974,7 +2002,7 @@ impl App {
         event_loop.exit();
     }
     fn insert(&mut self, text: &str) {
-        if self.downloads_panel.is_some() || self.update_panel_open() {
+        if self.downloads_panel.is_some() || self.site_info.is_some() || self.update_panel_open() {
             return;
         }
         if self.devtools_focused
@@ -2124,6 +2152,9 @@ impl App {
         if editor_arrow {
             // Keep Ctrl+Shift+arrows in the focused editor or document control.
             command = None;
+        }
+        if self.site_info_key(&key, repeat, command.is_some()) {
+            return;
         }
         if command == Some(Command::Downloads) {
             if !repeat {
@@ -2759,6 +2790,7 @@ impl App {
         self.draw_address_suggestions(canvas, width, height);
         self.draw_chrome_menu(canvas, width);
         self.draw_history_menu(canvas, width);
+        self.draw_site_info(canvas, width, height);
     }
 
     fn draw_tabs(&mut self, canvas: &mut Canvas, width: f32) {
@@ -3041,18 +3073,14 @@ impl App {
         let address_rect = chrome_box(layout.address);
         let address_focus = self.address_focus
             && !self.devtools_focused
+            && self.site_info.is_none()
             && self.downloads_panel.is_none()
             && !self.update_panel_open();
         address_bar::chrome::paint_address_field(canvas, address_rect, u, address_focus);
-        paint_centered_glyph(
-            canvas,
-            chrome_box(layout.location),
-            17.,
-            u,
-            icons::Glyph::Search,
-            CHROME_ICON,
-        );
+        self.hits.push((address_rect, Action::Address));
+        self.draw_site_anchor(canvas, &layout);
 
+        let tab = &self.tabs[self.active];
         let url = bookmarks::page_url(&tab.url);
         let marked = url.as_ref().is_some_and(|url| {
             self.bookmarks
@@ -3152,7 +3180,6 @@ impl App {
             width: canvas.width as f32,
             height: canvas.height as f32,
         });
-        self.hits.push((address_rect, Action::Address));
         if can_bookmark {
             self.hits.push((star_rect, Action::ToggleBookmark));
         }
@@ -3200,6 +3227,7 @@ impl App {
     fn favorites_occluded(&self) -> bool {
         self.chrome_menu.is_some()
             || self.suggestions_visible()
+            || self.site_info.is_some()
             || self.history_menu.is_some()
             || self.settings_panel.is_some()
             || self.downloads_panel.is_some()
@@ -3760,6 +3788,9 @@ impl App {
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
                 Action::TabListItem(_) => matches!(self.chrome_menu, Some(Menu::Tabs(_))),
+                Action::SiteInfoClose | Action::SiteInfoSurface => {
+                    self.site_info.is_some() && self.tab_hits_current
+                }
                 action if action.address_suggestion() => self.suggestions_visible(),
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 Action::UpdatePanel => self.update_view().is_some(),
@@ -3859,6 +3890,14 @@ impl App {
                 self.dismiss_downloads();
             } else {
                 self.downloads_press();
+                return;
+            }
+        }
+        if self.site_info.is_some() {
+            if self.caption_action_at_pointer().is_some() {
+                self.dismiss_site_info();
+            } else {
+                self.site_info_press(true);
                 return;
             }
         }
@@ -3973,6 +4012,7 @@ impl App {
         if self.settings_panel.is_some()
             || self.history_menu.is_some()
             || self.downloads_panel.is_some()
+            || self.site_info.is_some()
             || self.update_panel_open()
             || !self.pointer_in(self.window_regions(self.active).page)
         {
@@ -4048,6 +4088,10 @@ impl App {
         #[cfg(all(windows, target_arch = "x86_64"))]
         if self.update_panel {
             self.update_panel_pointer();
+            return;
+        }
+        if self.site_info.is_some() {
+            self.update_site_info_pointer();
             return;
         }
         let regions = self.window_regions(self.active);
@@ -4250,6 +4294,7 @@ impl App {
             self.dismiss_downloads();
             return;
         }
+        self.dismiss_site_info();
         self.dismiss_history_menu();
         self.chrome_menu = None;
         self.select_popup = None;
@@ -5085,6 +5130,7 @@ impl ApplicationHandler<()> for App {
                 let caption_changed = self.caption_pressed.take().is_some();
                 self.settings_cancel_pointer();
                 self.dismiss_address_suggestions();
+                self.dismiss_site_info();
                 self.wheel = None;
                 self.resizing_dock = false;
                 self.preedit = false;
@@ -5101,18 +5147,17 @@ impl ApplicationHandler<()> for App {
                 is_synthetic,
                 ..
             } => {
+                let owns_key = self.site_info.is_some();
                 #[cfg(all(windows, target_arch = "x86_64"))]
-                {
-                    let owns_key = self.update_owns_key(&event.logical_key);
-                    if self.update_keys.blocks(
-                        event.physical_key,
-                        event.state,
-                        event.repeat,
-                        is_synthetic,
-                        owns_key,
-                    ) {
-                        return;
-                    }
+                let owns_key = owns_key || self.update_owns_key(&event.logical_key);
+                if self.chrome_keys.blocks(
+                    event.physical_key,
+                    event.state,
+                    event.repeat,
+                    is_synthetic,
+                    owns_key,
+                ) {
+                    return;
                 }
                 if event.state != ElementState::Pressed {
                     return;
@@ -5143,12 +5188,18 @@ impl ApplicationHandler<()> for App {
             // Windows sends Enabled at the start of a new composition. A
             // pending Commit from disabling IME belongs to the old surface,
             // even if Escape or a click has since closed the flyout.
-            #[cfg(all(windows, target_arch = "x86_64"))]
-            WindowEvent::Ime(Ime::Enabled) if !self.update_panel => {
-                self.update_ime_blocked = false;
+            WindowEvent::Ime(Ime::Enabled) => {
+                self.site_info_ime_blocked = self.site_info.is_some();
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if !self.update_panel {
+                    self.update_ime_blocked = false;
+                }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
+                if std::mem::take(&mut self.site_info_ime_blocked) || self.site_info.is_some() {
+                    return;
+                }
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 if self.update_ime_blocked {
                     return;
@@ -5156,6 +5207,10 @@ impl ApplicationHandler<()> for App {
                 self.insert(&text);
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                if self.site_info.is_some() {
+                    self.site_info_ime_blocked |= !text.is_empty();
+                    return;
+                }
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 if self.update_ime_blocked {
                     return;
@@ -5204,6 +5259,8 @@ impl ApplicationHandler<()> for App {
             } => {
                 if button == MouseButton::Left {
                     self.left_press(event_loop);
+                } else if self.site_info.is_some() {
+                    self.site_info_press(false);
                 } else if button == MouseButton::Right
                     && self.pointer_inside
                     && self.history_menu.is_none()
@@ -5246,6 +5303,7 @@ impl ApplicationHandler<()> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_panel.is_some()
                     || self.history_menu.is_some()
+                    || self.site_info.is_some()
                     || self.update_panel_open()
                 {
                     return;
