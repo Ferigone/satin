@@ -15,7 +15,7 @@
 //! Native per-tab history is retained as such; fixed Cinder has no appearance row.
 
 use super::{
-    Action, ActiveEventLoop, App, Canvas, Color, Command, Fonts, MENU_ITEMS, Rect, elide,
+    Action, ActiveEventLoop, App, Canvas, Color, Command, Fonts, MENU_ITEMS, Rect, TAB_H, elide,
     icons::Glyph, paint_centered_glyph, rounded_chrome_rect, scaled_rect, shortcuts,
 };
 
@@ -215,21 +215,24 @@ impl Layout {
     fn new(window_width: f32, window_height: f32, anchor: Rect) -> Option<Self> {
         let width = WIDTH.min(window_width - 18.);
         let rows_height = ROWS.iter().map(|row| row.height()).sum::<f32>();
-        // At the supported 640x400 minimum all rows fit at native size.
-        let height = (rows_height + 2. * PADDING).min(window_height - 20.);
+        // Compress only when the full panel cannot fit below native titlebar
+        // hits. Its first row must never compete with caption or tab targets.
+        let floor = TAB_H;
+        let bottom = window_height - VIEWPORT_GAP;
+        let height = (rows_height + 2. * PADDING).min(bottom - floor);
         let density = (height - 2. * PADDING) / rows_height;
         if width < 190. || density < 0.75 {
             return None;
         }
         let right = anchor.x + anchor.width;
         let mut top = anchor.y + anchor.height + ANCHOR_GAP;
-        if top + height > window_height - VIEWPORT_GAP && anchor.y > height + VIEWPORT_GAP {
+        if top + height > bottom && anchor.y - 6. - height >= floor {
             top = anchor.y - height - 6.;
         }
         Some(Self {
             panel: Rect {
                 x: (right - width).clamp(VIEWPORT_GAP, window_width - width - VIEWPORT_GAP),
-                y: top.clamp(VIEWPORT_GAP, window_height - height - VIEWPORT_GAP),
+                y: top.clamp(floor, (bottom - height).max(floor)),
                 width,
                 height,
             },
@@ -529,34 +532,37 @@ mod tests {
 
     #[test]
     fn follows_the_toolbar_anchor_and_keeps_all_rows_inside_the_minimum_window() {
-        let anchor = Rect {
-            x: 581.,
-            y: 67.,
-            width: 46.,
-            height: 46.,
+        let anchor = |width| {
+            let menu = crate::app::quiet_cinder::Toolbar::new(width).menu;
+            crate::app::chrome_box(menu)
         };
-        let normal = Layout::new(640., 640., anchor).unwrap();
+        let normal = Layout::new(1280., 800., anchor(1280.)).unwrap();
         assert_eq!(
             normal.panel,
             Rect {
-                x: 275.,
-                y: 118.,
+                x: 917.,
+                y: 87.5,
                 width: 352.,
-                height: 372.,
+                height: 407.,
             }
         );
-        let minimum = Layout::new(640., 400., anchor).unwrap();
-        assert_eq!(minimum.panel.y, 20.);
-        assert_eq!(minimum.panel.height, normal.panel.height);
-        let mut edge = minimum.panel.y + PADDING;
-        for (row, bounds) in minimum.rows() {
-            assert_eq!(bounds.y, edge);
-            assert_eq!(bounds.x, minimum.panel.x + PADDING);
-            assert_eq!(bounds.width, minimum.panel.width - 2. * PADDING);
-            assert_eq!(bounds.height, row.height());
-            edge += bounds.height;
+        assert_eq!(normal.density, 1.);
+        for width in [390., 640.] {
+            let minimum = Layout::new(width, 400., anchor(width)).unwrap();
+            assert_eq!(minimum.panel.y, TAB_H);
+            assert_eq!(minimum.panel.y + minimum.panel.height, 400. - VIEWPORT_GAP);
+            assert!(minimum.panel.x >= VIEWPORT_GAP);
+            assert!(minimum.panel.x + minimum.panel.width <= width - VIEWPORT_GAP);
+            let mut edge = minimum.panel.y + PADDING;
+            for (row, bounds) in minimum.rows() {
+                assert_eq!(bounds.y, edge);
+                assert_eq!(bounds.x, minimum.panel.x + PADDING);
+                assert_eq!(bounds.width, minimum.panel.width - 2. * PADDING);
+                assert_eq!(bounds.height, row.height() * minimum.density);
+                edge += bounds.height;
+            }
+            assert!((edge + PADDING - minimum.panel.y - minimum.panel.height).abs() < 0.01);
         }
-        assert_eq!(edge + PADDING, minimum.panel.y + minimum.panel.height);
     }
 
     #[test]
