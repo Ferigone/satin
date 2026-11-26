@@ -19,6 +19,7 @@ pub enum Command {
     ZoomOut,
     ResetZoom,
     Menu,
+    Downloads,
     BookmarkPage,
     ToggleDevtools,
     InspectElement,
@@ -152,6 +153,12 @@ const BINDINGS: &[Binding] = &[
         "Reset zoom to 100%",
     ),
     binding(
+        Command::Downloads,
+        &[Chord::CtrlPlainChar("j")],
+        "Ctrl+J",
+        "Toggle the Downloads panel",
+    ),
+    binding(
         Command::BookmarkPage,
         &[Chord::CtrlPlainChar("d")],
         "Ctrl+D",
@@ -271,6 +278,7 @@ mod tests {
             (character("-"), ctrl, Command::ZoomOut),
             (character("0"), ctrl, Command::ResetZoom),
             (character("d"), ctrl, Command::BookmarkPage),
+            (character("J"), ctrl, Command::Downloads),
             (character("F"), alt, Command::Menu),
         ];
         for (key, modifiers, expected) in cases {
@@ -292,6 +300,9 @@ mod tests {
             (character("1"), ctrl),
             (character("D"), ctrl | Mods::SHIFT),
             (character("d"), ctrl | Mods::SUPER),
+            (character("J"), ctrl | Mods::SHIFT),
+            (character("j"), ctrl | Mods::SUPER),
+            (character("j"), ctrl | Mods::ALT),
             // Local editing and AltGr text must not become browser commands.
             (character("a"), ctrl),
             (character("l"), ctrl | Mods::ALT),

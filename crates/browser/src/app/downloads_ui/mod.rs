@@ -3,7 +3,10 @@
 
 mod row;
 
-use super::{elide, rounded_chrome_rect, scaled_rect};
+use super::{
+    chrome_elide, chrome_shape, icons::Glyph, paint_centered_glyph, rounded_chrome_rect,
+    scaled_rect,
+};
 use row::{Action as RowAction, Event, Failure, Row, SavedFileActions};
 use rust_browser_engine::{Fonts, Rect, css::Color, paint::Canvas};
 use std::{borrow::Cow, collections::VecDeque};
@@ -28,13 +31,11 @@ pub(super) enum Start {
 
 fn caption(entry: &Row) -> String {
     let view = entry.view();
-    if let Some(bytes) = view.saved_bytes {
-        format!("{} · Saved", byte_count(bytes))
-    } else if let Some(bytes) = view
-        .progress
-        .map(|progress| progress.written)
-        .filter(|&n| n > 0)
-    {
+    if let Some(bytes) = view.saved_bytes.or_else(|| {
+        view.progress
+            .map(|progress| progress.written)
+            .filter(|&n| n > 0)
+    }) {
         format!("{} · {}", byte_count(bytes), view.status)
     } else if let Some(detail) = view.detail {
         format!("{} · {detail}", view.status)
@@ -78,11 +79,7 @@ impl Downloads {
             })
             .take(255)
             .collect::<String>();
-        let name = if name.is_empty() {
-            "Download".into()
-        } else {
-            name
-        };
+        let name = if name.is_empty() { "Plik".into() } else { name };
         let mut row = Row::new(id, name, None);
         match state {
             Start::Transfer => {}
@@ -106,10 +103,13 @@ impl Downloads {
         self.entries.iter().any(Row::is_active)
     }
 
-    pub(super) fn progress(&mut self, id: u64, bytes: u64) {
+    pub(super) fn progress(&mut self, id: u64, bytes: u64) -> bool {
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == id) {
+            let previous = entry.view().progress;
             entry.apply(id, Event::BytesWritten(bytes));
+            return previous != entry.view().progress;
         }
+        false
     }
 
     /// Only call after matching the ID against a live transfer in App; the
@@ -122,8 +122,10 @@ impl Downloads {
         )
     }
 
-    pub(super) fn finish(&mut self, id: u64, result: &Result<u64, String>) {
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == id) {
+    pub(super) fn finish(&mut self, id: u64, result: &Result<u64, String>) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id() == id)
+            && entry.is_active()
+        {
             // A cancellation request can lose the race with publishing a
             // saved file. Only the worker's result determines the outcome.
             let event = match result {
@@ -133,7 +135,9 @@ impl Downloads {
             };
             entry.apply(id, event);
             self.trim();
+            return true;
         }
+        false
     }
 }
 
@@ -150,9 +154,17 @@ pub(super) struct Panel {
     all: bool,
     first: usize,
     focused: Option<Action>,
+    wheel: f32,
 }
 
 impl Panel {
+    pub(super) fn open(keyboard: bool) -> Self {
+        Self {
+            focused: keyboard.then_some(Action::Dismiss),
+            ..Self::default()
+        }
+    }
+
     /// `window` and the toolbar `anchor` are in logical window pixels.
     pub(super) fn layout<'a>(
         &self,
@@ -205,19 +217,43 @@ impl Panel {
     pub(super) fn show_all(&mut self, all: bool) {
         self.all = all;
         self.first = 0;
-        self.focused = None;
+        self.wheel = 0.;
+        self.focused = self.focused.map(|_| {
+            if all {
+                Action::ShowRecent
+            } else {
+                Action::ShowAll
+            }
+        });
     }
 
     /// Scroll by whole rows; no partially drawn row has a clickable action.
-    pub(super) fn scroll_rows(&mut self, layout: &Layout<'_>, rows: isize) {
+    fn scroll_rows(&mut self, layout: &Layout<'_>, rows: isize) -> bool {
         let next = layout
             .first
             .saturating_add_signed(rows)
             .min(layout.max_first);
         if next != layout.first {
             self.first = next;
-            self.focused = None;
+            return true;
         }
+        false
+    }
+
+    pub(super) fn scroll_page(&mut self, layout: &Layout<'_>, previous: bool) -> bool {
+        self.wheel = 0.;
+        let rows = layout.visible as isize;
+        self.scroll_rows(layout, if previous { -rows } else { rows })
+    }
+
+    pub(super) fn wheel(&mut self, layout: &Layout<'_>, delta: f32) -> bool {
+        if !delta.is_finite() || layout.max_first == 0 {
+            return false;
+        }
+        self.wheel += delta;
+        let rows = (self.wheel / ROW) as isize;
+        self.wheel %= ROW;
+        self.scroll_rows(layout, rows)
     }
 
     pub(super) fn move_focus(&mut self, layout: &Layout<'_>, previous: bool) {
@@ -319,6 +355,27 @@ impl Layout<'_> {
         self.controls()
             .find_map(|(bounds, action)| bounds.contains(x, y).then_some(action))
     }
+
+    pub(super) fn hit_frame(&self) -> HitFrame {
+        HitFrame {
+            bounds: self.bounds,
+            controls: self.controls().collect(),
+        }
+    }
+}
+
+/// Targets from the last successfully presented frame, not the newest model.
+pub(super) struct HitFrame {
+    pub(super) bounds: Rect,
+    controls: Vec<(Rect, Action)>,
+}
+
+impl HitFrame {
+    pub(super) fn hit(&self, x: f32, y: f32) -> Option<Action> {
+        self.controls
+            .iter()
+            .find_map(|(bounds, action)| bounds.contains(x, y).then_some(*action))
+    }
 }
 
 pub(super) struct Colors {
@@ -346,48 +403,6 @@ fn inset(r: Rect, by: f32) -> Rect {
 
 fn physical(r: Rect, scale: f32) -> Rect {
     scaled_rect(scale, r.x, r.y, r.width, r.height)
-}
-
-enum Glyph {
-    File,
-    Close,
-    External,
-}
-
-impl Glyph {
-    fn draw(self, canvas: &mut Canvas, center: (f32, f32), scale: f32, color: Color) {
-        // Reference icons use a 24-unit viewBox, painted at 17 DIPs.
-        let paths: &[&[(f32, f32)]] = match self {
-            Self::File => &[
-                &[
-                    (14., 2.),
-                    (6., 2.),
-                    (4., 4.),
-                    (4., 20.),
-                    (6., 22.),
-                    (18., 22.),
-                    (20., 20.),
-                    (20., 8.),
-                    (14., 2.),
-                    (14., 8.),
-                    (20., 8.),
-                ],
-                &[(8., 13.), (16., 13.)],
-                &[(8., 17.), (16., 17.)],
-            ],
-            Self::Close => &[&[(6., 6.), (18., 18.)], &[(18., 6.), (6., 18.)]],
-            Self::External => &[&[(7., 17.), (17., 7.)], &[(8., 7.), (17., 7.), (17., 16.)]],
-        };
-        let k = 17. / 24.;
-        let x = |v: f32| (center.0 + (v - 12.) * k) * scale;
-        let y = |v: f32| (center.1 + (v - 12.) * k) * scale;
-        for path in paths {
-            for points in path.windows(2) {
-                let [(x1, y1), (x2, y2)] = [points[0], points[1]];
-                canvas.stroke_line(x(x1), y(y1), x(x2), y(y2), 1.65 * k * scale, color);
-            }
-        }
-    }
 }
 
 pub(super) fn draw(
@@ -436,12 +451,7 @@ pub(super) fn draw(
             rounded_chrome_rect(canvas, physical(bounds, scale), 6. * scale, colors.hover);
         }
         if matches!(action, Action::Dismiss | Action::Cancel(_)) {
-            Glyph::Close.draw(
-                canvas,
-                (bounds.x + bounds.width / 2., bounds.y + bounds.height / 2.),
-                scale,
-                colors.icon,
-            );
+            paint_centered_glyph(canvas, bounds, 17., scale, Glyph::X, colors.icon);
         }
     }
 
@@ -449,7 +459,7 @@ pub(super) fn draw(
     label(
         canvas,
         fonts,
-        "Downloads",
+        "Pobrane pliki",
         r.x + 14.,
         close.y + 17.,
         close.x - r.x - 19.,
@@ -462,7 +472,7 @@ pub(super) fn draw(
         label(
             canvas,
             fonts,
-            "No downloads yet.",
+            "Brak pobranych plików.",
             r.x + 15.,
             r.y + HEADER + 13.,
             r.width - 30.,
@@ -473,9 +483,25 @@ pub(super) fn draw(
         );
     }
     for (row, entry) in layout.rows() {
-        Glyph::File.draw(canvas, (row.x + 18.5, row.y + ROW / 2.), scale, colors.text);
         let x = row.x + 37.;
         let view = entry.view();
+        let glyph = if view
+            .name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md"))
+        {
+            Glyph::Notebook
+        } else {
+            Glyph::FileText
+        };
+        paint_centered_glyph(
+            canvas,
+            rect(row.x + 10., row.y, 17., ROW),
+            17.,
+            scale,
+            glyph,
+            colors.text,
+        );
         let action_width = if view.actions.contains(&RowAction::Cancel) {
             41.
         } else {
@@ -525,16 +551,18 @@ pub(super) fn draw(
     let footer = layout.footer();
     let divider = rect(footer.x + 3., footer.y - 6., footer.width - 6., 1.);
     canvas.fill_rect(physical(divider, scale), colors.line);
-    Glyph::External.draw(
+    paint_centered_glyph(
         canvas,
-        (footer.x + 16.5, footer.y + FOOTER / 2.),
+        rect(footer.x + 8., footer.y, 17., FOOTER),
+        17.,
         scale,
+        Glyph::ArrowUpRight,
         colors.muted,
     );
     let text = if layout.footer == Action::ShowAll {
-        "Show all files"
+        "Pokaż wszystkie pliki"
     } else {
-        "Show recent files"
+        "Pokaż ostatnie pliki"
     };
     label(
         canvas,
@@ -566,24 +594,24 @@ fn label(
     if width < size {
         return;
     }
+    let weight = if bold { 700 } else { 400 };
     let text = if bold {
-        fit_bold(fonts, text, width * scale, size * scale)
+        fit_bold(fonts, text, width * scale, size * scale, weight)
     } else {
-        Cow::Owned(elide(fonts, text, width * scale, size * scale))
+        Cow::Owned(chrome_elide(
+            fonts,
+            text,
+            width * scale,
+            size * scale,
+            weight,
+        ))
     };
-    canvas.label(
-        &text,
-        x * scale,
-        baseline * scale,
-        size * scale,
-        color,
-        bold,
-        fonts,
-    );
+    let run = chrome_shape(fonts, &text, size * scale, weight);
+    canvas.text(x * scale, baseline * scale, &run, color, fonts);
 }
 
-fn fit_bold<'a>(fonts: &Fonts, name: &'a str, width: f32, size: f32) -> Cow<'a, str> {
-    let fits = |candidate: &str| fonts.shape(candidate, size, true, false, false).advance <= width;
+fn fit_bold<'a>(fonts: &Fonts, name: &'a str, width: f32, size: f32, weight: u16) -> Cow<'a, str> {
+    let fits = |candidate: &str| chrome_shape(fonts, candidate, size, weight).advance <= width;
     if fits(name) {
         return Cow::Borrowed(name);
     }
@@ -651,16 +679,16 @@ mod tests {
         downloads.record(2, "second.txt", Start::Transfer);
         downloads.progress(1, 2048);
         downloads.progress(1, 256);
-        assert_eq!(caption(&downloads.entries[1]), "2.0 KiB · Downloading…");
+        assert_eq!(caption(&downloads.entries[1]), "2.0 KiB · Pobieranie…");
         assert!(downloads.request_cancel(1));
         downloads.progress(1, 4096);
-        assert_eq!(caption(&downloads.entries[1]), "Canceling…");
+        assert_eq!(caption(&downloads.entries[1]), "Anulowanie…");
         downloads.finish(1, &Ok(5000));
         downloads.finish(1, &Err("Download cancelled".into()));
         assert_eq!(downloads.entries[1].view().saved_bytes, Some(5000));
         assert!(downloads.request_cancel(2));
         downloads.finish(2, &Err("Download cancelled".into()));
-        assert_eq!(caption(&downloads.entries[0]), "Canceled");
+        assert_eq!(caption(&downloads.entries[0]), "Anulowano");
         assert!(!downloads.has_active());
     }
 
@@ -717,6 +745,41 @@ mod tests {
     }
 
     #[test]
+    fn pointer_frame_retains_the_painted_id_after_an_insert() {
+        let mut downloads = Downloads::default();
+        downloads.record(21, "first.txt", Start::Transfer);
+        let panel = Panel::open(true);
+        let layout = panel.layout(&downloads, viewport(), toolbar()).unwrap();
+        let first = layout.rows().next().unwrap().0;
+        let point = center(Layout::cancel_button(first));
+        let frame = layout.hit_frame();
+        assert_eq!(panel.focused(&layout), Some(Action::Dismiss));
+        downloads.record(22, "second.txt", Start::Transfer);
+        let layout = panel.layout(&downloads, viewport(), toolbar()).unwrap();
+        assert_eq!(layout.hit(point.0, point.1), Some(Action::Cancel(22)));
+        assert_eq!(frame.hit(point.0, point.1), Some(Action::Cancel(21)));
+    }
+
+    #[test]
+    fn all_files_accumulates_precision_wheel_and_pages_without_click_through() {
+        let mut downloads = Downloads::default();
+        for id in 1..=16 {
+            downloads.record(id, "sample.txt", Start::Cancelled);
+        }
+        let mut panel = Panel::open(true);
+        panel.show_all(true);
+        let layout = panel.layout(&downloads, viewport(), toolbar()).unwrap();
+        assert_eq!(panel.focused(&layout), Some(Action::ShowRecent));
+        assert!(!panel.wheel(&layout, ROW / 2.));
+        assert!(panel.wheel(&layout, ROW / 2.));
+        let layout = panel.layout(&downloads, viewport(), toolbar()).unwrap();
+        assert_eq!(layout.first, 1);
+        assert!(panel.scroll_page(&layout, false));
+        let layout = panel.layout(&downloads, viewport(), toolbar()).unwrap();
+        assert_eq!(layout.first, 1 + layout.visible);
+    }
+
+    #[test]
     fn retention_does_not_evict_a_running_transfer() {
         let mut downloads = Downloads::default();
         downloads.record(1, "first.txt", Start::Transfer);
@@ -727,6 +790,6 @@ mod tests {
         assert_eq!(downloads.entries.len(), RETAINED);
         assert_eq!(downloads.entries.back().unwrap().id(), 1);
         downloads.finish(1, &Err("I/O error".into()));
-        assert_eq!(downloads.entries.back().unwrap().view().status, "Failed");
+        assert_eq!(downloads.entries.back().unwrap().view().status, "Błąd");
     }
 }

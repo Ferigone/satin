@@ -51,12 +51,12 @@ impl Failure {
     fn message(self) -> &'static str {
         match self {
             #[cfg(test)]
-            Self::Connection => "Connection interrupted.",
-            Self::Save => "Could not save the file.",
+            Self::Connection => "Połączenie przerwane.",
+            Self::Save => "Nie udało się zapisać pliku.",
             #[cfg(test)]
-            Self::Blocked => "The file was blocked by download protection.",
+            Self::Blocked => "Plik został zablokowany przez ochronę pobierania.",
             #[cfg(test)]
-            Self::Cleanup => "Could not remove the partial file.",
+            Self::Cleanup => "Nie udało się usunąć pliku częściowego.",
         }
     }
 }
@@ -188,9 +188,9 @@ impl Row {
         let (status, detail, progress) = match self.state {
             State::Transferring { written, total } => (
                 if total == Some(written) {
-                    "Finishing…"
+                    "Kończenie…"
                 } else {
-                    "Downloading…"
+                    "Pobieranie…"
                 },
                 None,
                 Some(Progress {
@@ -200,12 +200,12 @@ impl Row {
                         .map(|total| (u128::from(written) * 100 / u128::from(total)) as u8),
                 }),
             ),
-            State::Canceling => ("Canceling…", None, None),
-            State::Ready(..) => ("Ready", None, None),
+            State::Canceling => ("Anulowanie…", None, None),
+            State::Ready(..) => ("Gotowe", None, None),
             #[cfg(test)]
-            State::Unavailable => ("File unavailable", None, None),
-            State::Canceled => ("Canceled", None, None),
-            State::Failed(reason) => ("Failed", Some(reason.message()), None),
+            State::Unavailable => ("Plik niedostępny", None, None),
+            State::Canceled => ("Anulowano", None, None),
+            State::Failed(reason) => ("Błąd", Some(reason.message()), None),
         };
         RowView {
             name: &self.name,

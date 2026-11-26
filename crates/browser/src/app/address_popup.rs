@@ -6,7 +6,7 @@ use super::{
     address_bar::suggestions::{Direction, Source},
     chrome_box,
     icons::Glyph,
-    paint_centered_glyph, quiet_cinder, scaled_rect,
+    paint_centered_glyph, quiet_cinder, reserve_downloads_button, scaled_rect,
 };
 
 impl App {
@@ -50,6 +50,7 @@ impl App {
             && self.chrome_menu.is_none()
             && self.history_menu.is_none()
             && self.settings_panel.is_none()
+            && self.downloads_panel.is_none()
             && !self.address_suggestions.rows().is_empty()
     }
 
@@ -59,8 +60,10 @@ impl App {
         rows: &'a [super::address_bar::chrome::SuggestionRow<'a>],
         scroll: f32,
     ) -> Option<SuggestionPopup<'a>> {
+        let mut toolbar = quiet_cinder::Toolbar::new(width);
+        reserve_downloads_button(&mut toolbar);
         SuggestionPopup::new(
-            chrome_box(quiet_cinder::Toolbar::new(width).address),
+            chrome_box(toolbar.address),
             scaled_rect(1., 0., 0., width, height),
             rows,
             scroll,

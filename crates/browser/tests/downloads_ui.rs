@@ -46,10 +46,10 @@ fn offline_fixture_presents_the_four_primary_states() {
     println!("Offline downloads fixture (no network or download files)\n{snapshot}");
     assert_eq!(
         snapshot,
-        "notes.txt | Ready | Open | Show in folder\n\
-         schedule.csv | Downloading… 50 / 200 B (25%) | Cancel\n\
-         agenda.txt | Canceled\n\
-         reading-list.txt | Failed Connection interrupted."
+        "notes.txt | Gotowe | Open | Show in folder\n\
+         schedule.csv | Pobieranie… 50 / 200 B (25%) | Cancel\n\
+         agenda.txt | Anulowano\n\
+         reading-list.txt | Błąd Połączenie przerwane."
     );
 }
 
@@ -69,13 +69,13 @@ fn bytes_are_monotonic_and_only_save_acknowledgment_makes_the_row_ready() {
 
     item.apply(1, Event::BytesWritten(u64::MAX));
     assert_eq!(item.view().progress.unwrap().percent, Some(100));
-    assert_eq!(item.view().status, "Finishing…");
+    assert_eq!(item.view().status, "Kończenie…");
     assert_eq!(item.view().actions, &[Action::Cancel]);
     assert_eq!(item.activate(Action::Open), None);
     assert_eq!(item.activate(Action::ShowInFolder), None);
 
     item.apply(1, Event::Saved(u64::MAX, SavedFileActions::RevealOnly));
-    assert_eq!(item.view().status, "Ready");
+    assert_eq!(item.view().status, "Gotowe");
     assert_eq!(item.view().progress, None);
     assert_eq!(item.view().saved_bytes, Some(u64::MAX));
 }
@@ -85,7 +85,7 @@ fn unknown_zero_and_inconsistent_totals_are_indeterminate() {
     for (total, written) in [(None, 20), (Some(0), 0), (Some(15), 20)] {
         let mut item = row(1, "notes.txt", total);
         item.apply(1, Event::BytesWritten(written));
-        assert_eq!(item.view().status, "Downloading…");
+        assert_eq!(item.view().status, "Pobieranie…");
         assert_eq!(
             item.view().progress,
             Some(Progress {
@@ -109,7 +109,7 @@ fn cancel_waits_for_worker_acknowledgment_and_terminal_rows_ignore_late_events()
     );
     item.apply(1, Event::Canceled);
     item.apply(8, Event::BytesWritten(90));
-    assert_eq!(item.view().status, "Canceling…");
+    assert_eq!(item.view().status, "Anulowanie…");
     assert_eq!(item.view().progress, None);
     assert_eq!(item.activate(Action::Cancel), None);
 
@@ -117,7 +117,7 @@ fn cancel_waits_for_worker_acknowledgment_and_terminal_rows_ignore_late_events()
     item.apply(8, Event::Saved(100, SavedFileActions::OpenAndReveal));
     item.apply(8, Event::Failed(Failure::Save));
     item.apply(8, Event::BytesWritten(100));
-    assert_eq!(item.view().status, "Canceled");
+    assert_eq!(item.view().status, "Anulowano");
     assert_eq!(item.view().actions, &[]);
     assert_eq!(item.activate(Action::Open), None);
     assert_eq!(item.activate(Action::ShowInFolder), None);
@@ -129,7 +129,7 @@ fn worker_may_report_a_save_that_won_the_cancel_race() {
     assert!(item.activate(Action::Cancel).is_some());
     item.apply(9, Event::Saved(25, SavedFileActions::OpenAndReveal));
     item.apply(9, Event::Canceled);
-    assert_eq!(item.view().status, "Ready");
+    assert_eq!(item.view().status, "Gotowe");
     assert_eq!(item.activate(Action::Cancel), None);
     assert_eq!(
         item.activate(Action::Open),
@@ -144,7 +144,7 @@ fn worker_may_report_a_save_that_won_the_cancel_race() {
 fn reveal_only_policy_and_unavailable_files_disable_stale_actions() {
     let mut item = row(9, "notes.txt", None);
     item.apply(1, Event::Saved(25, SavedFileActions::OpenAndReveal));
-    assert_eq!(item.view().status, "Downloading…");
+    assert_eq!(item.view().status, "Pobieranie…");
 
     item.apply(9, Event::Saved(25, SavedFileActions::RevealOnly));
     assert_eq!(item.view().actions, &[Action::ShowInFolder]);
@@ -158,7 +158,7 @@ fn reveal_only_policy_and_unavailable_files_disable_stale_actions() {
     );
     item.apply(9, Event::FileUnavailable);
     item.apply(9, Event::Saved(25, SavedFileActions::OpenAndReveal));
-    assert_eq!(item.view().status, "File unavailable");
+    assert_eq!(item.view().status, "Plik niedostępny");
     assert_eq!(item.view().actions, &[]);
     assert_eq!(item.activate(Action::Open), None);
     assert_eq!(item.activate(Action::ShowInFolder), None);
@@ -167,19 +167,19 @@ fn reveal_only_policy_and_unavailable_files_disable_stale_actions() {
 #[test]
 fn failure_reports_safe_copy_and_never_offers_file_actions() {
     for (failure, message) in [
-        (Failure::Save, "Could not save the file."),
+        (Failure::Save, "Nie udało się zapisać pliku."),
         (
             Failure::Blocked,
-            "The file was blocked by download protection.",
+            "Plik został zablokowany przez ochronę pobierania.",
         ),
-        (Failure::Cleanup, "Could not remove the partial file."),
+        (Failure::Cleanup, "Nie udało się usunąć pliku częściowego."),
     ] {
         let mut item = row(1, "notes.txt", None);
         assert!(item.activate(Action::Cancel).is_some());
         item.apply(1, Event::Failed(failure));
         item.apply(1, Event::Canceled);
         item.apply(1, Event::Saved(25, SavedFileActions::OpenAndReveal));
-        assert_eq!(item.view().status, "Failed");
+        assert_eq!(item.view().status, "Błąd");
         assert_eq!(item.view().detail, Some(message));
         assert_eq!(item.view().actions, &[]);
         assert_eq!(item.activate(Action::Open), None);

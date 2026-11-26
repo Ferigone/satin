@@ -43,6 +43,7 @@ mod address_popup;
 mod bookmark_menu;
 mod bookmarks;
 mod chrome_menu;
+mod downloads_ui;
 mod history_ui;
 mod icons;
 mod navigation_error;
@@ -189,6 +190,7 @@ enum Action {
     Settings,
     Version,
     Bookmarks,
+    Downloads,
     ToggleBookmark,
     Favorite(usize),
     ShortcutHelp,
@@ -238,6 +240,69 @@ struct ActiveDownload {
     id: u64,
     cancel: CancelSignal,
     name: String,
+}
+
+enum DownloadUpdate {
+    Progress(u64),
+    Done(Result<u64, String>),
+}
+
+fn cancel_download(downloads: &mut downloads_ui::Downloads, tabs: &mut [Tab], id: u64) -> bool {
+    for tab in tabs {
+        if let Some(download) = &tab.download
+            && download.id == id
+            && !download.cancel.is_cancelled()
+        {
+            downloads.request_cancel(id);
+            download.cancel.cancel();
+            tab.download_status = "Cancelling download…".into();
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_download_update(
+    downloads: &mut downloads_ui::Downloads,
+    tabs: &mut [Tab],
+    tab_id: u64,
+    transfer_id: u64,
+    update: DownloadUpdate,
+) -> bool {
+    // The worker uses `Message.navigation` as a transfer ID for these two
+    // events, not the current page's navigation ID. The session row survives
+    // navigation, tab switches, and even tab closure while cancellation settles.
+    let row_changed = match &update {
+        DownloadUpdate::Progress(bytes) => downloads.progress(transfer_id, *bytes),
+        DownloadUpdate::Done(result) => downloads.finish(transfer_id, result),
+    };
+    let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+        return row_changed;
+    };
+    let Some(download) = tab
+        .download
+        .as_ref()
+        .filter(|download| download.id == transfer_id)
+    else {
+        return row_changed;
+    };
+    match update {
+        DownloadUpdate::Progress(n) if !download.cancel.is_cancelled() => {
+            tab.download_status = format!(
+                "Downloading {} · {} bytes · Esc to cancel",
+                download.name, n
+            );
+        }
+        DownloadUpdate::Progress(_) => return row_changed,
+        DownloadUpdate::Done(result) => {
+            tab.download_status = match result {
+                Ok(n) => format!("Saved {} · {} bytes", download.name, n),
+                Err(error) => error,
+            };
+            tab.download = None;
+        }
+    }
+    true
 }
 
 struct Tab {
@@ -471,6 +536,10 @@ pub(crate) fn run(
         hover: None,
         status: String::new(),
         download_id: 0,
+        downloads: downloads_ui::Downloads::default(),
+        downloads_panel: None,
+        downloads_frame: None,
+        downloads_hover: None,
         scale: 1.,
         clipboard: arboard::Clipboard::new().ok(),
         smoke_output,
@@ -575,6 +644,10 @@ struct App {
     hover: Option<String>,
     status: String,
     download_id: u64,
+    downloads: downloads_ui::Downloads,
+    downloads_panel: Option<downloads_ui::Panel>,
+    downloads_frame: Option<downloads_ui::HitFrame>,
+    downloads_hover: Option<downloads_ui::Action>,
     scale: f32,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -619,12 +692,13 @@ impl App {
             && self.settings_panel.is_none()
             && self.history_menu.is_none()
             && self.chrome_menu.is_none()
+            && self.downloads_panel.is_none()
             && self.frame_resize_at_pointer().is_none())
         .then_some((self.mouse.0 - bounds.x, self.mouse.1 - bounds.y));
         DockFrame {
             bounds,
             scale: self.scale,
-            focused: self.devtools_focused,
+            focused: self.devtools_focused && self.downloads_panel.is_none(),
             pointer,
             tab: tab.id,
             document_navigation: tab.document_navigation,
@@ -823,7 +897,9 @@ impl App {
                 self.dismiss_address_suggestions();
             }
             if let Some(window) = &self.window {
-                window.set_ime_allowed(self.settings_panel.is_none());
+                window.set_ime_allowed(
+                    self.settings_panel.is_none() && self.downloads_panel.is_none(),
+                );
             }
             self.redraw();
         }
@@ -841,6 +917,7 @@ impl App {
             dock.picking = false;
         }
         self.dismiss_history_menu();
+        self.dismiss_downloads();
         self.chrome_menu = None;
         self.select_popup = None;
         self.hover = None;
@@ -860,6 +937,8 @@ impl App {
         self.wheel = None;
         self.hits.retain(|(_, action)| !action.address_suggestion());
         self.tab_hits_current = false;
+        self.downloads_frame = None;
+        self.downloads_hover = None;
         self.caption_pressed = None;
         self.last_title_press = None;
         let width = self.window_regions(self.active).page.width;
@@ -1453,6 +1532,9 @@ impl App {
         if action != Action::Address && !action.address_suggestion() {
             self.dismiss_address_suggestions();
         }
+        if action != Action::Downloads {
+            self.dismiss_downloads();
+        }
         if !action.in_menu() {
             self.chrome_menu = None;
         }
@@ -1503,6 +1585,7 @@ impl App {
             }
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
+            Action::Downloads => self.toggle_downloads(false),
             Action::ToggleBookmark => {
                 let tab = &self.tabs[self.active];
                 let result = self.bookmarks.as_mut().ok().and_then(|store| {
@@ -1606,8 +1689,8 @@ impl App {
                 if let Some(dock) = &mut self.devtools {
                     dock.close_tab(tab.id);
                 }
-                if let Some(d) = self.tabs[i].download.take() {
-                    d.cancel.cancel();
+                if let Some(id) = self.tabs[i].download.as_ref().map(|download| download.id) {
+                    self.cancel_download(id);
                 }
                 self.tabs.remove(i);
                 if self.tabs.is_empty() {
@@ -1632,6 +1715,9 @@ impl App {
         event_loop.exit();
     }
     fn insert(&mut self, text: &str) {
+        if self.downloads_panel.is_some() {
+            return;
+        }
         if self.devtools_focused
             && self.settings_panel.is_none()
             && let Some(bounds) = self.window_regions(self.active).dock
@@ -1676,6 +1762,7 @@ impl App {
             Command::Back => self.action(Action::Back, event_loop),
             Command::Forward => self.action(Action::Forward, event_loop),
             Command::Menu => self.action(Action::Menu, event_loop),
+            Command::Downloads => self.toggle_downloads(true),
             Command::BookmarkPage => self.save_current_bookmark(),
             Command::ToggleDevtools => self.toggle_devtools(),
             Command::InspectElement => {
@@ -1715,18 +1802,6 @@ impl App {
             }
             return;
         }
-        if key == Key::Named(NamedKey::Escape)
-            && self.settings_panel.is_none()
-            && self.chrome_menu.is_none()
-            && self.history_menu.is_none()
-            && !self.suggestions_visible()
-            && let Some(d) = &self.tabs[self.active].download
-        {
-            d.cancel.cancel();
-            self.tabs[self.active].download_status = "Cancelling download…".into();
-            self.redraw();
-            return;
-        }
         // F12 is window chrome, not a panel, address, or document key. Settings
         // can remain modal above the dock when it opens or closes underneath.
         if let Some(toggle) = shortcuts::devtools_toggle(&key, self.modifiers, repeat) {
@@ -1738,6 +1813,21 @@ impl App {
         if self.settings_panel.is_some() {
             self.settings_key(key);
             return;
+        }
+        let command = shortcuts::command(&key, self.modifiers);
+        if command == Some(Command::Downloads) {
+            if !repeat {
+                self.run_shortcut(Command::Downloads, event_loop);
+            }
+            return;
+        }
+        if self.downloads_panel.is_some() {
+            if command.is_some() {
+                self.dismiss_downloads();
+            } else {
+                self.downloads_key(&key, repeat);
+                return;
+            }
         }
         if self.handle_history_key(&key) || self.bookmark_panel_key(&key) {
             return;
@@ -1799,9 +1889,19 @@ impl App {
                 return;
             }
         }
-        if let Some(command @ (Command::InspectElement | Command::ToggleDevtools)) =
-            shortcuts::command(&key, self.modifiers)
+        if key == Key::Named(NamedKey::Escape)
+            && !self.suggestions_visible()
+            && let Some(id) = self.tabs[self.active]
+                .download
+                .as_ref()
+                .map(|download| download.id)
         {
+            if !repeat {
+                self.cancel_download(id);
+            }
+            return;
+        }
+        if let Some(command @ (Command::InspectElement | Command::ToggleDevtools)) = command {
             if !repeat {
                 self.run_shortcut(command, event_loop);
             }
@@ -1809,7 +1909,7 @@ impl App {
         }
         if self.devtools_focused
             && let Some(bounds) = self.window_regions(self.active).dock
-            && (shortcuts::command(&key, self.modifiers).is_none()
+            && (command.is_none()
                 || self.devtools.as_ref().is_some_and(|d| d.is_console())
                     && self.modifiers == ModifiersState::CONTROL
                     && matches!(&key,Key::Character(c) if c.eq_ignore_ascii_case("l")))
@@ -1817,7 +1917,7 @@ impl App {
             self.dock_key(self.dock_frame(bounds), key, text, repeat);
             return;
         }
-        if let Some(command) = shortcuts::command(&key, self.modifiers) {
+        if let Some(command) = command {
             self.run_shortcut(command, event_loop);
             return;
         }
@@ -2043,7 +2143,9 @@ impl App {
         if let Some(frame) = dock_frame {
             self.sync_inspector(frame);
         }
-        let picked_node = if self.devtools.as_ref().is_some_and(|d| d.picking) {
+        let picked_node = if self.downloads_panel.is_none()
+            && self.devtools.as_ref().is_some_and(|d| d.picking)
+        {
             self.page_node_under_pointer()
         } else {
             None
@@ -2235,6 +2337,7 @@ impl App {
         if let Some(panel) = &self.settings_panel {
             panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
         }
+        let downloads_frame = self.draw_downloads(&mut canvas, width, height);
         let presented = (|| -> Result<(), String> {
             let graphics = self
                 .graphics
@@ -2253,11 +2356,13 @@ impl App {
         })();
         match presented {
             Ok(()) => {
+                self.downloads_frame = downloads_frame;
                 self.tab_hits_current = true;
                 self.presented_frames += 1;
                 self.last_present_error = None;
             }
             Err(e) => {
+                self.downloads_frame = None;
                 self.tab_hits_current = false;
                 self.last_present_error = Some(e);
             }
@@ -2466,7 +2571,8 @@ impl App {
     fn draw_toolbar(&mut self, canvas: &mut Canvas, width: f32) {
         let u = self.scale;
         let tab = &self.tabs[self.active];
-        let layout = quiet_cinder::Toolbar::new(width);
+        let mut layout = quiet_cinder::Toolbar::new(width);
+        let downloads_button = reserve_downloads_button(&mut layout);
         let pointer = self.chrome_hover;
         for (bounds, action, enabled) in [
             (
@@ -2481,6 +2587,7 @@ impl App {
             ),
             (Some(layout.reload), Action::Reload, true),
             (layout.home, Action::Home, true),
+            (Some(downloads_button), Action::Downloads, true),
             (Some(layout.menu), Action::Menu, true),
         ] {
             let Some(bounds) = bounds.map(chrome_box) else {
@@ -2488,6 +2595,7 @@ impl App {
             };
             let on = enabled
                 && (pointer == Some(action)
+                    || action == Action::Downloads && self.downloads_panel.is_some()
                     || action == Action::Menu && self.chrome_menu.is_some());
             if on {
                 rounded_chrome_rect(canvas, physical_rect(u, bounds), 6. * u, CHROME_HOVER);
@@ -2507,13 +2615,20 @@ impl App {
                     Color(CHROME_ICON.0, CHROME_ICON.1, CHROME_ICON.2, 84)
                 },
             );
+            if action == Action::Downloads && self.downloads.has_active() {
+                let dot = scaled_rect(1., bounds.x + bounds.width - 12., bounds.y + 4., 7., 7.);
+                rounded_chrome_rect(canvas, physical_rect(u, dot), 3.5 * u, NAVIGATION_BAR);
+                let fill = scaled_rect(1., dot.x + 1., dot.y + 1., 5., 5.);
+                rounded_chrome_rect(canvas, physical_rect(u, fill), 2.5 * u, CHROME_ACCENT);
+            }
             if enabled {
                 self.hits.push((bounds, action));
             }
         }
 
         let address_rect = chrome_box(layout.address);
-        let address_focus = self.address_focus && !self.devtools_focused;
+        let address_focus =
+            self.address_focus && !self.devtools_focused && self.downloads_panel.is_none();
         address_bar::chrome::paint_address_field(canvas, address_rect, u, address_focus);
         paint_centered_glyph(
             canvas,
@@ -2622,6 +2737,38 @@ impl App {
         if can_bookmark {
             self.hits.push((star_rect, Action::ToggleBookmark));
         }
+    }
+
+    fn draw_downloads(
+        &mut self,
+        canvas: &mut Canvas,
+        width: f32,
+        height: f32,
+    ) -> Option<downloads_ui::HitFrame> {
+        if self.settings_panel.is_some() {
+            return None;
+        }
+        let panel = self.downloads_panel.as_ref()?;
+        let (window, anchor) = downloads_geometry(width, height);
+        let layout = panel.layout(&self.downloads, window, anchor)?;
+        downloads_ui::draw(
+            canvas,
+            &mut self.fonts,
+            &layout,
+            &downloads_ui::Colors {
+                card: CHROME_PANEL,
+                line: CHROME_LINE,
+                text: CHROME_TEXT,
+                muted: CHROME_MUTED,
+                icon: CHROME_ICON,
+                hover: CHROME_HOVER,
+                accent: CHROME_ACCENT,
+            },
+            self.scale,
+            self.pointer_inside.then_some(self.mouse),
+            panel.focused(&layout),
+        );
+        Some(layout.hit_frame())
     }
 
     fn draw_favorites(&mut self, canvas: &mut Canvas, width: f32) {
@@ -3188,6 +3335,16 @@ impl App {
             }
             return;
         }
+        // The native frame remains operable above browser overlays. Other
+        // outside presses dismiss Downloads without reaching the page/dock.
+        if self.downloads_panel.is_some() {
+            if self.caption_action_at_pointer().is_some() {
+                self.dismiss_downloads();
+            } else {
+                self.downloads_press();
+                return;
+            }
+        }
         let action = self.chrome_action_at_pointer();
         // A keyboard tab switch/close or resize can precede the next frame.
         // Don't apply an old tab hit to the new layout or tab indices.
@@ -3293,6 +3450,7 @@ impl App {
     fn pointer_link(&self) -> Option<String> {
         if self.settings_panel.is_some()
             || self.history_menu.is_some()
+            || self.downloads_panel.is_some()
             || !self.pointer_in(self.window_regions(self.active).page)
         {
             return None;
@@ -3312,6 +3470,10 @@ impl App {
             return;
         }
         if self.update_history_pointer() {
+            return;
+        }
+        if self.downloads_panel.is_some() {
+            self.update_downloads_pointer();
             return;
         }
         let regions = self.window_regions(self.active);
@@ -3505,6 +3667,162 @@ impl App {
             }
         }
     }
+    fn toggle_downloads(&mut self, keyboard: bool) {
+        if self.settings_panel.is_some() {
+            return;
+        }
+        if self.downloads_panel.is_some() {
+            self.dismiss_downloads();
+            return;
+        }
+        self.dismiss_history_menu();
+        self.chrome_menu = None;
+        self.select_popup = None;
+        self.chrome_hover = None;
+        self.hover = None;
+        self.caption_pressed = None;
+        self.last_title_press = None;
+        self.preedit = false;
+        self.wheel = None;
+        self.resizing_dock = false;
+        self.downloads_panel = Some(downloads_ui::Panel::open(keyboard));
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+        }
+        self.redraw();
+    }
+
+    fn dismiss_downloads(&mut self) {
+        if self.downloads_panel.take().is_some() {
+            self.downloads_frame = None;
+            self.downloads_hover = None;
+            if let Some(window) = &self.window {
+                window.set_ime_allowed(self.settings_panel.is_none());
+                window.set_cursor(CursorIcon::Default);
+            }
+            self.redraw();
+        }
+    }
+
+    fn downloads_viewport(&self) -> Option<(Rect, Rect)> {
+        let size = self.window.as_ref()?.inner_size();
+        Some(downloads_geometry(
+            size.width as f32 / self.scale,
+            size.height as f32 / self.scale,
+        ))
+    }
+
+    fn downloads_key(&mut self, key: &Key, repeat: bool) {
+        if self.modifiers.control_key() || self.modifiers.alt_key() || self.modifiers.super_key() {
+            return;
+        }
+        if key == &Key::Named(NamedKey::Escape) {
+            self.dismiss_downloads();
+            return;
+        }
+        let Some((window, anchor)) = self.downloads_viewport() else {
+            return;
+        };
+        let Some(panel) = &mut self.downloads_panel else {
+            return;
+        };
+        let Some(layout) = panel.layout(&self.downloads, window, anchor) else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown | NamedKey::Tab) => {
+                let previous = *key == Key::Named(NamedKey::ArrowUp)
+                    || (*key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
+                panel.move_focus(&layout, previous);
+                self.redraw();
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Space) if !repeat => {
+                if let Some(action) = panel.focused(&layout) {
+                    self.downloads_action(action);
+                }
+            }
+            Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
+                if panel.scroll_page(&layout, *key == Key::Named(NamedKey::PageUp)) {
+                    self.redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn downloads_press(&mut self) {
+        let Some(frame) = &self.downloads_frame else {
+            // Nothing is presented yet (or viewport coordinates are stale).
+            return;
+        };
+        if let Some(action) = frame.hit(self.mouse.0, self.mouse.1) {
+            self.downloads_action(action);
+        } else if !self.pointer_in(frame.bounds) {
+            self.dismiss_downloads();
+        }
+    }
+
+    fn downloads_action(&mut self, action: downloads_ui::Action) {
+        use downloads_ui::Action::*;
+        match action {
+            Dismiss => self.dismiss_downloads(),
+            Cancel(id) => self.cancel_download(id),
+            ShowAll | ShowRecent => {
+                if let Some(panel) = &mut self.downloads_panel {
+                    panel.show_all(action == ShowAll);
+                    self.redraw();
+                }
+            }
+        }
+    }
+
+    fn update_downloads_pointer(&mut self) {
+        let target = self
+            .downloads_frame
+            .as_ref()
+            .and_then(|frame| frame.hit(self.mouse.0, self.mouse.1));
+        if let Some(window) = &self.window {
+            let button = matches!(self.chrome_action_at_pointer(), Some(Action::Downloads));
+            window.set_cursor(self.frame_resize_at_pointer().map_or_else(
+                || {
+                    if target.is_some() || button {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    }
+                },
+                resize_cursor,
+            ));
+        }
+        if self.downloads_hover != target {
+            self.downloads_hover = target;
+            self.redraw();
+        }
+    }
+
+    fn downloads_wheel(&mut self, delta: f32) {
+        if !self
+            .downloads_frame
+            .as_ref()
+            .is_some_and(|frame| self.pointer_in(frame.bounds))
+        {
+            return;
+        }
+        if let Some((window, anchor)) = self.downloads_viewport()
+            && let Some(panel) = &mut self.downloads_panel
+            && let Some(layout) = panel.layout(&self.downloads, window, anchor)
+            && panel.wheel(&layout, delta)
+        {
+            self.redraw();
+        }
+    }
+
+    fn cancel_download(&mut self, id: u64) {
+        if cancel_download(&mut self.downloads, &mut self.tabs, id) {
+            self.redraw();
+        }
+    }
+
     fn accept_download(
         &mut self,
         index: usize,
@@ -3528,14 +3846,23 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let path = match crate::downloads::destination(window, &response.response.suggested_name) {
+        self.download_id += 1;
+        let id = self.download_id;
+        let suggested = &response.response.suggested_name;
+        let path = match crate::downloads::destination(window, suggested) {
             Ok(Some(path)) => path,
             Ok(None) => {
                 tab.download_status = "Download cancelled".into();
+                self.downloads
+                    .record(id, suggested, downloads_ui::Start::Cancelled);
+                self.redraw();
                 return;
             }
             Err(e) => {
                 tab.download_status = format!("Could not save the download: {e}");
+                self.downloads
+                    .record(id, suggested, downloads_ui::Start::DestinationError);
+                self.redraw();
                 return;
             }
         };
@@ -3544,20 +3871,18 @@ impl App {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        self.download_id += 1;
-        let cancel = self
-            .jobs
-            .save_download(tab.id, self.download_id, path, response);
+        let cancel = self.jobs.save_download(tab.id, id, path, response);
+        self.downloads
+            .record(id, &name, downloads_ui::Start::Transfer);
         tab.download_status = format!("Downloading {name} · Esc to cancel");
-        tab.download = Some(ActiveDownload {
-            id: self.download_id,
-            cancel,
-            name,
-        });
+        tab.download = Some(ActiveDownload { id, cancel, name });
+        self.redraw();
     }
 
     fn content_click(&mut self) {
-        if self.settings_panel.is_some() || !self.pointer_in(self.window_regions(self.active).page)
+        if self.settings_panel.is_some()
+            || self.downloads_panel.is_some()
+            || !self.pointer_in(self.window_regions(self.active).page)
         {
             return;
         }
@@ -4016,26 +4341,18 @@ impl ApplicationHandler<()> for App {
                 message.payload,
                 Payload::DownloadProgress(_) | Payload::DownloadDone(_)
             ) {
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == message.tab)
-                    && let Some(download) =
-                        tab.download.as_ref().filter(|d| d.id == message.navigation)
-                {
-                    match message.payload {
-                        Payload::DownloadProgress(n) => {
-                            tab.download_status = format!(
-                                "Downloading {} · {} bytes · Esc to cancel",
-                                download.name, n
-                            )
-                        }
-                        Payload::DownloadDone(result) => {
-                            tab.download_status = match result {
-                                Ok(n) => format!("Saved {} · {} bytes", download.name, n),
-                                Err(e) => e,
-                            };
-                            tab.download = None;
-                        }
-                        _ => unreachable!(),
-                    }
+                let update = match message.payload {
+                    Payload::DownloadProgress(bytes) => DownloadUpdate::Progress(bytes),
+                    Payload::DownloadDone(result) => DownloadUpdate::Done(result),
+                    _ => unreachable!(),
+                };
+                if apply_download_update(
+                    &mut self.downloads,
+                    &mut self.tabs,
+                    message.tab,
+                    message.navigation,
+                    update,
+                ) {
                     self.redraw();
                 }
                 continue;
@@ -4173,6 +4490,7 @@ impl ApplicationHandler<()> for App {
                 self.resizing_dock = false;
                 self.preedit = false;
                 self.dismiss_history_menu();
+                self.dismiss_downloads();
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -4207,7 +4525,9 @@ impl ApplicationHandler<()> for App {
                 self.insert(&text);
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
-                self.preedit = self.settings_panel.is_none() && !text.is_empty();
+                self.preedit = self.settings_panel.is_none()
+                    && self.downloads_panel.is_none()
+                    && !text.is_empty();
                 if self.preedit && self.address_focus {
                     self.dismiss_address_suggestions();
                 }
@@ -4237,6 +4557,7 @@ impl ApplicationHandler<()> for App {
                 self.settings_cancel_pointer();
                 self.clear_history_hover();
                 self.chrome_hover = None;
+                self.downloads_hover = None;
                 self.caption_pressed = None;
                 self.hover = None;
                 self.redraw();
@@ -4251,6 +4572,7 @@ impl ApplicationHandler<()> for App {
                 } else if button == MouseButton::Right
                     && self.pointer_inside
                     && self.history_menu.is_none()
+                    && self.downloads_panel.is_none()
                     && WINDOW_FRAME
                     && self.settings_panel.is_none()
                     && self.tab_hits_current
@@ -4261,6 +4583,7 @@ impl ApplicationHandler<()> for App {
                     window.show_window_menu(LogicalPosition::new(self.mouse.0, self.mouse.1));
                 } else if button == MouseButton::Middle
                     && self.settings_panel.is_none()
+                    && self.downloads_panel.is_none()
                     && !self
                         .chrome_action_at_pointer()
                         .is_some_and(Action::address_suggestion)
@@ -4293,6 +4616,10 @@ impl ApplicationHandler<()> for App {
                     return;
                 }
                 let (delta, detent) = scroll::wheel_delta(delta, self.scale);
+                if self.downloads_panel.is_some() {
+                    self.downloads_wheel(delta.y);
+                    return;
+                }
                 let regions = self.window_regions(self.active);
                 if let Some(Menu::Tabs(selected)) = self.chrome_menu {
                     if matches!(
@@ -4340,6 +4667,7 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
                 self.dismiss_history_menu();
+                self.dismiss_downloads();
                 if let Ok(url) = url::Url::from_file_path(path) {
                     self.navigate(url.into(), true);
                 }
@@ -4381,6 +4709,31 @@ fn chrome_box(bounds: quiet_cinder::Box2) -> Rect {
     scaled_rect(1., bounds.x, bounds.y, bounds.w, bounds.h)
 }
 
+fn reserve_downloads_button(toolbar: &mut quiet_cinder::Toolbar) -> quiet_cinder::Box2 {
+    // Use the existing gap and control dimensions. Keep the button reachable
+    // at the minimum window size, where Satin has no overflow Downloads row.
+    let gap = (toolbar.menu.x - toolbar.address.right()).max(0.);
+    let reserve = toolbar.menu.w + gap;
+    toolbar.address.w = (toolbar.address.w - reserve).max(0.);
+    toolbar.bookmark.x -= reserve;
+    toolbar.edit.w = (toolbar.edit.w - reserve).max(0.);
+    quiet_cinder::Box2 {
+        x: toolbar.menu.x - reserve,
+        ..toolbar.menu
+    }
+}
+
+fn downloads_geometry(width: f32, height: f32) -> (Rect, Rect) {
+    let mut toolbar = quiet_cinder::Toolbar::new(width);
+    // At short window sizes the popover can slide upward, but not over the
+    // native title/caption buttons which retain pointer priority.
+    let top = quiet_cinder::TAB_ROW;
+    (
+        scaled_rect(1., 0., top, width, (height - top).max(0.)),
+        chrome_box(reserve_downloads_button(&mut toolbar)),
+    )
+}
+
 fn centered_chrome_icon(
     canvas: &mut Canvas,
     bounds: Rect,
@@ -4398,6 +4751,7 @@ fn centered_chrome_icon(
         Action::Reload if loading => Glyph::X,
         Action::Reload => Glyph::RotateCw,
         Action::Bookmarks => Glyph::BookMarked,
+        Action::Downloads => Glyph::Download,
         Action::Menu => Glyph::Ellipsis,
         Action::Minimize => Glyph::Minus,
         Action::Maximize if loading => Glyph::Copy,
@@ -4588,6 +4942,114 @@ fn elide(fonts: &Fonts, text: &str, width: f32, size: f32) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod download_wiring_tests {
+    use super::*;
+
+    fn download_tab(downloads: &mut downloads_ui::Downloads, tab_id: u64, transfer_id: u64) -> Tab {
+        let mut tab = Tab::new(tab_id, "about:home".into(), Default::default());
+        tab.download = Some(ActiveDownload {
+            id: transfer_id,
+            cancel: CancelSignal::new(),
+            name: format!("file-{transfer_id}.txt"),
+        });
+        downloads.record(
+            transfer_id,
+            &tab.download.as_ref().unwrap().name,
+            downloads_ui::Start::Transfer,
+        );
+        tab
+    }
+
+    #[test]
+    fn cancellation_targets_the_live_transfer_id_across_tabs() {
+        let mut downloads = downloads_ui::Downloads::default();
+        let foreground = download_tab(&mut downloads, 1, 7);
+        let mut background = download_tab(&mut downloads, 2, 8);
+        background.navigation = 42;
+        let mut tabs = [foreground, background];
+
+        assert!(!cancel_download(&mut downloads, &mut tabs, 2));
+        assert!(!apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            2,
+            42,
+            DownloadUpdate::Done(Ok(100))
+        ));
+        assert!(cancel_download(&mut downloads, &mut tabs, 8));
+        assert!(!cancel_download(&mut downloads, &mut tabs, 8));
+        assert!(!tabs[0].download.as_ref().unwrap().cancel.is_cancelled());
+        assert!(tabs[1].download.as_ref().unwrap().cancel.is_cancelled());
+        assert!(!apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            2,
+            8,
+            DownloadUpdate::Progress(768)
+        ));
+        assert_eq!(tabs[1].download_status, "Cancelling download…");
+
+        assert!(apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            2,
+            8,
+            DownloadUpdate::Done(Ok(1024))
+        ));
+        assert_eq!(tabs[1].download_status, "Saved file-8.txt · 1024 bytes");
+        assert!(tabs[1].download.is_none());
+        assert!(!cancel_download(&mut downloads, &mut tabs, 8));
+        assert!(downloads.has_active());
+    }
+
+    #[test]
+    fn terminal_event_settles_the_session_row_after_source_tab_closes() {
+        let mut downloads = downloads_ui::Downloads::default();
+        let source = download_tab(&mut downloads, 9, 12);
+        let mut tabs = vec![
+            Tab::new(10, "about:home".into(), Default::default()),
+            source,
+        ];
+        assert!(cancel_download(&mut downloads, &mut tabs, 12));
+        tabs.pop();
+        assert!(downloads.has_active());
+        assert!(apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            9,
+            12,
+            DownloadUpdate::Done(Err("Download cancelled".into()))
+        ));
+        assert!(!downloads.has_active());
+        assert!(tabs[0].download_status.is_empty());
+        assert!(!apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            9,
+            12,
+            DownloadUpdate::Done(Ok(100))
+        ));
+    }
+
+    #[test]
+    fn toolbar_slot_and_popup_anchor_share_geometry() {
+        for width in [320., 410., 640., 660., 661., 880., 881., 1280.] {
+            let mut toolbar = quiet_cinder::Toolbar::new(width);
+            let original_gap = toolbar.menu.x - toolbar.address.right();
+            let button = reserve_downloads_button(&mut toolbar);
+            assert_eq!(toolbar.menu.x - button.right(), original_gap);
+            assert_eq!(button.x - toolbar.address.right(), original_gap);
+            assert!(toolbar.bookmark.right() < toolbar.address.right());
+            assert!(toolbar.edit.w > 0.);
+            let (viewport, anchor) = downloads_geometry(width, 400.);
+            assert_eq!(anchor, chrome_box(button));
+            assert_eq!(viewport.y, quiet_cinder::TAB_ROW);
+            assert_eq!(viewport.y + viewport.height, 400.);
+        }
+    }
 }
 
 #[cfg(test)]
