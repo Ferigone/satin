@@ -375,19 +375,21 @@ impl Vm {
         self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
     pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
-        self.compilation_budget_for_bytes(source.len())
+        // The ASCII lexer backs its spans with one byte instead of four
+        // per source character. Keep the same decoded-literal scratch allowance.
+        self.compilation_budget_for_bytes(source.len(), if source.is_ascii() { 13 } else { 16 })
     }
-    fn compilation_budget_for_bytes(&self, bytes: usize) -> Result<usize, JsError> {
+    fn compilation_budget_for_bytes(&self, bytes: usize, input_expansion: usize) -> Result<usize, JsError> {
         if bytes > self.limits.max_source_bytes {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Script source exceeds configured byte limit",
             ));
         }
-        // UTF-32 lexer input and decoded character data, including temporary
+        // Lexer input and decoded character data, including temporary
         // UTF-16 buffers during literal conversion. The lexer accounts for
         // per-token structural allocations as it consumes the source.
-        let input_bytes = bytes.saturating_mul(16).saturating_add(4096);
+        let input_bytes = bytes.saturating_mul(input_expansion).saturating_add(4096);
         self.ensure_allocation(input_bytes)?;
         Ok(self
             .limits
@@ -1418,7 +1420,7 @@ impl Vm {
         let mut sites = self.qa_work_sites.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>();
         sites.sort_unstable_by_key(|&(site, amount)| (std::cmp::Reverse(amount), site));
         sites.truncate(8);
-        qa_budget_with_costs(kind, site, requested, self.remaining, self.qa_native_work, &sites);
+        qa_budget_with_costs(kind, site, requested, self.remaining, self.qa_native_work, &sites, None);
     }
     fn compare_strings(&mut self, a: &JsString, b: &JsString) -> Result<(), JsError> {
         if a.storage_id() != b.storage_id() {
@@ -3358,7 +3360,7 @@ impl Vm {
         // source budget used for well-formed UTF-8 script inputs.
         let bytes = char::decode_utf16(source.as_utf16().iter().copied())
             .map(|entry| entry.map_or(3, char::len_utf8)).sum();
-        let budget = self.compilation_budget_for_bytes(bytes)?;
+        let budget = self.compilation_budget_for_bytes(bytes, 16)?;
         let lexer = crate::lexer::Lexer::from_utf16(source.as_utf16(), budget);
         bytecode::compile_eval(lexer, bytes, strict, context)
     }
@@ -4789,7 +4791,19 @@ pub(crate) fn qa_budget_limit(
     remaining: u64,
     native_work: u64,
 ) {
-    qa_budget_with_costs(kind, site, requested, remaining, native_work, &[]);
+    qa_budget_with_costs(kind, site, requested, remaining, native_work, &[], None);
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+pub(crate) fn qa_compiler_limit(
+    site: &'static std::panic::Location<'static>,
+    requested: usize,
+    remaining: usize,
+    counts: [usize; 4],
+) {
+    qa_budget_with_costs(
+        "compiler", Some(site), requested as u64, remaining as u64, 0, &[], Some(counts),
+    );
 }
 
 #[cfg(feature = "media-startup-diagnostics")]
@@ -4800,6 +4814,7 @@ fn qa_budget_with_costs(
     remaining: u64,
     native_work: u64,
     costs: &[((&'static str, u32), u64)],
+    compiler: Option<[usize; 4]>,
 ) {
     use std::io::Write;
     use std::sync::atomic::AtomicUsize;
@@ -4813,6 +4828,9 @@ fn qa_budget_with_costs(
         let (file, line) = site.map_or(("-", 0), |loc| (loc.file(), loc.line()));
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
+        if let Some([initial, source_units, backing_bytes, offset]) = compiler {
+            let _ = writeln!(stderr, "SATIN_QA_COMPILER {initial} {source_units} {backing_bytes} {offset}");
+        }
         for &((file, line), units) in costs {
             let _ = writeln!(stderr, "SATIN_QA_COST {units} {line} {file}");
         }

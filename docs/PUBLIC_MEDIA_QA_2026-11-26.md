@@ -47,3 +47,72 @@ did not create playable media. Twitch exhausted instructions; YouTube now
 exhausted instructions and still reported a separate compilation limit. In
 those two traces, the last native charge was a lexical name load. It does not
 identify the top cost by itself.
+
+`bca25ed` (`target/public-media/satin-mt3AOD/`) measured cumulative native work.
+Twitch's `core` task spent 181,224 of 535,683 native units on string property
+references. YouTube's inline script spent 169,864 of 647,809 native units in
+the RegExp interpreter dispatch and 148,790 on string property references.
+These are fuel charges, not elapsed time. YouTube's separate compiler failure
+could not debit 384 estimated bytes with 278 left. It was a local accounting
+failure, not a measurement of RAM or of the script's full memory requirement.
+Neither player became usable on this run.
+
+On `d34d609`, the authored repeated-property workload switched from
+budget failure to success at the same limit
+(`target/media-property-delta-77d2ba28ceb44a5cab4c520b92f26b00/`).
+147 focused JS tests passed. Native progressive/MSE controls and rebuffering
+passed (`target/native-media-byzFsG/`). On the public repeat
+(`target/public-media/satin-aTfhbw/`), Twitch's last sampled task charged
+141,058 units to the uncached property-key path; it still reached the
+instruction limit. YouTube still hit both the native-work and compilation
+memory limits. No public playback, controls, or Twitch chat were verified.
+
+## Compiler memory policy
+
+There is no universal compiler-memory quota in ECMAScript. Its
+[ParseScript operation](https://tc39.es/ecma262/multipage/ecmascript-language-scripts-and-modules.html#sec-parse-script)
+requires early errors before script execution, not a particular parser
+architecture. Mature engines keep resource bounds without sizing a parser
+quota to particular sites:
+
+- [V8's preparser](https://v8.dev/blog/preparser) checks cold functions and
+  resolves scopes without building their full AST and bytecode. V8 also
+  [reclaims unused bytecode](https://v8.dev/blog/v8-release-74#bytecode-flushing)
+  and has separate [heap controls](https://chromium.googlesource.com/v8/v8.git/+/HEAD/include/v8-isolate.h).
+- [Firefox's SpiderMonkey frontend](https://firefox-source-docs.mozilla.org/js/)
+  similarly uses lazy parsing and a non-GC compilation representation
+  (Stencil). [WebKit's JavaScriptCore](https://webkit.org/blog/9329/a-new-bytecode-format-for-javascriptcore/)
+  made retained bytecode more compact. These approaches reduce different
+  parts of memory use; none implies that compilation is unlimited.
+- [Chromium's renderer architecture](https://www.chromium.org/developers/design-documents/multi-process-architecture/)
+  contains a renderer crash to its affected tabs and frames. Process isolation
+  is a separate safeguard, not a replacement for bounded compilation.
+
+Satin already derives the classic-document compiler allowance from the
+512 MiB VM allocation cap minus estimated heap use and a source/scratch
+reservation (`16 * source bytes + 4096`). The 12 MiB classic source cap is
+separate. The lexer typically debits 384 bytes per structural token, even
+though only three lookahead tokens are held. This is an AST/bytecode proxy,
+not allocation tracking. Satin already validates and releases one eligible
+function body at a time in large, known-strict classic scripts, but that
+path still lowers the full body once to check early errors. It does not
+establish that the live YouTube script qualifies or that this mechanism alone
+would solve its failure.
+
+The unchanged Windows VM passed 82 `parser_budget` and `semantics` tests
+on `bca25ed`, including rejection of a dense input under a deliberately small
+heap followed by successful evaluation in the same VM, and early errors in
+unused function bodies. These are protection controls, not live-site passes.
+
+Keep hard source/depth, task, and aggregate memory protections. Do not raise
+an allowance by how much one live script appeared to miss it or tune it to a
+domain. Next, measure source/scratch reservation, existing VM use (including
+retained code), high-water mark of temporary compiler allocations, and
+retained output separately. Compare large generated inputs of different
+shapes (dense flat code, nested bundles, large literals, and unused
+functions), independent real bundles, and multiple tabs/workers under a
+shared memory envelope. Use these results to replace coarse charges with
+bounded accounting where possible and to prioritize less eager parsing or
+emission. The acceptance tests must preserve early errors in unused
+functions, valid closures on first call, and a responsive browser when a
+compile is refused. Execution fuel remains a separate investigation.

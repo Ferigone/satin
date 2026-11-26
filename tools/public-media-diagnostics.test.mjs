@@ -31,6 +31,7 @@ test('cost breakdowns belong to their failed work task', () => {
     'SATIN_QA_COST 14 5 C:\\Private\\crates\\javascript\\src\\lexer.rs',
     'SATIN_QA_COST 3 8 C:\\Private\\hidden.rs',
     'SATIN_QA_BUDGET compiler 5 1 0 2 crates/javascript/src/lexer.rs',
+    'SATIN_QA_COMPILER 500 100 100 90',
     'SATIN_QA_COST 99 2 dropped.rs',
   ].join('\n'));
   assert.deepEqual(trace[0].topWork, [
@@ -38,6 +39,7 @@ test('cost breakdowns belong to their failed work task', () => {
     { units: 3, line: 8, file: null },
   ]);
   assert.equal(trace[1].topWork, undefined);
+  assert.deepEqual(trace[1].compilation, { initialBytes: 500, sourceUnits: 100, backingBytes: 100, offset: 90 });
 });
 
 test('budget traces only expose source paths inside the two engine crates', () => {

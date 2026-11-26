@@ -54,6 +54,12 @@ export function budgetTrace(stderr) {
   for (const line of String(stderr).split(/\r?\n/)) {
     const cost = /^SATIN_QA_COST (\d{1,15}) (\d{1,6}) (.+)$/.exec(line);
     const parent = records.at(-1);
+    const compiler = /^SATIN_QA_COMPILER (\d{1,15}) (\d{1,15}) (\d{1,15}) (\d{1,15})$/.exec(line);
+    if (compiler && parent?.kind === 'compiler' && !parent.compilation) {
+      const [, initialBytes, sourceUnits, backingBytes, offset] = compiler.map(Number);
+      parent.compilation = { initialBytes, sourceUnits, backingBytes, offset };
+      continue;
+    }
     if (cost && ['instruction', 'native'].includes(parent?.kind)) {
       const costs = parent.topWork ??= [];
       if (costs.length < 8) costs.push({ units: +cost[1], line: +cost[2], file: sourcePath(cost[3]) });
