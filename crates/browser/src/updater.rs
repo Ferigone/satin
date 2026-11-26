@@ -713,6 +713,8 @@ async fn apply(install: Installation, candidate: &Candidate) -> Result<Outcome, 
     let lock = publication_lock(root).await?;
     let prior = eligible_update(root, &install.running, candidate)?;
     let launcher = launcher(root).ok_or("The installed launcher is missing")?;
+    check_x64(&mut File::open(&launcher).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("Cannot use the installed launcher: {error}"))?;
     let manifest = stage_manifest(candidate)?;
     let target = installed_target(root, &manifest).ok_or("Staged update is missing or invalid")?;
     let verified = verify_existing(&target, candidate)?;
@@ -1129,7 +1131,7 @@ mod tests {
             let running = self.0.join(&executable);
             fs::create_dir_all(running.parent().unwrap()).unwrap();
             fs::write(&running, b"running fixture").unwrap();
-            fs::write(self.0.join(LAUNCHER_NAME), b"launcher fixture").unwrap();
+            fs::write(self.0.join(LAUNCHER_NAME), sample_payload()).unwrap();
             let profile = self.0.join("Separate test profile");
             fs::create_dir(&profile).unwrap();
             let current = Manifest {
