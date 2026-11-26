@@ -1,6 +1,6 @@
 //! Desktop wheel input is sampled once per display interval. Pixel deltas
 //! already describe a gesture; only whole wheel detents need interpolation.
-use super::{App, Layout, MouseScrollDelta, ScrollOffset, TOP, Viewport};
+use super::{App, Layout, MouseScrollDelta, ScrollOffset, Viewport};
 use rust_browser_engine::dom::NodeId;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -169,16 +169,15 @@ fn axis_step(value: f32, offset: f32, min: f32, max: f32, allowed: bool) -> f32 
 impl App {
     fn scroll_target(&self) -> Option<NodeId> {
         let tab = &self.tabs[self.active];
+        let viewport = self.window_regions(self.active).page;
         let layout = tab.layout.as_ref()?;
-        if !self.pointer_in(self.window_regions(self.active).page)
-            || !layout.scroll_regions.iter().any(|r| r.can_scroll())
-        {
+        if !self.pointer_in(viewport) || !layout.scroll_regions.iter().any(|r| r.can_scroll()) {
             return None;
         }
         let page = tab.page.as_ref()?;
         let mut node = layout.element_at(
             self.mouse.0 / tab.zoom + tab.scroll_x,
-            (self.mouse.1 - TOP) / tab.zoom + tab.scroll,
+            (self.mouse.1 - viewport.y) / tab.zoom + tab.scroll,
         )?;
         loop {
             let overflow = layout.computed_styles.get(node.0)?.overflow;
