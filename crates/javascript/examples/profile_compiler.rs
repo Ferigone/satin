@@ -106,8 +106,15 @@ fn main() {
     let bytes = std::fs::metadata(path).expect("fixture metadata").len();
     assert!(bytes <= 12 * 1024 * 1024, "fixture exceeds browser script cap");
     let source = std::fs::read_to_string(path).expect("read UTF-8 fixture");
+    // Reproduce a document's remaining headroom without its network, DOM or JS.
+    // This override is restricted to the offline probe and can only lower its cap.
+    let max_heap_bytes = std::env::var("SATIN_QA_HEAP_BYTES").ok().map_or(512 * 1024 * 1024, |n| {
+        let bytes: usize = n.parse().expect("invalid QA heap ceiling");
+        assert!((1..=512 * 1024 * 1024).contains(&bytes));
+        bytes
+    });
     let mut vm = Vm::with_limits(VmLimits {
-        max_heap_bytes: 512 * 1024 * 1024,
+        max_heap_bytes,
         max_source_bytes: 12 * 1024 * 1024,
         ..VmLimits::default()
     });

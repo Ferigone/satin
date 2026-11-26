@@ -139,7 +139,9 @@ async function paired(directory, destination, rounds, ...variants) {
   const manifest = JSON.parse(bytes);
   assert.equal(manifest.version, 1);
   const report = { startedUtc: new Date().toISOString(), platform: platform(), arch: arch(),
-    osRelease: release(), node: process.version, manifestSha256: hash(bytes), probes, rounds: count, cases: [] };
+    osRelease: release(), node: process.version, manifestSha256: hash(bytes), probes, rounds: count,
+    qaHeapBytes: process.env.SATIN_QA_HEAP_BYTES ? Number(process.env.SATIN_QA_HEAP_BYTES) : null,
+    cases: [] };
   for (const entry of manifest.cases) {
     assert.match(entry.file, /^[a-z0-9-]+\.js$/);
     const file = join(directory, entry.file);

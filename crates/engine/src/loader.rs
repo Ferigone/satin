@@ -79,7 +79,7 @@ pub struct LoadedPage {
     pub document: Arc<Document>,
     // The streaming loader publishes headers before it can sniff the first
     // bytes. It sets this once, before handing text to the parser.
-    document_encoding: Arc<std::sync::OnceLock<&'static encoding_rs::Encoding>>,
+    pub(crate) document_encoding: Arc<std::sync::OnceLock<&'static encoding_rs::Encoding>>,
     pub(crate) raw_json: Option<crate::raw_json::SharedSource>,
     pub stylesheets: Arc<Vec<Arc<str>>>,
     pub linked_stylesheets: HashMap<NodeId, Arc<str>>,
