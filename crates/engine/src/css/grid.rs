@@ -495,17 +495,13 @@ fn list(source: &str, kind: TrackList) -> Option<GridTemplate<SpecifiedLength>> 
 }
 
 pub(super) fn parse_tracks(source: &str) -> Option<SpecifiedTemplate> {
-    list(source, TrackList::Template).map(SpecifiedTemplate::new)
-}
-
-pub(super) fn parse_columns(source: &str) -> Option<SpecifiedTemplate> {
     if source.trim().eq_ignore_ascii_case("subgrid") {
         return Some(SpecifiedTemplate::Shared(Arc::new(GridTemplate {
             subgrid: true,
             ..Default::default()
         })));
     }
-    parse_tracks(source)
+    list(source, TrackList::Template).map(SpecifiedTemplate::new)
 }
 
 pub(super) fn parse_auto_tracks(source: &str) -> Option<SpecifiedTracks> {
@@ -674,7 +670,7 @@ pub(super) fn parse_template(
     if !tokens.iter().any(|token| matches!(token, Token::String(_))) {
         return Some((
             parse_tracks(rows)?,
-            parse_columns(columns?)?,
+            parse_tracks(columns?)?,
             GridAreas::default(),
         ));
     }

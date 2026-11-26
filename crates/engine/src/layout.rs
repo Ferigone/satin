@@ -295,7 +295,7 @@ pub struct Layout {
     pub links: Vec<Link>,
     pub elements: Vec<ElementBox>,
     pub anchors: HashMap<String, f32>,
-    pub(crate) subgrid_spans: HashMap<NodeId, usize>,
+    pub(crate) subgrid_spans: HashMap<(NodeId, bool), usize>,
     pub height: f32,
     pub content_width: f32,
     pub background: Color,
@@ -495,10 +495,7 @@ impl Layout {
         .then(|| Arc::new(ScrollFlow::capture(&b, background)));
         let mut layout = b.finish_frame(background, scroll, observe_intersections);
         if layout.depends_on_viewport_scroll
-            || layout
-                .scroll_regions
-                .iter()
-                .any(ScrollRegion::can_scroll)
+            || layout.scroll_regions.iter().any(ScrollRegion::can_scroll)
         {
             layout.scroll_flow = candidate;
         }
@@ -680,7 +677,8 @@ struct Fragment {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
-    subgrid_spans: HashMap<NodeId, usize>,
+    subgrid_spans: HashMap<(NodeId, bool), usize>,
+    intrinsic_subgrid_rows: Vec<GridContribution>,
     width: f32,
     height: f32,
 }
@@ -721,7 +719,7 @@ struct FragmentKey {
     intrinsic_width: bool,
     flex_item: bool,
     href: Option<Arc<str>>,
-    inherited_columns: Option<InheritedColumns>,
+    inherited_tracks: Option<SubgridTracks>,
 }
 
 impl Fragment {
@@ -736,6 +734,7 @@ impl Fragment {
             .saturating_add(self.links.len())
             .saturating_add(self.elements.len())
             .saturating_add(self.subgrid_spans.len())
+            .saturating_add(self.intrinsic_subgrid_rows.len())
             .saturating_add(1);
         for command in self.commands.iter() {
             match command {
@@ -862,14 +861,49 @@ fn is_css_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct InheritedColumns {
+struct InheritedTracks {
     // Fragment keys compare exact track sizes even when the area width is unchanged.
     sizes: Arc<[u32]>,
     gap: u32,
 }
 
+impl InheritedTracks {
+    fn from_parent(sizes: &[f32], gap: f32, start_inset: f32, end_inset: f32) -> Self {
+        let mut occupied = sizes.to_vec();
+        occupied[0] -= start_inset;
+        *occupied.last_mut().unwrap() -= end_inset;
+        Self {
+            sizes: occupied.into_iter().map(f32::to_bits).collect(),
+            gap: gap.to_bits(),
+        }
+    }
+    fn adjusted(&self, gap: f32) -> Vec<f32> {
+        let delta = (f32::from_bits(self.gap) - gap) / 2.;
+        let last = self.sizes.len() - 1;
+        self.sizes
+            .iter()
+            .enumerate()
+            .map(|(i, bits)| {
+                // Only the final grid area is clamped when a gutter exceeds a track.
+                f32::from_bits(*bits)
+                    + if i != 0 { delta } else { 0. }
+                    + if i != last { delta } else { 0. }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
+struct SubgridTracks {
+    columns: Option<InheritedTracks>,
+    rows: Option<InheritedTracks>,
+    // During intrinsic measurement parent rows have a span but no used sizes yet.
+    row_span: Option<usize>,
+    row_gap: u32,
+}
+
 struct Builder<'a> {
-    subgrid: Option<(NodeId, InheritedColumns)>,
+    subgrid: Option<(NodeId, SubgridTracks)>,
     page: &'a LoadedPage,
     fonts: &'a Fonts,
     // Layout treats computed styles as immutable. Borrow them across recursive
@@ -884,7 +918,8 @@ struct Builder<'a> {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
-    subgrid_spans: HashMap<NodeId, usize>,
+    subgrid_spans: HashMap<(NodeId, bool), usize>,
+    intrinsic_subgrid_rows: Vec<GridContribution>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
     fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
@@ -920,6 +955,7 @@ impl<'a> Builder<'a> {
             elements: vec![],
             anchors: HashMap::new(),
             subgrid_spans: HashMap::new(),
+            intrinsic_subgrid_rows: Vec::new(),
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             fragment_cache: HashMap::new(),
@@ -1115,17 +1151,25 @@ struct GridPlacement {
     row_origin: i32,
 }
 impl GridPlacement {
-    fn for_subgrid_columns(&self, count: usize) -> Self {
-        let mut placed = self.clone();
-        for item in &mut placed.items {
-            let start = item.column as i32 + self.column_origin;
-            let end = (start + item.columns as i32).clamp(1, count as i32);
-            item.column = start.clamp(0, end - 1) as usize;
-            item.columns = end as usize - item.column;
+    fn clamp_subgrid_axis(&mut self, count: usize, row: bool) {
+        for item in &mut self.items {
+            let (start, span, origin) = if row {
+                (&mut item.row, &mut item.rows, self.row_origin)
+            } else {
+                (&mut item.column, &mut item.columns, self.column_origin)
+            };
+            let first = *start as i32 + origin;
+            let end = (first + *span as i32).clamp(1, count as i32);
+            *start = first.clamp(0, end - 1) as usize;
+            *span = end as usize - *start;
         }
-        placed.column_origin = 0;
-        placed.columns = count;
-        placed
+        if row {
+            self.rows = count;
+            self.row_origin = 0;
+        } else {
+            self.columns = count;
+            self.column_origin = 0;
+        }
     }
 }
 
@@ -2095,12 +2139,13 @@ impl Builder<'_> {
             AxisSize::from_style(style, true, None, metrics),
         );
         let columns =
-            Axis::new(style, false, AxisSize::fixed(width)).inherited_columns(item.columns);
+            Axis::new(style, false, AxisSize::fixed(width)).inherited_tracks(item.columns);
         let Some(placement) = self.grid_placement_cached(item.node, &rows, &columns) else {
             self.limited = true;
             return;
         };
-        let children = placement.for_subgrid_columns(item.columns);
+        let mut children = (*placement).clone();
+        children.clamp_subgrid_axis(item.columns, false);
         let left = metrics.padding[3] + metrics.border[3] + metrics.margin[3];
         let right = metrics.padding[1] + metrics.border[1] + metrics.margin[1];
         let start = out.len();
@@ -2183,25 +2228,46 @@ impl Builder<'_> {
         item: GridItem,
         sizes: &[f32],
         gap: f32,
+        rows: Option<&[f32]>,
+        row_gap: f32,
         available: f32,
         href: Option<Arc<str>>,
         constraints: Constraints,
     ) -> Fragment {
-        if !self.styles[item.node.0].grid_template_columns.subgrid {
+        let style = &self.styles[item.node.0];
+        if !style.grid_template_columns.subgrid && !style.grid_template_rows.subgrid {
             return self.fragment(item.node, available, href, constraints);
         }
-        let style = &self.styles[item.node.0];
         let metrics = BoxMetrics::new(style, available, constraints);
-        let mut occupied = sizes[item.column..item.column + item.columns].to_vec();
-        let last = occupied.len() - 1;
-        occupied[0] -= metrics.margin[3] + metrics.border[3] + metrics.padding[3];
-        occupied[last] -= metrics.margin[1] + metrics.border[1] + metrics.padding[1];
-        let sizes = occupied.into_iter().map(f32::to_bits).collect();
+        let inset = |i: usize| metrics.margin[i] + metrics.border[i] + metrics.padding[i];
+        let columns = style.grid_template_columns.subgrid.then(|| {
+            InheritedTracks::from_parent(
+                &sizes[item.column..item.column + item.columns],
+                gap,
+                inset(3),
+                inset(1),
+            )
+        });
+        let row_span = style.grid_template_rows.subgrid.then_some(item.rows);
+        let rows = rows.filter(|_| row_span.is_some()).map(|sizes| {
+            InheritedTracks::from_parent(
+                &sizes[item.row..item.row + item.rows],
+                row_gap,
+                inset(0),
+                inset(2),
+            )
+        });
         let previous = self.subgrid.replace((
             item.node,
-            InheritedColumns {
-                sizes,
-                gap: gap.to_bits(),
+            SubgridTracks {
+                columns,
+                rows,
+                row_span,
+                row_gap: if row_span.is_some() {
+                    row_gap.to_bits()
+                } else {
+                    0
+                },
             },
         ));
         let result = self.fragment(item.node, available, href, constraints);
@@ -2221,7 +2287,7 @@ impl Builder<'_> {
         let height = block_size
             .preferred
             .map(|height| height.min(block_size.maximum).max(block_size.minimum));
-        let row_template = Axis::new(
+        let mut row_template = Axis::new(
             container,
             true,
             AxisSize {
@@ -2233,14 +2299,19 @@ impl Builder<'_> {
             .subgrid
             .as_ref()
             .filter(|(node, _)| *node == id)
-            .map(|(_, c)| c.clone());
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default();
         let mut column_template = Axis::new(container, false, inline_size);
-        if let Some(c) = &inherited {
-            column_template = column_template.inherited_columns(c.sizes.len());
-            self.subgrid_spans.insert(id, c.sizes.len());
+        if let Some(c) = &inherited.columns {
+            column_template = column_template.inherited_tracks(c.sizes.len());
+            self.subgrid_spans.insert((id, false), c.sizes.len());
+        }
+        if let Some(span) = inherited.row_span {
+            row_template = row_template.inherited_tracks(span);
+            self.subgrid_spans.insert((id, true), span);
         }
         self.limited |= row_template.limited || column_template.limited;
-        let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template)
+        let Some(mut placement) = self.grid_placement_cached(id, &row_template, &column_template)
         else {
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
@@ -2250,35 +2321,29 @@ impl Builder<'_> {
             self.flush(&mut line, false);
             return (line.y - y).max(0.);
         };
-        let placement = if let Some(c) = &inherited {
-            // Place on the hypothetical implicit grid, then clamp to the subgrid edges.
-            Arc::new(placement.for_subgrid_columns(c.sizes.len()))
-        } else {
-            placement
-        };
+        if let Some(c) = &inherited.columns {
+            Arc::make_mut(&mut placement).clamp_subgrid_axis(c.sizes.len(), false);
+        }
+        if let Some(span) = inherited.row_span {
+            Arc::make_mut(&mut placement).clamp_subgrid_axis(span, true);
+        }
         let columns = column_template.tracks(&container.grid_auto_columns, &placement);
         let rows = row_template.tracks(&container.grid_auto_rows, &placement);
         let gap_x = container.gap[1]
             .resolve(width, container.font_size)
-            .unwrap_or_else(|| inherited.as_ref().map_or(0., |c| f32::from_bits(c.gap)))
+            .unwrap_or_else(|| {
+                inherited
+                    .columns
+                    .as_ref()
+                    .map_or(0., |c| f32::from_bits(c.gap))
+            })
             .max(0.);
         let gap_y = container.gap[0]
             .resolve(height.unwrap_or(0.), container.font_size)
-            .unwrap_or(0.)
+            .unwrap_or(f32::from_bits(inherited.row_gap))
             .max(0.);
-        let column_sizes = if let Some(c) = &inherited {
-            let delta = (f32::from_bits(c.gap) - gap_x) / 2.;
-            let last = c.sizes.len() - 1;
-            c.sizes
-                .iter()
-                .enumerate()
-                .map(|(i, bits)| {
-                    // Keep signed distances between grid lines when a gutter exceeds a
-                    // track. Only the final grid area is clamped to nonnegative size.
-                    f32::from_bits(*bits) + if i != 0 { delta } else { 0. }
-                        + if i != last { delta } else { 0. }
-                })
-                .collect()
+        let column_sizes = if let Some(c) = &inherited.columns {
+            c.adjusted(gap_x)
         } else {
             let contributions = if columns.needs_contributions(Some(width), container.font_size) {
                 self.grid_contributions(&placement.items, width)
@@ -2393,6 +2458,8 @@ impl Builder<'_> {
                 item,
                 &column_sizes,
                 used_gap_x,
+                None,
+                gap_y,
                 area_width,
                 href.clone(),
                 Constraints {
@@ -2418,6 +2485,33 @@ impl Builder<'_> {
             } else {
                 fragment.height
             };
+            // Each descendant participates in the parent tracks it actually spans.
+            // Preserve this information before imposing the final stretch height.
+            let local_gap = style.gap[0].resolve(0., style.font_size).unwrap_or(gap_y);
+            for mut contribution in fragment.intrinsic_subgrid_rows.iter().copied() {
+                if row_contributions.len() >= GRID_ITEM_LIMIT {
+                    self.limited = true;
+                    break;
+                }
+                let half_gap = (local_gap - gap_y) * 0.5;
+                let start_inset = if contribution.start == 0 {
+                    m.margin[0] + m.border[0] + m.padding[0]
+                } else {
+                    half_gap
+                };
+                let end_inset = if contribution.start + contribution.span == item.rows {
+                    m.margin[2] + m.border[2] + m.padding[2]
+                } else {
+                    half_gap
+                };
+                let extra = start_inset + end_inset;
+                contribution.start += item.row;
+                contribution.minimum += extra;
+                contribution.min_content += extra;
+                contribution.maximum += extra;
+                contribution.floor += extra;
+                row_contributions.push(contribution);
+            }
             row_contributions.push(GridContribution {
                 start: item.row,
                 span: item.rows,
@@ -2429,15 +2523,19 @@ impl Builder<'_> {
             });
             measured.push((fragment, border_width, justify));
         }
-        let row_sizes = grid_track_sizes(
-            &rows,
-            height,
-            gap_y,
-            container.font_size,
-            &row_contributions,
-            container.align_content,
-            false,
-        );
+        let row_sizes = if let Some(r) = &inherited.rows {
+            r.adjusted(gap_y)
+        } else {
+            grid_track_sizes(
+                &rows,
+                height,
+                gap_y,
+                container.font_size,
+                &row_contributions,
+                container.align_content,
+                false,
+            )
+        };
         let natural_height = row_sizes.iter().sum::<f32>() + rows.gaps(gap_y);
         let used_height = height.unwrap_or(
             natural_height
@@ -2448,9 +2546,9 @@ impl Builder<'_> {
         // zero during intrinsic sizing. Resolve both against the resulting height.
         let gap_y = container.gap[0]
             .resolve(used_height, container.font_size)
-            .unwrap_or(0.)
+            .unwrap_or(f32::from_bits(inherited.row_gap))
             .max(0.);
-        let row_sizes = if height.is_none() {
+        let row_sizes = if height.is_none() && inherited.rows.is_none() {
             grid_track_sizes(
                 &rows,
                 Some(used_height),
@@ -2538,7 +2636,8 @@ impl Builder<'_> {
             // hence the basis passed to its descendants) is unchanged.
             // Reuse the measured fragment rather than recursively formatting
             // nested grids twice at every level.
-            let needs_final_layout = target_height.is_some()
+            let needs_final_layout = style.grid_template_rows.subgrid
+                || target_height.is_some()
                 || style.height.has_percent()
                 || style.min_height.has_percent()
                 || style.max_height.has_percent();
@@ -2547,6 +2646,8 @@ impl Builder<'_> {
                     *item,
                     &column_sizes,
                     used_gap_x,
+                    Some(&row_sizes),
+                    used_gap_y,
                     area_width,
                     href.clone(),
                     Constraints {
@@ -2600,6 +2701,9 @@ impl Builder<'_> {
                 x + column_offsets[item.column] + dx,
                 y + row_offsets[item.row] + dy,
             );
+        }
+        if inherited.row_span.is_some() && inherited.rows.is_none() {
+            self.intrinsic_subgrid_rows = row_contributions;
         }
         used_height
     }
@@ -3646,7 +3750,7 @@ impl Builder<'_> {
             intrinsic_width: c.intrinsic_width,
             flex_item: c.flex_item,
             href: href.clone(),
-            inherited_columns: self
+            inherited_tracks: self
                 .subgrid
                 .as_ref()
                 .filter(|(node, _)| *node == id)
@@ -3668,6 +3772,7 @@ impl Builder<'_> {
             elements: std::mem::take(&mut self.elements),
             anchors: std::mem::take(&mut self.anchors),
             subgrid_spans: std::mem::take(&mut self.subgrid_spans),
+            intrinsic_subgrid_rows: std::mem::take(&mut self.intrinsic_subgrid_rows),
             ..Fragment::default()
         };
         let s = &self.styles[id.0];
@@ -3702,6 +3807,10 @@ impl Builder<'_> {
             elements: std::mem::replace(&mut self.elements, old.elements),
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
             subgrid_spans: std::mem::replace(&mut self.subgrid_spans, old.subgrid_spans),
+            intrinsic_subgrid_rows: std::mem::replace(
+                &mut self.intrinsic_subgrid_rows,
+                old.intrinsic_subgrid_rows,
+            ),
             width,
             height,
         };

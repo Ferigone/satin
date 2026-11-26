@@ -963,6 +963,7 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 
 const PROPERTIES: &[(&str, &str)] = &[
     ("gridTemplateColumns", "grid-template-columns"),
+    ("gridTemplateRows", "grid-template-rows"),
     ("webkitLineClamp", "-webkit-line-clamp"),
     ("webkitBoxOrient", "-webkit-box-orient"),
     ("display", "display"),
@@ -1421,8 +1422,14 @@ fn resolved_values<'a>(
                 .replace("inlineflex", "inline-flex")
                 .replace("inlinegrid", "inline-grid")
                 .replace("listitem", "list-item"),
-            "grid-template-columns" if style.grid_template_columns.subgrid => {
-                if let Some(span) = layout.subgrid_spans.get(&id) {
+            "grid-template-columns" | "grid-template-rows"
+                if (name == "grid-template-columns" && style.grid_template_columns.subgrid)
+                    || (name == "grid-template-rows" && style.grid_template_rows.subgrid) =>
+            {
+                if let Some(span) = layout
+                    .subgrid_spans
+                    .get(&(id, name == "grid-template-rows"))
+                {
                     format!("subgrid{}", " []".repeat(span + 1))
                 } else if matches!(style.display, css::Display::Grid | css::Display::InlineGrid) {
                     "none".into()

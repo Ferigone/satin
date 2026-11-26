@@ -101,7 +101,7 @@ impl<'a> Axis<'a> {
         }
     }
 
-    pub(super) fn inherited_columns(mut self, count: usize) -> Self {
+    pub(super) fn inherited_tracks(mut self, count: usize) -> Self {
         self.count = count;
         self.explicit = count;
         self

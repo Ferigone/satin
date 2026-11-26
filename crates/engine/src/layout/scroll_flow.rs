@@ -9,7 +9,7 @@ pub(crate) struct ScrollFlow {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
-    subgrid_spans: HashMap<NodeId, usize>,
+    subgrid_spans: HashMap<(NodeId, bool), usize>,
     link_cache: positioning::LinkCache,
     limited: bool,
     pub(super) replay_work: usize,

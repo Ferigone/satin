@@ -4436,7 +4436,7 @@ fn implicit_grid(value: &str) -> Option<[Value; 6]> {
         };
         let mut values = std::array::from_fn(|_| Value::Initial);
         if axis == GridAutoFlow::Row {
-            values[1] = Value::GridTemplate(grid::parse_columns(explicit)?);
+            values[1] = Value::GridTemplate(grid::parse_tracks(explicit)?);
             values[3] = auto_tracks;
         } else {
             values[0] = Value::GridTemplate(grid::parse_tracks(explicit)?);
@@ -5200,7 +5200,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "break-word" | "anywhere" | "break-all" => true,
             _ => return None,
         })),
-        GridTemplateColumns => grid::parse_columns(value).map(Value::GridTemplate),
+        GridTemplateColumns => grid::parse_tracks(value).map(Value::GridTemplate),
         GridTemplateRows => grid::parse_tracks(value).map(Value::GridTemplate),
         GridTemplateAreas => grid::parse_areas(value).map(Arc::new).map(Value::GridAreas),
         GridAutoColumns | GridAutoRows => grid::parse_auto_tracks(value).map(Value::Tracks),
