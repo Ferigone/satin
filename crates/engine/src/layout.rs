@@ -724,6 +724,11 @@ struct FragmentKey {
 }
 
 impl Fragment {
+    fn baseline(&self, last: bool, end_margin: f32) -> f32 {
+        self.baselines
+            .map_or(self.height - end_margin, |lines| lines[usize::from(last)])
+    }
+
     // Bound both the cache's retained payload and the work of cloning it.
     // Text runs own glyph vectors, and anchors own their strings.
     fn cache_cost(&self) -> Option<usize> {
@@ -2458,6 +2463,53 @@ impl Builder<'_> {
                     });
                 border_width = border_width.min(maximum).max(minimum).max(m.extra_x());
             }
+            let align = if style.align_self == Align::Auto {
+                container.align_items
+            } else {
+                style.align_self
+            };
+            let participates = matches!(align, Align::FirstBaseline | Align::LastBaseline)
+                && style.margin[0] != Length::Auto
+                && style.margin[2] != Length::Auto;
+            // A percentage height needs the row size to locate its baseline. If
+            // that size depends on the item, use fallback alignment to break the cycle.
+            let percentage_baseline = participates
+                && [style.height, style.min_height, style.max_height]
+                    .iter()
+                    .any(|length| length.has_percent());
+            let mut baseline_height = None;
+            let mut cyclic_baseline = false;
+            if percentage_baseline {
+                let tracks = &rows[item.row..item.row + item.rows];
+                if let Some(r) = &inherited.rows {
+                    let sizes = r.adjusted(gap_y);
+                    baseline_height = Some(grid_area(&sizes, item.row, item.rows, gap_y));
+                } else {
+                    baseline_height =
+                        tracks
+                            .iter()
+                            .try_fold(gap_y * (item.rows - 1) as f32, |sum, track| {
+                                if let GridBreadth::Length(length) = track.min
+                                    && track.min == track.max
+                                {
+                                    return length
+                                        .resolve_with_basis(height, container.font_size)
+                                        .map(|v| sum + v);
+                                }
+                                None
+                            });
+                    cyclic_baseline = tracks.iter().any(|track| {
+                        [track.min, track.max].iter().any(|breadth| {
+                            matches!(
+                                breadth,
+                                GridBreadth::Auto
+                                    | GridBreadth::MinContent
+                                    | GridBreadth::MaxContent
+                            )
+                        })
+                    });
+                }
+            }
             let fragment = self.grid_item_fragment(
                 item,
                 &column_sizes,
@@ -2468,6 +2520,7 @@ impl Builder<'_> {
                 href.clone(),
                 Constraints {
                     width: Some(border_width),
+                    containing_height: baseline_height,
                     flex_item: true,
                     ..Constraints::default()
                 },
@@ -2525,15 +2578,7 @@ impl Builder<'_> {
                 auto_minimum: text || (style.min_height == Length::Auto && auto_height),
                 floor: m.extra_y() + m.margin[0] + m.margin[2],
             });
-            let align = if style.align_self == Align::Auto {
-                container.align_items
-            } else {
-                style.align_self
-            };
-            let baseline = if matches!(align, Align::FirstBaseline | Align::LastBaseline)
-                && style.margin[0] != Length::Auto
-                && style.margin[2] != Length::Auto
-            {
+            let baseline = if participates && !cyclic_baseline {
                 let last = align == Align::LastBaseline;
                 let key = (
                     if last {
@@ -2544,9 +2589,7 @@ impl Builder<'_> {
                     last,
                 );
                 // A box without a line synthesizes its baseline at its border end.
-                let line = fragment
-                    .baselines
-                    .map_or(fragment.height - m.margin[2], |b| b[usize::from(last)]);
+                let line = fragment.baseline(last, m.margin[2]);
                 let distance = if last { fragment.height - line } else { line };
                 let group = baseline_groups.entry(key).or_insert(distance);
                 *group = group.max(distance);
@@ -2718,7 +2761,7 @@ impl Builder<'_> {
                     + usize::from(style.margin[2] == Length::Auto)
             };
             let offset = |align, free| match align {
-                Align::End | Align::FlexEnd => free,
+                Align::End | Align::FlexEnd | Align::LastBaseline => free,
                 Align::Center => free / 2.,
                 _ => 0.,
             };
@@ -3120,6 +3163,7 @@ impl Builder<'_> {
             let gaps = gap * group.len().saturating_sub(1) as f32;
             let sizes = distribute_flex(group, main_limit - margins - gaps);
             let mut cross = 0f32;
+            let mut line_baselines = [[0f32; 2]; 2];
             for (item, &size) in group.iter_mut().zip(&sizes) {
                 if row {
                     item.fragment = Some(self.fragment(
@@ -3154,9 +3198,27 @@ impl Builder<'_> {
                     }
                 }
                 let f = item.fragment.as_ref().unwrap();
+                let style = &self.styles[item.node.0];
+                let align = if style.align_self == Align::Auto {
+                    container.align_items
+                } else {
+                    style.align_self
+                };
+                if row
+                    && !item.auto[0]
+                    && !item.auto[2]
+                    && matches!(align, Align::FirstBaseline | Align::LastBaseline)
+                {
+                    let last = align == Align::LastBaseline;
+                    let distance = f.baseline(last, item.margin[2]);
+                    let group = &mut line_baselines[usize::from(last)];
+                    group[0] = group[0].max(distance);
+                    group[1] = group[1].max(f.height - distance);
+                    cross = cross.max(group[0] + group[1]);
+                }
                 cross = cross.max(if row { f.height } else { f.width });
             }
-            lines.push((range, sizes, cross));
+            lines.push((range, sizes, cross, line_baselines));
         }
         let natural_cross = lines.iter().map(|line| line.2).sum::<f32>()
             + cross_gap * lines.len().saturating_sub(1) as f32;
@@ -3183,7 +3245,7 @@ impl Builder<'_> {
                 lines.len(),
             )
         };
-        for (range, sizes, cross) in lines {
+        for (range, sizes, cross, line_baselines) in lines {
             let line_start = if reverse_cross {
                 cross_size - cross_cursor - cross
             } else {
@@ -3292,6 +3354,11 @@ impl Builder<'_> {
                     } else {
                         0.
                     }
+                } else if row && matches!(align, Align::FirstBaseline | Align::LastBaseline) {
+                    let last = align == Align::LastBaseline;
+                    let group = line_baselines[usize::from(last)];
+                    let anchor = if last { cross - group[1] } else { group[0] };
+                    anchor - f.baseline(last, item.margin[2])
                 } else {
                     let offset = match flex_alignment(align, reverse_wrap) {
                         Align::End => cross_extra,

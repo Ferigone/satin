@@ -84,3 +84,45 @@ fn grid_items_share_first_and_last_baselines_across_a_row() {
       let first=ys(); document.getElementById('grid').className='end';[first,ys()].join('|')
     "#).unwrap(),"20,0|80,60".into());
 }
+
+#[test]
+fn percentage_height_uses_baseline_fallback_only_for_intrinsic_rows() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"
+        <style>
+        body{margin:0}
+        #g{display:grid;height:100px;grid:auto / 40px 40px;align-items:baseline}
+        #g.fixed{grid-template-rows:100px}
+        #a{height:60px} #b{height:20%}
+        </style><div id=g><div id=a></div><div id=b></div></div>
+    "#,
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+        let g=document.getElementById('g'),b=document.getElementById('b');
+        let initial=b.offsetTop;g.className='fixed';[initial,b.offsetTop].join(',')
+    "#
+            )
+            .unwrap(),
+        "0,40".into()
+    );
+}
+
+#[test]
+fn horizontal_flex_lines_share_baselines_under_reverse_wrapping() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"<style>
+      body{margin:0} #f{display:flex;flex-wrap:wrap-reverse;width:80px;align-items:baseline}
+      #f>div{width:40px} .small{height:10px}.tall{height:30px}
+      </style><div id=f><div class=small></div><div class=tall></div><div class=tall></div><div class=small></div></div>"#,
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"function positions(){return Array.from(document.querySelectorAll('#f>div'),e=>e.offsetTop).join(',')}
+    let reversed=positions();document.getElementById('f').style.setProperty('flex-wrap','wrap');
+    [reversed,positions()].join('|')"#).unwrap(),"50,30,0,20|20,0,30,50".into());
+}
