@@ -61,6 +61,8 @@ mod tab_strip;
 mod visit_store;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod update_ui;
+#[cfg(all(test, windows, target_arch = "x86_64"))]
+mod updater_ui_qa;
 use self::address_bar::{
     AddressBar, Movement,
     suggestions::{Direction as SuggestionDirection, Suggestions},
@@ -519,6 +521,10 @@ pub(crate) fn run(
     devtools: Option<crate::devtools::DevTools>,
     #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    if updater_ui_qa::active() {
+        assert!(!enable_updates && smoke_output.is_none() && url.is_some());
+    }
     #[cfg(all(windows, target_arch = "x86_64"))]
     let startup_signal = if enable_updates && url.is_none() {
         crate::updater::StartupSignal::from_parent()?
@@ -540,9 +546,17 @@ pub(crate) fn run(
     let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let visits = visit_store::Visits::open(path.join(visit_store::FILE_NAME));
     let fonts = Fonts::new()?;
-    let events = EventLoop::<()>::with_user_event()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let builder = EventLoop::<()>::with_user_event();
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    let builder = {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        let mut builder = builder;
+        if updater_ui_qa::active() {
+            builder.with_any_thread(true);
+        }
+        builder
+    };
+    let events = { builder }.build().map_err(|e| e.to_string())?;
     events.set_control_flow(ControlFlow::Wait);
     let proxy = events.create_proxy();
     let (results, incoming) = mpsc::channel(16);
@@ -578,6 +592,8 @@ pub(crate) fn run(
     let smoke_requested = smoke_output.is_some();
     let chrome_motion_forced_off =
         smoke_requested || std::env::var("SATIN_REDUCED_MOTION").is_ok_and(|value| value == "1");
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    let chrome_motion_forced_off = chrome_motion_forced_off || updater_ui_qa::active();
     let mut app = App {
         window: None,
         graphics: None,
@@ -682,6 +698,10 @@ pub(crate) fn run(
         #[cfg(all(windows, target_arch = "x86_64"))]
         startup_signal,
     };
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    if updater_ui_qa::active() {
+        app.updater = Some(crate::updater::Updates::ui_qa_fixture(&path));
+    }
     let event_result = events.run_app(&mut app);
     if event_result.is_ok() && smoke_requested {
         app.smoke_result
@@ -5041,6 +5061,13 @@ impl ApplicationHandler<()> for App {
         if let Some(next) = self.chrome_motion.deadline() {
             deadline = Some(deadline.map_or(next, |current| current.min(next)));
         }
+        #[cfg(all(test, windows, target_arch = "x86_64"))]
+        if let Some(next) = updater_ui_qa::deadline(self, event_loop) {
+            if event_loop.exiting() {
+                return;
+            }
+            deadline = Some(deadline.map_or(next, |current| current.min(next)));
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if let Err(error) = self.profile.save_storage() {
             self.status = format!("Site data could not be saved. {error}");
@@ -5072,6 +5099,10 @@ impl ApplicationHandler<()> for App {
                 Size::Physical,
             ))
             .with_min_inner_size(LogicalSize::new(390., 400.));
+        #[cfg(all(test, windows, target_arch = "x86_64"))]
+        if let Some(size) = updater_ui_qa::size() {
+            attributes = attributes.with_inner_size(Size::Physical(size));
+        }
         #[cfg(windows)]
         {
             attributes = attributes
@@ -5252,7 +5283,15 @@ impl ApplicationHandler<()> for App {
         }
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                #[cfg(all(test, windows, target_arch = "x86_64"))]
+                let previous_frame = self.presented_frames;
+                self.draw();
+                #[cfg(all(test, windows, target_arch = "x86_64"))]
+                if self.presented_frames != previous_frame || self.last_present_error.is_some() {
+                    updater_ui_qa::after_draw(self, event_loop);
+                }
+            }
             WindowEvent::Resized(_) => self.window_geometry_changed(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let new_scale = scale_factor as f32;

@@ -24,6 +24,8 @@ use tokio::sync::oneshot;
 use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ};
 
 mod restart;
+#[cfg(test)]
+mod ui_qa;
 pub(crate) use restart::{Restart, StartupSignal};
 
 const RELEASES: &str = "https://api.github.com/repos/Ferigone/satin/releases";
@@ -184,6 +186,8 @@ pub(crate) struct Updates {
     wake: Arc<dyn Fn() + Send + Sync>,
     phase: Phase,
     job: Option<Job>,
+    #[cfg(test)]
+    ui_qa: Option<ui_qa::Transport>,
 }
 
 pub(crate) struct View {
@@ -219,6 +223,8 @@ impl Updates {
             wake,
             phase: Phase::Current,
             job: None,
+            #[cfg(test)]
+            ui_qa: None,
         };
         updates.start_job(UpdateAction::Check);
         Some(updates)
@@ -330,6 +336,11 @@ impl Updates {
 
     pub(crate) fn start_job(&mut self, action: UpdateAction) {
         if !self.can_start(action) {
+            return;
+        }
+        #[cfg(test)]
+        if self.ui_qa.is_some() {
+            self.begin_ui_qa_job(action);
             return;
         }
         let candidate = self.offered();
@@ -1344,6 +1355,7 @@ mod tests {
             wake: Arc::new(|| {}),
             phase: Phase::Checking,
             job: None,
+            ui_qa: None,
         };
         let check = attach_test_job(&mut updates);
         assert!(updates.view(false).is_none());
@@ -1392,6 +1404,7 @@ mod tests {
             wake: Arc::new(|| {}),
             phase: Phase::Checking,
             job: None,
+            ui_qa: None,
         };
         drop(attach_test_job(&mut updates));
         assert!(updates.poll().0);
@@ -1420,6 +1433,7 @@ mod tests {
             wake: Arc::new(|| {}),
             phase: Phase::Applying(candidate.clone()),
             job: None,
+            ui_qa: None,
         };
         attach_test_job(&mut updates)
             .send(Err("temporarily busy".into()))
