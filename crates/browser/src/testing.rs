@@ -45,6 +45,7 @@ pub enum SmokeAction {
         value: String,
         timeout_ms: u64,
     },
+    SampleMedia { after_ms: u64 },
     Checkpoint(Checkpoint),
 }
 
@@ -607,6 +608,9 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
     let mut follows_click = false;
     let mut names = HashSet::new();
     for action in &actions {
+        if matches!(action, SmokeAction::SampleMedia { after_ms } if *after_ms > 60_000) {
+            return Err("Media sample delay exceeds 60 seconds".into());
+        }
         if let SmokeAction::ClickInRow(row) = action {
             row.validate()?;
         }

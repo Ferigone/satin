@@ -136,6 +136,22 @@ async function sample(page, site) {
   }, { site, selector: player[site].shell });
 }
 
+async function windowCase(exe, { site, url }, dir) {
+  const started = new Date();
+  const actions = join(dir, 'actions.json');
+  await writeFile(actions, JSON.stringify([8000, 5000].map(after_ms => ({ action: 'sample_media', after_ms }))));
+  const outcome = await run(exe, ['--url', url, '--profile', join(dir, 'profile'),
+    '--smoke-window', join(dir, 'frame.png'), '--smoke-actions', actions,
+    '--width', String(viewport.width), '--height', String(viewport.height)], 120000);
+  let r;
+  try { r = JSON.parse(outcome.stdout); } catch { /* unsuccessful window run */ }
+  return { site, url, startedUtc: started.toISOString(), elapsedMs: Date.now() - started.getTime(),
+    exit: outcome.exit, killed: outcome.killed, version: r?.version ?? null,
+    finalHost: r?.url ? new URL(r.url).hostname : null,
+    samples: r?.media_samples ?? null, diagnostics: r?.javascript?.diagnostics?.map(safeDiagnostic) ?? null,
+    executionProfiles: executionProfiles(outcome.stderr), budgetTrace: budgetTrace(outcome.stderr) };
+}
+
 async function chromeCase(exe, chromium, { site, url }) {
   const startedUtc = new Date().toISOString();
   const outcome = { site, url, startedUtc, samples: [], controls: {}, pageErrorCount: 0, firstErrors: [] };
@@ -301,9 +317,9 @@ async function reaCase(chrome, cli, { site, url }, dir) {
 
 const [mode, executable, identifier, site] = process.argv.slice(2);
 const selected = cases.filter(test => !site || test.site === site);
-if (!['chrome', 'satin'].includes(mode) || !executable || !identifier || !selected.length) {
+if (!['chrome', 'satin', 'window'].includes(mode) || !executable || !identifier || !selected.length) {
   console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
-  console.error('   or: node tools/verify-public-media.mjs satin <rust-browser.exe> <git commit> [twitch|youtube]');
+  console.error('   or: node tools/verify-public-media.mjs satin|window <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
 }
 const root = fileURLToPath(new URL('../target/public-media/', import.meta.url));
@@ -312,7 +328,7 @@ const directory = await mkdtemp(join(root, `${mode}-`));
 const temporary = join(directory, 'transient');
 await mkdir(temporary);
 const exe = resolve(executable);
-const binary = { path: exe, sha256: await sha256(exe), commit: mode === 'satin' ? identifier : null };
+const binary = { path: exe, sha256: await sha256(exe), commit: mode === 'chrome' ? null : identifier };
 const report = {
   mode, binary, viewport, node: process.version, os: process.platform, osRelease: release(), arch: arch(),
   startedUtc: new Date().toISOString(), cases: [], rea: [],
@@ -337,7 +353,8 @@ try {
   } else {
     for (const test of selected) {
       await mkdir(join(temporary, test.site));
-      report.cases.push(await satinCase(exe, test, join(temporary, test.site)));
+      const probe = mode === 'window' ? windowCase : satinCase;
+      report.cases.push(await probe(exe, test, join(temporary, test.site)));
       await save();
     }
   }

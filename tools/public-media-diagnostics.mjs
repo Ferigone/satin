@@ -61,7 +61,8 @@ export function executionProfiles(stderr) {
     if (!p || !number(p.node) || !number(p.bytes) || typeof p.external !== 'boolean'
       || typeof p.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(p.sha256)
       || !['ExecutionLimit', 'HeapLimit', 'SyntaxError', 'TypeError', 'ReferenceError',
-        'RangeError', 'UnsupportedFeature', 'InternalError', 'Throw'].includes(p.error)
+        'RangeError', 'UnsupportedFeature', 'InternalError', 'Thrown', 'Error', 'EvalError',
+        'UriError', 'AggregateError', 'CompileError', 'LinkError', 'RuntimeError'].includes(p.error)
       || !number(p.wallUs) || !(p.cpuUs === null || number(p.cpuUs))
       || !vector(p.work) || !(p.cycles === null || vector(p.cycles))) continue;
     results.push({ node: p.node, external: p.external, sha256: p.sha256, bytes: p.bytes,

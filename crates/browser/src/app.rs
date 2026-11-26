@@ -648,6 +648,7 @@ pub(crate) fn run(
             .transpose()?
             .unwrap_or_default(),
         smoke_wait_deadline: None,
+        smoke_media_samples: Vec::new(),
         smoke_checkpoint_document: None,
         smoke_checkpoint_sample: None,
         smoke_checkpoint_last: None,
@@ -703,6 +704,9 @@ pub(crate) fn run(
         if let Some(checkpoints) = app.smoke_checkpoint_outputs.summary() {
             summary["checkpoints"] = checkpoints;
         }
+        if !app.smoke_media_samples.is_empty() {
+            summary["media_samples"] = std::mem::take(&mut app.smoke_media_samples).into();
+        }
         println!("{summary}");
         app.smoke_checkpoint_outputs.commit();
     }
@@ -727,6 +731,7 @@ struct App {
     smoke_click: Option<String>,
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
     smoke_wait_deadline: Option<Instant>,
+    smoke_media_samples: Vec<serde_json::Value>,
     smoke_checkpoint_document: Option<CheckpointDocument>,
     smoke_checkpoint_sample: Option<CheckpointSample>,
     smoke_checkpoint_last: Option<Checkpoint>,
@@ -3703,6 +3708,33 @@ impl App {
             return;
         }
         let tab = &self.tabs[self.active];
+        if let Some(SmokeAction::SampleMedia { after_ms }) = self.smoke_actions.front() {
+            let Some(page) = tab.inspected_page() else { return };
+            let now = Instant::now();
+            let delay = Duration::from_millis(*after_ms);
+            let deadline = *self.smoke_wait_deadline.get_or_insert(now + delay);
+            if now < deadline {
+                match event_loop.control_flow() {
+                    ControlFlow::Wait => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                    ControlFlow::WaitUntil(next) if next > deadline => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            self.smoke_media_samples.push(serde_json::json!({
+                "navigation": tab.document_navigation,
+                "timestampMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_millis() as u64,
+                "videoElements": page.document.html_elements("video").count(),
+                "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
+            }));
+            self.smoke_actions.pop_front();
+            self.smoke_wait_deadline = None;
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
         if let Some(SmokeAction::WaitTitle { value, timeout_ms }) = self.smoke_actions.front() {
             if &tab.title == value {
                 self.smoke_actions.pop_front();
@@ -4347,7 +4379,7 @@ impl App {
                     Err(format!("Expected native title {value:?}, got {actual:?}"))
                 }
             }
-            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) => {
+            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) | SmokeAction::SampleMedia { .. } => {
                 unreachable!("the event loop handles waiting actions")
             }
             SmokeAction::Key {
