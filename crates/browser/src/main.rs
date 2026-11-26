@@ -195,15 +195,6 @@ fn run() -> Result<(), String> {
         .as_deref()
         .map(rust_browser_engine::normalize_url)
         .transpose()?;
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    if !args.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "--smoke-window" | "--smoke-click-id" | "--smoke-actions"
-        )
-    }) {
-        updater::start_for_installed_launch();
-    }
     let smoke_output = value("--smoke-window").map(PathBuf::from);
     let smoke_size = smoke_output.as_ref().and_then(|_| {
         let width = value("--width").and_then(|width| width.parse::<u32>().ok());
@@ -224,5 +215,12 @@ fn run() -> Result<(), String> {
         file_picker_responses,
         smoke_size,
         Some(devtools::DevTools::default()),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        !args.iter().any(|argument| {
+            matches!(
+                argument.as_str(),
+                "--smoke-window" | "--smoke-click-id" | "--smoke-actions"
+            )
+        }),
     )
 }

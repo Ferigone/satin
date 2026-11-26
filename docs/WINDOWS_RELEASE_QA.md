@@ -77,7 +77,7 @@ speedup or a meaningful memory change beyond this fixture.
   should report the same version. The launcher requires a staged
   `current.json` and browser under `versions/` to forward `--version`.
 - `scripts/PackageRelease.ps1` emits `satin-windows-x64.exe` (browser only for
-  automatic updates), `Satin-windows-x64.zip` (browser, launcher and installer
+  in-app updates), `Satin-windows-x64.zip` (browser, launcher and installer
   scripts) and `SHA256SUMS.txt`. Check that the ZIP's browser entry and
   standalone executable are byte-identical, the ZIP has both Windows x64
   executables, and both hashes match `SHA256SUMS.txt`.
@@ -110,21 +110,127 @@ speedup or a meaningful memory change beyond this fixture.
   `-NoLaunch`. Creating or retargeting the desktop Preview shortcut is a
   separate action.
 - Only a normal Windows x64 run of the current installed build qualifies for
-  automatic updates (`current.json` version and absolute executable must
+  in-app updates (`current.json` version and absolute executable must
   match). Headless, smoke-window and unmanaged executable launches do not
   qualify. Updater selection requires a newer SemVer and a non-draft GitHub
   release; alpha prereleases are intentionally admitted. The standalone
   asset must pass official HTTPS URL, size, SHA-256, and PE machine checks. The
-  browser swaps manifests for the next launch, not the running executable,
-  profile or launcher.
+  startup check fetches only release metadata. **Download update** stages the
+  verified binary without changing either manifest. **Restart and update**
+  re-verifies and holds both executables, closes the browser, releases its
+  profile and trial-launches the exact staged executable. The trial acquires
+  the same profile and acknowledges its first native frame over a fresh
+  private pipe. Only then does the updater switch `current.json` under the
+  publication lock. The unchanged desktop launcher still resolves the old
+  build until publication. See [interactive updater QA](#interactive-updater-qa).
 - `Rollback.ps1` verifies the previous target's SHA-256, then swaps the
   manifests under the same lock. Relaunch to use it. When a newer installed
   version is now in `previous.json`, that version is the updater's floor, so
   it won't immediately undo the rollback. A simulated manifest swap is not
   proof of an actual release download.
-- For a public alpha.17 → alpha.18 test, prime a disposable install and
-  profile with the authentic alpha.17 assets before promotion. Observe the
-  updater only after publication. Verify both manifests, the running
-  launcher-reported version, byte identity with the public executable, and
-  preservation of the old binary and profile sentinel. Allow enough time
-  for startup delay, retry budgets and the asset download.
+
+### Interactive updater QA
+
+Run the offline regression tests on Windows x64:
+
+```powershell
+cargo test --locked -p rust-browser updater::tests
+```
+
+These tests use disposable manifests and a loopback stream. They check passive
+discovery, duplicate/stale commands, intermediate progress, corrupt bytes,
+unchanged manifests after staging, active-version/rollback-floor checks at
+apply, and failing publication with a live `current.json` file lock. They also
+cover a replaced pending payload, verification and pinning of the prior
+executable, staged ticket identity, immediate spawn failure and recovery
+refusing to overwrite a superseding manifest.
+
+For the offline **process** smoke, compile the stand-alone probe and use an
+unmodified workspace launcher binary. The test copies both into a temporary
+installation; it never uses the actual user's install, shortcut or profile.
+Use absolute paths and a disposable output folder:
+
+```powershell
+rustc --edition 2024 crates/browser/tests/fixtures/updater_probe.rs -o "$scratch\updater-probe.exe"
+$env:SATIN_TEST_UPDATER_PROBE = "$scratch\updater-probe.exe"
+$env:SATIN_TEST_LAUNCHER = 'C:\path\to\target\debug\rust-browser-launcher.exe'
+cargo test --locked -p rust-browser supervised_restart_requires_ack_and_reopens_exact_profile -- --ignored
+```
+
+The probe must receive only the original effective profile (no startup URL),
+take its exclusive lock, and read the saved two-tab session with the correct
+active tab. It makes no network requests. The unchanged launcher queries
+`--version` while a trial is waiting for acknowledgment; it must route to
+the old executable until a successful commit. Early exit, timeout, an
+incorrect receipt, and an acknowledged trial whose manifest rename fails
+must all leave `current.json` on the old executable and reopen it with the
+saved session. The launcher must still route to the old executable after
+each failed trial.
+
+The startup acknowledgment is bounded (25 seconds, with up to 5 seconds to
+confirm termination after failure). Older candidate builds without the
+current readiness protocol cannot be activated. The nonce is per trial, and
+its receipt must come from the live, supervised executable's private pipe;
+there is no named event or durable receipt to reuse. This is not protection
+against a hostile process with the same user's ability to modify the install
+or inject into that executable. The trial and any recovery session deliberately
+skip update discovery for their whole lifetime; an ordinary launch checks
+again. If termination cannot be confirmed or current changed out of band,
+the updater stops automatic reopening. This is not a persistent journal:
+forced termination of the updater itself or power loss can interrupt recovery,
+and a forced exit during the two manifest renames can leave `previous.json`
+different even though `current.json` points to a verified build.
+
+For manual UI QA when two authentic builds with the readiness protocol already
+exist, stage the older interactive browser, its original launcher
+(`RustBrowser.exe`), and a matching
+`current.json` under a disposable process-local `LOCALAPPDATA\RustBrowser`.
+Launch the versioned executable directly, with a relative, nondefault
+`--profile` and a working directory different from that of the launcher.
+Do **not** run the installer or publish a release for this check.
+
+1. Open two tabs. Wait for the update icon; check the hover label and **Alt+U**.
+   Verify that neither manifest changed and there is no new version directory
+   before selecting **Download update**.
+2. Select **Download update**. Verify that progress is visible, the panel can be
+   dismissed with **Esc** and reopened, and repeated clicks don't start another
+   job. When the panel says the update is ready, verify `current.json` and
+   `previous.json` are unchanged and the staged hash matches the release.
+3. To test late publication failure, hold `current.json` open without delete
+   sharing during the trial. Verify the trial stops and the old build reopens
+   with the same tabs. Remove the lock; a verified stage can be reused. The
+   old window should stay open if preflight fails before the trial begins.
+4. Set normal startup to **Start page**, then select **Restart and update**.
+   Verify `previous.json` is the original current and the new native window
+   opens the same profile, tabs and active tab without a profile-lock error.
+   An ordinary subsequent launch must still respect the Start page preference.
+   Repeat in headless/smoke-window mode or from an unmanaged copy and verify
+   no updater check or icon.
+
+### Quiet Cinder toolbar and input
+
+On the combined candidate SHA, check at **390×800** and **1280×800** logical
+pixels, at 100% scaling and again at a higher DPI. Use a disposable profile
+and an offline test fixture for offer, progress and ready UI states. Native
+smoke mode intentionally disables the real updater; a normal unmanaged
+launch is the negative control. Do not install or publish to supply fixtures.
+
+- Before an offer and after it appears, confirm the Downloads button and
+  its flyout anchor do not move. The address field, bookmark star, suggestion
+  popup and suggestion targets shrink together to make room for the badge.
+  Test with a real Downloads transfer present as well as an empty list.
+- Opening the updater must not start a download. Check clickable separation
+  on all toolbar boundaries; inspect the tooltip, offer, intermediate progress,
+  and ready frames for clipping. Download and Restart must occupy separate
+  hit regions. Resizing before the next frame must not activate an old hit.
+- Open via badge and Alt+U with the address suggestion, real Downloads, or
+  DevTools focused. Use Esc and an outside click over a page control, dock
+  control and Downloads button; verify only dismissal occurs. Test middle
+  click, wheel and dropped-file input while open. Hold Enter/Space as Ready
+  arrives and hold Esc or Alt+U through dismissal; repeats and synthetic
+  focus keys must not act on either surface. Exercise an active Windows IME
+  composition on opening and dismissal; old text must not commit into the
+  address, document or DevTools, and a new composition must still work.
+- The geometry and key-ownership unit tests do not prove native presentation,
+  real IME ordering, download transport, or the supervised restart. Keep these
+  checks separate from the updater backend tests and first-frame process smoke.

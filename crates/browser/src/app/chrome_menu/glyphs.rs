@@ -1,5 +1,5 @@
 use super::{Canvas, Color, ICON_SIZE};
-use crate::app::{Action, chrome_icon};
+use crate::app::{icons::Glyph as NativeGlyph, paint_glyph};
 use std::f32::consts::TAU;
 
 #[derive(Clone, Copy)]
@@ -27,22 +27,14 @@ pub(super) fn draw_glyph(
     color: Color,
 ) {
     if matches!(glyph, Glyph::Home | Glyph::Info) {
-        let action = if matches!(glyph, Glyph::Home) {
-            Action::Home
+        let glyph = if matches!(glyph, Glyph::Home) {
+            NativeGlyph::House
         } else {
-            Action::Version
+            NativeGlyph::Info
         };
         // Reuse the native 20-DIP toolbar glyphs in the reference's 17-DIP slot.
         let factor = ICON_SIZE / 20.;
-        chrome_icon(
-            canvas,
-            x / factor,
-            y / factor,
-            scale * factor,
-            action,
-            false,
-            color,
-        );
+        paint_glyph(canvas, x / factor, y / factor, scale * factor, glyph, color);
         return;
     }
 
