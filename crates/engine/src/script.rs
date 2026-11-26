@@ -126,6 +126,8 @@ struct State {
     dirty: bool,
     revision: u64,
     snapshot_revision: u64,
+    tag_tree_revision: u64,
+    appended_leaf: Option<(NodeId, NodeId)>,
     snapshot_document: Arc<Document>,
     ready_state: &'static str,
     current_script: Option<NodeId>,
@@ -173,6 +175,12 @@ pub struct ScriptRuntime {
 }
 
 fn mark_dirty(state: &mut State) {
+    state.tag_tree_revision = state.tag_tree_revision.wrapping_add(1);
+    state.appended_leaf = None;
+    mark_style_dirty(state);
+}
+
+fn mark_style_dirty(state: &mut State) {
     state.dirty = true;
     state.revision = state.revision.wrapping_add(1);
 }
@@ -499,7 +507,7 @@ fn set_attribute(
             vm.unroot(root);
         }
         state.dom_bytes = next_bytes.saturating_sub(if removed_namespace { key.len() } else { 0 });
-        mark_dirty(&mut state);
+        mark_style_dirty(&mut state);
         if changes_canvas_attribute {
             canvas::attribute_changed(vm, &mut state, id, &key)?;
         }
@@ -772,6 +780,8 @@ impl ScriptRuntime {
             dirty: fresh_parser_snapshot,
             revision: u64::from(fresh_parser_snapshot),
             snapshot_revision: 0,
+            tag_tree_revision: 0,
+            appended_leaf: None,
             snapshot_document: page.document.clone(),
             ready_state: "loading",
             current_script: None,
