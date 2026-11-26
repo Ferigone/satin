@@ -1,19 +1,21 @@
 //! Standalone offline smoke helper; compile directly, never package with Satin.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use std::{
     fs,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+    io::{self, Write},
     path::PathBuf,
     time::{Duration, Instant},
 };
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> RawHandle;
-    fn SetEvent(event: RawHandle) -> i32;
-}
-
 fn main() {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let executable = std::env::current_exe().unwrap();
+    let build = executable.parent().unwrap();
+    if args.iter().any(|argument| argument == "--version") {
+        // Identify the executable the unmodified legacy launcher selected.
+        println!("{}", build.file_name().unwrap().to_str().unwrap());
+        return;
+    }
     assert_eq!(
         args.len(),
         2,
@@ -28,11 +30,12 @@ fn main() {
         .expect("launch used the same profile directory");
     lock.try_lock()
         .expect("the prior profile released its exclusive lock");
-    let executable = std::env::current_exe().unwrap();
-    let build = executable.parent().unwrap();
     fs::write(build.join("probe-started"), b"has profile").unwrap();
     let mode = fs::read_to_string(build.join("probe-mode")).ok();
-    if matches!(mode.as_deref(), Some("exit" | "hang")) {
+    if matches!(
+        mode.as_deref(),
+        Some("exit" | "hang" | "wrong-ack" | "publish-fail")
+    ) {
         // Model an unsupported/failed startup that already wrote a new session.
         fs::write(
             profile.join("session.json"),
@@ -46,6 +49,12 @@ fn main() {
             std::thread::sleep(Duration::from_secs(10));
             return;
         }
+        Some("ack" | "wrong-ack" | "publish-fail") => {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !build.join("probe-release").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
         _ => {}
     }
     let pending = profile.join("updater-probe-receipt.pending");
@@ -56,15 +65,22 @@ fn main() {
         build.file_name().unwrap().to_str().unwrap(),
     )
     .unwrap();
-    let nonce = std::env::var("SATIN_UPDATE_READY_V1").unwrap();
-    let event = format!("Local\\Satin.UpdateReady.{nonce}\0")
-        .encode_utf16()
-        .collect::<Vec<_>>();
-    // Borrow a terminated event name and take ownership of the returned handle.
-    let handle = unsafe { OpenEventW(2, 0, event.as_ptr()) };
-    assert!(!handle.is_null());
-    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-    assert_ne!(unsafe { SetEvent(handle.as_raw_handle()) }, 0);
+    let handoff = std::env::var("SATIN_UPDATE_HANDOFF_V2").unwrap();
+    let nonce = handoff
+        .split('"')
+        .nth(3)
+        .expect("nonce is the first ticket field");
+    assert_eq!(nonce.len(), 32);
+    let nonce = if mode.as_deref() == Some("wrong-ack") {
+        "00000000000000000000000000000000"
+    } else {
+        nonce
+    };
+    {
+        let mut pipe = io::stdout().lock();
+        writeln!(pipe, "Satin first frame v2 {nonce}").unwrap();
+        pipe.flush().unwrap();
+    }
     // A real browser remains running after its first presentation. Keep the
     // test process alive until the parent has checked that it got the ACK.
     let end = Instant::now() + Duration::from_secs(8);

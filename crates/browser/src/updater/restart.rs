@@ -1,274 +1,317 @@
-//! Supervise the verified version through its first presented browser window.
-use super::{Activation, Installation, hex, installed_running, installed_target, read_manifest};
+//! Trial-launch a verified build while the legacy launcher still sees the prior manifest.
+use super::{
+    Installation, Manifest, Publication, hex, install_root, installed_target, valid_manifest,
+};
 use ring::rand::{SecureRandom, SystemRandom};
+use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
-    io,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    io::{self, Read, Write},
+    os::windows::io::AsRawHandle,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::{Child, Command, Stdio},
     ptr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{ERROR_ALREADY_EXISTS, SetLastError, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
-    System::Threading::{
-        CreateEventW, EVENT_MODIFY_STATE, OpenEventW, SetEvent, WaitForMultipleObjects,
-        WaitForSingleObject,
-    },
+    Foundation::WAIT_OBJECT_0,
+    System::{Pipes::PeekNamedPipe, Threading::WaitForSingleObject},
 };
 
-const READY_ENV: &str = "SATIN_UPDATE_READY_V1";
-const EVENT_PREFIX: &str = "Local\\Satin.UpdateReady.";
+const TICKET_ENV: &str = "SATIN_UPDATE_HANDOFF_V2";
 const START_TIMEOUT: Duration = Duration::from_secs(25);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL: Duration = Duration::from_millis(20);
+const TICKET_LIMIT: usize = 2048;
 
-fn event_name(nonce: &str) -> Vec<u16> {
-    EVENT_PREFIX
-        .encode_utf16()
-        .chain(nonce.encode_utf16())
-        .chain([0])
-        .collect()
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Ticket {
+    nonce: String,
+    manifest: Manifest,
 }
 
-pub(crate) struct StartupSignal(OwnedHandle);
+impl Ticket {
+    fn receipt(&self) -> String {
+        format!("Satin first frame v2 {}\n", self.nonce)
+    }
+}
+
+pub(crate) struct StartupSignal(String);
 
 impl StartupSignal {
-    pub(crate) fn from_parent() -> Option<Self> {
-        let nonce = std::env::var(READY_ENV).ok()?;
-        if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return None;
-        }
-        installed_running()?;
-        let name = event_name(&nonce);
-        // The terminated name stays live for the call; this process only needs
-        // permission to signal, and does not pass the handle to other children.
-        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
-        if handle.is_null() {
-            return None;
-        }
-        // Successful OpenEventW gives us an owned kernel handle.
-        Some(Self(unsafe { OwnedHandle::from_raw_handle(handle) }))
+    pub(crate) fn from_parent() -> Result<Option<Self>, String> {
+        let Some(ticket) = std::env::var_os(TICKET_ENV) else {
+            return Ok(None);
+        };
+        let json = ticket
+            .to_str()
+            .filter(|text| text.len() <= TICKET_LIMIT)
+            .ok_or("Invalid update handoff size or encoding")?;
+        let root = install_root().ok_or("Cannot locate the installation for the update handoff")?;
+        let running = std::env::current_exe()
+            .and_then(|exe| exe.canonicalize())
+            .map_err(|error| error.to_string())?;
+        let receipt = validate_ticket(json, &root, &running, env!("CARGO_PKG_VERSION"))?;
+        // On Windows, the environment may be changed safely even with other
+        // threads. Do not pass the one-shot handoff to any later subprocess.
+        unsafe { std::env::remove_var(TICKET_ENV) };
+        Ok(Some(Self(receipt)))
     }
 
     pub(crate) fn ready(self) {
-        // OwnedHandle keeps the event live while it is signalled.
-        if unsafe { SetEvent(self.0.as_raw_handle()) } == 0 {
-            eprintln!(
-                "Satin updater: Could not signal startup: {}",
-                io::Error::last_os_error()
-            );
+        let mut pipe = io::stdout().lock();
+        if let Err(error) = pipe
+            .write_all(self.0.as_bytes())
+            .and_then(|()| pipe.flush())
+        {
+            eprintln!("Satin updater: Could not acknowledge the first browser frame: {error}");
         }
     }
 }
 
-pub(super) struct ParentSignal {
-    nonce: String,
-    handle: OwnedHandle,
+pub(super) fn validate_ticket(
+    json: &str,
+    root: &Path,
+    running: &Path,
+    version: &str,
+) -> Result<String, String> {
+    if json.len() > TICKET_LIMIT {
+        return Err("Update handoff exceeded its size limit".into());
+    }
+    let ticket = serde_json::from_str::<Ticket>(json).map_err(|_| "Invalid update handoff")?;
+    // The trial is intentionally not in current.json. Match the bounded ticket
+    // against the compiled version and exact canonical versioned executable.
+    // The parent pins that file and owns the only read end of the pipe, so an
+    // environment ticket alone cannot confirm startup.
+    if ticket.nonce.len() != 32
+        || !ticket.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !valid_manifest(&ticket.manifest)
+        || ticket.manifest.version != version
+        || installed_target(root, &ticket.manifest).as_deref() != Some(running)
+    {
+        return Err("This browser does not match the update handoff".into());
+    }
+    Ok(ticket.receipt())
 }
 
-impl ParentSignal {
-    pub(super) fn new() -> Result<Self, String> {
-        let mut nonce = [0; 16];
+pub(super) struct VerifiedBuild {
+    target: PathBuf,
+    manifest: Manifest,
+    // Deny writes/delete from hash verification through the supervised launch.
+    _file: File,
+}
+
+impl VerifiedBuild {
+    pub(super) fn new(target: PathBuf, manifest: Manifest, file: File) -> Self {
+        Self {
+            target,
+            manifest,
+            _file: file,
+        }
+    }
+}
+
+struct Trial {
+    child: Child,
+    receipt: String,
+}
+
+impl Trial {
+    fn spawn(install: &Installation, build: &VerifiedBuild) -> Result<Self, String> {
+        if installed_target(&install.root, &build.manifest).as_ref() != Some(&build.target) {
+            return Err(
+                "The verified executable is no longer at its expected installation path".into(),
+            );
+        }
+        let mut nonce = [0_u8; 16];
         SystemRandom::new()
             .fill(&mut nonce)
             .map_err(|_| "Could not create startup nonce")?;
-        let nonce = hex(&nonce);
-        let name = event_name(&nonce);
-        // Null security attributes use the caller's default security descriptor
-        // and make the event non-inheritable. The name is NUL-terminated.
-        let handle = unsafe {
-            SetLastError(0);
-            CreateEventW(ptr::null(), 1, 0, name.as_ptr())
+        let ticket = Ticket {
+            nonce: hex(&nonce),
+            manifest: build.manifest.clone(),
         };
-        let last_error = io::Error::last_os_error();
-        if handle.is_null() {
-            return Err(format!(
-                "Could not create update startup event: {last_error}"
-            ));
+        let json = serde_json::to_string(&ticket).map_err(|error| error.to_string())?;
+        if json.len() > TICKET_LIMIT {
+            return Err("Update handoff exceeded its size limit".into());
         }
-        // Successful CreateEventW gives us an owned kernel handle.
-        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        if last_error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
-            return Err("Update startup nonce already in use".into());
-        }
-        Ok(Self { nonce, handle })
+        // Legacy launchers detach; start the exact verified child with the
+        // same profile/cwd convention. Only its process gets the write end of
+        // this fresh pipe. No named, same-user-signallable event is used.
+        let child = Command::new(&build.target)
+            .current_dir(&install.root)
+            .arg("--profile")
+            .arg(&install.profile)
+            .env(TICKET_ENV, json)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Could not start Satin: {error}"))?;
+        Ok(Self {
+            child,
+            receipt: ticket.receipt(),
+        })
     }
 
-    fn wait(&self, child: &mut Child, timeout: Duration) -> Result<(), String> {
-        // If both are signaled, prefer the child exit over the event.
-        let handles = [child.as_raw_handle(), self.handle.as_raw_handle()];
-        // Both live handles are borrowed for the duration of this bounded wait.
-        let result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, millis(timeout)) };
-        if result == WAIT_OBJECT_0 + 1
-            && child
-                .try_wait()
-                .map_err(|error| error.to_string())?
-                .is_none()
-        {
-            return Ok(());
+    fn still_running(&mut self) -> Result<(), String> {
+        match self.child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) => Err(format!("Satin exited during its update trial ({status})")),
+            None => Ok(()),
         }
-        match result {
-            WAIT_TIMEOUT => Err("Satin did not acknowledge its first window in time".into()),
-            WAIT_FAILED => Err(format!(
-                "Could not verify Satin startup: {}",
-                io::Error::last_os_error()
-            )),
-            _ => {
-                let status = child.try_wait().map_err(|error| error.to_string())?;
-                Err(
-                    status.map_or("Satin did not confirm startup".into(), |status| {
-                        format!("Satin exited before confirming startup ({status})")
-                    }),
+    }
+
+    fn wait_for_frame(&mut self, timeout: Duration) -> Result<(), String> {
+        let mut pipe = self
+            .child
+            .stdout
+            .take()
+            .ok_or("Missing private startup pipe")?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.still_running()?;
+            let mut available = 0_u32;
+            // No other thread reads this pipe. Peeking with no output buffer
+            // cannot consume data; read only when a whole frame is buffered.
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    pipe.as_raw_handle(),
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    &mut available,
+                    ptr::null_mut(),
                 )
+            };
+            if peeked == 0 {
+                return Err(format!(
+                    "The startup pipe closed before acknowledgment: {}",
+                    io::Error::last_os_error()
+                ));
             }
+            let available = available as usize;
+            if available >= self.receipt.len() {
+                if available != self.receipt.len() {
+                    return Err("Invalid update startup acknowledgment length".into());
+                }
+                let mut received = vec![0; self.receipt.len()];
+                pipe.read_exact(&mut received)
+                    .map_err(|error| error.to_string())?;
+                if received != self.receipt.as_bytes() {
+                    return Err("Invalid update startup acknowledgment".into());
+                }
+                return self.still_running();
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("Satin did not acknowledge its first window in time".into());
+            }
+            std::thread::sleep(POLL.min(remaining));
         }
     }
-}
 
-fn millis(timeout: Duration) -> u32 {
-    // INFINITE (u32::MAX) is not a valid timeout for a restart.
-    timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32
-}
-
-struct StartFailure {
-    reason: String,
-    stopped: bool,
-}
-
-fn verified_start(
-    install: &Installation,
-    target: &Path,
-    signal: &ParentSignal,
-    timeout: Duration,
-) -> Result<(), StartFailure> {
-    // Legacy installed launchers detach immediately and don't return the browser
-    // process handle. Use their same working directory/profile convention, but
-    // supervise the verified installation target ourselves on an update handoff.
-    let mut child = Command::new(target)
-        .current_dir(&install.root)
-        .arg("--profile")
-        .arg(&install.profile)
-        .env(READY_ENV, &signal.nonce)
-        .spawn()
-        .map_err(|error| StartFailure {
-            reason: format!("Could not start Satin: {error}"),
-            stopped: true,
-        })?;
-    if let Err(reason) = signal.wait(&mut child, timeout) {
-        let _ = child.kill();
-        // The process handle is owned by `child`. Do not try to open the profile
-        // in a replacement process until Windows confirms this process is gone.
-        let stopped = unsafe { WaitForSingleObject(child.as_raw_handle(), millis(STOP_TIMEOUT)) }
-            == WAIT_OBJECT_0;
-        return Err(StartFailure { reason, stopped });
+    fn stop(&mut self) -> bool {
+        let _ = self.child.kill();
+        // Borrow the exact child's still-owned process handle; never search
+        // for or terminate other Satin processes by binary name or PID.
+        unsafe {
+            WaitForSingleObject(self.child.as_raw_handle(), STOP_TIMEOUT.as_millis() as u32)
+                == WAIT_OBJECT_0
+        }
     }
-    Ok(())
 }
 
 pub(crate) struct Restart {
     _lock: File,
-    _verified: File,
-    target: PathBuf,
     install: Installation,
-    activation: Option<Activation>,
-    signal: ParentSignal,
+    next: VerifiedBuild,
+    prior: VerifiedBuild,
+    publication: Publication,
 }
 
 impl Restart {
     pub(super) fn new(
         lock: File,
-        verified: File,
-        target: PathBuf,
         install: Installation,
-        activation: Activation,
-        signal: ParentSignal,
+        next: VerifiedBuild,
+        prior: VerifiedBuild,
+        publication: Publication,
     ) -> Self {
         Self {
             _lock: lock,
-            _verified: verified,
-            target,
             install,
-            activation: Some(activation),
-            signal,
+            next,
+            prior,
+            publication,
         }
     }
 
-    /// The caller must have dropped the App (including its Profile) before this call.
+    /// The caller must have dropped the App (including its Profile) first.
     pub(crate) fn launch(self) -> Result<(), String> {
         self.launch_with_timeout(START_TIMEOUT)
     }
 
-    pub(super) fn launch_with_timeout(mut self, timeout: Duration) -> Result<(), String> {
+    pub(super) fn launch_with_timeout(self, timeout: Duration) -> Result<(), String> {
+        if !self.publication.prior_is_current(&self.install.root)? {
+            return Err(
+                "The active installation changed before the trial; it was left untouched".into(),
+            );
+        }
         let saved_session = match crate::profile::snapshot_update_session(&self.install.profile) {
             Ok(session) => session,
             Err(error) => {
                 return self.recover(&format!("Could not preserve the saved session: {error}"));
             }
         };
-        match verified_start(&self.install, &self.target, &self.signal, timeout) {
-            Ok(()) => {
-                self.activation.take();
-                Ok(())
+        let mut trial = match Trial::spawn(&self.install, &self.next) {
+            Ok(trial) => trial,
+            Err(error) => return self.recover(&error),
+        };
+        if let Err(reason) = trial
+            .wait_for_frame(timeout)
+            .and_then(|()| self.publication.commit(&self.install.root))
+        {
+            if !trial.stop() {
+                return Err(format!(
+                    "{reason}; the trial could not be confirmed stopped. The updater did not reopen another browser."
+                ));
             }
-            Err(failure) if failure.stopped => {
-                self.recover_with_session(&failure.reason, Some(&saved_session))
-            }
-            Err(failure) => {
-                // If the candidate may still be running, restoration/reopen
-                // could contend for its profile. Report and leave it alone.
-                self.activation.take();
-                Err(format!(
-                    "{}; the new process could not be confirmed stopped. Close it before recovering the installation.",
-                    failure.reason
-                ))
-            }
+            return self.recover_with_session(&reason, Some(&saved_session));
         }
+        Ok(())
     }
 
-    /// Recover only after the old App and any attempted child no longer hold the profile.
+    /// Use only after the old App and any attempted trial have released the profile.
     pub(crate) fn recover(self, reason: &str) -> Result<(), String> {
         self.recover_with_session(reason, None)
     }
 
-    fn recover_with_session(mut self, reason: &str, session: Option<&[u8]>) -> Result<(), String> {
-        let activation = self.activation.take().expect("pending startup");
-        activation.restore(&self.install.root)
-            .map_err(|error| format!("The update did not start: {reason}. Could not restore the prior installation: {error}"))?;
+    fn recover_with_session(self, reason: &str, session: Option<&[u8]>) -> Result<(), String> {
         let reopen = (|| {
+            if !self.publication.prior_is_current(&self.install.root)? {
+                return Err("The active installation changed; it was left untouched".into());
+            }
             if let Some(session) = session {
                 crate::profile::restore_update_session(&self.install.profile, session)
                     .map_err(|error| format!("Could not restore the saved tab session: {error}"))?;
             }
-            let (manifest, _) = read_manifest(&self.install.root.join("current.json"))
-                .ok_or("The restored manifest could not be read")?;
-            let target = installed_target(&self.install.root, &manifest)
-                .filter(|path| path == &self.install.running)
-                .ok_or("The restored executable no longer matches the previous build")?;
-            let signal = ParentSignal::new()?;
-            verified_start(&self.install, &target, &signal, START_TIMEOUT)
-                .map_err(|error| error.reason)
+            let mut prior = Trial::spawn(&self.install, &self.prior)?;
+            if let Err(error) = prior.wait_for_frame(START_TIMEOUT) {
+                return Err(if prior.stop() {
+                    error
+                } else {
+                    format!("{error}; could not confirm the recovery process stopped")
+                });
+            }
+            Ok(())
         })();
         match reopen {
             Ok(()) => Err(format!(
-                "The update did not start: {reason}. Satin restored and reopened the prior build."
+                "The update was not applied: {reason}. Satin reopened the prior build."
             )),
             Err(error) => Err(format!(
-                "The update did not start: {reason}. Satin restored the prior build but could not reopen it: {error}"
+                "The update was not applied: {reason}. Could not reopen the prior build: {error}"
             )),
-        }
-    }
-}
-
-impl Drop for Restart {
-    fn drop(&mut self) {
-        // The worker may publish immediately before a window/event-loop error
-        // tears down its receiver. No child was spawned, so undo that activation
-        // under the lock; never try to reopen while the old App may still exist.
-        if let Some(activation) = self.activation.take()
-            && let Err(error) = activation.restore(&self.install.root)
-        {
-            eprintln!("Satin updater: Could not undo abandoned activation: {error}");
         }
     }
 }

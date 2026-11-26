@@ -363,12 +363,14 @@ pub(crate) fn run(
     devtools: Option<crate::devtools::DevTools>,
     #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let startup_signal = if enable_updates && url.is_none() {
+        crate::updater::StartupSignal::from_parent()?
+    } else {
+        None
+    };
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
-    #[cfg(all(windows, target_arch = "x86_64"))]
-    let startup_signal = (enable_updates && url.is_none())
-        .then(crate::updater::StartupSignal::from_parent)
-        .flatten();
     #[cfg(all(windows, target_arch = "x86_64"))]
     let restore_upgrade_session = startup_signal.is_some();
     #[cfg(not(all(windows, target_arch = "x86_64")))]
@@ -477,7 +479,9 @@ pub(crate) fn run(
         presented_frames: 0,
         last_present_error: None,
         #[cfg(all(windows, target_arch = "x86_64"))]
-        updater: enable_updates
+        // A trial handoff intentionally starts before current.json is changed.
+        // Do not discover/offer another update in that entire browser session.
+        updater: (enable_updates && startup_signal.is_none())
             .then(|| {
                 crate::updater::Updates::start(
                     &path,

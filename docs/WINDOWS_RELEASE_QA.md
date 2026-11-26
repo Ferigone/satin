@@ -117,12 +117,12 @@ speedup or a meaningful memory change beyond this fixture.
   asset must pass official HTTPS URL, size, SHA-256, and PE machine checks. The
   startup check fetches only release metadata. **Download update** stages the
   verified binary without changing either manifest. **Restart and update**
-  re-verifies the stage, activates it under the publication lock, closes the
-  browser and releases the profile, and then supervises the verified browser
-  directly with the same profile. The installed desktop launcher is unchanged:
-  its exit status does not mean a browser opened. The update is confirmed only
-  after the new process acquires the profile and presents its first native
-  frame. See [interactive updater QA](#interactive-updater-qa).
+  re-verifies and holds both executables, closes the browser, releases its
+  profile and trial-launches the exact staged executable. The trial acquires
+  the same profile and acknowledges its first native frame over a fresh
+  private pipe. Only then does the updater switch `current.json` under the
+  publication lock. The unchanged desktop launcher still resolves the old
+  build until publication. See [interactive updater QA](#interactive-updater-qa).
 - `Rollback.ps1` verifies the previous target's SHA-256, then swaps the
   manifests under the same lock. Relaunch to use it. When a newer installed
   version is now in `previous.json`, that version is the updater's floor, so
@@ -141,34 +141,45 @@ These tests use disposable manifests and a loopback stream. They check passive
 discovery, duplicate/stale commands, intermediate progress, corrupt bytes,
 unchanged manifests after staging, active-version/rollback-floor checks at
 apply, and failing publication with a live `current.json` file lock. They also
-cover a replaced pending payload, immediate process spawn failure and recovery
+cover a replaced pending payload, verification and pinning of the prior
+executable, staged ticket identity, immediate spawn failure and recovery
 refusing to overwrite a superseding manifest.
 
-For the additional offline **process** smoke, compile the stand-alone probe.
-The test copies it into a temporary installation; it never uses the actual
-user's install, shortcut or profile. Use a disposable output folder:
+For the offline **process** smoke, compile the stand-alone probe and use an
+unmodified workspace launcher binary. The test copies both into a temporary
+installation; it never uses the actual user's install, shortcut or profile.
+Use absolute paths and a disposable output folder:
 
 ```powershell
 rustc --edition 2024 crates/browser/tests/fixtures/updater_probe.rs -o "$scratch\updater-probe.exe"
 $env:SATIN_TEST_UPDATER_PROBE = "$scratch\updater-probe.exe"
+$env:SATIN_TEST_LAUNCHER = 'C:\path\to\target\debug\rust-browser-launcher.exe'
 cargo test --locked -p rust-browser supervised_restart_requires_ack_and_reopens_exact_profile -- --ignored
 ```
 
 The probe must receive only the original effective profile (no startup URL),
 take its exclusive lock, and read the saved two-tab session with the correct
-active tab. It makes no network requests. The same test launches a candidate
-that exits without acknowledgment and one that hangs while holding the
-profile. Both must restore the exact original manifests and saved session,
-then reopen the old executable without contending for the profile.
+active tab. It makes no network requests. The unchanged launcher queries
+`--version` while a trial is waiting for acknowledgment; it must route to
+the old executable until a successful commit. Early exit, timeout, an
+incorrect receipt, and an acknowledged trial whose manifest rename fails
+must all leave `current.json` on the old executable and reopen it with the
+saved session. The launcher must still route to the old executable after
+each failed trial.
 
 The startup acknowledgment is bounded (25 seconds, with up to 5 seconds to
-confirm termination after a failed start). Older candidate builds without
-the readiness protocol cannot be confirmed and are rolled back. Do not treat
-a launcher exit, process creation, or a version query as startup proof. If
-termination cannot be confirmed or manifests have changed out of band, the
-updater reports the issue without reopening another browser. This is not a
-persistent crash-recovery journal: forced termination of the updater itself
-and power loss are outside the automatic rollback guarantee.
+confirm termination after failure). Older candidate builds without the
+current readiness protocol cannot be activated. The nonce is per trial, and
+its receipt must come from the live, supervised executable's private pipe;
+there is no named event or durable receipt to reuse. This is not protection
+against a hostile process with the same user's ability to modify the install
+or inject into that executable. The trial and any recovery session deliberately
+skip update discovery for their whole lifetime; an ordinary launch checks
+again. If termination cannot be confirmed or current changed out of band,
+the updater stops automatic reopening. This is not a persistent journal:
+forced termination of the updater itself or power loss can interrupt recovery,
+and a forced exit during the two manifest renames can leave `previous.json`
+different even though `current.json` points to a verified build.
 
 For manual UI QA when two authentic builds with the readiness protocol already
 exist, stage the older interactive browser, its original launcher
@@ -185,10 +196,10 @@ Do **not** run the installer or publish a release for this check.
    dismissed with **Esc** and reopened, and repeated clicks don't start another
    job. When the panel says the update is ready, verify `current.json` and
    `previous.json` are unchanged and the staged hash matches the release.
-3. To test failure, hold `current.json` open without delete sharing before
-   selecting **Restart and update**. Verify no manifest switch or window exit,
-   and that the panel offers retry after dismissing and reopening it. Remove the
-   lock, then retry; a verified stage can be reused.
+3. To test late publication failure, hold `current.json` open without delete
+   sharing during the trial. Verify the trial stops and the old build reopens
+   with the same tabs. Remove the lock; a verified stage can be reused. The
+   old window should stay open if preflight fails before the trial begins.
 4. Set normal startup to **Start page**, then select **Restart and update**.
    Verify `previous.json` is the original current and the new native window
    opens the same profile, tabs and active tab without a profile-lock error.
