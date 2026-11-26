@@ -64,6 +64,8 @@ pub(crate) struct Lexer {
     compilation_bytes: usize,
     #[cfg(feature = "media-startup-diagnostics")]
     initial_compilation_bytes: usize,
+    #[cfg(feature = "media-startup-diagnostics")]
+    compacted_bodies: usize,
 }
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
@@ -94,6 +96,8 @@ impl Lexer {
             compilation_bytes,
             #[cfg(feature = "media-startup-diagnostics")]
             initial_compilation_bytes: compilation_bytes,
+            #[cfg(feature = "media-startup-diagnostics")]
+            compacted_bodies: 0,
         }
     }
 
@@ -142,7 +146,12 @@ impl Lexer {
     pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
         // Up to three already-lexed tokens following the closing brace survive this body.
         self.compilation_bytes = before;
-        self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))
+        self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))?;
+        #[cfg(feature = "media-startup-diagnostics")]
+        {
+            self.compacted_bodies = self.compacted_bodies.saturating_add(1);
+        }
+        Ok(())
     }
 
     #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
@@ -158,6 +167,7 @@ impl Lexer {
                     self.chars.len(),
                     self.chars.storage().1,
                     self.pos,
+                    self.compacted_bodies,
                 ],
             );
             return Err(JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted"));

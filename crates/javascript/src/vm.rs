@@ -4818,7 +4818,7 @@ pub(crate) fn qa_compiler_limit(
     site: &'static std::panic::Location<'static>,
     requested: usize,
     remaining: usize,
-    counts: [usize; 4],
+    counts: [usize; 5],
 ) {
     qa_budget_with_costs(
         "compiler", Some(site), requested as u64, remaining as u64, 0, &[], Some(counts),
@@ -4833,7 +4833,7 @@ fn qa_budget_with_costs(
     remaining: u64,
     native_work: u64,
     costs: &[((&'static str, u32), u64)],
-    compiler: Option<[usize; 4]>,
+    compiler: Option<[usize; 5]>,
 ) {
     use std::io::Write;
     use std::sync::atomic::AtomicUsize;
@@ -4847,8 +4847,8 @@ fn qa_budget_with_costs(
         let (file, line) = site.map_or(("-", 0), |loc| (loc.file(), loc.line()));
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
-        if let Some([initial, source_units, backing_bytes, offset]) = compiler {
-            let _ = writeln!(stderr, "SATIN_QA_COMPILER {initial} {source_units} {backing_bytes} {offset}");
+        if let Some([initial, source_units, backing_bytes, offset, compacted]) = compiler {
+            let _ = writeln!(stderr, "SATIN_QA_COMPILER {initial} {source_units} {backing_bytes} {offset} {compacted}");
         }
         for &((file, line), units) in costs {
             let _ = writeln!(stderr, "SATIN_QA_COST {units} {line} {file}");

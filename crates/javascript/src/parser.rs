@@ -1,5 +1,7 @@
 pub(crate) mod annex;
 mod classes;
+mod cold_functions;
+mod directives;
 mod literals;
 pub(crate) mod modules;
 use crate::{
@@ -260,28 +262,17 @@ pub(crate) fn parse_script(
     inherited_strict: bool,
 ) -> Result<Vec<Stmt>, JsError> {
     let mut p = script_parser(lexer, context);
-    // In a large, known-strict script validate and release one nested body at
-    // a time. A function that is never called must still pass all early errors.
-    let large = source_bytes >= 64 * 1024;
-    p.defer_strict_functions = large && inherited_strict;
+    // A function that is never called must still pass all early errors.
+    p.defer_large_functions = source_bytes >= 64 * 1024;
+    p.known_strict_context = inherited_strict;
     let mut in_prologue = true;
     let mut body = Vec::new();
     while !p.is_eof() {
         let statement = p.statement()?;
-        if in_prologue {
-            match &statement {
-                Stmt::Expression(Expr::Literal(Value::String(s))) => {
-                    if large && s == &JsString::from("use strict") {
-                        p.defer_strict_functions = true;
-                    }
-                }
-                Stmt::EscapedStringStatement(_) => {}
-                _ => in_prologue = false,
-            }
-        }
+        p.known_strict_context |= directives::visit(&statement, &mut in_prologue);
         body.push(statement);
     }
-    if p.legacy_literals != 0 && (inherited_strict || has_strict_directive(&body)) {
+    if p.legacy_literals != 0 && p.known_strict_context {
         return Err(p.error("Legacy literal in strict code"));
     }
     annex::mark(&mut body, []);
@@ -306,7 +297,8 @@ fn script_parser(lexer: Lexer, context: EvalContext) -> Parser {
     let mut p = Parser {
         tokens: VecDeque::with_capacity(TOKEN_WINDOW),
         lexer,
-        defer_strict_functions: false,
+        defer_large_functions: false,
+        known_strict_context: false,
         function_depth: 0,
         legacy_literals: 0,
         last_end: 0,
@@ -333,15 +325,13 @@ fn script_parser(lexer: Lexer, context: EvalContext) -> Parser {
     p
 }
 pub(crate) fn has_strict_directive(body: &[Stmt]) -> bool {
+    let mut in_prologue = true;
     for stmt in body {
-        match stmt {
-            Stmt::EscapedStringStatement(_) => continue,
-            Stmt::Expression(Expr::Literal(Value::String(s))) => {
-                if s == &JsString::from("use strict") {
-                    return true;
-                }
-            }
-            _ => return false,
+        if directives::visit(stmt, &mut in_prologue) {
+            return true;
+        }
+        if !in_prologue {
+            break;
         }
     }
     false
@@ -376,7 +366,9 @@ struct Parser {
     // Current token followed by up to two lookahead tokens.
     tokens: VecDeque<Token>,
     lexer: Lexer,
-    defer_strict_functions: bool,
+    defer_large_functions: bool,
+    /// Strictness established by an enclosing script or function prologue.
+    known_strict_context: bool,
     function_depth: usize,
     legacy_literals: usize,
     last_end: usize,
@@ -926,12 +918,17 @@ impl Parser {
     }
 
     fn block_contents(&mut self) -> Result<Vec<Stmt>, JsError> {
+        self.block_contents_with_directives(false)
+    }
+    fn block_contents_with_directives(&mut self, mut in_prologue: bool) -> Result<Vec<Stmt>, JsError> {
         let mut stmts = Vec::new();
         while !self.eat("}") {
             if self.is_eof() {
                 return Err(self.error("Unterminated block"));
             }
-            stmts.push(self.statement()?);
+            let statement = self.statement()?;
+            self.known_strict_context |= directives::visit(&statement, &mut in_prologue);
+            stmts.push(statement);
         }
         Ok(stmts)
     }
@@ -1116,20 +1113,7 @@ impl Parser {
             let params = self.parameters()?;
             let mut f = self.function_body(start, name, params, false, kind)?;
             f.self_binding = !require_name && f.name.is_some();
-            if self.defer_strict_functions
-                && self.function_depth == 1
-                && kind == FunctionKind::Ordinary
-                && self.private_scopes.is_empty()
-                && self.eval_private_names.is_empty()
-                && f.params.iter().all(simple_parameter)
-            {
-                self.check_ast(Ast::Function(&f))?;
-                let (code, retained) = crate::bytecode::validate_deferred_function(&f)?;
-                f.body = Vec::new();
-                f.params = Vec::new();
-                f.validated = Some(code);
-                self.lexer.finish_deferred_function(before, retained)?;
-            }
+            self.compact_cold_function(&mut f, before)?;
             Ok(f)
         })();
         (
@@ -1152,6 +1136,7 @@ impl Parser {
         arrow: bool,
         kind: FunctionKind,
     ) -> Result<Function, JsError> {
+        let old_strict_context = self.known_strict_context;
         let legacy_before = self.legacy_literals;
         let old_loop = self.loop_depth;
         let old_switch = self.switch_depth;
@@ -1170,7 +1155,7 @@ impl Parser {
         let result = if self.eat("{") {
             let previous = self.allow_in;
             self.allow_in = true;
-            let result = self.block_contents();
+            let result = self.block_contents_with_directives(true);
             self.allow_in = previous;
             result
         } else if arrow {
@@ -1188,6 +1173,7 @@ impl Parser {
         self.await_count = old_await_count;
         self.yield_context = old_yield_context;
         self.yield_count = old_yield_count;
+        self.known_strict_context = old_strict_context;
         let mut body = result?;
         let strict = has_strict_directive(&body);
         if strict && self.legacy_literals != legacy_before {

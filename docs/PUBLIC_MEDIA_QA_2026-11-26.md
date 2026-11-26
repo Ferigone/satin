@@ -78,6 +78,19 @@ both JS limits. Its failing YouTube compilation processed 2,536,233 of
 (43,742,976 bytes), so the ASCII improvement did not address that failure.
 These are bounded lexer diagnostics, not a measured allocation high-water mark.
 
+`efe6c4a` emits dedicated instructions for static property references and
+reads. The inherited-property workload passed where the previous browser
+failed at the unchanged task limit
+(`target/media-named-read-delta-86ef5b8a7cc44f079d98eada1b1b2041/`), and
+150 focused JS tests and all four local media cases passed
+(`target/native-media-UzSsoB/`). The live Satin repeat
+(`target/public-media/satin-GViLAo/`) still failed before player startup.
+The following Chrome control (`target/public-media/chrome-lpo2Fq/`) advanced
+Twitch from 28 to 277 frames and YouTube from 53 to 198, with progress in
+decoded audio bytes and both pause/resume checks. YouTube also sought.
+Twitch did not expose a seek range or render chat lines in this particular
+reference sample. None of these observations establish audible output.
+
 ## Compiler memory policy
 
 There is no universal compiler-memory quota in ECMAScript. Its
