@@ -425,6 +425,14 @@ pub struct OpenedPage {
     pub(crate) http_status: Option<u16>,
     pub http_content: HttpContentMetadata,
 }
+
+impl OpenedPage {
+    /// Status of the final top-level HTTP response, absent for local documents.
+    pub fn http_status(&self) -> Option<u16> {
+        self.http_status
+    }
+}
+
 pub(crate) enum DocumentInput {
     Html(String),
     Streaming,

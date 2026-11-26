@@ -143,6 +143,12 @@ const ROWS: &[Row] = &[
     ),
     Row::Divider,
     Row::Item(
+        Target::Browser(Action::VisitHistory),
+        Glyph::History,
+        "Historia",
+        Some(Command::VisitHistory),
+    ),
+    Row::Item(
         Target::Browser(Action::TabHistory),
         Glyph::History,
         "Historia tej karty",

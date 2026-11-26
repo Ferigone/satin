@@ -60,7 +60,7 @@ pub(super) fn page_url(input: &str) -> Option<Url> {
         .then_some(url)
 }
 
-fn page_title(input: &str) -> String {
+pub(super) fn page_title(input: &str) -> String {
     // A document title is untrusted text shown in native chrome.
     let mut title = String::new();
     let mut count = 0;

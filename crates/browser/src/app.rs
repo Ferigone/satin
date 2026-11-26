@@ -54,6 +54,7 @@ mod scroll;
 mod settings;
 mod tab_behavior;
 mod tab_strip;
+mod visit_store;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod update_ui;
 use self::address_bar::{
@@ -211,6 +212,7 @@ enum Action {
     StartShortcuts,
     Menu,
     TabHistory,
+    VisitHistory,
     MenuItem(usize),
     BookmarkItem(usize),
     Minimize,
@@ -255,6 +257,7 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::Settings, "Settings"),
     (Action::Bookmarks, "Bookmarks"),
     (Action::TabHistory, "Tab history"),
+    (Action::VisitHistory, "Historia"),
     (Action::Version, "About Satin"),
     (Action::ShortcutHelp, "Keyboard shortcuts"),
     (Action::StartShortcuts, "Skróty startowe"),
@@ -336,6 +339,8 @@ struct Tab {
     url: String,
     // Keep the initiating method's eligibility through redirects.
     get_navigation: bool,
+    visit_pending: bool,
+    visit_confirm: bool,
     title: String,
     page: Option<Arc<LoadedPage>>,
     runtime: Option<ScriptRuntime>,
@@ -372,6 +377,8 @@ impl Tab {
             title: "New tab".into(),
             url: address.as_str().into(),
             get_navigation: true,
+            visit_pending: false,
+            visit_confirm: false,
             page: None,
             runtime: None,
             document_session: None,
@@ -397,6 +404,16 @@ impl Tab {
 
     fn fresh_address(&self) -> Option<FreshTab> {
         FreshTab::capture(&self.url, self.get_navigation)
+    }
+
+    fn visit_history_ready(&self) -> bool {
+        !self.loading
+            && self.url == visit_store::PAGE_URL
+            && self.document_navigation == self.navigation
+            && self.displayed_navigation == self.navigation
+            && self.runtime.is_none()
+            && self.document_session.is_none()
+            && self.page.as_ref().is_some_and(|page| page.url == visit_store::PAGE_URL)
     }
 
     fn install_page(&mut self, page: LoadedPage) {
@@ -504,6 +521,7 @@ pub(crate) fn run(
     };
     let bookmarks_path = path.join(bookmarks::FILE_NAME);
     let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
+    let visits = visit_store::Visits::open(path.join(visit_store::FILE_NAME));
     let fonts = Fonts::new()?;
     let events = EventLoop::<()>::with_user_event()
         .build()
@@ -550,6 +568,7 @@ pub(crate) fn run(
         fonts,
         profile,
         bookmarks,
+        visits,
         settings,
         settings_panel: None,
         tabs,
@@ -702,6 +721,7 @@ struct App {
     canvas: Option<Canvas>,
     fonts: Fonts,
     bookmarks: Result<bookmarks::Bookmarks, String>,
+    visits: Result<visit_store::Visits, String>,
     settings: settings::Store,
     settings_panel: Option<settings::Panel>,
     tabs: Vec<Tab>,
@@ -1071,6 +1091,9 @@ impl App {
     }
 
     fn start_page(&mut self, index: usize, opened: OpenedPage) {
+        if !opened.http_status().is_some_and(|code| (200..300).contains(&code)) {
+            self.tabs[index].visit_pending = false;
+        }
         let history = self.tabs[index].history.clone();
         let storage = self.tabs[index].storage.clone();
         match DocumentSession::start_in_tab(opened, history, storage) {
@@ -1097,6 +1120,7 @@ impl App {
         tab.cancel.cancel();
         tab.navigation = tab.navigation.wrapping_add(1);
         tab.document_navigation = tab.navigation;
+        tab.visit_pending = false;
         tab.recovery = tab.recovery.failed();
         let page = tab.recovery.page(&tab.url, error);
         tab.install_page(page);
@@ -1130,7 +1154,19 @@ impl App {
                     tab.title = page.title();
                     tab.layout = None;
                 }
-                changed || was_loading != tab.loading
+                let loading_changed = was_loading != tab.loading;
+                if !tab.loading && std::mem::take(&mut tab.visit_pending)
+                    && let Ok(visits) = &mut self.visits
+                {
+                    let time = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if let Err(error) = visits.record(&page.url, &tab.title, time) {
+                        self.status = format!("Nie zapisano historii: {error}");
+                    }
+                }
+                changed || loading_changed
             }
             Err(error) => {
                 self.fail_page(index, &error);
@@ -1474,6 +1510,8 @@ impl App {
         } else {
             mode
         };
+        tab.visit_pending = mode == NavigationMode::Push && tab.get_navigation;
+        tab.visit_confirm = false;
         tab.history.visit(parsed.clone(), mode, scroll);
         tab.history_scroll = restore.or_else(|| parsed.fragment().map(|_| HistoryScroll::Fragment));
         if tab.recovery.is_error_page() {
@@ -1507,6 +1545,9 @@ impl App {
         if let Some(page) = shortcuts::help_page(&parsed) {
             // Browser-owned help is static: do not create a script realm for it.
             tab.install_page(page);
+            tab.loading = false;
+        } else if url == visit_store::PAGE_URL {
+            tab.install_page(visit_store::page(self.visits.as_ref().ok(), false));
             tab.loading = false;
         } else if url.starts_with("about:") {
             self.start_page(index, OpenedPage::internal(&parsed, self.profile.cookies()));
@@ -1684,6 +1725,12 @@ impl App {
         self.sync_address();
         if self.tabs[index].page.is_none() && !self.tabs[index].loading {
             self.navigate(self.tabs[index].url.clone(), false);
+        } else if self.tabs[index].visit_history_ready() {
+            // The profile-wide store can change while a history tab is in
+            // the background. Never re-expose its old list or confirmation.
+            let tab = &mut self.tabs[index];
+            tab.visit_confirm = false;
+            tab.install_page(visit_store::page(self.visits.as_ref().ok(), false));
         }
         self.ensure_layout();
         self.set_title();
@@ -1792,6 +1839,7 @@ impl App {
                 true,
             ),
             Action::TabHistory => self.open_history_menu(),
+            Action::VisitHistory => self.navigate(visit_store::PAGE_URL.into(), true),
             Action::Menu => {
                 self.select_popup = None;
                 self.chrome_menu = (!matches!(self.chrome_menu, Some(Menu::Main(_))))
@@ -1979,6 +2027,7 @@ impl App {
                 );
             }
             Command::NextTab => self.activate((self.active + 1) % self.tabs.len()),
+            Command::VisitHistory => self.action(Action::VisitHistory, event_loop),
             Command::PreviousTab => {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
             }
@@ -3938,6 +3987,52 @@ impl App {
             .map(str::to_owned)
     }
 
+    fn visit_history_click(&mut self, link: &str) -> bool {
+        use visit_store::HistoryClick;
+        let Some(command) = HistoryClick::from_link(link) else {
+            return false;
+        };
+        let tab = &self.tabs[self.active];
+        if !tab.visit_history_ready() {
+            return false;
+        }
+        let Ok(visits) = &mut self.visits else {
+            return true;
+        };
+        let mut confirm = tab.visit_confirm;
+        let result = match command {
+            HistoryClick::Confirm => {
+                confirm = !visits.entries().is_empty();
+                Ok(())
+            }
+            HistoryClick::Cancel => {
+                confirm = false;
+                Ok(())
+            }
+            HistoryClick::Clear if confirm => {
+                confirm = false;
+                visits.clear().map(|()| {
+                    for tab in &mut self.tabs {
+                        tab.visit_pending = false;
+                        tab.visit_confirm = false;
+                    }
+                })
+            }
+            HistoryClick::Clear => return true,
+            HistoryClick::Remove(url) => visits.remove(&url),
+        };
+        if let Err(error) = result {
+            self.status = format!("Nie można zmienić historii: {error}");
+        }
+        let tab = &mut self.tabs[self.active];
+        tab.visit_confirm = confirm;
+        tab.install_page(visit_store::page(Some(visits), confirm));
+        self.hover = None;
+        self.ensure_layout();
+        self.redraw();
+        true
+    }
+
     fn update_pointer(&mut self, redraw_dock: bool) {
         if self.settings_panel.is_some() {
             self.settings_cursor();
@@ -4445,6 +4540,9 @@ impl App {
             return;
         }
         if let Some(url) = link {
+            if self.visit_history_click(&url) {
+                return;
+            }
             let initiator = self.tabs[self.active]
                 .page
                 .as_ref()

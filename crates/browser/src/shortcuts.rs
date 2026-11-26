@@ -24,6 +24,7 @@ pub enum Command {
     ResetZoom,
     Menu,
     Downloads,
+    VisitHistory,
     BookmarkPage,
     ToggleDevtools,
     InspectElement,
@@ -186,6 +187,12 @@ const BINDINGS: &[Binding] = &[
         "Ctrl+J",
         "Toggle the Downloads panel",
     ),
+    (
+        Command::VisitHistory,
+        &[Chord::CtrlPlainChar("h")],
+        "Ctrl+H",
+        "Open browsing history",
+    ),
     binding(
         Command::BookmarkPage,
         &[Chord::CtrlPlainChar("d")],
@@ -322,6 +329,7 @@ mod tests {
             (character("0"), ctrl, Command::ResetZoom),
             (character("d"), ctrl, Command::BookmarkPage),
             (character("J"), ctrl, Command::Downloads),
+            (character("H"), ctrl, Command::VisitHistory),
             (character("F"), alt, Command::Menu),
         ];
         for (key, modifiers, expected) in cases {
