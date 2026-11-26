@@ -42,6 +42,41 @@ All 823 property probes ran. Of 625 distinguishing computed values, exact matche
 
 The candidate passed 1,464 workspace tests with three existing opt-in tests ignored. The complete Linux run used `RUST_TEST_THREADS=1 cargo test --workspace --locked`. The locked workspace build also succeeded. The pull request records the separate Windows verification and the original synchronous WPT assertion comparison. [Alpha.41 verification](https://github.com/Ferigone/satin/pull/24)
 
+#### Synchronous CSS testharness
+
+The runner inventoried 8,316 entries. The individual records preserve partial pages and assertions observed in only one revision.
+
+| Outcome | Alpha.40 | Alpha.41 |
+| --- | ---: | ---: |
+| Reported assertions passing | 10,511 / 37,179 (28.27%) | 10,523 / 37,180 (28.30%) |
+| Pages marked COMPLETE | 3,472 | 3,472 |
+| Pages marked PARTIAL | 269 | 269 |
+| Pages marked HARNESS_ERROR | 223 | 223 |
+| Pages marked NOT_RUN | 4,352 | 4,352 |
+| Runner timeouts within harness errors | 0 | 0 |
+| Assertions marked FAIL | 26,667 | 26,656 |
+| Assertions marked PASS | 10,511 | 10,523 |
+| Assertions marked PRECONDITION_FAILED | 1 | 1 |
+
+12 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 previous passes were unobserved in the candidate. [Page and assertion statuses](css-js-alpha41.tsv.gz)
+
+#### Property-parsing directory
+
+The runner inventoried 1,325 entries. The individual records preserve partial pages and assertions observed in only one revision.
+
+| Outcome | Alpha.40 | Alpha.41 |
+| --- | ---: | ---: |
+| Reported assertions passing | 6,086 / 15,943 (38.17%) | 6,088 / 15,944 (38.18%) |
+| Pages marked COMPLETE | 1,112 | 1,112 |
+| Pages marked PARTIAL | 21 | 21 |
+| Pages marked HARNESS_ERROR | 0 | 0 |
+| Pages marked NOT_RUN | 192 | 192 |
+| Runner timeouts within harness errors | 0 | 0 |
+| Assertions marked FAIL | 9,857 | 9,856 |
+| Assertions marked PASS | 6,086 | 6,088 |
+
+2 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 previous passes were unobserved in the candidate. [Page and assertion statuses](css-parsing-alpha41.tsv.gz)
+
 [Download native and Chromium screenshots, per-element geometry, scroll observations and source hashes (ZIP)](css-alpha41-native.zip)
 
 ## Alpha.37 static CSS rerun
