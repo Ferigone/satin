@@ -4317,6 +4317,9 @@ impl Vm {
         if matches!(op, "===" | "!==") {
             self.charge_bigint_comparison(&left, &right)?;
             if let (Value::String(a), Value::String(b)) = (&left, &right) {
+                if a.len() != b.len() {
+                    return Ok(Value::Bool(op == "!=="));
+                }
                 self.compare_strings(a, b)?;
             }
             let equal = left == right;
@@ -4445,6 +4448,9 @@ impl Vm {
         if std::mem::discriminant(&a) == std::mem::discriminant(&b) {
             self.charge_bigint_comparison(&a, &b)?;
             if let (Value::String(a), Value::String(b)) = (&a, &b) {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
                 self.compare_strings(a, b)?;
             }
             return Ok(a == b);

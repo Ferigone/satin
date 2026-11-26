@@ -25,6 +25,7 @@ pub(crate) use forms::default_placeholder_shown;
 mod frames;
 mod history_api;
 mod image_element;
+mod link_element;
 mod intersection_observers;
 mod layout_api;
 mod media;
@@ -107,6 +108,8 @@ struct State {
     media_prototypes: media::Prototypes,
     input_prototype: Value,
     image_prototype: Value,
+    link_prototype: Value,
+    absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
     image_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
@@ -124,6 +127,8 @@ struct State {
     dirty: bool,
     revision: u64,
     snapshot_revision: u64,
+    tag_tree_revision: u64,
+    appended_leaf: Option<(NodeId, NodeId)>,
     snapshot_document: Arc<Document>,
     ready_state: &'static str,
     current_script: Option<NodeId>,
@@ -171,6 +176,12 @@ pub struct ScriptRuntime {
 }
 
 fn mark_dirty(state: &mut State) {
+    state.tag_tree_revision = state.tag_tree_revision.wrapping_add(1);
+    state.appended_leaf = None;
+    mark_style_dirty(state);
+}
+
+fn mark_style_dirty(state: &mut State) {
     state.dirty = true;
     state.revision = state.revision.wrapping_add(1);
 }
@@ -291,6 +302,8 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.canvas_prototype.clone()
         } else if let Some(prototype) = state.media_prototypes.element(&state.document, id) {
             prototype
+        } else if link_element::is_link(&state.document, id) {
+            state.link_prototype.clone()
         } else if image_element::is_image(&state.document, id) {
             state.image_prototype.clone()
         } else if state.document.namespace(id) == crate::dom::Namespace::Html
@@ -495,9 +508,12 @@ fn set_attribute(
             vm.unroot(root);
         }
         state.dom_bytes = next_bytes.saturating_sub(if removed_namespace { key.len() } else { 0 });
-        mark_dirty(&mut state);
+        mark_style_dirty(&mut state);
         if changes_canvas_attribute {
             canvas::attribute_changed(vm, &mut state, id, &key)?;
+        }
+        if key == "href" {
+            state.absolute_link_hrefs.remove(&id);
         }
         image_element::attribute_changed(&mut state, id, &key);
         drop(state);
@@ -698,6 +714,8 @@ impl ScriptRuntime {
         let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
         let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
+        let link_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(link_prototype.clone());
         let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
@@ -748,6 +766,8 @@ impl ScriptRuntime {
             media_prototypes,
             input_prototype: input_prototype.clone(),
             image_prototype: image_prototype.clone(),
+            link_prototype: link_prototype.clone(),
+            absolute_link_hrefs: HashMap::new(),
             image_updates: Default::default(),
             invalid_images: Default::default(),
             character_data_prototype: character_data_prototype.clone(),
@@ -765,6 +785,8 @@ impl ScriptRuntime {
             dirty: fresh_parser_snapshot,
             revision: u64::from(fresh_parser_snapshot),
             snapshot_revision: 0,
+            tag_tree_revision: 0,
+            appended_leaf: None,
             snapshot_document: page.document.clone(),
             ready_state: "loading",
             current_script: None,
@@ -794,6 +816,7 @@ impl ScriptRuntime {
         }));
         install_node(&mut vm, &state, prototype.clone(), &element_prototype)?;
         frames::install(&mut vm, &state, iframe_prototype)?;
+        link_element::install(&mut vm, &state, link_prototype)?;
         image_element::install(&mut vm, &state, image_prototype)?;
         install_character_data(&mut vm, &state, prototype.clone(), character_data_prototype)?;
         dynamic_scripts::install(&mut vm, &state, script_prototype)?;

@@ -28,6 +28,12 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.44
+
+On MDN’s row subgrid example, twelve cells now share the intended two rows. At both 390 and 1280 CSS pixels wide, the cells measure 98 px high and the final cell begins at y = 213 px, matching Chromium. Alpha.43 placed that cell in a third row at y = 245.67 px. The pinned screen suite rose from 1,993 to 2,003 passes out of 6,536 pairs and the supplemental linked-Ahem suite rose from 316 to 320 out of 1,388. [Screenshots, per-case outcomes and runner limits](docs/compatibility/css.md#row-subgrid-development)
+
+Scripts can read a stylesheet link’s resolved URL and change its relation to disable and restore its rules. Repeated live-link scans reuse unchanged results. The wide Brave Search sidebar remains an open compatibility issue.
+
 ## Changes in alpha.43
 
 Satin lays out nested column subgrids against the parent tracks. In the Tailwind CSS documentation, the two table headings now share a 48 px row at a 390 px viewport. The example below the table moved up by 208 px and starts approximately 12 px below its position in Chromium. The pinned screen comparison improved from 1,981 to 1,993 passes among 6,536 cases. Fifteen cases gained a pass and three lost one. The separate Ahem comparison improved from 315 to 316 passes among 1,388. [Screenshots, individual outcomes and remaining grid differences](docs/compatibility/css.md#column-subgrid-development)

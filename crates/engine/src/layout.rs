@@ -295,7 +295,7 @@ pub struct Layout {
     pub links: Vec<Link>,
     pub elements: Vec<ElementBox>,
     pub anchors: HashMap<String, f32>,
-    pub(crate) subgrid_spans: HashMap<NodeId, usize>,
+    pub(crate) subgrid_spans: HashMap<(NodeId, bool), usize>,
     pub height: f32,
     pub content_width: f32,
     pub background: Color,
@@ -495,10 +495,7 @@ impl Layout {
         .then(|| Arc::new(ScrollFlow::capture(&b, background)));
         let mut layout = b.finish_frame(background, scroll, observe_intersections);
         if layout.depends_on_viewport_scroll
-            || layout
-                .scroll_regions
-                .iter()
-                .any(ScrollRegion::can_scroll)
+            || layout.scroll_regions.iter().any(ScrollRegion::can_scroll)
         {
             layout.scroll_flow = candidate;
         }
@@ -680,7 +677,9 @@ struct Fragment {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
-    subgrid_spans: HashMap<NodeId, usize>,
+    subgrid_spans: HashMap<(NodeId, bool), usize>,
+    intrinsic_subgrid_rows: Vec<GridContribution>,
+    baselines: Option<[f32; 2]>,
     width: f32,
     height: f32,
 }
@@ -721,10 +720,15 @@ struct FragmentKey {
     intrinsic_width: bool,
     flex_item: bool,
     href: Option<Arc<str>>,
-    inherited_columns: Option<InheritedColumns>,
+    inherited_tracks: Option<SubgridTracks>,
 }
 
 impl Fragment {
+    fn baseline(&self, last: bool, end_margin: f32) -> f32 {
+        self.baselines
+            .map_or(self.height - end_margin, |lines| lines[usize::from(last)])
+    }
+
     // Bound both the cache's retained payload and the work of cloning it.
     // Text runs own glyph vectors, and anchors own their strings.
     fn cache_cost(&self) -> Option<usize> {
@@ -736,6 +740,7 @@ impl Fragment {
             .saturating_add(self.links.len())
             .saturating_add(self.elements.len())
             .saturating_add(self.subgrid_spans.len())
+            .saturating_add(self.intrinsic_subgrid_rows.len())
             .saturating_add(1);
         for command in self.commands.iter() {
             match command {
@@ -862,14 +867,49 @@ fn is_css_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct InheritedColumns {
+struct InheritedTracks {
     // Fragment keys compare exact track sizes even when the area width is unchanged.
     sizes: Arc<[u32]>,
     gap: u32,
 }
 
+impl InheritedTracks {
+    fn from_parent(sizes: &[f32], gap: f32, start_inset: f32, end_inset: f32) -> Self {
+        let mut occupied = sizes.to_vec();
+        occupied[0] -= start_inset;
+        *occupied.last_mut().unwrap() -= end_inset;
+        Self {
+            sizes: occupied.into_iter().map(f32::to_bits).collect(),
+            gap: gap.to_bits(),
+        }
+    }
+    fn adjusted(&self, gap: f32) -> Vec<f32> {
+        let delta = (f32::from_bits(self.gap) - gap) / 2.;
+        let last = self.sizes.len() - 1;
+        self.sizes
+            .iter()
+            .enumerate()
+            .map(|(i, bits)| {
+                // Only the final grid area is clamped when a gutter exceeds a track.
+                f32::from_bits(*bits)
+                    + if i != 0 { delta } else { 0. }
+                    + if i != last { delta } else { 0. }
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
+struct SubgridTracks {
+    columns: Option<InheritedTracks>,
+    rows: Option<InheritedTracks>,
+    // During intrinsic measurement parent rows have a span but no used sizes yet.
+    row_span: Option<usize>,
+    row_gap: u32,
+}
+
 struct Builder<'a> {
-    subgrid: Option<(NodeId, InheritedColumns)>,
+    subgrid: Option<(NodeId, SubgridTracks)>,
     page: &'a LoadedPage,
     fonts: &'a Fonts,
     // Layout treats computed styles as immutable. Borrow them across recursive
@@ -884,7 +924,9 @@ struct Builder<'a> {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
-    subgrid_spans: HashMap<NodeId, usize>,
+    subgrid_spans: HashMap<(NodeId, bool), usize>,
+    intrinsic_subgrid_rows: Vec<GridContribution>,
+    baselines: Option<[f32; 2]>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
     fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
@@ -920,6 +962,8 @@ impl<'a> Builder<'a> {
             elements: vec![],
             anchors: HashMap::new(),
             subgrid_spans: HashMap::new(),
+            intrinsic_subgrid_rows: Vec::new(),
+            baselines: None,
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             fragment_cache: HashMap::new(),
@@ -1115,17 +1159,25 @@ struct GridPlacement {
     row_origin: i32,
 }
 impl GridPlacement {
-    fn for_subgrid_columns(&self, count: usize) -> Self {
-        let mut placed = self.clone();
-        for item in &mut placed.items {
-            let start = item.column as i32 + self.column_origin;
-            let end = (start + item.columns as i32).clamp(1, count as i32);
-            item.column = start.clamp(0, end - 1) as usize;
-            item.columns = end as usize - item.column;
+    fn clamp_subgrid_axis(&mut self, count: usize, row: bool) {
+        for item in &mut self.items {
+            let (start, span, origin) = if row {
+                (&mut item.row, &mut item.rows, self.row_origin)
+            } else {
+                (&mut item.column, &mut item.columns, self.column_origin)
+            };
+            let first = *start as i32 + origin;
+            let end = (first + *span as i32).clamp(1, count as i32);
+            *start = first.clamp(0, end - 1) as usize;
+            *span = end as usize - *start;
         }
-        placed.column_origin = 0;
-        placed.columns = count;
-        placed
+        if row {
+            self.rows = count;
+            self.row_origin = 0;
+        } else {
+            self.columns = count;
+            self.column_origin = 0;
+        }
     }
 }
 
@@ -2095,12 +2147,13 @@ impl Builder<'_> {
             AxisSize::from_style(style, true, None, metrics),
         );
         let columns =
-            Axis::new(style, false, AxisSize::fixed(width)).inherited_columns(item.columns);
+            Axis::new(style, false, AxisSize::fixed(width)).inherited_tracks(item.columns);
         let Some(placement) = self.grid_placement_cached(item.node, &rows, &columns) else {
             self.limited = true;
             return;
         };
-        let children = placement.for_subgrid_columns(item.columns);
+        let mut children = (*placement).clone();
+        children.clamp_subgrid_axis(item.columns, false);
         let left = metrics.padding[3] + metrics.border[3] + metrics.margin[3];
         let right = metrics.padding[1] + metrics.border[1] + metrics.margin[1];
         let start = out.len();
@@ -2183,25 +2236,46 @@ impl Builder<'_> {
         item: GridItem,
         sizes: &[f32],
         gap: f32,
+        rows: Option<&[f32]>,
+        row_gap: f32,
         available: f32,
         href: Option<Arc<str>>,
         constraints: Constraints,
     ) -> Fragment {
-        if !self.styles[item.node.0].grid_template_columns.subgrid {
+        let style = &self.styles[item.node.0];
+        if !style.grid_template_columns.subgrid && !style.grid_template_rows.subgrid {
             return self.fragment(item.node, available, href, constraints);
         }
-        let style = &self.styles[item.node.0];
         let metrics = BoxMetrics::new(style, available, constraints);
-        let mut occupied = sizes[item.column..item.column + item.columns].to_vec();
-        let last = occupied.len() - 1;
-        occupied[0] -= metrics.margin[3] + metrics.border[3] + metrics.padding[3];
-        occupied[last] -= metrics.margin[1] + metrics.border[1] + metrics.padding[1];
-        let sizes = occupied.into_iter().map(f32::to_bits).collect();
+        let inset = |i: usize| metrics.margin[i] + metrics.border[i] + metrics.padding[i];
+        let columns = style.grid_template_columns.subgrid.then(|| {
+            InheritedTracks::from_parent(
+                &sizes[item.column..item.column + item.columns],
+                gap,
+                inset(3),
+                inset(1),
+            )
+        });
+        let row_span = style.grid_template_rows.subgrid.then_some(item.rows);
+        let rows = rows.filter(|_| row_span.is_some()).map(|sizes| {
+            InheritedTracks::from_parent(
+                &sizes[item.row..item.row + item.rows],
+                row_gap,
+                inset(0),
+                inset(2),
+            )
+        });
         let previous = self.subgrid.replace((
             item.node,
-            InheritedColumns {
-                sizes,
-                gap: gap.to_bits(),
+            SubgridTracks {
+                columns,
+                rows,
+                row_span,
+                row_gap: if row_span.is_some() {
+                    row_gap.to_bits()
+                } else {
+                    0
+                },
             },
         ));
         let result = self.fragment(item.node, available, href, constraints);
@@ -2221,7 +2295,7 @@ impl Builder<'_> {
         let height = block_size
             .preferred
             .map(|height| height.min(block_size.maximum).max(block_size.minimum));
-        let row_template = Axis::new(
+        let mut row_template = Axis::new(
             container,
             true,
             AxisSize {
@@ -2233,14 +2307,19 @@ impl Builder<'_> {
             .subgrid
             .as_ref()
             .filter(|(node, _)| *node == id)
-            .map(|(_, c)| c.clone());
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default();
         let mut column_template = Axis::new(container, false, inline_size);
-        if let Some(c) = &inherited {
-            column_template = column_template.inherited_columns(c.sizes.len());
-            self.subgrid_spans.insert(id, c.sizes.len());
+        if let Some(c) = &inherited.columns {
+            column_template = column_template.inherited_tracks(c.sizes.len());
+            self.subgrid_spans.insert((id, false), c.sizes.len());
+        }
+        if let Some(span) = inherited.row_span {
+            row_template = row_template.inherited_tracks(span);
+            self.subgrid_spans.insert((id, true), span);
         }
         self.limited |= row_template.limited || column_template.limited;
-        let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template)
+        let Some(mut placement) = self.grid_placement_cached(id, &row_template, &column_template)
         else {
             self.limited = true;
             let mut line = Line::new(x, y, width, container, height);
@@ -2250,35 +2329,29 @@ impl Builder<'_> {
             self.flush(&mut line, false);
             return (line.y - y).max(0.);
         };
-        let placement = if let Some(c) = &inherited {
-            // Place on the hypothetical implicit grid, then clamp to the subgrid edges.
-            Arc::new(placement.for_subgrid_columns(c.sizes.len()))
-        } else {
-            placement
-        };
+        if let Some(c) = &inherited.columns {
+            Arc::make_mut(&mut placement).clamp_subgrid_axis(c.sizes.len(), false);
+        }
+        if let Some(span) = inherited.row_span {
+            Arc::make_mut(&mut placement).clamp_subgrid_axis(span, true);
+        }
         let columns = column_template.tracks(&container.grid_auto_columns, &placement);
         let rows = row_template.tracks(&container.grid_auto_rows, &placement);
         let gap_x = container.gap[1]
             .resolve(width, container.font_size)
-            .unwrap_or_else(|| inherited.as_ref().map_or(0., |c| f32::from_bits(c.gap)))
+            .unwrap_or_else(|| {
+                inherited
+                    .columns
+                    .as_ref()
+                    .map_or(0., |c| f32::from_bits(c.gap))
+            })
             .max(0.);
         let gap_y = container.gap[0]
             .resolve(height.unwrap_or(0.), container.font_size)
-            .unwrap_or(0.)
+            .unwrap_or(f32::from_bits(inherited.row_gap))
             .max(0.);
-        let column_sizes = if let Some(c) = &inherited {
-            let delta = (f32::from_bits(c.gap) - gap_x) / 2.;
-            let last = c.sizes.len() - 1;
-            c.sizes
-                .iter()
-                .enumerate()
-                .map(|(i, bits)| {
-                    // Keep signed distances between grid lines when a gutter exceeds a
-                    // track. Only the final grid area is clamped to nonnegative size.
-                    f32::from_bits(*bits) + if i != 0 { delta } else { 0. }
-                        + if i != last { delta } else { 0. }
-                })
-                .collect()
+        let column_sizes = if let Some(c) = &inherited.columns {
+            c.adjusted(gap_x)
         } else {
             let contributions = if columns.needs_contributions(Some(width), container.font_size) {
                 self.grid_contributions(&placement.items, width)
@@ -2304,6 +2377,7 @@ impl Builder<'_> {
         );
         let mut measured = Vec::with_capacity(placement.items.len());
         let mut row_contributions = Vec::with_capacity(placement.items.len());
+        let mut baseline_groups = HashMap::<(usize, bool), f32>::new();
         for &item in &placement.items {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let style = &self.styles[item.node.0];
@@ -2389,14 +2463,64 @@ impl Builder<'_> {
                     });
                 border_width = border_width.min(maximum).max(minimum).max(m.extra_x());
             }
+            let align = if style.align_self == Align::Auto {
+                container.align_items
+            } else {
+                style.align_self
+            };
+            let participates = matches!(align, Align::FirstBaseline | Align::LastBaseline)
+                && style.margin[0] != Length::Auto
+                && style.margin[2] != Length::Auto;
+            // A percentage height needs the row size to locate its baseline. If
+            // that size depends on the item, use fallback alignment to break the cycle.
+            let percentage_baseline = participates
+                && [style.height, style.min_height, style.max_height]
+                    .iter()
+                    .any(|length| length.has_percent());
+            let mut baseline_height = None;
+            let mut cyclic_baseline = false;
+            if percentage_baseline {
+                let tracks = &rows[item.row..item.row + item.rows];
+                if let Some(r) = &inherited.rows {
+                    let sizes = r.adjusted(gap_y);
+                    baseline_height = Some(grid_area(&sizes, item.row, item.rows, gap_y));
+                } else {
+                    baseline_height =
+                        tracks
+                            .iter()
+                            .try_fold(gap_y * (item.rows - 1) as f32, |sum, track| {
+                                if let GridBreadth::Length(length) = track.min
+                                    && track.min == track.max
+                                {
+                                    return length
+                                        .resolve_with_basis(height, container.font_size)
+                                        .map(|v| sum + v);
+                                }
+                                None
+                            });
+                    cyclic_baseline = tracks.iter().any(|track| {
+                        [track.min, track.max].iter().any(|breadth| {
+                            matches!(
+                                breadth,
+                                GridBreadth::Auto
+                                    | GridBreadth::MinContent
+                                    | GridBreadth::MaxContent
+                            )
+                        })
+                    });
+                }
+            }
             let fragment = self.grid_item_fragment(
                 item,
                 &column_sizes,
                 used_gap_x,
+                None,
+                gap_y,
                 area_width,
                 href.clone(),
                 Constraints {
                     width: Some(border_width),
+                    containing_height: baseline_height,
                     flex_item: true,
                     ..Constraints::default()
                 },
@@ -2418,6 +2542,33 @@ impl Builder<'_> {
             } else {
                 fragment.height
             };
+            // Each descendant participates in the parent tracks it actually spans.
+            // Preserve this information before imposing the final stretch height.
+            let local_gap = style.gap[0].resolve(0., style.font_size).unwrap_or(gap_y);
+            for mut contribution in fragment.intrinsic_subgrid_rows.iter().copied() {
+                if row_contributions.len() >= GRID_ITEM_LIMIT {
+                    self.limited = true;
+                    break;
+                }
+                let half_gap = (local_gap - gap_y) * 0.5;
+                let start_inset = if contribution.start == 0 {
+                    m.margin[0] + m.border[0] + m.padding[0]
+                } else {
+                    half_gap
+                };
+                let end_inset = if contribution.start + contribution.span == item.rows {
+                    m.margin[2] + m.border[2] + m.padding[2]
+                } else {
+                    half_gap
+                };
+                let extra = start_inset + end_inset;
+                contribution.start += item.row;
+                contribution.minimum += extra;
+                contribution.min_content += extra;
+                contribution.maximum += extra;
+                contribution.floor += extra;
+                row_contributions.push(contribution);
+            }
             row_contributions.push(GridContribution {
                 start: item.row,
                 span: item.rows,
@@ -2427,17 +2578,49 @@ impl Builder<'_> {
                 auto_minimum: text || (style.min_height == Length::Auto && auto_height),
                 floor: m.extra_y() + m.margin[0] + m.margin[2],
             });
-            measured.push((fragment, border_width, justify));
+            let baseline = if participates && !cyclic_baseline {
+                let last = align == Align::LastBaseline;
+                let key = (
+                    if last {
+                        item.row + item.rows - 1
+                    } else {
+                        item.row
+                    },
+                    last,
+                );
+                // A box without a line synthesizes its baseline at its border end.
+                let line = fragment.baseline(last, m.margin[2]);
+                let distance = if last { fragment.height - line } else { line };
+                let group = baseline_groups.entry(key).or_insert(distance);
+                *group = group.max(distance);
+                Some((key, distance, row_contributions.len() - 1))
+            } else {
+                None
+            };
+            measured.push((fragment, border_width, justify, baseline));
         }
-        let row_sizes = grid_track_sizes(
-            &rows,
-            height,
-            gap_y,
-            container.font_size,
-            &row_contributions,
-            container.align_content,
-            false,
-        );
+        for (_, _, _, baseline) in &measured {
+            if let Some((key, distance, index)) = baseline {
+                let shim = baseline_groups[key] - distance;
+                let contribution = &mut row_contributions[*index];
+                contribution.minimum += shim;
+                contribution.min_content += shim;
+                contribution.maximum += shim;
+            }
+        }
+        let row_sizes = if let Some(r) = &inherited.rows {
+            r.adjusted(gap_y)
+        } else {
+            grid_track_sizes(
+                &rows,
+                height,
+                gap_y,
+                container.font_size,
+                &row_contributions,
+                container.align_content,
+                false,
+            )
+        };
         let natural_height = row_sizes.iter().sum::<f32>() + rows.gaps(gap_y);
         let used_height = height.unwrap_or(
             natural_height
@@ -2448,9 +2631,9 @@ impl Builder<'_> {
         // zero during intrinsic sizing. Resolve both against the resulting height.
         let gap_y = container.gap[0]
             .resolve(used_height, container.font_size)
-            .unwrap_or(0.)
+            .unwrap_or(f32::from_bits(inherited.row_gap))
             .max(0.);
-        let row_sizes = if height.is_none() {
+        let row_sizes = if height.is_none() && inherited.rows.is_none() {
             grid_track_sizes(
                 &rows,
                 Some(used_height),
@@ -2470,7 +2653,9 @@ impl Builder<'_> {
             used_height,
             container.align_content,
         );
-        for (item, (mut fragment, border_width, justify)) in placement.items.iter().zip(measured) {
+        for (item, (mut fragment, border_width, justify, baseline)) in
+            placement.items.iter().zip(measured)
+        {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let area_height = grid_area(&row_sizes, item.row, item.rows, used_gap_y);
             let style = &self.styles[item.node.0];
@@ -2538,7 +2723,8 @@ impl Builder<'_> {
             // hence the basis passed to its descendants) is unchanged.
             // Reuse the measured fragment rather than recursively formatting
             // nested grids twice at every level.
-            let needs_final_layout = target_height.is_some()
+            let needs_final_layout = style.grid_template_rows.subgrid
+                || target_height.is_some()
                 || style.height.has_percent()
                 || style.min_height.has_percent()
                 || style.max_height.has_percent();
@@ -2547,6 +2733,8 @@ impl Builder<'_> {
                     *item,
                     &column_sizes,
                     used_gap_x,
+                    Some(&row_sizes),
+                    used_gap_y,
                     area_width,
                     href.clone(),
                     Constraints {
@@ -2573,7 +2761,7 @@ impl Builder<'_> {
                     + usize::from(style.margin[2] == Length::Auto)
             };
             let offset = |align, free| match align {
-                Align::End | Align::FlexEnd => free,
+                Align::End | Align::FlexEnd | Align::LastBaseline => free,
                 Align::Center => free / 2.,
                 _ => 0.,
             };
@@ -2592,6 +2780,9 @@ impl Builder<'_> {
                 } else {
                     0.
                 }
+            } else if let Some((key, distance, _)) = baseline {
+                let shim = baseline_groups[&key] - distance;
+                if key.1 { free_y - shim } else { shim }
             } else {
                 offset(align, free_y)
             };
@@ -2600,6 +2791,9 @@ impl Builder<'_> {
                 x + column_offsets[item.column] + dx,
                 y + row_offsets[item.row] + dy,
             );
+        }
+        if inherited.row_span.is_some() && inherited.rows.is_none() {
+            self.intrinsic_subgrid_rows = row_contributions;
         }
         used_height
     }
@@ -2969,6 +3163,7 @@ impl Builder<'_> {
             let gaps = gap * group.len().saturating_sub(1) as f32;
             let sizes = distribute_flex(group, main_limit - margins - gaps);
             let mut cross = 0f32;
+            let mut line_baselines = [[0f32; 2]; 2];
             for (item, &size) in group.iter_mut().zip(&sizes) {
                 if row {
                     item.fragment = Some(self.fragment(
@@ -3003,9 +3198,27 @@ impl Builder<'_> {
                     }
                 }
                 let f = item.fragment.as_ref().unwrap();
+                let style = &self.styles[item.node.0];
+                let align = if style.align_self == Align::Auto {
+                    container.align_items
+                } else {
+                    style.align_self
+                };
+                if row
+                    && !item.auto[0]
+                    && !item.auto[2]
+                    && matches!(align, Align::FirstBaseline | Align::LastBaseline)
+                {
+                    let last = align == Align::LastBaseline;
+                    let distance = f.baseline(last, item.margin[2]);
+                    let group = &mut line_baselines[usize::from(last)];
+                    group[0] = group[0].max(distance);
+                    group[1] = group[1].max(f.height - distance);
+                    cross = cross.max(group[0] + group[1]);
+                }
                 cross = cross.max(if row { f.height } else { f.width });
             }
-            lines.push((range, sizes, cross));
+            lines.push((range, sizes, cross, line_baselines));
         }
         let natural_cross = lines.iter().map(|line| line.2).sum::<f32>()
             + cross_gap * lines.len().saturating_sub(1) as f32;
@@ -3032,7 +3245,7 @@ impl Builder<'_> {
                 lines.len(),
             )
         };
-        for (range, sizes, cross) in lines {
+        for (range, sizes, cross, line_baselines) in lines {
             let line_start = if reverse_cross {
                 cross_size - cross_cursor - cross
             } else {
@@ -3141,6 +3354,11 @@ impl Builder<'_> {
                     } else {
                         0.
                     }
+                } else if row && matches!(align, Align::FirstBaseline | Align::LastBaseline) {
+                    let last = align == Align::LastBaseline;
+                    let group = line_baselines[usize::from(last)];
+                    let anchor = if last { cross - group[1] } else { group[0] };
+                    anchor - f.baseline(last, item.margin[2])
                 } else {
                     let offset = match flex_alignment(align, reverse_wrap) {
                         Align::End => cross_extra,
@@ -3646,7 +3864,7 @@ impl Builder<'_> {
             intrinsic_width: c.intrinsic_width,
             flex_item: c.flex_item,
             href: href.clone(),
-            inherited_columns: self
+            inherited_tracks: self
                 .subgrid
                 .as_ref()
                 .filter(|(node, _)| *node == id)
@@ -3668,6 +3886,8 @@ impl Builder<'_> {
             elements: std::mem::take(&mut self.elements),
             anchors: std::mem::take(&mut self.anchors),
             subgrid_spans: std::mem::take(&mut self.subgrid_spans),
+            intrinsic_subgrid_rows: std::mem::take(&mut self.intrinsic_subgrid_rows),
+            baselines: self.baselines.take(),
             ..Fragment::default()
         };
         let s = &self.styles[id.0];
@@ -3702,6 +3922,11 @@ impl Builder<'_> {
             elements: std::mem::replace(&mut self.elements, old.elements),
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
             subgrid_spans: std::mem::replace(&mut self.subgrid_spans, old.subgrid_spans),
+            intrinsic_subgrid_rows: std::mem::replace(
+                &mut self.intrinsic_subgrid_rows,
+                old.intrinsic_subgrid_rows,
+            ),
+            baselines: std::mem::replace(&mut self.baselines, old.baselines),
             width,
             height,
         };
@@ -3725,7 +3950,15 @@ impl Builder<'_> {
         }
         fragment
     }
+    fn add_baselines(&mut self, first: f32, last: f32) {
+        let edges = self.baselines.get_or_insert([first, last]);
+        edges[0] = edges[0].min(first);
+        edges[1] = edges[1].max(last);
+    }
     fn append_fragment(&mut self, mut f: Fragment, x: f32, y: f32) {
+        if let Some([first, last]) = f.baselines {
+            self.add_baselines(first + y, last + y);
+        }
         for command in &mut f.commands {
             match command {
                 DrawCommand::PushState { transform, clip } => {
@@ -4581,6 +4814,7 @@ impl Builder<'_> {
         }
         let height = (ascent + descent).max(0.);
         let baseline = line.y + ascent;
+        self.add_baselines(baseline, baseline);
         let slot = self.float_interval(line);
         let extra = (slot.width() - line.used).max(0.);
         let mut x = slot.left

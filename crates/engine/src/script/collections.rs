@@ -48,6 +48,7 @@ struct Cache {
     revision: u64,
     retained: usize,
     reflection_work: usize,
+    last_tag: Option<(Query, u64, Arc<[NodeId]>)>,
     matches: VecDeque<(Query, Arc<[NodeId]>)>,
 }
 struct Collection {
@@ -88,6 +89,9 @@ impl Collection {
             let nodes = hit.1.clone();
             cache.matches.push_front(hit);
             return Ok(nodes);
+        }
+        if let Some(updated) = self.updated_tag(&state, &mut cache, &mut vm)? {
+            return Ok(updated);
         }
         let document = &state.document;
         let root = self.query.root;
@@ -157,6 +161,10 @@ impl Collection {
                 matches.into()
             }
         };
+        if root == document.root && matches!(self.query.filter, Filter::Tag { .. }) {
+            cache.last_tag = (nodes.len() <= 4096)
+                .then(|| (self.query.clone(), state.tag_tree_revision, nodes.clone()));
+        }
         if nodes.len() > CACHE_NODES {
             return Ok(nodes);
         }
@@ -173,6 +181,70 @@ impl Collection {
         Ok(nodes)
     }
 
+    fn updated_tag(
+        &self,
+        state: &State,
+        cache: &mut Cache,
+        vm: &mut Option<&mut Vm>,
+    ) -> Result<Option<Arc<[NodeId]>>, JsError> {
+        let Filter::Tag { original, lower } = &self.query.filter else {
+            return Ok(None);
+        };
+        let Some((query, revision, nodes)) = &cache.last_tag else {
+            return Ok(None);
+        };
+        if query != &self.query {
+            return Ok(None);
+        }
+        if *revision == state.tag_tree_revision {
+            return Ok(Some(nodes.clone()));
+        }
+        if revision.wrapping_add(1) != state.tag_tree_revision {
+            return Ok(None);
+        }
+        let Some((parent, child)) = state.appended_leaf else {
+            return Ok(None);
+        };
+        let doc = &state.document;
+        let old = nodes.clone();
+        let tag = doc.tag(child);
+        let matched = !tag.is_empty()
+            && (original == "*"
+                || if doc.is_html_document(doc.root) && doc.namespace(child) == Namespace::Html {
+                    tag == lower
+                } else {
+                    tag == original
+                });
+        let mut current = Some(parent);
+        let mut connected = false;
+        while matched && let Some(id) = current {
+            charge_scan(cache, vm, 1)?;
+            if id == doc.root {
+                connected = true;
+                break;
+            }
+            current = doc.nodes[id.0].parent;
+        }
+        let updated = if connected {
+            // Otherwise a matching node elsewhere could follow this insertion.
+            if old.len() >= 4096
+                || old
+                    .last()
+                    .is_some_and(|n| doc.nodes[n.0].parent != Some(parent))
+            {
+                return Ok(None);
+            }
+            charge_scan(cache, vm, old.len() + 1)?;
+            let mut next = Vec::with_capacity(old.len() + 1);
+            next.extend_from_slice(&old);
+            next.push(child);
+            next.into()
+        } else {
+            old
+        };
+        cache.last_tag = Some((self.query.clone(), state.tag_tree_revision, updated.clone()));
+        Ok(Some(updated))
+    }
     fn get(&self, vm: &mut Vm, index: usize) -> Result<Option<Value>, JsError> {
         let list = self.nodes(Some(vm))?;
         let Some(&id) = list.get(index) else {
