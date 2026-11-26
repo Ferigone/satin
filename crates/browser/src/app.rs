@@ -51,6 +51,7 @@ mod navigation_error;
 mod quiet_cinder;
 mod scroll;
 mod settings;
+mod tab_behavior;
 mod tab_strip;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod update_ui;
@@ -65,6 +66,7 @@ use crate::testing::{
 };
 use chrome_motion::{Button as MotionButton, ChromeMotion, TabInk};
 use navigation_error::Recovery;
+use tab_behavior::{ClosedTabs, FreshTab, TabId, TabMove};
 use tab_strip::TabStrip;
 
 const TAB_H: f32 = tab_strip::TAB_ROW_HEIGHT;
@@ -189,10 +191,13 @@ enum Action {
     Reload,
     Home,
     NewTab,
+    ReopenTab,
+    DuplicateTab(TabId),
+    MoveTab(TabId, TabMove),
     TabList,
-    TabListItem(usize),
-    Select(usize),
-    Close(usize),
+    TabListItem(Option<TabId>),
+    Select(TabId),
+    Close(TabId),
     Settings,
     Version,
     Bookmarks,
@@ -321,8 +326,10 @@ fn apply_download_update(
 }
 
 struct Tab {
-    id: u64,
+    id: TabId,
     url: String,
+    // Keep the initiating method's eligibility through redirects.
+    get_navigation: bool,
     title: String,
     page: Option<Arc<LoadedPage>>,
     runtime: Option<ScriptRuntime>,
@@ -348,7 +355,7 @@ struct Tab {
 }
 impl Tab {
     fn new(
-        id: u64,
+        id: TabId,
         url: String,
         storage: rust_browser_engine::web_storage::StorageProfile,
     ) -> Self {
@@ -358,6 +365,7 @@ impl Tab {
             id,
             title: "New tab".into(),
             url: address.as_str().into(),
+            get_navigation: true,
             page: None,
             runtime: None,
             document_session: None,
@@ -379,6 +387,10 @@ impl Tab {
             download: None,
             download_status: String::new(),
         }
+    }
+
+    fn fresh_address(&self) -> Option<FreshTab> {
+        FreshTab::capture(&self.url, self.get_navigation)
     }
 
     fn install_page(&mut self, page: LoadedPage) {
@@ -535,6 +547,7 @@ pub(crate) fn run(
         settings,
         settings_panel: None,
         tabs,
+        closed_tabs: ClosedTabs::default(),
         active,
         next_id,
         jobs,
@@ -685,8 +698,9 @@ struct App {
     settings: settings::Store,
     settings_panel: Option<settings::Panel>,
     tabs: Vec<Tab>,
+    closed_tabs: ClosedTabs,
     active: usize,
-    next_id: u64,
+    next_id: TabId,
     jobs: Workers,
     media: Bridge,
     worker_wake: Arc<dyn Fn() + Send + Sync>,
@@ -1034,8 +1048,7 @@ impl App {
         self.downloads_hover = None;
         self.caption_pressed = None;
         self.last_title_press = None;
-        let width = self.window_regions(self.active).page.width;
-        self.tab_scroll = self.tab_strip(width).reveal(self.active).scroll();
+        self.reveal_active_tab();
         self.select_popup = None;
         self.hover = None;
         if self.window_regions(self.active).dock.is_none() {
@@ -1444,6 +1457,9 @@ impl App {
         }
         let tab = &mut self.tabs[index];
         self.media.close_page(tab.id, tab.document_navigation);
+        tab.get_navigation = request
+            .as_ref()
+            .is_none_or(|request| request.method == "GET");
         let mode = if mode == NavigationMode::Push && tab.history.url() == parsed {
             NavigationMode::Reload
         } else {
@@ -1597,6 +1613,51 @@ impl App {
         self.refresh_address_suggestions();
     }
 
+    fn tab_index(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
+    }
+
+    fn reveal_active_tab(&mut self) {
+        let width = self.window_regions(self.active).page.width;
+        self.tab_scroll = self.tab_strip(width).reveal(self.active).scroll();
+    }
+
+    fn can_add_tab(&mut self) -> bool {
+        if self.tabs.len() < MAX_TABS {
+            return true;
+        }
+        self.status = "The alpha supports up to 24 tabs.".into();
+        self.redraw();
+        false
+    }
+
+    fn append_tab(&mut self, address: String) {
+        debug_assert!(self.tabs.len() < MAX_TABS);
+        let index = self.tabs.len();
+        // A new browsing context always gets a new ID; late events from a
+        // cancelled tab must not reach a reopened tab, even at the same URL.
+        self.tabs
+            .push(Tab::new(self.next_id, address, self.profile.storage()));
+        self.next_id += 1;
+        self.activate(index);
+    }
+
+    fn move_active_tab(&mut self, id: TabId, direction: TabMove) {
+        if self.tabs[self.active].id != id {
+            return;
+        }
+        if let Some(index) = tab_behavior::move_tab(&mut self.tabs, id, direction, |tab| tab.id) {
+            // The selected browsing context hasn't changed. Keep its document,
+            // media, download, inspector and focus rather than activating it again.
+            self.active = index;
+            self.tab_hits_current = false;
+            self.reveal_active_tab();
+            self.save();
+        }
+        // The common action path can also dismiss a menu at the row boundary.
+        self.redraw();
+    }
+
     fn activate(&mut self, index: usize) {
         if index != self.active
             && let Some(dock) = &mut self.devtools
@@ -1608,10 +1669,7 @@ impl App {
         }
         self.tab_hits_current = false;
         self.active = index;
-        self.tab_scroll = self
-            .tab_strip(self.window_regions(index).page.width)
-            .reveal(index)
-            .scroll();
+        self.reveal_active_tab();
         self.select_popup = None;
         self.address_focus = false;
         self.sync_address();
@@ -1743,8 +1801,10 @@ impl App {
                     .then_some(Menu::Tabs(self.active));
                 self.redraw();
             }
-            Action::TabListItem(index) => {
-                if matches!(self.chrome_menu, Some(Menu::Tabs(_))) && index < self.tabs.len() {
+            Action::TabListItem(id) => {
+                if matches!(self.chrome_menu, Some(Menu::Tabs(_)))
+                    && let Some(index) = id.and_then(|id| self.tab_index(id))
+                {
                     self.chrome_menu = None;
                     self.activate(index);
                 }
@@ -1766,31 +1826,53 @@ impl App {
             }
             Action::CloseWindow => self.close_window(event_loop),
             Action::NewTab => {
-                if self.tabs.len() >= MAX_TABS {
-                    self.status = "The alpha supports up to 24 tabs.".into();
-                    self.redraw();
-                    return;
+                if self.can_add_tab() {
+                    self.append_tab("about:home".into());
+                    self.action(Action::Address, event_loop);
                 }
-                let index = self.tabs.len();
-                self.tabs.push(Tab::new(
-                    self.next_id,
-                    "about:home".into(),
-                    self.profile.storage(),
-                ));
-                self.next_id += 1;
-                self.activate(index);
-                self.action(Action::Address, event_loop);
             }
-            Action::Select(i) => self.activate(i),
-            Action::Close(i) => {
-                if i >= self.tabs.len() {
-                    return;
+            Action::ReopenTab => {
+                if self.can_add_tab() {
+                    if let Some(tab) = self.closed_tabs.reopen() {
+                        self.append_tab(tab.into_address());
+                    } else {
+                        self.status = "No recently closed eligible tab.".into();
+                        self.redraw();
+                    }
                 }
+            }
+            Action::DuplicateTab(id) => {
+                if self.can_add_tab()
+                    && let Some(index) = self.tab_index(id)
+                {
+                    if let Some(tab) = self.tabs[index].fresh_address() {
+                        self.append_tab(tab.into_address());
+                    } else {
+                        self.status = "This address cannot be duplicated.".into();
+                        self.redraw();
+                    }
+                }
+            }
+            Action::MoveTab(id, direction) => self.move_active_tab(id, direction),
+            Action::Select(id) => {
+                if let Some(index) = self.tab_index(id) {
+                    self.activate(index);
+                }
+            }
+            Action::Close(id) => {
+                let Some(i) = self.tab_index(id) else {
+                    return;
+                };
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 if self.tabs.len() == 1 && self.update_applying() {
                     return;
                 }
                 let tab = &self.tabs[i];
+                let reopen = if self.tabs.len() > 1 {
+                    tab.fresh_address()
+                } else {
+                    None
+                };
                 self.media.close_page(tab.id, tab.document_navigation);
                 tab.cancel.cancel();
                 if let Some(dock) = &mut self.devtools {
@@ -1805,6 +1887,7 @@ impl App {
                     event_loop.exit();
                     return;
                 }
+                self.closed_tabs.remember(reopen);
                 if i < self.active {
                     self.active -= 1;
                 }
@@ -1870,7 +1953,22 @@ impl App {
         match command {
             Command::Address => self.action(Action::Address, event_loop),
             Command::NewTab => self.action(Action::NewTab, event_loop),
-            Command::CloseTab => self.action(Action::Close(self.active), event_loop),
+            Command::CloseTab => self.action(Action::Close(self.tabs[self.active].id), event_loop),
+            Command::ReopenTab => self.action(Action::ReopenTab, event_loop),
+            Command::DuplicateTab => {
+                self.action(Action::DuplicateTab(self.tabs[self.active].id), event_loop)
+            }
+            Command::MoveTabLeft | Command::MoveTabRight => {
+                let direction = if command == Command::MoveTabLeft {
+                    TabMove::Left
+                } else {
+                    TabMove::Right
+                };
+                self.action(
+                    Action::MoveTab(self.tabs[self.active].id, direction),
+                    event_loop,
+                );
+            }
             Command::NextTab => self.activate((self.active + 1) % self.tabs.len()),
             Command::PreviousTab => {
                 self.activate((self.active + self.tabs.len() - 1) % self.tabs.len())
@@ -1937,7 +2035,35 @@ impl App {
             self.settings_key(key);
             return;
         }
-        let command = shortcuts::command(&key, self.modifiers);
+        let mut command = shortcuts::command(&key, self.modifiers);
+        let editor_arrow = matches!(command, Some(Command::MoveTabLeft | Command::MoveTabRight))
+            && (self.address_focus
+                || self.devtools_focused
+                || self.preedit
+                || self.tabs[self.active]
+                    .runtime
+                    .as_ref()
+                    .and_then(ScriptRuntime::focused_control)
+                    .is_some());
+        // A tab edit must not dismiss an open Downloads or page select popup.
+        if matches!(
+            command,
+            Some(
+                Command::ReopenTab
+                    | Command::DuplicateTab
+                    | Command::MoveTabLeft
+                    | Command::MoveTabRight
+            )
+        ) && (self.downloads_panel.is_some()
+            || self.select_popup.is_some()
+            || (repeat && !editor_arrow))
+        {
+            return;
+        }
+        if editor_arrow {
+            // Keep Ctrl+Shift+arrows in the focused editor or document control.
+            command = None;
+        }
         if command == Some(Command::Downloads) {
             if !repeat {
                 self.run_shortcut(Command::Downloads, event_loop);
@@ -1980,8 +2106,8 @@ impl App {
             match key {
                 Key::Named(NamedKey::Escape) => self.chrome_menu = None,
                 Key::Named(NamedKey::Enter | NamedKey::Space) => {
-                    if !repeat {
-                        self.action(Action::TabListItem(selected), event_loop);
+                    if !repeat && let Some(tab) = self.tabs.get(selected) {
+                        self.action(Action::TabListItem(Some(tab.id)), event_loop);
                     }
                     return;
                 }
@@ -2580,10 +2706,10 @@ impl App {
         for slot in strip.visible_tabs() {
             let index = slot.index;
             let tab = &self.tabs[index];
-            let close = Action::Close(index);
+            let close = Action::Close(tab.id);
             let active = index == self.active;
-            // A stored action can still name a prior index after closing or
-            // scrolling a tab. Painting uses the new rect, not the old index.
+            // An old hit can be under a different tab after a reorder or
+            // scroll. Painting takes hover from the new geometry.
             let hovered = over_tabs && self.pointer_in(slot.visible_face);
             let close_hovered = slot
                 .close
@@ -2633,7 +2759,7 @@ impl App {
                     &mut self.fonts,
                 );
             }
-            self.hits.push((slot.visible_face, Action::Select(index)));
+            self.hits.push((slot.visible_face, Action::Select(tab.id)));
             if let Some(button) = slot.close {
                 if ink.close_hover > 0. && ink.close > 0. {
                     rounded_chrome_rect(
@@ -3148,7 +3274,7 @@ impl App {
         let physical = physical_rect(u, panel);
         canvas.fill_rounded_rect(physical, [10. * u; 4], CHROME_PANEL);
         canvas.outline_rounded_rect(physical, [10. * u; 4], -u, u, CHROME_LINE);
-        self.hits.push((panel, Action::TabListItem(usize::MAX)));
+        self.hits.push((panel, Action::TabListItem(None)));
         let title = chrome_shape(&self.fonts, "Otwarte karty", 13. * u, 700);
         canvas.text(
             (x + 14.) * u,
@@ -3159,7 +3285,7 @@ impl App {
         );
         for (offset, tab) in self.tabs.iter().skip(start).take(count).enumerate() {
             let index = start + offset;
-            let action = Action::TabListItem(index);
+            let action = Action::TabListItem(Some(tab.id));
             let row = scaled_rect(
                 1.,
                 x + 7.,
@@ -4921,10 +5047,10 @@ impl ApplicationHandler<()> for App {
                         .is_some_and(Action::address_suggestion)
                 {
                     if matches!(self.chrome_menu, None)
-                        && let Some(Action::Select(index) | Action::Close(index)) =
+                        && let Some(Action::Select(id) | Action::Close(id)) =
                             self.chrome_action_at_pointer()
                     {
-                        self.action(Action::Close(index), event_loop);
+                        self.action(Action::Close(id), event_loop);
                     } else if let Some(url) = self.pointer_link() {
                         self.action(Action::NewTab, event_loop);
                         self.navigate(url, true);
@@ -5384,6 +5510,46 @@ mod download_wiring_tests {
             12,
             DownloadUpdate::Done(Ok(100))
         ));
+    }
+
+    #[test]
+    fn reordered_source_keeps_its_transfer_but_a_reopened_tab_does_not_inherit_it() {
+        let mut downloads = downloads_ui::Downloads::default();
+        let mut source = download_tab(&mut downloads, 9, 12);
+        source.navigation = 7;
+        let mut tabs = vec![
+            Tab::new(10, "about:shortcuts".into(), Default::default()),
+            source,
+        ];
+
+        let active = tab_behavior::move_tab(&mut tabs, 9, TabMove::Left, |tab| tab.id).unwrap();
+        assert_eq!(active, 0);
+        assert_eq!(tabs[active].navigation, 7);
+        assert!(apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            9,
+            12,
+            DownloadUpdate::Progress(120)
+        ));
+        let mut closed = ClosedTabs::default();
+        closed.remember(tabs[active].fresh_address());
+        assert!(cancel_download(&mut downloads, &mut tabs, 12));
+        tabs.remove(active);
+        let fresh = closed.reopen().unwrap().into_address();
+        tabs.push(Tab::new(11, fresh, Default::default()));
+        assert_eq!(tabs[1].url, "about:home");
+        assert_eq!(tabs[1].navigation, 0);
+        assert!(tabs[1].download.is_none());
+        assert!(apply_download_update(
+            &mut downloads,
+            &mut tabs,
+            9,
+            12,
+            DownloadUpdate::Done(Err("Download cancelled".into()))
+        ));
+        assert!(!downloads.has_active());
+        assert!(tabs[1].download_status.is_empty());
     }
 
     #[test]

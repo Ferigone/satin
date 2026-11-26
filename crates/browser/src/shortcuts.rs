@@ -10,6 +10,10 @@ pub enum Command {
     Address,
     NewTab,
     CloseTab,
+    ReopenTab,
+    DuplicateTab,
+    MoveTabLeft,
+    MoveTabRight,
     NextTab,
     PreviousTab,
     Reload,
@@ -29,6 +33,7 @@ enum Chord {
     CtrlChar(&'static str),
     CtrlPlainChar(&'static str),
     CtrlShiftChar(&'static str),
+    CtrlShiftNamed(NamedKey),
     CtrlTab { shift: bool },
     AltChar(&'static str),
     AltNamed(NamedKey),
@@ -44,11 +49,10 @@ impl Chord {
         }
 
         let ctrl = modifiers.control_key() && !modifiers.alt_key();
+        let ctrl_shift = modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT;
         match *self {
-            Self::CtrlShiftChar(chars) => {
-                modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
-                    && character(key, chars)
-            }
+            Self::CtrlShiftChar(chars) => ctrl_shift && character(key, chars),
+            Self::CtrlShiftNamed(named) => ctrl_shift && *key == Key::Named(named),
             Self::CtrlChar(chars) => ctrl && character(key, chars),
             Self::CtrlPlainChar(chars) => {
                 ctrl && !modifiers.shift_key() && !modifiers.super_key() && character(key, chars)
@@ -94,7 +98,7 @@ const BINDINGS: &[Binding] = &[
     ),
     binding(
         Command::NewTab,
-        &[Chord::CtrlChar("t")],
+        &[Chord::CtrlPlainChar("t")],
         "Ctrl+T",
         "Open a new tab",
     ),
@@ -103,6 +107,30 @@ const BINDINGS: &[Binding] = &[
         &[Chord::CtrlChar("w")],
         "Ctrl+W",
         "Close the active tab",
+    ),
+    binding(
+        Command::ReopenTab,
+        &[Chord::CtrlShiftChar("t")],
+        "Ctrl+Shift+T",
+        "Reopen the most recently closed eligible tab",
+    ),
+    binding(
+        Command::DuplicateTab,
+        &[Chord::CtrlShiftChar("k")],
+        "Ctrl+Shift+K",
+        "Open the current eligible address in a new tab",
+    ),
+    binding(
+        Command::MoveTabLeft,
+        &[Chord::CtrlShiftNamed(NamedKey::ArrowLeft)],
+        "Ctrl+Shift+Left arrow",
+        "Move the active tab one position left while not editing",
+    ),
+    binding(
+        Command::MoveTabRight,
+        &[Chord::CtrlShiftNamed(NamedKey::ArrowRight)],
+        "Ctrl+Shift+Right arrow",
+        "Move the active tab one position right while not editing",
     ),
     binding(
         Command::NextTab,
@@ -262,8 +290,19 @@ mod tests {
         let cases = [
             (character("L"), ctrl, Command::Address),
             (character("t"), ctrl, Command::NewTab),
-            // Preserve the old behavior: Shift does not reopen a closed tab.
-            (character("T"), ctrl | Mods::SHIFT, Command::NewTab),
+            (character("T"), ctrl | Mods::SHIFT, Command::ReopenTab),
+            (character("t"), ctrl | Mods::SHIFT, Command::ReopenTab),
+            (character("K"), ctrl | Mods::SHIFT, Command::DuplicateTab),
+            (
+                Key::Named(NamedKey::ArrowLeft),
+                ctrl | Mods::SHIFT,
+                Command::MoveTabLeft,
+            ),
+            (
+                Key::Named(NamedKey::ArrowRight),
+                ctrl | Mods::SHIFT,
+                Command::MoveTabRight,
+            ),
             (character("w"), ctrl, Command::CloseTab),
             (Key::Named(NamedKey::Tab), ctrl, Command::NextTab),
             (
@@ -311,6 +350,12 @@ mod tests {
             (character("a"), ctrl),
             (character("l"), ctrl | Mods::ALT),
             (character("t"), Mods::empty()),
+            (character("T"), Mods::SHIFT),
+            (character("T"), ctrl | Mods::SHIFT | Mods::ALT),
+            (character("T"), ctrl | Mods::SHIFT | Mods::SUPER),
+            (character("k"), ctrl),
+            (Key::Named(NamedKey::ArrowLeft), ctrl),
+            (Key::Named(NamedKey::ArrowRight), Mods::SHIFT),
             (Key::Named(NamedKey::Tab), Mods::SHIFT),
         ];
         for (key, modifiers) in cases {
