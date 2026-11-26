@@ -5,7 +5,9 @@ use crate::{
 };
 mod box_border;
 mod controls;
+mod native_chrome;
 mod transformed;
+pub use native_chrome::RoundedShadow;
 use transformed::valid_rect;
 
 #[derive(Clone, Copy)]
