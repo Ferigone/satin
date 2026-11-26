@@ -442,13 +442,9 @@ impl ParserHost {
                     self.base = base_for(doc, &self.client, self.base_node);
                 }
                 "link"
-                    if doc.attr(id, "rel").is_some_and(|rel| {
-                        rel.split_ascii_whitespace()
-                            .any(|part| part.eq_ignore_ascii_case("stylesheet"))
-                            && !rel
-                                .split_ascii_whitespace()
-                                .any(|part| part.eq_ignore_ascii_case("alternate"))
-                    }) && doc.attr(id, "disabled").is_none()
+                    if doc.has_link_relation(id, "stylesheet")
+                        && !doc.has_link_relation(id, "alternate")
+                        && doc.attr(id, "disabled").is_none()
                         && connected(doc, id) =>
                 {
                     if self.sheets >= MAX_TRACKED_SHEETS {

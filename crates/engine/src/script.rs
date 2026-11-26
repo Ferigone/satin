@@ -25,6 +25,7 @@ pub(crate) use forms::default_placeholder_shown;
 mod frames;
 mod history_api;
 mod image_element;
+mod link_element;
 mod intersection_observers;
 mod layout_api;
 mod media;
@@ -107,6 +108,7 @@ struct State {
     media_prototypes: media::Prototypes,
     input_prototype: Value,
     image_prototype: Value,
+    link_prototype: Value,
     image_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
@@ -291,6 +293,8 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.canvas_prototype.clone()
         } else if let Some(prototype) = state.media_prototypes.element(&state.document, id) {
             prototype
+        } else if link_element::is_link(&state.document, id) {
+            state.link_prototype.clone()
         } else if image_element::is_image(&state.document, id) {
             state.image_prototype.clone()
         } else if state.document.namespace(id) == crate::dom::Namespace::Html
@@ -698,6 +702,8 @@ impl ScriptRuntime {
         let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
         let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
+        let link_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(link_prototype.clone());
         let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
@@ -748,6 +754,7 @@ impl ScriptRuntime {
             media_prototypes,
             input_prototype: input_prototype.clone(),
             image_prototype: image_prototype.clone(),
+            link_prototype: link_prototype.clone(),
             image_updates: Default::default(),
             invalid_images: Default::default(),
             character_data_prototype: character_data_prototype.clone(),
@@ -794,6 +801,7 @@ impl ScriptRuntime {
         }));
         install_node(&mut vm, &state, prototype.clone(), &element_prototype)?;
         frames::install(&mut vm, &state, iframe_prototype)?;
+        link_element::install(&mut vm, &state, link_prototype)?;
         image_element::install(&mut vm, &state, image_prototype)?;
         install_character_data(&mut vm, &state, prototype.clone(), character_data_prototype)?;
         dynamic_scripts::install(&mut vm, &state, script_prototype)?;
