@@ -16,6 +16,7 @@ pub(crate) struct Program {
     pub(super) captures: usize,
     repeats: usize,
     pub(super) first_ascii: u128,
+    start_only: bool,
     bytes: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
@@ -84,6 +85,12 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         .extend((0..pattern.wrapping_captures).rev().map(Op::CloseCapture));
     compiler.code.push(Op::Match);
     specialize_disjoint_class_repeats(&mut compiler.code);
+    // Capture openings do not consume input or branch. A mandatory assertion
+    // at this position can succeed only at the start of the entire input.
+    let start_only = matches!(
+        compiler.code.iter().find(|op| !matches!(op, Op::OpenCapture(_))),
+        Some(Op::Assert(Assertion::Start, local)) if !local.has(Flags::MULTILINE)
+    );
     let mut program = Program {
         source,
         flags,
@@ -91,6 +98,7 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         captures: pattern.captures,
         repeats: compiler.repeats,
         first_ascii,
+        start_only,
         names: pattern.names,
         bytes: 0,
     };
@@ -413,7 +421,8 @@ impl Program {
         if start > input.len() {
             return Ok(None);
         }
-        let first_ascii = if sticky { u128::MAX } else { self.first_ascii };
+        let single_start = sticky || self.start_only;
+        let first_ascii = if single_start { u128::MAX } else { self.first_ascii };
         let Some(mut start) = prefix::seek(vm, input, start, first_ascii)? else {
             return Ok(None);
         };
@@ -460,7 +469,7 @@ impl Program {
                         .collect(),
                 }));
             }
-            if sticky || start == input.len() {
+            if single_start || start == input.len() {
                 return Ok(None);
             }
             let next = advance(input, start, self.flags.unicode());

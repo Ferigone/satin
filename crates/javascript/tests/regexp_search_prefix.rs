@@ -1,6 +1,23 @@
 use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
 
 #[test]
+fn absolute_start_uses_local_flags_and_preserves_captures_and_global_index() {
+    let mut vm = Vm::new();
+    let answer = vm.eval(r#"
+        var g = /(^😀)/dgu;
+        g.lastIndex = 1;
+        var first = g.exec("😀z"), later = g.exec("😀z");
+        var y = /^z/y; y.lastIndex = 1;
+        first.indices[1].join() === "0,2" && later === null && g.lastIndex === 0 &&
+          y.exec("az") === null && y.lastIndex === 0 &&
+          /(^b)/m.exec("a\nb").index === 2 && /(?m:^b)/.test("a\nb") &&
+          !/(?-m:^b)/m.test("a\nb") &&
+          /(^x)|z/.exec("az").index === 1 && /(?:^a)?b/.exec("zb").index === 1;
+    "#).unwrap();
+    assert_eq!(answer, Value::Bool(true));
+}
+
+#[test]
 fn sparse_ascii_starts_fit_the_work_budget_across_replacements() {
     let mut vm = Vm::with_limits(VmLimits {
         max_instructions: 280_000,
