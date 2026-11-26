@@ -45,6 +45,7 @@ mod bookmarks;
 mod chrome_menu;
 mod chrome_motion;
 mod downloads_ui;
+mod favorites_strip;
 mod history_ui;
 mod icons;
 mod navigation_error;
@@ -204,6 +205,7 @@ enum Action {
     QuietMode,
     Downloads,
     ToggleBookmark,
+    FavoriteManager,
     Favorite(usize),
     ShortcutHelp,
     StartShortcuts,
@@ -225,6 +227,10 @@ enum Action {
 impl Action {
     fn address_suggestion(self) -> bool {
         matches!(self, Self::Suggestion(_) | Self::SuggestionBackground)
+    }
+
+    fn in_favorites(self) -> bool {
+        matches!(self, Self::FavoriteManager | Self::Favorite(_))
     }
 
     fn caption(self) -> bool {
@@ -573,6 +579,7 @@ pub(crate) fn run(
         hits: vec![],
         tab_hits_current: false,
         tab_scroll: 0.,
+        favorites_scroll: favorites_strip::Scroll::default(),
         chrome_hover: None,
         chrome_motion: ChromeMotion::new(
             Instant::now(),
@@ -724,6 +731,7 @@ struct App {
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
     tab_scroll: f32,
+    favorites_scroll: favorites_strip::Scroll,
     chrome_hover: Option<Action>,
     chrome_motion: ChromeMotion<MAX_TABS>,
     chrome_motion_forced_off: bool,
@@ -1043,6 +1051,7 @@ impl App {
     fn window_geometry_changed(&mut self) {
         self.wheel = None;
         self.hits.retain(|(_, action)| !action.address_suggestion());
+        self.invalidate_favorites_hits();
         self.tab_hits_current = false;
         self.downloads_frame = None;
         self.downloads_hover = None;
@@ -1744,7 +1753,7 @@ impl App {
                 self.open_settings();
             }
             Action::Version => self.navigate("about:version".into(), true),
-            Action::Bookmarks => self.show_bookmarks(),
+            Action::Bookmarks | Action::FavoriteManager => self.show_bookmarks(),
             Action::QuietMode => self.toggle_quiet_mode(),
             Action::Downloads => self.toggle_downloads(false),
             Action::ToggleBookmark => {
@@ -1764,8 +1773,7 @@ impl App {
                 if let Some(Err(error)) = result {
                     self.status = error;
                 }
-                self.hits
-                    .retain(|(_, hit)| !matches!(hit, Action::Favorite(_)));
+                self.invalidate_favorites_hits();
                 self.redraw();
             }
             Action::Favorite(index) => {
@@ -1812,6 +1820,7 @@ impl App {
             Action::BookmarkItem(index) => {
                 if matches!(self.chrome_menu, Some(Menu::Bookmarks(_))) {
                     self.pick_bookmark_row(index);
+                    self.invalidate_favorites_hits();
                 }
             }
             Action::Minimize => {
@@ -1980,7 +1989,10 @@ impl App {
             Command::Forward => self.action(Action::Forward, event_loop),
             Command::Menu => self.action(Action::Menu, event_loop),
             Command::Downloads => self.toggle_downloads(true),
-            Command::BookmarkPage => self.save_current_bookmark(),
+            Command::BookmarkPage => {
+                self.save_current_bookmark();
+                self.invalidate_favorites_hits();
+            }
             Command::ToggleDevtools => self.toggle_devtools(),
             Command::InspectElement => {
                 if !self.devtools_open {
@@ -2078,7 +2090,11 @@ impl App {
                 return;
             }
         }
-        if self.handle_history_key(&key) || self.bookmark_panel_key(&key) {
+        if self.handle_history_key(&key) {
+            return;
+        }
+        if self.bookmark_panel_key(&key) {
+            self.invalidate_favorites_hits();
             return;
         }
         if let Some(Menu::Main(selected)) = self.chrome_menu {
@@ -3125,69 +3141,126 @@ impl App {
         Some(layout.hit_frame())
     }
 
+    fn invalidate_favorites_hits(&mut self) {
+        self.hits.retain(|(_, action)| !action.in_favorites());
+        if self.chrome_hover.is_some_and(Action::in_favorites) {
+            self.chrome_hover = None;
+        }
+    }
+
+    fn favorites_occluded(&self) -> bool {
+        self.chrome_menu.is_some()
+            || self.suggestions_visible()
+            || self.history_menu.is_some()
+            || self.settings_panel.is_some()
+            || self.downloads_panel.is_some()
+            || self.update_panel_open()
+    }
+
+    fn pointer_in_favorites(&self, width: f32) -> bool {
+        self.settings.chrome().bookmarks_bar_visible()
+            && self.pointer_in(scaled_rect(
+                1.,
+                0.,
+                quiet_cinder::TOOLBAR_END,
+                width,
+                quiet_cinder::FAVORITES_ROW,
+            ))
+    }
+
+    fn scroll_favorites_at_pointer(&mut self, width: f32, delta: ScrollOffset) -> bool {
+        if !self.pointer_in_favorites(width) {
+            return false;
+        }
+        // Don't hand a bar gesture back to the document or dock at either end.
+        self.wheel = None;
+        if !self.favorites_occluded() && self.favorites_scroll.wheel(delta.x, delta.y) {
+            self.invalidate_favorites_hits();
+            self.redraw();
+        }
+        true
+    }
+
     fn draw_favorites(&mut self, canvas: &mut Canvas, width: f32) {
         let u = self.scale;
         let y = quiet_cinder::TOOLBAR_END;
-        let manager = scaled_rect(1., 11., y, 31., quiet_cinder::FAVORITES_ROW - 1.);
-        let manager_hovered = self.chrome_hover == Some(Action::Bookmarks);
+        let inner_height = quiet_cinder::FAVORITES_ROW - 1.;
         let manager_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
-        if manager_hovered || manager_open {
-            rounded_chrome_rect(canvas, physical_rect(u, manager), 6. * u, CHROME_HOVER);
-        }
-        centered_chrome_icon(
-            canvas,
-            manager,
-            17.,
-            u,
-            Action::Bookmarks,
-            false,
-            CHROME_ICON,
+        let interactive = !self.favorites_occluded();
+        let entries = self
+            .bookmarks
+            .as_ref()
+            .map_or(&[][..], |store| store.entries());
+        let runs: Vec<_> = entries
+            .iter()
+            .take(favorites_strip::MAX_FAVORITES)
+            .map(|bookmark| {
+                // These titles are bounded by the store. Empty titles use only the host.
+                let text = if bookmark.title.is_empty() {
+                    bookmark.url.host_str().unwrap_or_default()
+                } else {
+                    &bookmark.title
+                };
+                chrome_shape(&self.fonts, text, 11., 400)
+            })
+            .collect();
+        let strip = favorites_strip::Strip::layout(
+            width,
+            runs.iter().map(|run| run.advance),
+            &mut self.favorites_scroll,
         );
-        self.hits.push((manager, Action::Bookmarks));
-
-        let Ok(store) = &self.bookmarks else {
-            return;
-        };
-        let mut x = manager.x + manager.width + 3.;
-        let font = 11. * u;
-        let label_inset = 8. + 15. + 6.;
-        for (index, bookmark) in store.entries().iter().take(9).enumerate() {
-            let available = (width - 11. - x - label_inset - 8.).min(166.);
-            if available < 24. {
-                break;
-            }
-            // These titles were normalized by the bookmark store. For empty
-            // titles, use only the host, not an unbounded URL.
-            let text = if bookmark.title.is_empty() {
-                bookmark.url.host_str().unwrap_or_default()
+        canvas.clip(scaled_rect(u, 0., y, width, inner_height));
+        for (slot, paint, visible) in strip.visible() {
+            let (action, top, height) = if slot == 0 {
+                (Action::FavoriteManager, y, inner_height)
             } else {
-                &bookmark.title
+                (Action::Favorite(slot - 1), y + 2.25, 24.5)
             };
-            let label = chrome_elide(&self.fonts, text, available * u, font, 400);
-            let run = chrome_shape(&self.fonts, &label, font, 400);
-            let bounds = scaled_rect(1., x, y + 2.25, run.advance / u + label_inset + 8., 24.5);
-            let action = Action::Favorite(index);
-            let hovered = self.chrome_hover == Some(action);
+            let bounds = scaled_rect(1., paint.x, top, paint.width, height);
+            let hit = scaled_rect(1., visible.x, top, visible.width, height);
+            let hovered = interactive && self.pointer_in(hit);
+            self.hits.push((hit, action));
+            if slot == 0 {
+                if hovered || manager_open {
+                    rounded_chrome_rect(canvas, physical_rect(u, bounds), 6. * u, CHROME_HOVER);
+                }
+                centered_chrome_icon(
+                    canvas,
+                    bounds,
+                    17.,
+                    u,
+                    Action::Bookmarks,
+                    false,
+                    CHROME_ICON,
+                );
+                continue;
+            }
             if hovered {
                 rounded_chrome_rect(canvas, physical_rect(u, bounds), 4. * u, CHROME_HOVER);
             }
-            let icon = scaled_rect(1., x + 8., y + 7., 15., 15.);
-            if let Some(bitmap) = built_in_site_icon(bookmark.url.as_str()) {
+            let icon = scaled_rect(1., paint.x + 8., y + 7., 15., 15.);
+            if let Some(bitmap) = built_in_site_icon(entries[slot - 1].url.as_str()) {
                 canvas.image(physical_rect(u, icon), bitmap);
             } else {
                 rounded_chrome_rect(canvas, physical_rect(u, icon), 4. * u, CHROME_ACCENT_SOFT);
                 paint_centered_glyph(canvas, icon, 11., u, icons::Glyph::Globe, CHROME_ACCENT);
             }
-            canvas.text(
-                (x + label_inset) * u,
+            canvas.text_scaled(
+                (paint.x + favorites_strip::LABEL_INSET) * u,
                 (y + 18.) * u,
-                &run,
+                &runs[slot - 1],
                 if hovered { CHROME_TEXT } else { CHROME_ICON },
                 &mut self.fonts,
+                u,
             );
-            self.hits.push((bounds, action));
-            x += bounds.width + 3.;
         }
+        canvas.clip(scaled_rect(
+            1.,
+            0.,
+            0.,
+            canvas.width as f32,
+            canvas.height as f32,
+        ));
     }
 
     fn draw_footer(&mut self, canvas: &mut Canvas, width: f32, height: f32, dock_visible: bool) {
@@ -3630,6 +3703,11 @@ impl App {
             }
             let current = match action {
                 action if action.caption() => false,
+                action if action.in_favorites() => {
+                    self.tab_hits_current
+                        && self.settings.chrome().bookmarks_bar_visible()
+                        && !self.favorites_occluded()
+                }
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
                 Action::TabListItem(_) => matches!(self.chrome_menu, Some(Menu::Tabs(_))),
@@ -3751,6 +3829,10 @@ impl App {
             self.redraw();
         }
         let regions = self.window_regions(self.active);
+        if action.is_none() && self.pointer_in_favorites(regions.page.width) {
+            // Blank bar and invalidated targets do not pass the click onward.
+            return;
+        }
         if let Some(bounds) = regions.dock
             && self.pointer_in(bounds)
             && !action.is_some_and(|a| a.in_menu() || a.address_suggestion())
@@ -5039,16 +5121,17 @@ impl ApplicationHandler<()> for App {
                     window.show_window_menu(LogicalPosition::new(self.mouse.0, self.mouse.1));
                 } else if button == MouseButton::Middle
                     && self.settings_panel.is_none()
+                    && self.history_menu.is_none()
                     && self.downloads_panel.is_none()
                     && !self.update_panel_open()
+                    && self.chrome_menu.is_none()
                     && self.tab_hits_current
                     && !self
                         .chrome_action_at_pointer()
                         .is_some_and(Action::address_suggestion)
                 {
-                    if matches!(self.chrome_menu, None)
-                        && let Some(Action::Select(id) | Action::Close(id)) =
-                            self.chrome_action_at_pointer()
+                    if let Some(Action::Select(id) | Action::Close(id)) =
+                        self.chrome_action_at_pointer()
                     {
                         self.action(Action::Close(id), event_loop);
                     } else if let Some(url) = self.pointer_link() {
@@ -5104,6 +5187,9 @@ impl ApplicationHandler<()> for App {
                 if self.chrome_menu.is_some()
                     && self.chrome_action_at_pointer().is_some_and(Action::in_menu)
                 {
+                    return;
+                }
+                if self.scroll_favorites_at_pointer(regions.page.width, delta) {
                     return;
                 }
                 let strip = self.tab_strip(regions.page.width);
