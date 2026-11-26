@@ -776,6 +776,7 @@ impl Vm {
     pub fn estimated_heap_bytes(&self) -> usize {
         self.heap
             .estimated_bytes
+            .saturating_add(self.heap.property_cache_bytes())
             .saturating_add(self.inactive_realms.len() * std::mem::size_of::<realm::RealmState>())
             .saturating_add(self.string_bytes)
             .saturating_add(self.live_large_string_bytes.get())
@@ -1469,6 +1470,15 @@ impl Vm {
         self.checked_string(JsString::from_utf16_slice(units))
     }
     pub(crate) fn get(&mut self, receiver: Value, key: &JsString) -> Result<Value, JsError> {
+        self.get_string_property(receiver, key, false)
+    }
+
+    fn get_string_property(
+        &mut self,
+        receiver: Value,
+        key: &JsString,
+        cache_own: bool,
+    ) -> Result<Value, JsError> {
         if receiver.is_nullish() {
             return Err(JsError::type_error(
                 "Cannot read a property of null or undefined",
@@ -1538,6 +1548,12 @@ impl Vm {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
             let property = self.stored_argument_property(object, key);
+            let cacheable = cache_own && depth == 1 && receiver.as_object() == Some(id)
+                && key.len() <= 64 && !object.is_platform_object()
+                && matches!(object.kind, ObjectKind::Ordinary | ObjectKind::Array { .. }
+                    | ObjectKind::Function { .. } | ObjectKind::Native { .. })
+                // This property can run the lazy builtin initializer on read.
+                && !crate::temporal::is_lazy_property_name(key);
             current = object.prototype;
             let indexed = object.indexed_properties.is_some();
             let named = object.named_properties.is_some();
@@ -1551,6 +1567,13 @@ impl Vm {
                 return match property.kind {
                     PropertyKind::Data { value, .. } => {
                         crate::temporal::force_named(self, key, &value)?;
+                        if cacheable
+                            && (self.heap.property_cache_bytes() != 0
+                                || self.estimated_heap_bytes()
+                                    .saturating_add(Heap::PROPERTY_CACHE_BYTES) <= self.limits.max_heap_bytes)
+                        {
+                            self.heap.cache_own_data(id, key, &value);
+                        }
                         Ok(value)
                     }
                     PropertyKind::Accessor {
@@ -2462,8 +2485,20 @@ impl Vm {
             }
             Reference::Global(object, key) => self.get(Value::Object(object), &key),
             Reference::Property(object, key) => {
+                if let Value::String(name) = &key
+                    && let Some(id) = object.as_object()
+                    && let Some(value) = self.heap.cached_own_data(id, name)
+                {
+                    // The object and exact key identity matched; no coercion,
+                    // UTF-16 scan, or prototype/property search took place.
+                    self.consume_work(1)?;
+                    return Ok(value);
+                }
                 let key = self.property_reference_key(&object, &key)?;
-                self.get_property_key(object, key)
+                match key {
+                    PropertyKey::String(name) => self.get_string_property(object, &name, true),
+                    key => self.get_property_key(object, key),
+                }
             }
             Reference::Private(object, id) => self.private_get(object, id),
             Reference::Unresolvable(key) => Err(JsError::new(
