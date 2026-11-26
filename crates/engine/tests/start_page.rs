@@ -68,7 +68,9 @@ fn built_in_home_has_only_the_polish_wordmark_and_address_activation() {
         Some("pl")
     );
     assert_eq!(doc.elements("main").count(), 1);
-    assert_eq!(doc.text(doc.elements("h1").next().unwrap()).trim(), "Satin");
+    let heading = doc.elements("h1").next().unwrap();
+    assert_eq!(doc.text(heading).trim(), "Satin");
+    assert_eq!(doc.attr(heading, "aria-label"), Some("Satin"));
     let button = search_button(&page);
     assert_eq!(doc.elements("button").count(), 1);
     assert_eq!(doc.attr(button, "type"), Some("button"));
@@ -123,11 +125,11 @@ fn engine_layout_centers_the_quiet_surface_at_desktop_and_narrow_widths() {
     let title = page.document.elements("h1").next().unwrap();
     let button = search_button(&page);
     let hint = page.document.elements("kbd").next().unwrap();
-    for (width, height, expected_width, center) in [
-        (1586., 900., 486., 0.47),
-        (1280., 708., 486., 0.47),
-        (320., 400., 284., 0.5),
-        (240., 216., 204., 0.5),
+    for (width, height, expected_width) in [
+        (1586., 900., 486.),
+        (1280., 679., 486.),
+        (320., 400., 284.),
+        (240., 216., 204.),
     ] {
         let layout = Layout::build_with_viewport(&page, &fonts, viewport(width, height));
         assert_eq!(layout.background, Color(25, 25, 28, 255));
@@ -140,7 +142,12 @@ fn engine_layout_centers_the_quiet_surface_at_desktop_and_narrow_widths() {
         assert!((search.x + search.width / 2. - width / 2.).abs() < 1.);
         assert!(search.height >= 47.);
         assert!(search.y > title.y + title.height);
-        assert!(((title.y + search.y + search.height) / 2. - height * center).abs() < 3.);
+        let center = if width > 660. {
+            height * 0.47 - 3.5
+        } else {
+            height * 0.5
+        };
+        assert!(((title.y + search.y + search.height) / 2. - center).abs() < 1.);
         assert_eq!(layout.rect_for(hint).is_some(), width > 300.);
         assert_eq!(
             layout
@@ -150,6 +157,44 @@ fn engine_layout_centers_the_quiet_surface_at_desktop_and_narrow_widths() {
                 .count(),
             2
         );
+    }
+}
+
+#[test]
+fn quiet_home_tracking_scales_with_the_wordmark_and_keeps_a_proportional_keycap() {
+    let page = builtin("home");
+    let fonts = Fonts::new().unwrap();
+    let doc = &page.document;
+    let mark = doc.elements("svg").next().unwrap();
+    let word = doc
+        .elements("span")
+        .find(|&node| doc.attr(node, "class") == Some("home-brand-text"))
+        .unwrap();
+    let letters = &doc.nodes[word.0].children;
+    assert_eq!(letters.len(), 5);
+    let hint = doc.elements("kbd").next().unwrap();
+
+    for (width, height) in [(1280., 679.), (540., 500.)] {
+        let layout = Layout::build_with_viewport(&page, &fonts, viewport(width, height));
+        let mark = layout.rect_for(mark).unwrap();
+        let word = layout.rect_for(word).unwrap();
+        let letters: Vec<_> = letters
+            .iter()
+            .map(|&letter| layout.rect_for(letter).unwrap())
+            .collect();
+        let font_size = mark.width / 0.54;
+        let tracking = font_size * 0.085;
+        for pair in letters.windows(2) {
+            let gap = pair[1].x - (pair[0].x + pair[0].width);
+            assert!((gap + tracking).abs() < 0.3, "{gap} != -{tracking}");
+        }
+        let full_width: f32 = letters.iter().map(|letter| letter.width).sum();
+        assert!((word.width - (full_width - 5. * tracking)).abs() < 0.3);
+        assert!(((mark.x + word.x + word.width) / 2. - width / 2.).abs() < 0.5);
+        let center_delta = (word.y + word.height / 2.) - (mark.y + mark.height / 2.);
+        assert!((center_delta + font_size * 0.02).abs() < 0.3);
+        let hint = layout.rect_for(hint).unwrap();
+        assert!((30. ..=40.).contains(&hint.width), "{hint:?}");
     }
 }
 

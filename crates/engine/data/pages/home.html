@@ -25,7 +25,8 @@
     }
     .home-inner {
       position: relative;
-      top: -3vh;
+      /* The reference uses window vh; this document's vh excludes browser chrome. */
+      top: calc(-3vh - 3.5px);
       width: 100%;
       max-width: 486px;
     }
@@ -45,6 +46,19 @@
       flex: none;
       width: .54em;
       height: .54em;
+    }
+    .home-brand-text {
+      display: flex;
+      flex: none;
+      position: relative;
+      /* Align the painted Georgia baseline without shifting the mark or field. */
+      top: -.02em;
+    }
+    .home-brand-text > span {
+      display: block;
+      flex: none;
+      /* Keep the Georgia glyph widths; emulate the reference's -.085em tracking. */
+      margin-right: -.085em;
     }
     .home-search {
       display: flex;
@@ -85,7 +99,7 @@
       background: #19191c;
       border: 1px solid #3e3a42;
       border-radius: 4px;
-      font-family: monospace;
+      font-family: inherit;
       font-size: 10px;
       line-height: 1.4;
       white-space: nowrap;
@@ -112,10 +126,10 @@
 <body>
   <main>
     <div class="home-inner">
-      <h1 class="home-wordmark"><svg class="home-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <h1 class="home-wordmark" aria-label="Satin"><svg class="home-mark" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 17.5 11.5 4h5L9 17.5z" fill="#c4a3f4"/>
         <path d="m10.5 20 7.4-13.5H21L13.6 20z" fill="#c4a3f4" opacity=".49"/>
-      </svg><span>Satin</span></h1>
+      </svg><span class="home-brand-text"><span>S</span><span>a</span><span>t</span><span>i</span><span>n</span></span></h1>
       <button id="home-search" class="home-search" type="button" aria-keyshortcuts="Control+L">
         <svg class="home-search-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"
              stroke="#c4a3f4" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
