@@ -122,12 +122,56 @@ async function run(executable, directory, destination, commit, repeats = '3') {
   console.log(destination);
 }
 
+// Rotate the first executable every round. Each variant spends the same
+// number of samples in each position, including the cold first position.
+async function paired(directory, destination, rounds, ...variants) {
+  directory = resolve(directory);
+  const count = Number(rounds);
+  assert.ok(variants.length >= 4 && variants.length % 2 === 0);
+  const probes = [];
+  for (let i = 0; i < variants.length; i += 2) {
+    const path = resolve(variants[i + 1]);
+    probes.push({ label: variants[i], path, sha256: hash(await readFile(path)) });
+  }
+  assert.equal(new Set(probes.map(p => p.label)).size, probes.length);
+  assert.ok(Number.isInteger(count) && count > 0 && count <= 24 && count % probes.length === 0);
+  const bytes = await readFile(join(directory, 'manifest.json'));
+  const manifest = JSON.parse(bytes);
+  assert.equal(manifest.version, 1);
+  const report = { startedUtc: new Date().toISOString(), platform: platform(), arch: arch(),
+    osRelease: release(), node: process.version, manifestSha256: hash(bytes), probes, rounds: count, cases: [] };
+  for (const entry of manifest.cases) {
+    assert.match(entry.file, /^[a-z0-9-]+\.js$/);
+    const file = join(directory, entry.file);
+    const input = await readFile(file);
+    assert.equal(input.length, entry.bytes);
+    assert.equal(hash(input), entry.sha256);
+    const samples = [];
+    for (const mode of entry.evaluate ? ['compile', 'eval'] : ['compile']) {
+      for (let round = 0; round < count; round++) {
+        for (let pos = 0; pos < probes.length; pos++) {
+          const probe = probes[(round + pos) % probes.length];
+          const result = satin(execFileSync(probe.path, [mode, file], {
+            encoding: 'utf8', timeout: 30000, windowsHide: true, maxBuffer: 4096,
+          }));
+          samples.push({ mode, round, pos, label: probe.label, ...result });
+        }
+      }
+    }
+    report.cases.push({ ...entry, samples });
+  }
+  await writeFile(destination, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' });
+  console.log(destination);
+}
+
 if (command === 'fixtures' && args.length === 1) {
   await fixtures(resolve(args[0]));
 } else if (command === 'run' && [4, 5].includes(args.length)) {
   await run(...args);
 } else if (command === 'v8' && args.length === 2) {
   await reference(...args);
+} else if (command === 'paired' && args.length >= 7) {
+  await paired(...args);
 } else {
-  throw new Error('fixtures <new-dir> | run <probe> <fixtures-dir> <new-json> <commit> [repeats]');
+  throw new Error('fixtures <new-dir> | run <probe> <fixtures-dir> <new-json> <commit> [repeats] | paired <fixtures-dir> <new-json> <rounds> <label> <probe> ...');
 }

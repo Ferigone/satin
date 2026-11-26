@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { budgetTrace, safeDiagnostic } from './public-media-diagnostics.mjs';
+import { budgetTrace, executionProfiles, safeDiagnostic } from './public-media-diagnostics.mjs';
+
+test('CPU profiles accept fixed counters and discard arbitrary data and malformed buckets', () => {
+  const data = { node: 1, bytes: 20, sha256: 'a'.repeat(64), external: false,
+    error: 'ExecutionLimit', wallUs: 450, cpuUs: 0, work: [1,2,3,4,5,6],
+    cycles: null, secret: 'do not export' };
+  const line = value => 'SATIN_QA_SCRIPT ' + JSON.stringify(value);
+  const profiles = executionProfiles([line(data), line({ ...data, work: [1] }),
+    line({ ...data, sha256: ['a'.repeat(64)] }), line({ ...data, error: data.secret })].join('\n'));
+  assert.equal(profiles.length, 1);
+  assert.equal(profiles[0].work.propertyRead, 5);
+  assert.equal(profiles[0].cpuUs, 0);
+  assert.equal(profiles[0].cycles, null);
+  assert.ok(!JSON.stringify(profiles).includes(data.secret));
+});
 
 test('preserves known startup and memory budget classes', () => {
   assert.deepEqual(safeDiagnostic('Dynamic import: ExecutionLimit: Nested bytecode depth budget exhausted'), {

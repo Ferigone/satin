@@ -1760,6 +1760,9 @@ fn document_base(state: &State) -> url::Url {
         .clone()
 }
 
+#[cfg(all(windows, feature = "media-startup-diagnostics"))]
+mod startup_measure;
+
 fn run_classic(
     vm: &mut Vm,
     state: &Shared,
@@ -1780,7 +1783,11 @@ fn run_classic(
         state.ignore_destructive_writes += usize::from(external);
         state.current_script.replace(node)
     };
-    let evaluated = match vm.eval_with_identifier(source, identifier) {
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    let evaluation = startup_measure::evaluate(vm, source, identifier, node, external);
+    #[cfg(not(all(windows, feature = "media-startup-diagnostics")))]
+    let evaluation = vm.eval_with_identifier(source, identifier);
+    let evaluated = match evaluation {
         Ok(_) => {
             state.borrow_mut().executed += 1;
             Ok(())

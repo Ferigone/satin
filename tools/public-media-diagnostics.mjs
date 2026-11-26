@@ -47,6 +47,31 @@ export function safeDiagnostic(line) {
   };
 }
 
+// Fixed diagnostic fields only. Never spread a parsed line into a public receipt.
+export function executionProfiles(stderr) {
+  const labels = ['other', 'entryCompile', 'regexpCompile', 'regexpMatch', 'propertyRead', 'host'];
+  const number = n => Number.isSafeInteger(n) && n >= 0;
+  const vector = v => Array.isArray(v) && v.length === labels.length && v.every(number);
+  const named = v => Object.fromEntries(labels.map((label, i) => [label, v[i]]));
+  const results = [];
+  for (const line of String(stderr).split(/\r?\n/)) {
+    if (!line.startsWith('SATIN_QA_SCRIPT ') || line.length > 1024) continue;
+    let p;
+    try { p = JSON.parse(line.slice('SATIN_QA_SCRIPT '.length)); } catch { continue; }
+    if (!p || !number(p.node) || !number(p.bytes) || typeof p.external !== 'boolean'
+      || typeof p.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(p.sha256)
+      || !['ExecutionLimit', 'HeapLimit', 'SyntaxError', 'TypeError', 'ReferenceError',
+        'RangeError', 'UnsupportedFeature', 'InternalError', 'Throw'].includes(p.error)
+      || !number(p.wallUs) || !(p.cpuUs === null || number(p.cpuUs))
+      || !vector(p.work) || !(p.cycles === null || vector(p.cycles))) continue;
+    results.push({ node: p.node, external: p.external, sha256: p.sha256, bytes: p.bytes,
+      error: p.error, wallUs: p.wallUs, cpuUs: p.cpuUs, work: named(p.work),
+      cycles: p.cycles && named(p.cycles) });
+    if (results.length === 128) break;
+  }
+  return results;
+}
+
 export function budgetTrace(stderr) {
   const sourcePath = raw => /(?:^|\/)(crates\/(?:engine|javascript)\/src\/[A-Za-z0-9_./-]+\.rs)$/
     .exec(raw.replaceAll('\\', '/'))?.[1] ?? null;

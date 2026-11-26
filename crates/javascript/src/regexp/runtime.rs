@@ -298,6 +298,8 @@ fn create_from_args(
 }
 
 fn compile_args(vm: &mut Vm, source: Value, flags: Value) -> Result<Rc<Program>, JsError> {
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    let _scope = crate::startup_profile::enter(crate::startup_profile::Area::RegexpCompile);
     let source = if source.is_undefined() {
         JsString::default()
     } else {

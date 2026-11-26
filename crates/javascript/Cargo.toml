@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [features]
 twitch-bootstrap-profile = []
-media-startup-diagnostics = []
+media-startup-diagnostics = ["windows-sys/Win32_System_WindowsProgramming"]
 compiler-qa = []
 
 [[example]]

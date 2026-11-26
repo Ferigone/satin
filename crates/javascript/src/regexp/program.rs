@@ -408,6 +408,8 @@ impl Program {
         start: usize,
         sticky: bool,
     ) -> Result<Option<Match>, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = crate::startup_profile::enter(crate::startup_profile::Area::RegexpMatch);
         if start > input.len() {
             return Ok(None);
         }

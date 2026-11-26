@@ -7,7 +7,7 @@ import { arch, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { budgetTrace, safeDiagnostic } from './public-media-diagnostics.mjs';
+import { budgetTrace, executionProfiles, safeDiagnostic } from './public-media-diagnostics.mjs';
 
 const cases = [
   { site: 'twitch', url: 'https://www.twitch.tv/theburntpeanut_247' },
@@ -86,6 +86,7 @@ async function satinCase(exe, { site, url }, dir) {
     nestingDiagnostics: diagnostics?.filter(line => line.includes('Expression nesting limit exceeded')).length ?? null,
     firstDiagnostics: diagnostics?.slice(0, 8).map(safeDiagnostic) ?? null,
     budgetTrace: budgetTrace(outcome.stderr),
+    executionProfiles: executionProfiles(outcome.stderr),
     document, media,
     timeProgress: 'not sampled within one run',
     controls: 'not tried by this headless probe',

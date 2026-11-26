@@ -24,6 +24,8 @@ use crate::dynamic_import::SourceReferrer;
 mod inspection;
 pub(crate) mod realm;
 mod task_deadline;
+#[cfg(all(windows, feature = "media-startup-diagnostics"))]
+pub mod startup_profile;
 
 use task_deadline::TaskDeadline;
 
@@ -512,8 +514,13 @@ impl Vm {
         inspected_node: Option<Value>,
     ) -> Result<Value, JsError> {
         self.check_interrupt()?;
-        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
-        self.retain_compiled_chunk(&chunk)?;
+        let chunk = {
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _scope = startup_profile::enter(startup_profile::Area::Compile);
+            let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+            self.retain_compiled_chunk(&chunk)?;
+            chunk
+        };
         if self.active == 0 {
             self.remaining = self.limits.max_instructions;
         }
@@ -923,6 +930,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value]| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args)
+        };
         self.native(name, 0, false, Rc::new(callback))
     }
     /// Creates a callable host exotic with the Annex B [[IsHTMLDDA]] slot.
@@ -942,6 +954,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value], bool) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value], construct| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args, construct)
+        };
         let callback = Rc::new(callback);
         let call = callback.clone();
         let function = self.native(
@@ -965,6 +982,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value], Option<Value>) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value], target| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args, target)
+        };
         let callback = Rc::new(callback);
         let call = callback.clone();
         let function = self.native(
@@ -1377,6 +1399,8 @@ impl Vm {
             ));
         }
         self.remaining -= 1;
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        startup_profile::charge(1);
         if self.heap.live > self.limits.max_heap_objects {
             return Err(JsError::new(
                 ErrorKind::HeapLimit,
@@ -1416,6 +1440,8 @@ impl Vm {
             }
         }
         self.remaining -= units;
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        startup_profile::charge(units);
         Ok(())
     }
     /// Charge native DOM/host work to the current shared execution budget.
@@ -1501,6 +1527,8 @@ impl Vm {
         key: &JsString,
         cache_own: bool,
     ) -> Result<Value, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = startup_profile::enter(startup_profile::Area::Property);
         if receiver.is_nullish() {
             return Err(JsError::type_error(
                 "Cannot read a property of null or undefined",
@@ -2481,6 +2509,8 @@ impl Vm {
     }
 
     fn read_named_property(&mut self, object: Value, name: &JsString) -> Result<Value, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = startup_profile::enter(startup_profile::Area::Property);
         if object.is_nullish() {
             return Err(JsError::type_error("Cannot access a property of null or undefined"));
         }
@@ -3076,6 +3106,8 @@ impl Vm {
             callback(self, this, args)
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _scope = startup_profile::enter(startup_profile::Area::Other);
             self.active_calls.push(code.name.clone());
             self.enter_legacy_call(id, &code);
             let mut result = self.with_referrer(referrer, |vm| {
