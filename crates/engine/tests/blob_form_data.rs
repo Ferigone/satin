@@ -13,6 +13,20 @@ fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
     assert_eq!(runtime.eval(source).unwrap(), expected.into(), "{source}");
 }
 
+// Each Blob fetch queues a zero-delay task. A busy host can exhaust a frame's
+// timer budget after one callback. Preserve the per-request assertions below.
+fn pump_blob_fetches(runtime: &mut ScriptRuntime, requests: usize) {
+    for _ in 0..requests {
+        runtime.pump();
+        if runtime
+            .next_deadline()
+            .is_none_or(|next| next > std::time::Instant::now())
+        {
+            break;
+        }
+    }
+}
+
 #[test]
 fn blob_fetch_captures_requests_and_enforces_document_scope() {
     let mut runtime = realm("<!doctype html>");
@@ -67,7 +81,7 @@ fn blob_fetch_captures_requests_and_enforces_document_scope() {
             "#,
         )
         .unwrap();
-    runtime.pump();
+    pump_blob_fetches(&mut runtime, 6);
     js(
         &mut runtime,
         r##"
@@ -110,7 +124,7 @@ fn blob_fetch_ranges_use_offsets_into_the_existing_slice() {
             "#,
         )
         .unwrap();
-    runtime.pump();
+    pump_blob_fetches(&mut runtime, 6);
     js(
         &mut runtime,
         r#"

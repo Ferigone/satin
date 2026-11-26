@@ -14,6 +14,8 @@ Three static comparisons expose missing features on the **test** side. The refer
 
 Across the same 6,536 eligible screen comparisons, passes rose from 1,981 to 1,993 (30.49%). Fourteen failures and one inconclusive pair became passes. Three prior passes became failures and five single-color comparisons became visible mismatches. The final counts are 4,412 failures, 130 inconclusive pairs, one engine work limit, zero process timeouts and 19,782 exclusions. The supplemental Ahem cohort gained one pass with no losses, reaching 316 passes, 1,062 failures and ten inconclusive results among 1,388 comparisons. The property inventory still has 94 exact results among 625 distinguishing controls, and all 87 pinned selector assertions pass. [All pixel results, references and exclusions](css-subgrid-reftests.tsv.gz)
 
+The complete Linux workspace run for this candidate passed 1,470 tests, with three existing opt-in tests ignored. Blob URL fetches use zero-delay timer tasks. Their tests now drive pending tasks through a frame yield before comparing all six request outcomes.
+
 ## Author cascade layers on Tailwind CSS
 
 The Tailwind CSS documentation applies its component utilities inside five `@layer` blocks. Alpha.41 fetched the stylesheet but discarded those blocks. The example paragraph used the default font, wrapped to 14 lines at 390 × 800 and occupied 268.8 px. The cascade-layer implementation applies the three-line limit, the Inter font stack and the requested 24 px line height. The paragraph measures 72 px at both viewport sizes. [Original Tailwind example](https://tailwindcss.com/docs/line-clamp) · [Measured implementation](https://github.com/Ferigone/satin/commit/f1ff062)
