@@ -413,17 +413,13 @@ impl Layout {
         } else {
             0.
         };
-        let mut rules = vec![];
-        for (index, sheet) in page.stylesheets.iter().enumerate() {
-            if !page.stylesheet_applies(index, (width, viewport.height)) {
-                continue;
-            }
-            rules.extend(css::parse_for_viewport(sheet, (width, viewport.height)));
-            if rules.len() >= 8192 {
-                rules.truncate(8192);
-                break;
-            }
-        }
+        let sheets = page
+            .stylesheets
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| page.stylesheet_applies(*i, (width, viewport.height)))
+            .map(|(_, sheet)| sheet.as_ref());
+        let rules = css::parse_stylesheets(sheets, (width, viewport.height));
         let stylesheet = css::Stylesheet::with_viewport(rules, width, viewport.height);
         let form_state = |node, pseudo| page.matches_form_pseudo(node, pseudo);
         let mut selector_context = css::SelectorContext::new(&form_state);

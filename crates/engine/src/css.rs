@@ -6,6 +6,7 @@ pub(crate) use cssom_rules::constructed_rules;
 pub(crate) mod canvas_font;
 mod grid;
 mod inspection;
+mod layers;
 mod media;
 mod named_colors;
 mod oklab;
@@ -686,6 +687,7 @@ pub struct Rule {
     pub selector: String,
     pub declarations: Vec<Declaration>,
     pub specificity: u32,
+    layer_rank: usize,
 }
 
 // A raw newline ends a bad-string token; the caller resumes at that newline.
@@ -928,12 +930,35 @@ pub fn parse(source: &str, width: f32) -> Vec<Rule> {
 }
 
 pub(crate) fn parse_for_viewport(source: &str, viewport: (f32, f32)) -> Vec<Rule> {
-    let clean = without_comments(source);
+    parse_stylesheets(std::iter::once(source), viewport)
+}
+
+pub(crate) fn parse_stylesheets<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    viewport: (f32, f32),
+) -> Vec<Rule> {
     let mut out = vec![];
-    // Bound selector-list expansion by bytes as well as rule/declaration count;
-    // one enormous declaration must not be copied thousands of times.
-    let mut declaration_budget = 16 * 1024 * 1024;
-    parse_rules(&clean, viewport, 0, &mut out, &mut declaration_budget);
+    let mut layers = layers::Layers::new();
+    for source in sources {
+        let clean = without_comments(source);
+        let mut declaration_budget = 16 * 1024 * 1024;
+        parse_rules(
+            &clean,
+            viewport,
+            0,
+            &mut out,
+            &mut declaration_budget,
+            &mut layers,
+            0,
+        );
+        if out.len() >= 8192 {
+            break;
+        }
+    }
+    let ranks = layers.ranks();
+    for rule in &mut out {
+        rule.layer_rank = ranks[rule.layer_rank];
+    }
     out
 }
 
@@ -1375,6 +1400,8 @@ fn parse_rules(
     depth: usize,
     out: &mut Vec<Rule>,
     declaration_budget: &mut usize,
+    layers: &mut layers::Layers,
+    layer: usize,
 ) {
     if depth > 32 || out.len() >= 8192 {
         return;
@@ -1387,6 +1414,9 @@ fn parse_rules(
             break;
         };
         if byte == b';' {
+            if let Some(names) = layers::header(trim_boundary(&tail[..stop])) {
+                layers.statement(layer, names);
+            }
             offset += stop + 1;
             continue;
         }
@@ -1395,8 +1425,28 @@ fn parse_rules(
         let end = stylesheet_block_end(source, open).unwrap_or(source.len());
         let body = &source[open + 1..end];
         if header.starts_with('@') {
-            if group_applies(header, viewport) {
-                parse_rules(body, viewport, depth + 1, out, declaration_budget);
+            if let Some(names) = layers::header(header) {
+                if let Some(child) = layers.block(layer, names) {
+                    parse_rules(
+                        body,
+                        viewport,
+                        depth + 1,
+                        out,
+                        declaration_budget,
+                        layers,
+                        child,
+                    );
+                }
+            } else if group_applies(header, viewport) {
+                parse_rules(
+                    body,
+                    viewport,
+                    depth + 1,
+                    out,
+                    declaration_budget,
+                    layers,
+                    layer,
+                );
             }
         } else {
             let declarations = clean_declarations(body);
@@ -1427,6 +1477,7 @@ fn parse_rules(
                     }
                     *declaration_budget -= declaration_cost;
                     out.push(Rule {
+                        layer_rank: layer,
                         selector: serialized_tokens(selector),
                         declarations: declarations.clone(),
                         specificity: compiled.specificity.packed(),
@@ -1843,7 +1894,11 @@ fn compile_selector_in(
                         let supported_name = legacy_pseudo
                             || matches!(
                                 name.as_str(),
-                                "marker" | "placeholder" | "selection" | "file-selector-button"
+                                "marker"
+                                    | "placeholder"
+                                    | "selection"
+                                    | "file-selector-button"
+                                    | "backdrop"
                             );
                         if !supported_name
                             || argument.is_some()
@@ -3034,6 +3089,7 @@ struct CompiledDeclaration {
     order: usize,
 }
 struct CompiledRule {
+    layer_rank: usize,
     selector: Selector,
     declarations: Vec<CompiledDeclaration>,
     custom: Vec<Declaration>,
@@ -3105,6 +3161,7 @@ fn svg_declarations(declarations: &[Declaration]) -> Vec<SvgDeclaration> {
 struct Priority {
     important: bool,
     inline: bool,
+    layer: usize,
     specificity: Specificity,
     rule: usize,
     declaration: usize,
@@ -3195,6 +3252,7 @@ impl Stylesheet {
                 .filter(|d| d.name.starts_with("--") && d.value.len() <= 16384)
                 .collect();
             result.rules.push(CompiledRule {
+                layer_rank: rule.layer_rank,
                 selector,
                 declarations,
                 custom,
@@ -3264,63 +3322,38 @@ impl Stylesheet {
         let inline_declarations = compile_declarations(&inline);
         let mut winners: [Option<Winner<'_>>; PROPERTY_COUNT] = [None; PROPERTY_COUNT];
         let mut custom: HashMap<&str, (&Declaration, Priority)> = HashMap::new();
-        // Candidate processing order is irrelevant: source order is in Priority.
         self.candidates(doc, id, |index| {
             let rule = &self.rules[index];
             if !rule.selector.matches(doc, id, context) {
                 return;
             }
+            let source = CascadeSource {
+                inline: false,
+                layer: rule.layer_rank,
+                specificity: rule.selector.specificity,
+                rule: index,
+            };
             if is_svg {
-                choose_svg(
-                    &mut svg_winners,
-                    &rule.svg,
-                    false,
-                    rule.selector.specificity,
-                    index,
-                );
+                choose_svg(&mut svg_winners, &rule.svg, source);
             }
             for declaration in &rule.declarations {
-                choose(
-                    &mut winners,
-                    declaration,
-                    false,
-                    rule.selector.specificity,
-                    index,
-                );
+                choose(&mut winners, declaration, source);
             }
-            choose_custom(
-                &mut custom,
-                &rule.custom,
-                false,
-                rule.selector.specificity,
-                index,
-            );
+            choose_custom(&mut custom, &rule.custom, source);
         });
+        let source = CascadeSource {
+            inline: true,
+            layer: usize::MAX,
+            specificity: Specificity::default(),
+            rule: usize::MAX,
+        };
         for declaration in &inline_declarations {
-            choose(
-                &mut winners,
-                declaration,
-                true,
-                Specificity::default(),
-                usize::MAX,
-            );
+            choose(&mut winners, declaration, source);
         }
         if is_svg {
-            choose_svg(
-                &mut svg_winners,
-                &inline_svg,
-                true,
-                Specificity::default(),
-                usize::MAX,
-            );
+            choose_svg(&mut svg_winners, &inline_svg, source);
         }
-        choose_custom(
-            &mut custom,
-            &inline,
-            true,
-            Specificity::default(),
-            usize::MAX,
-        );
+        choose_custom(&mut custom, &inline, source);
         if !custom.is_empty() {
             // Inherited custom properties are already computed. Resolve only local
             // declarations; unrelated inherited variables keep their shared strings.
@@ -3454,9 +3487,12 @@ impl Stylesheet {
         choose_svg(
             &mut svg_winners,
             &presentation,
-            false,
-            Specificity::default(),
-            0,
+            CascadeSource {
+                inline: false,
+                layer: 0,
+                specificity: Specificity::default(),
+                rule: 0,
+            },
         );
         if !svg_winners.is_empty() {
             let mut values = HashMap::new();
@@ -3519,21 +3555,38 @@ impl Stylesheet {
         style
     }
 }
+#[derive(Clone, Copy)]
+struct CascadeSource {
+    inline: bool,
+    layer: usize,
+    specificity: Specificity,
+    rule: usize,
+}
+
+impl CascadeSource {
+    fn priority(self, important: bool, declaration: usize) -> Priority {
+        Priority {
+            important,
+            inline: self.inline,
+            layer: if important {
+                usize::MAX - self.layer
+            } else {
+                self.layer
+            },
+            specificity: self.specificity,
+            rule: self.rule,
+            declaration,
+        }
+    }
+}
+
 fn choose_svg<'a>(
     winners: &mut HashMap<Arc<str>, (&'a SvgDeclaration, Priority)>,
     declarations: &'a [SvgDeclaration],
-    inline: bool,
-    specificity: Specificity,
-    rule: usize,
+    source: CascadeSource,
 ) {
     for d in declarations {
-        let priority = Priority {
-            important: d.important,
-            inline,
-            specificity,
-            rule,
-            declaration: d.order,
-        };
+        let priority = source.priority(d.important, d.order);
         if winners.get(&d.name).is_none_or(|(_, p)| priority >= *p) {
             winners.insert(d.name.clone(), (d, priority));
         }
@@ -3542,17 +3595,9 @@ fn choose_svg<'a>(
 fn choose<'a>(
     winners: &mut [Option<Winner<'a>>; PROPERTY_COUNT],
     declaration: &'a CompiledDeclaration,
-    inline: bool,
-    specificity: Specificity,
-    rule: usize,
+    source: CascadeSource,
 ) {
-    let priority = Priority {
-        important: declaration.important,
-        inline,
-        specificity,
-        rule,
-        declaration: declaration.order,
-    };
+    let priority = source.priority(declaration.important, declaration.order);
     let target = &mut winners[declaration.property as usize];
     if target.is_none_or(|w| priority >= w.priority) {
         *target = Some(Winner {
@@ -3564,21 +3609,13 @@ fn choose<'a>(
 fn choose_custom<'a>(
     custom: &mut HashMap<&'a str, (&'a Declaration, Priority)>,
     declarations: &'a [Declaration],
-    inline: bool,
-    specificity: Specificity,
-    rule: usize,
+    source: CascadeSource,
 ) {
     for (order, d) in declarations.iter().enumerate() {
         if !d.name.starts_with("--") || d.value.len() > 16384 {
             continue;
         }
-        let priority = Priority {
-            important: d.important,
-            inline,
-            specificity,
-            rule,
-            declaration: order,
-        };
+        let priority = source.priority(d.important, order);
         if custom
             .get(d.name.as_str())
             .is_none_or(|(_, old)| priority >= *old)

@@ -2,6 +2,43 @@
 
 The alpha.35–alpha.36 audit ran on Linux x86_64 on 2026-11-25, against Satin `57e1dbd` (alpha.35) and [the CSS implementation released in alpha.36](https://github.com/Ferigone/satin/commit/8f8882f3d68d8eaaf8112194dac75f7ca61658c6). Both runs used Rust 1.99.1, the same system fonts and the same source pages. The candidate workspace test suite on Linux recorded 1,403 passes, zero failures and three pre-existing opt-in checks. The upstream [WPT revision is pinned to `9b8b1be`](https://github.com/web-platform-tests/wpt/tree/9b8b1beec730060783726b7c538b21e25e63b1f4/css).
 
+## Author cascade layers on Tailwind CSS
+
+The Tailwind CSS documentation applies its component utilities inside five `@layer` blocks. Alpha.41 fetched the stylesheet but discarded those blocks. The example paragraph used the default font, wrapped to 14 lines at 390 × 800 and occupied 268.8 px. The cascade-layer implementation applies the three-line limit, the Inter font stack and the requested 24 px line height. The paragraph measures 72 px at both viewport sizes. [Original Tailwind example](https://tailwindcss.com/docs/line-clamp) · [Measured implementation](https://github.com/Ferigone/satin/commit/f1ff062)
+
+| Viewport, 1× scale | Alpha.41 paragraph (width × height) | With layers | With layers and reset | Chromium |
+| --- | ---: | ---: | ---: | ---: |
+| 390 × 800 | 294 × 268.8 | 158 × 72 | 254 × 72 | 254 × 72 |
+| 1280 × 800 | 1,184 × 76.8 | 384 × 72 | 320 × 72 | 320 × 72 |
+
+![Tailwind paragraph in alpha.41, the updated engine and Chromium at 390 CSS pixels.](css-layers-tailwind.png)
+
+The reset groups the universal selector with `::backdrop`. Satin previously rejected this selector list, which kept the figure’s 40 px default margins, the body’s 8 px margins and content-box sizing. Accepting the valid pseudo-element restores the reset on ordinary elements. The paragraph now has exactly the Chromium x coordinate and width at both sizes. Its initial y coordinate still differs by 220.33 px on the narrow page and 220.17 px on desktop. [Selector fix and regression](https://github.com/Ferigone/satin/commit/b8fb946)
+
+The same native window was resized without navigation. Scrolling brought the paragraph into view and returning to the top restored its original geometry. The archive includes the computed styles, full native captures and source hashes. [Download measurements and screenshots](css-layers-native.zip)
+
+On the pinned WPT revision, `css/css-cascade/layer-basic.html` improved from 5/34 to 34/34, and `layer-important.html` from 1/9 to 9/9. Both original harnesses completed. Across the original 6,536 eligible static comparisons all 1,981 passes, 4,418 failures, 136 inconclusive results and the one work-limit error remained the same. The 19,782 other screen entries remained outside that cohort. The regression checks named layers across stylesheets, conditional declarations, a custom property, inline importance, class changes, viewport resize and painted pixels. [Layer regression tests](../../crates/engine/tests/css_layers.rs)
+
+The final selector change preserved every status in both pixel cohorts, including all 315 passes among the 1,388 supplemental Ahem comparisons. All 87 relational selector assertions and 1,466 Linux workspace tests passed, with three existing opt-in tests ignored. On Brave Search the one-line title retained its alpha.41 geometry and scroll behavior at both widths.
+
+One remaining Tailwind difference is visible above the example. At 390 px, its table header uses a nested column subgrid. Chromium places the two cells side by side in one 48 px row. Satin stacks them in a 96 px row. Layered imports, layered font-face precedence, `revert-layer` and the specialized CSSOM layer interfaces also remain open.
+
+### Synchronous WPT comparison for layers
+
+| Outcome | Alpha.41 | Layers and reset |
+| --- | ---: | ---: |
+| Reported assertions passing | 10,523 / 37,180 (28.30%) | 10,574 / 37,180 (28.44%) |
+| Pages marked COMPLETE | 3,472 | 3,472 |
+| Pages marked PARTIAL | 269 | 269 |
+| Pages marked HARNESS_ERROR | 223 | 223 |
+| Pages marked NOT_RUN | 4,352 | 4,352 |
+| Assertions marked FAIL | 26,656 | 26,605 |
+| Assertions marked PASS | 10,523 | 10,574 |
+| Assertions marked PRECONDITION_FAILED | 1 | 1 |
+| Runner timeouts within harness errors | 0 | 0 |
+
+51 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 prior passes were unobserved in the candidate. [Individual WPT results](css-layers-testharness.tsv.gz)
+
 ## Alpha.41 line clamping
 
 At 390 × 800 CSS px, Satin wrapped the first Brave Search result title onto a second line. The page requested a one-line preview. Alpha.41 measures the line, reserves space for the ellipsis, and stops emitting text and inline hit regions beyond it. The description moves up by 26 px. At 1280 × 800 the title already fit, and all three browsers measured it at 648 × 26 px. The screenshots below show the same result in alpha.40, alpha.41 and Chromium, left to right.
