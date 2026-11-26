@@ -135,7 +135,6 @@ fn new_scope(vm: &mut Vm, parent: EnvId) -> Result<EnvId, JsError> {
 
 pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError> {
     Ok(match op {
-        Op::Evaluate(expression) => Advance::child(expression, env, Resume::Pass),
         Op::Initialize(_, _, Some(value)) => Advance::child(value, env, Resume::Initialize),
         Op::Block(body) => Advance::child(body, vm.block_environment(body, env)?, Resume::Pass),
         Op::Label(_, body) => Advance::child(body, env, Resume::Label),

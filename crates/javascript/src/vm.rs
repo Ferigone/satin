@@ -3552,6 +3552,10 @@ impl Vm {
             self.tick()?;
             let op = &chunk.ops[pc];
             pc += 1;
+            if matches!(op, Op::StatementValue) {
+                result = Some(self.pop_value(&mut stack)?);
+                continue;
+            }
             if self.run_stack_op(op, &mut stack, env, chunk.strict, &mut pc)? {
                 continue;
             }
@@ -4172,7 +4176,6 @@ impl Vm {
         let mut result = None;
         match op {
             Op::CopyAnnexFunction(name) => self.copy_annex_function(env, name)?,
-            Op::Evaluate(expression) => result = Some(self.expression_value(expression, env)?),
             Op::Initialize(kind, key, expression) => {
                 let value = if let Some(e) = expression {
                     self.expression_value(e, env)?

@@ -178,7 +178,8 @@ pub(crate) enum Op {
     Argument(bool),
     Call,
     Construct,
-    Evaluate(Rc<Chunk>),
+    /// Store the expression's GetValue as the statement-list completion.
+    StatementValue,
     Initialize(VarKind, Rc<PatternCode>, Option<Rc<Chunk>>),
     Block(Rc<Chunk>),
     Label(LabelId, Rc<Chunk>),
@@ -235,8 +236,7 @@ impl Op {
     pub(crate) fn can_suspend(&self) -> bool {
         match self {
             Self::Await | Self::Yield { .. } | Self::ForOf(_, _, _, _, true, _) => true,
-            Self::Evaluate(chunk)
-            | Self::Throw(chunk)
+            Self::Throw(chunk)
             | Self::Block(chunk)
             | Self::Label(_, chunk) => chunk.can_suspend,
             Self::Initialize(_, _, chunk) | Self::Return(chunk) => {
@@ -450,7 +450,7 @@ pub(crate) fn retained_size(
                         &mut chunks,
                     ))
                 }
-                Op::Evaluate(c) | Op::Block(c) | Op::Label(_, c) | Op::Throw(c) => {
+                Op::Block(c) | Op::Label(_, c) | Op::Throw(c) => {
                     chunks.push(c.clone())
                 }
                 Op::Initialize(_, pattern, c) => {
@@ -1062,11 +1062,13 @@ fn compile_statement(
             out.push(Op::CopyAnnexFunction(f.name.clone().unwrap()));
         }
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
-        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(
-            &Expr::Literal(Value::String(value.clone())),
-            strict,
-        )?)),
-        Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
+        Stmt::EscapedStringStatement(value) => {
+            out.extend([Op::Push(Value::String(value.clone())), Op::StatementValue]);
+        }
+        Stmt::Expression(e) => {
+            expr(e, out, strict)?;
+            out.push(Op::StatementValue);
+        }
         Stmt::Class(name, class) => {
             let chunk = Chunk {
                 ops: vec![Op::Class(classes::compile(class)?, ClassName::Intrinsic)],

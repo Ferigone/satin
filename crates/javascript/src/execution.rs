@@ -481,6 +481,10 @@ impl Vm {
         self.tick()?;
         let op = &frame.chunk.ops[frame.pc];
         frame.pc += 1;
+        if matches!(op, Op::StatementValue) {
+            frame.result = Some(self.pop_value(&mut frame.operands)?);
+            return Ok(Advance::Keep);
+        }
         if let Op::Pattern(step) = op {
             let step = *step;
             destructuring::step(self, frame, step)?;
