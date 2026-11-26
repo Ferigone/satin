@@ -1858,7 +1858,7 @@ fn grid_track_sizes(
         .collect()
 }
 fn grid_area(sizes: &[f32], start: usize, span: usize, gap: f32) -> f32 {
-    sizes[start..start + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32
+    (sizes[start..start + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32).max(0.)
 }
 fn grid_offsets(
     sizes: &[f32],
@@ -2194,10 +2194,8 @@ impl Builder<'_> {
         let metrics = BoxMetrics::new(style, available, constraints);
         let mut occupied = sizes[item.column..item.column + item.columns].to_vec();
         let last = occupied.len() - 1;
-        occupied[0] =
-            (occupied[0] - metrics.margin[3] - metrics.border[3] - metrics.padding[3]).max(0.);
-        occupied[last] =
-            (occupied[last] - metrics.margin[1] - metrics.border[1] - metrics.padding[1]).max(0.);
+        occupied[0] -= metrics.margin[3] + metrics.border[3] + metrics.padding[3];
+        occupied[last] -= metrics.margin[1] + metrics.border[1] + metrics.padding[1];
         let sizes = occupied.into_iter().map(f32::to_bits).collect();
         let previous = self.subgrid.replace((
             item.node,
@@ -2275,10 +2273,10 @@ impl Builder<'_> {
                 .iter()
                 .enumerate()
                 .map(|(i, bits)| {
-                    (f32::from_bits(*bits)
-                        + if i != 0 { delta } else { 0. }
-                        + if i != last { delta } else { 0. })
-                    .max(0.)
+                    // Keep signed distances between grid lines when a gutter exceeds a
+                    // track. Only the final grid area is clamped to nonnegative size.
+                    f32::from_bits(*bits) + if i != 0 { delta } else { 0. }
+                        + if i != last { delta } else { 0. }
                 })
                 .collect()
         } else {

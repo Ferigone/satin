@@ -100,3 +100,22 @@ fn grid_shorthand_places_implicit_tracks_and_resets_the_previous_axis() {
         [before,box()].join('|')
     "#).unwrap(),"40,0,40,18|0,30,50,30".into());
 }
+
+#[test]
+fn oversized_subgrid_gutters_keep_the_parent_line_centers() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"
+        <style>body{margin:0}.outer{display:grid;width:300px;grid-template-columns:repeat(3,100px)}
+        #child{display:grid;grid-template-columns:subgrid;grid-column:span 3;gap:150px}
+        i{width:100px;height:10px}#a{grid-column:2}#b{grid-column:3}</style>
+        <div class=outer><div id=child><i id=a></i><i id=b></i></div></div>
+    "#,
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+        const x=id=>document.getElementById(id).getBoundingClientRect().x;
+        const first=[x('a'),x('b')];document.getElementById('child').style.setProperty('gap','250px');
+        [...first,x('a'),x('b')].join(',')
+    "#).unwrap(),"175,275,225,325".into());
+}
