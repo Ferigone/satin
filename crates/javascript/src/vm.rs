@@ -161,6 +161,8 @@ pub struct Vm {
     qa_native_work: u64,
     #[cfg(feature = "media-startup-diagnostics")]
     qa_last_native_site: Option<&'static std::panic::Location<'static>>,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_work_sites: std::collections::HashMap<(&'static str, u32), u64>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -292,6 +294,8 @@ impl Vm {
             qa_native_work: 0,
             #[cfg(feature = "media-startup-diagnostics")]
             qa_last_native_site: None,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_work_sites: Default::default(),
             limits,
             interrupt: None,
             task_deadline: None,
@@ -577,6 +581,7 @@ impl Vm {
             {
                 self.qa_native_work = 0;
                 self.qa_last_native_site = None;
+                self.qa_work_sites.clear();
             }
         }
         self.active += 1;
@@ -1342,7 +1347,7 @@ impl Vm {
         }
         if self.remaining == 0 {
             #[cfg(feature = "media-startup-diagnostics")]
-            qa_budget_limit("instruction", self.qa_last_native_site, 1, 0, self.qa_native_work);
+            self.qa_report_work_limit("instruction", self.qa_last_native_site, 1);
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Instruction budget exhausted",
@@ -1368,13 +1373,7 @@ impl Vm {
         let units = units as u64;
         if units > self.remaining {
             #[cfg(feature = "media-startup-diagnostics")]
-            qa_budget_limit(
-                "native",
-                Some(std::panic::Location::caller()),
-                units,
-                self.remaining,
-                self.qa_native_work,
-            );
+            self.qa_report_work_limit("native", Some(std::panic::Location::caller()), units);
             self.remaining = 0;
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
@@ -1382,9 +1381,16 @@ impl Vm {
             ));
         }
         #[cfg(feature = "media-startup-diagnostics")]
-        {
+        if units != 0 {
+            let location = std::panic::Location::caller();
             self.qa_native_work = self.qa_native_work.saturating_add(units);
-            self.qa_last_native_site = Some(std::panic::Location::caller());
+            self.qa_last_native_site = Some(location);
+            let site = (location.file(), location.line());
+            if let Some(total) = self.qa_work_sites.get_mut(&site) {
+                *total = total.saturating_add(units);
+            } else if self.qa_work_sites.len() < 128 {
+                self.qa_work_sites.insert(site, units);
+            }
         }
         self.remaining -= units;
         Ok(())
@@ -1399,6 +1405,19 @@ impl Vm {
     #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
+    }
+
+    #[cfg(feature = "media-startup-diagnostics")]
+    fn qa_report_work_limit(
+        &self,
+        kind: &str,
+        site: Option<&'static std::panic::Location<'static>>,
+        requested: u64,
+    ) {
+        let mut sites = self.qa_work_sites.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>();
+        sites.sort_unstable_by_key(|&(site, amount)| (std::cmp::Reverse(amount), site));
+        sites.truncate(8);
+        qa_budget_with_costs(kind, site, requested, self.remaining, self.qa_native_work, &sites);
     }
     fn compare_strings(&mut self, a: &JsString, b: &JsString) -> Result<(), JsError> {
         if a.storage_id() != b.storage_id() {
@@ -4735,6 +4754,19 @@ pub(crate) fn qa_budget_limit(
     remaining: u64,
     native_work: u64,
 ) {
+    qa_budget_with_costs(kind, site, requested, remaining, native_work, &[]);
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn qa_budget_with_costs(
+    kind: &str,
+    site: Option<&'static std::panic::Location<'static>>,
+    requested: u64,
+    remaining: u64,
+    native_work: u64,
+    costs: &[((&'static str, u32), u64)],
+) {
+    use std::io::Write;
     use std::sync::atomic::AtomicUsize;
     static TRACES: AtomicUsize = AtomicUsize::new(0);
     if TRACES
@@ -4744,7 +4776,11 @@ pub(crate) fn qa_budget_limit(
         .is_ok()
     {
         let (file, line) = site.map_or(("-", 0), |loc| (loc.file(), loc.line()));
-        eprintln!("SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
+        for &((file, line), units) in costs {
+            let _ = writeln!(stderr, "SATIN_QA_COST {units} {line} {file}");
+        }
     }
 }
 

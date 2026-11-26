@@ -36,3 +36,14 @@ property-key work; that is not a CPU profile. YouTube's failed native charge
 was the insertion step of `Map`/`Set` in `collections.rs`, after 688,492
 units of native work. A separate script exhausted the compilation budget in
 `lexer.rs`. The two YouTube failures should be tracked independently.
+
+`d3c9e93` changes the string key index to meter hashing once and bound exact
+comparison to the corresponding bucket. The authored `Map`/`Set` workload
+switches from a budget error to success at the unchanged default limit.
+The four suites (VM library, keyed collections, collection helpers, structured
+clone) passed 69 tests. See `target/media-collection-delta-721685de869d4371927e42e2c9645a51/`.
+The repeat on both public sites (`target/public-media/satin-S3A7rf/`) still
+did not create playable media. Twitch exhausted instructions; YouTube now
+exhausted instructions and still reported a separate compilation limit. In
+those two traces, the last native charge was a lexical name load. It does not
+identify the top cost by itself.

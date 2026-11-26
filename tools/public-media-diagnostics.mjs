@@ -25,6 +25,11 @@ const origins = [
   ['yt-static', 'www.gstatic.com'], ['youtube', 'www.youtube.com'],
   ['yt-assets', 'i.ytimg.com'],
 ];
+const scriptAssets = [
+  ['twitch-core', /^https:\/\/assets\.twitch\.tv\/assets\/core-[a-z0-9.-]+\.js(?:[:?\s]|$)/i],
+  ['youtube-player', /^https:\/\/www\.youtube\.com\/s\/player\/[a-z0-9_./-]+\.js(?:[:?\s]|$)/i],
+  ['youtube-desktop', /^https:\/\/www\.youtube\.com\/s\/desktop\/[a-z0-9_./-]+\.js(?:[:?\s]|$)/i],
+];
 
 export function safeDiagnostic(line) {
   const text = String(line);
@@ -38,20 +43,28 @@ export function safeDiagnostic(line) {
     kind: text.match(kinds)?.[0] ?? 'Other',
     cause: causes.find(cause => lower.includes(cause.toLowerCase())) ?? null,
     inline, phase, source,
+    asset: scriptAssets.find(([, match]) => match.test(text))?.[0] ?? null,
   };
 }
 
 export function budgetTrace(stderr) {
+  const sourcePath = raw => /(?:^|\/)(crates\/(?:engine|javascript)\/src\/[A-Za-z0-9_./-]+\.rs)$/
+    .exec(raw.replaceAll('\\', '/'))?.[1] ?? null;
   const records = [];
   for (const line of String(stderr).split(/\r?\n/)) {
+    const cost = /^SATIN_QA_COST (\d{1,15}) (\d{1,6}) (.+)$/.exec(line);
+    const parent = records.at(-1);
+    if (cost && ['instruction', 'native'].includes(parent?.kind)) {
+      const costs = parent.topWork ??= [];
+      if (costs.length < 8) costs.push({ units: +cost[1], line: +cost[2], file: sourcePath(cost[3]) });
+      continue;
+    }
     const record = /^SATIN_QA_BUDGET (heap|instruction|native|compiler) (\d{1,15}) (\d{1,15}) (\d{1,15}) (\d{1,6}) (.+)$/.exec(line);
     if (!record) continue;
-    const [, kind, requested, remaining, nativeWork, lineNumber, rawPath] = record;
-    const path = rawPath.replaceAll('\\', '/');
-    const file = /(?:^|\/)(crates\/(?:engine|javascript)\/src\/[A-Za-z0-9_./-]+\.rs)$/.exec(path)?.[1] ?? null;
-    records.push({ kind, requested: +requested, remaining: +remaining,
-      nativeWork: +nativeWork, line: +lineNumber, file });
     if (records.length === 128) break;
+    const [, kind, requested, remaining, nativeWork, lineNumber, rawPath] = record;
+    records.push({ kind, requested: +requested, remaining: +remaining,
+      nativeWork: +nativeWork, line: +lineNumber, file: sourcePath(rawPath) });
   }
   return records;
 }

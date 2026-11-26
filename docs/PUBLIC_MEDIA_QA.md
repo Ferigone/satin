@@ -36,7 +36,9 @@ native work, heap, and compiler limits; it does not raise any limits or change
 what code the scripts are allowed to run. The sanitized receipt retains only
 known record types and engine source paths. For an `instruction` record, the
 location is the **last** native charge, not necessarily the main cost.
-Instrumentation can affect timing; compare with an ordinary build.
+`topWork` summarizes up to eight measured native charge sites for that
+budget failure. Instrumentation can affect timing; compare with an ordinary
+build.
 
 `node tools/probe-media-capabilities.mjs $binary $chrome $rea $scratch` uses
 one local document and reports advertised MIME/codec and player API support
