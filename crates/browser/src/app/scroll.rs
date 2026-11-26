@@ -142,7 +142,7 @@ pub(super) fn wheel_delta(delta: MouseScrollDelta, scale: f32) -> (ScrollOffset,
 }
 
 #[cfg(windows)]
-fn animations_enabled() -> bool {
+pub(super) fn animations_enabled() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
     };
@@ -154,7 +154,7 @@ fn animations_enabled() -> bool {
     enabled != 0
 }
 #[cfg(not(windows))]
-fn animations_enabled() -> bool {
+pub(super) fn animations_enabled() -> bool {
     true
 }
 
