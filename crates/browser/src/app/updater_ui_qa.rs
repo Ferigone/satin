@@ -31,6 +31,15 @@ enum Step {
     QuietPage,
     QuietScrolled,
     ResizeRestored,
+    TabsWide,
+    TabsContext,
+    TabsPinned,
+    TabsDragging,
+    TabsDropped,
+    TabsNarrow,
+    TabsNarrowRevealed,
+    TabsNarrowContext,
+    TabsUnpinned,
 }
 
 struct Driver {
@@ -121,13 +130,28 @@ fn click(app: &mut App, events: &ActiveEventLoop, point: (f32, f32)) {
     app.left_release(events);
 }
 
-fn wheel(app: &mut App, events: &ActiveEventLoop, point: (f32, f32), dx: f64, dy: f64) {
+fn move_pointer(app: &mut App, events: &ActiveEventLoop, point: (f32, f32)) {
     let window = app.window.as_ref().unwrap().id();
     let device_id = winit::event::DeviceId::dummy();
     app.window_event(events, window, WindowEvent::CursorMoved {
         device_id,
         position: winit::dpi::PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
     });
+}
+
+fn mouse_button(app: &mut App, events: &ActiveEventLoop, button: MouseButton, state: ElementState) {
+    let window = app.window.as_ref().unwrap().id();
+    app.window_event(events, window, WindowEvent::MouseInput {
+        button,
+        state,
+        device_id: winit::event::DeviceId::dummy(),
+    });
+}
+
+fn wheel(app: &mut App, events: &ActiveEventLoop, point: (f32, f32), dx: f64, dy: f64) {
+    let window = app.window.as_ref().unwrap().id();
+    let device_id = winit::event::DeviceId::dummy();
+    move_pointer(app, events, point);
     app.window_event(events, window, WindowEvent::MouseWheel {
         device_id,
         delta: winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(-dx, -dy)),
@@ -312,8 +336,102 @@ impl Driver {
         Ok(false)
     }
 
+    fn advance_tabs(&mut self, app: &mut App, events: &ActiveEventLoop) -> Result<bool, String> {
+        use ElementState::{Pressed, Released};
+        const PIN: Action = Action::TabContextRow(2, tab_context::ContextCommand::Pin);
+        let ids: Vec<_> = app.tabs.iter().map(|tab| tab.id).collect();
+        let target = |app: &App, action| hit(app, action).map(center).ok_or("Tab control is not visible");
+        require(app.tabs[app.active].id == 1 && app.tabs[app.active].url == self.url,
+            "Context or drag unexpectedly replaced or activated the fixture tab")?;
+        commands(app, [0, 0, 0])?;
+        self.step = match self.step {
+            Step::TabsWide => {
+                require(ids == [1, 2, 3, 4], "Wrong initial tabs")?;
+                let point = target(app, Action::Select(2))?;
+                move_pointer(app, events, point);
+                mouse_button(app, events, MouseButton::Right, Pressed);
+                mouse_button(app, events, MouseButton::Right, Released);
+                Step::TabsContext
+            }
+            Step::TabsContext => {
+                let point = target(app, PIN)?;
+                self.capture(app, "01-tab-context.png")?;
+                move_pointer(app, events, point);
+                mouse_button(app, events, MouseButton::Left, Pressed);
+                require(!app.tabs[1].pinned && app.tabs[1].id == 2, "Pin ran before release")?;
+                mouse_button(app, events, MouseButton::Left, Released);
+                Step::TabsPinned
+            }
+            Step::TabsPinned => {
+                require(ids == [2, 1, 3, 4] && app.tabs[0].pinned && app.chrome_menu.is_none(),
+                    "The right-click target was not pinned and compacted")?;
+                let pinned = hit(app, Action::Select(2)).ok_or("Missing pinned hit")?;
+                let destination = hit(app, Action::Select(1)).ok_or("Missing unpinned target")?;
+                require(pinned[2] < destination[2], "Pin did not yield a compact tab")?;
+                self.capture(app, "02-pinned.png")?;
+                let point = target(app, Action::Select(4))?;
+                move_pointer(app, events, point);
+                mouse_button(app, events, MouseButton::Left, Pressed);
+                move_pointer(app, events, (destination[0] + 4., destination[1] + destination[3] / 2.));
+                Step::TabsDragging
+            }
+            Step::TabsDragging => {
+                require(ids == [2, 1, 3, 4] && app.tab_press.is_some(),
+                    "Drag preview committed before release")?;
+                self.capture(app, "03-drag-preview.png")?;
+                mouse_button(app, events, MouseButton::Left, Released);
+                Step::TabsDropped
+            }
+            Step::TabsDropped => {
+                require(ids == [2, 4, 1, 3] && app.tab_press.is_none(),
+                    "Valid drop did not commit within the unpinned group")?;
+                self.capture(app, "04-drag-released.png")?;
+                self.request_width(app, 390);
+                Step::TabsNarrow
+            }
+            Step::TabsNarrow => {
+                let strip = app.tab_strip(app.window_regions(app.active).page.width);
+                wheel(app, events, center(rect(strip.list)), -1000., 0.);
+                Step::TabsNarrowRevealed
+            }
+            Step::TabsNarrowRevealed => {
+                let point = target(app, Action::Select(2))?;
+                move_pointer(app, events, point);
+                mouse_button(app, events, MouseButton::Right, Pressed);
+                mouse_button(app, events, MouseButton::Right, Released);
+                Step::TabsNarrowContext
+            }
+            Step::TabsNarrowContext => {
+                let point = target(app, PIN)?;
+                self.capture(app, "05-narrow-context.png")?;
+                move_pointer(app, events, point);
+                mouse_button(app, events, MouseButton::Left, Pressed);
+                mouse_button(app, events, MouseButton::Left, Released);
+                Step::TabsUnpinned
+            }
+            Step::TabsUnpinned => {
+                require(ids == [2, 4, 1, 3] && !app.tabs[0].pinned && app.chrome_menu.is_none(),
+                    "Narrow context menu did not unpin the intended tab")?;
+                self.capture(app, "06-narrow-unpinned.png")?;
+                fs::write(self.output.join("passed.txt"), format!(
+                    "Right-click, release-only pin, wide pointer reorder, and narrow unpin, \
+                     {} presented frames at 100%.\n", app.presented_frames
+                )).map_err(|error| error.to_string())?;
+                return Ok(true);
+            }
+            _ => unreachable!("other fixtures use their own step handlers"),
+        };
+        Ok(false)
+    }
+
     fn advance(&mut self, app: &mut App, events: &ActiveEventLoop) -> Result<bool, String> {
         use ElementState::{Pressed, Released};
+        if matches!(self.step, Step::TabsWide | Step::TabsContext | Step::TabsPinned | Step::TabsDragging
+            | Step::TabsDropped | Step::TabsNarrow | Step::TabsNarrowRevealed
+            | Step::TabsNarrowContext | Step::TabsUnpinned)
+        {
+            return self.advance_tabs(app, events);
+        }
         if matches!(self.step, Step::ResizeWide | Step::ResizeNarrow | Step::FavoritesScrolled
             | Step::QuietPage | Step::QuietScrolled | Step::ResizeRestored)
         {
@@ -519,6 +637,13 @@ fn capture_favorites_resize_and_scroll_offline() {
     run_fixture(output, 1280, Step::ResizeWide);
 }
 
+#[test]
+#[ignore = "requires an interactive Windows x64 desktop at 100% DPI"]
+fn capture_tab_context_pin_and_drag_offline() {
+    let output = PathBuf::from(std::env::var_os("SATIN_QA_TAB_OUTPUT").expect("Set output directory"));
+    run_fixture(output, 1280, Step::TabsWide);
+}
+
 fn run_fixture(output: PathBuf, width: u32, step: Step) {
     assert!(output.is_absolute(), "Use an absolute output directory in disposable scratch space");
     fs::create_dir(&output).expect("Output must not exist and its parent must exist");
@@ -531,6 +656,12 @@ fn run_fixture(output: PathBuf, width: u32, step: Step) {
         })).collect();
         fs::write(profile.join(bookmarks::FILE_NAME),
             serde_json::json!({"schema": 1, "entries": entries}).to_string()).unwrap();
+    } else if matches!(step, Step::TabsWide) {
+        fs::create_dir(&profile).unwrap();
+        fs::write(profile.join("session.json"), serde_json::json!({
+            "schema": 1, "active": 0,
+            "tabs": ["about:home", "about:version", "about:shortcuts", "about:start-shortcuts"]
+        }).to_string()).unwrap();
     }
     let page = output.join("offline-click-guard.html");
     fs::write(&page, format!(r#"<!doctype html><meta charset="utf-8"><title>{PAGE_TITLE}</title>

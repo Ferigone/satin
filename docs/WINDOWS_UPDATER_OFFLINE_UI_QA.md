@@ -11,6 +11,14 @@ page at y=91, scrolling the document from the former bar area, and restoring
 the wide geometry while preserving page scroll. It makes no HTTP requests
 and does not establish Chromium pixel parity or higher-DPI behavior.
 
+The separate `app::updater_ui_qa::capture_tab_context_pin_and_drag_offline`
+fixture uses `SATIN_QA_TAB_OUTPUT`, again a fresh absolute folder and one
+process. It sends right-click, movement, press and release through the App's
+Winit handler. It checks pinning an inactive tab on release, a pointer drag
+that previews before committing, preserved selected tab identity, and the
+context menu after a real resize and tab-strip scroll to 390×800. No real
+profile is read or changed.
+
 This ignored test runs the real Windows x64 Winit app and presenter. It is
 QA-only. Run it **after** the build/run gate on an interactive 100% DPI
 desktop with enough space for a 1280×800 client. Do not interact with the
