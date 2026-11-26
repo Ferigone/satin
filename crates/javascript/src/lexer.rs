@@ -2,6 +2,9 @@ use std::rc::Rc;
 use crate::{ErrorKind, JsBigInt, JsError, JsString};
 
 mod source;
+mod comment_scan;
+#[cfg(test)]
+mod comment_span_tests;
 use source::push_source_point;
 pub(crate) use source::SourceSpan;
 
@@ -222,15 +225,16 @@ impl Lexer {
             }
             let prefix = |bytes: &[u8]| self.chars.points(self.pos..self.chars.len())
                 .take(bytes.len()).eq(bytes.iter().copied().map(u32::from));
-            let html_comment = self.script_goal && (prefix(b"<!--") ||
-                ((self.before_first_token || self.line != initial_line) && prefix(b"-->")));
+            let html_comment = self.script_goal && ((c == '<' && prefix(b"<!--")) ||
+                (c == '-' && (self.before_first_token || self.line != initial_line) && prefix(b"-->")));
             if (c == '/' && self.peek(1) == Some('/'))
                 || (self.pos == 0 && prefix(b"#!")) || html_comment {
 
-                while self
-                    .peek(0)
-                    .is_some_and(|x| !matches!(x, '\r' | '\n' | '\u{2028}' | '\u{2029}'))
-                {
+                loop {
+                    self.advance_comment_run::<false>();
+                    if !self.peek(0).is_some_and(|x| !matches!(x, '\r' | '\n' | '\u{2028}' | '\u{2029}')) {
+                        break;
+                    }
                     self.bump();
                 }
                 continue;
@@ -239,6 +243,7 @@ impl Lexer {
                 self.bump();
                 self.bump();
                 loop {
+                    self.advance_comment_run::<true>();
                     match (self.peek(0), self.peek(1)) {
                         (Some('*'), Some('/')) => {
                             self.bump();
@@ -256,6 +261,12 @@ impl Lexer {
             break;
         }
         Ok(())
+    }
+
+    fn advance_comment_run<const BLOCK: bool>(&mut self) {
+        let count = self.chars.comment_prefix::<BLOCK>(self.pos);
+        self.pos += count;
+        self.column += count;
     }
 
     fn kind(&mut self) -> Result<TokenKind, JsError> {

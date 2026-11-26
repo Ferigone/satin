@@ -55,6 +55,23 @@ impl SourceSpan {
         self.range.len()
     }
 
+    /// Count ordinary code points before a comment delimiter or line break.
+    /// Respect the end of a shared function span when reparsing a cold body.
+    pub(super) fn comment_prefix<const BLOCK: bool>(&self, pos: usize) -> usize {
+        use super::comment_scan::safe_prefix;
+        if pos >= self.len() { return 0; }
+        let start = self.range.start + pos;
+        match &self.buffer {
+            SourceStorage::Ascii(data) => safe_prefix::<BLOCK>(&data[start..self.range.end]),
+            SourceStorage::Packed(data) => data.narrow_run(start, self.range.end).map_or(0, safe_prefix::<BLOCK>),
+            SourceStorage::CodePoints(data) => {
+                let points = &data[start..self.range.end];
+                points.iter().position(|&p| matches!(p, 10 | 13 | 0x2028 | 0x2029) || BLOCK && p == 42)
+                    .unwrap_or(points.len())
+            }
+        }
+    }
+
     pub(super) fn span(&self, range: Range<usize>) -> Rc<Self> {
         debug_assert!(range.end <= self.len());
         let base = self.range.start;

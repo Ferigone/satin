@@ -65,6 +65,14 @@ impl PackedSource {
 
     pub(super) fn len(&self) -> usize { self.len }
 
+    pub(super) fn narrow_run(&self, start: usize, end: usize) -> Option<&[u8]> {
+        let entry = self.directory[start >> SHIFT];
+        if entry >> OFFSET_BITS != 0 { return None; }
+        let cell = start & (UNITS - 1);
+        let offset = entry as usize + cell;
+        Some(&self.bytes[offset..offset + (end - start).min(UNITS - cell)])
+    }
+
     pub(super) fn storage_bytes(&self) -> usize {
         size_of::<Self>() + size_of_val(self.directory.as_ref()) + self.bytes.len()
     }
