@@ -38,7 +38,9 @@ All 1,968 prior passes held. Twelve new passes are in the line-clamp directory, 
 
 Run the optional cohort with the same command under **Reproduce**, adding `--ahem-only` and writing a separate report. Use the alpha.41 Python adapter and renderer example on both engine revisions. The adapter verifies the SHA-256 hashes of the canonical WPT font and stylesheet, decodes the font with Satin, and checks that two 20 px Ahem X glyphs paint an exact 40 × 20 green rectangle on the white canvas. It checks eligibility on each reference as well as the test.
 
-All 823 property probes ran. Of 625 distinguishing computed values, exact matches rose from 92 to 94, missing readbacks fell from 532 to 530, and one serialization still differed. Five reference inputs had no distinguishing change and 193 had no reference sample. The six pinned relational-selector pages again passed all 87 assertions on both revisions.
+All 823 property probes ran. Of 625 distinguishing computed values, exact matches rose from 92 to 94, missing readbacks fell from 532 to 530, and one serialization still differed. Five reference inputs had no distinguishing change and 193 had no reference sample. The six pinned relational-selector pages again passed all 87 assertions on both revisions. [Property inputs and readbacks for both builds](css-properties-alpha41.tsv.gz)
+
+The candidate passed 1,464 workspace tests with three existing opt-in tests ignored. The complete Linux run used `RUST_TEST_THREADS=1 cargo test --workspace --locked`. The locked workspace build also succeeded. The pull request records the separate Windows verification and the original synchronous WPT assertion comparison. [Alpha.41 verification](https://github.com/Ferigone/satin/pull/24)
 
 [Download native and Chromium screenshots, per-element geometry, scroll observations and source hashes (ZIP)](css-alpha41-native.zip)
 
