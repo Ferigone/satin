@@ -142,14 +142,12 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
         Op::Branch(arms, _) => Advance::child(&arms[0].0, env, Resume::Select(0)),
         Op::While(..) => LoopState::new(env).test(vm, op)?,
         Op::DoWhile(..) => LoopState::new(env).body(vm, op)?,
-        Op::For {
-            initial, lexical, ..
-        } => {
-            let scope = if lexical.is_empty() {
+        Op::For(code) => {
+            let scope = if code.lexical.is_empty() {
                 env
             } else {
                 let scope = new_scope(vm, env)?;
-                for (name, mutable) in lexical {
+                for (name, mutable) in &code.lexical {
                     vm.reserve_binding(name)?;
                     vm.heap.environment_mut(scope).bindings.insert(
                         name.clone(),
@@ -166,7 +164,7 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
                 scope
             };
             let state = LoopState::new(scope);
-            if let Some(initial) = initial {
+            if let Some(initial) = &code.initial {
                 Advance::child(initial, scope, Resume::Loop(state))
             } else {
                 state.test(vm, op)?
@@ -373,7 +371,7 @@ impl LoopState {
                 vm.tick()?;
                 body
             }
-            Op::For { body, .. } => body,
+            Op::For(code) => &code.body,
             _ => unreachable!(),
         };
         self.phase = Phase::Body;
@@ -383,9 +381,9 @@ impl LoopState {
     fn test(mut self, vm: &mut Vm, op: &Op) -> Result<Advance, JsError> {
         let test = match op {
             Op::While(test, _, _) | Op::DoWhile(_, test, _) => Some(test),
-            Op::For { test, .. } => {
+            Op::For(code) => {
                 vm.tick()?;
-                test.as_ref()
+                code.test.as_ref()
             }
             _ => unreachable!(),
         };
@@ -410,10 +408,10 @@ impl LoopState {
         match self.phase {
             Phase::Initial => {
                 completed?;
-                let Op::For { lexical, .. } = op else {
+                let Op::For(code) = op else {
                     unreachable!()
                 };
-                self.scope = vm.next_for_iteration(env, self.scope, lexical)?;
+                self.scope = vm.next_for_iteration(env, self.scope, &code.lexical)?;
                 self.test(vm, op)
             }
             Phase::Update => {
@@ -433,12 +431,9 @@ impl LoopState {
                 {
                     return Ok(Advance::Finish(completion));
                 }
-                if let Op::For {
-                    lexical, update, ..
-                } = op
-                {
-                    self.scope = vm.next_for_iteration(env, self.scope, lexical)?;
-                    if let Some(update) = update {
+                if let Op::For(code) = op {
+                    self.scope = vm.next_for_iteration(env, self.scope, &code.lexical)?;
+                    if let Some(update) = &code.update {
                         self.phase = Phase::Update;
                         return Ok(Advance::child(update, self.scope, Resume::Loop(self)));
                     }

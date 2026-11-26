@@ -79,6 +79,7 @@ pub(crate) struct Chunk {
 }
 impl Chunk {
     fn finish(mut self) -> Rc<Self> {
+        self.ops.shrink_to_fit();
         self.can_suspend = self.ops.iter().any(Op::can_suspend);
         Rc::new(self)
     }
@@ -110,6 +111,16 @@ pub(crate) enum ClassName {
     Intrinsic,
     Binding(JsString),
     Property,
+}
+/// The full C-style loop header is cold data for every other stack opcode.
+#[derive(Clone, Debug)]
+pub(crate) struct ForCode {
+    pub initial: Option<Rc<Chunk>>,
+    pub test: Option<Rc<Chunk>>,
+    pub update: Option<Rc<Chunk>>,
+    pub body: Rc<Chunk>,
+    pub lexical: Vec<(JsString, bool)>,
+    pub label: Option<LabelId>,
 }
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
@@ -187,14 +198,7 @@ pub(crate) enum Op {
     Branch(Rc<[(Rc<Chunk>, Rc<Chunk>)]>, Option<Rc<Chunk>>),
     While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
-    For {
-        initial: Option<Rc<Chunk>>,
-        test: Option<Rc<Chunk>>,
-        update: Option<Rc<Chunk>>,
-        body: Rc<Chunk>,
-        lexical: Vec<(JsString, bool)>,
-        label: Option<LabelId>,
-    },
+    For(Box<ForCode>),
     ForIn(
         Option<VarKind>,
         Rc<PatternCode>,
@@ -226,9 +230,9 @@ impl Op {
         match self {
             Self::While(_, _, label)
             | Self::DoWhile(_, _, label)
-            | Self::For { label, .. }
             | Self::ForIn(_, _, _, _, label)
             | Self::ForOf(_, _, _, _, _, label) => *label,
+            Self::For(code) => code.label,
             _ => unreachable!("loop opcode expected"),
         }
     }
@@ -251,15 +255,9 @@ impl Op {
             | Self::DoWhile(body, test, _)
             | Self::ForOf(_, _, test, body, false, _)
             | Self::ForIn(_, _, test, body, _) => test.can_suspend || body.can_suspend,
-            Self::For {
-                initial,
-                test,
-                update,
-                body,
-                ..
-            } => {
-                body.can_suspend
-                    || [initial, test, update]
+            Self::For(code) => {
+                code.body.can_suspend
+                    || [&code.initial, &code.test, &code.update]
                         .into_iter()
                         .flatten()
                         .any(|chunk| chunk.can_suspend)
@@ -469,15 +467,9 @@ pub(crate) fn retained_size(
                     chunks.push(a.clone());
                     chunks.push(b.clone());
                 }
-                Op::For {
-                    initial,
-                    test,
-                    update,
-                    body,
-                    lexical,
-                    ..
-                } => {
-                    bytes = bytes.saturating_add(vector_storage(lexical)
+                Op::For(code) => {
+                    let ForCode { initial, test, update, body, lexical, .. } = code.as_ref();
+                    bytes = bytes.saturating_add(size_of::<ForCode>() + vector_storage(lexical)
                         + lexical.iter().map(|(name, _)| name.allocation_bytes()).sum::<usize>());
                     chunks.extend(initial.iter().cloned());
                     chunks.extend(test.iter().cloned());
@@ -1273,14 +1265,14 @@ fn compile_for(
         _ => Vec::new(),
     };
     check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
-    out.push(Op::For {
+    out.push(Op::For(Box::new(ForCode {
         initial: initial.map(|s| stmt_chunk(s, strict)).transpose()?,
         test: test.map(|e| expression(e, strict)).transpose()?,
         update: update.map(|e| expression(e, strict)).transpose()?,
         body: stmt_chunk(body, strict)?,
         lexical,
         label,
-    });
+    })));
     Ok(())
 }
 

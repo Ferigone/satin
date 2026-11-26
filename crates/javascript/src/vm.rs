@@ -4247,14 +4247,8 @@ impl Vm {
                     }
                 }
             }
-            Op::For {
-                initial,
-                test,
-                update,
-                body,
-                lexical,
-                label,
-            } => {
+            Op::For(code) => {
+                let bytecode::ForCode { initial, test, update, body, lexical, label } = code.as_ref();
                 result = Some(Value::Undefined);
                 let mut iteration = if lexical.is_empty() {
                     env
