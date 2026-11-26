@@ -26,3 +26,13 @@ feature detection.
 Local receipts: `target/public-media/satin-ZNzNnY/`,
 `satin-VR2HlG/`, `chrome-oJb5X7/`, `capabilities-9V1jhs/` under
 `target/public-media/`, and `target/native-media-VitGMJ/`.
+
+## Budget attribution
+
+The opt-in debug binary `724972a`, receipt `target/public-media/satin-TRMDFL/`,
+reproduced both startup failures. The Twitch task had charged 582,038 units
+of native work when it ran out of instructions. Its last native charge was
+property-key work; that is not a CPU profile. YouTube's failed native charge
+was the insertion step of `Map`/`Set` in `collections.rs`, after 688,492
+units of native work. A separate script exhausted the compilation budget in
+`lexer.rs`. The two YouTube failures should be tracked independently.

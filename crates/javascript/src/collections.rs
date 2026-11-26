@@ -5,7 +5,11 @@ use crate::{
     builtins::{constructor, method, replace_construct},
     heap::{ObjectKind, Property, PropertyKind, TraceEdges},
 };
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, hash_map::RandomState},
+    hash::BuildHasher,
+    rc::Rc,
+};
 
 mod map;
 pub(crate) use map::group_by;
@@ -54,13 +58,13 @@ enum Key {
     Bool(bool),
     Number(u64),
     BigInt(crate::JsBigInt),
-    String(JsString),
+    StringHash(u64),
     Symbol(SymbolId),
     Object(ObjectId),
 }
 
-impl From<&Value> for Key {
-    fn from(value: &Value) -> Self {
+impl Key {
+    fn from_value(value: &Value, strings: &RandomState) -> Self {
         match value {
             Value::Undefined => Self::Undefined,
             Value::Null => Self::Null,
@@ -72,7 +76,7 @@ impl From<&Value> for Key {
             } else {
                 value.to_bits()
             }),
-            Value::String(value) => Self::String(value.clone()),
+            Value::String(value) => Self::StringHash(strings.hash_one(value)),
             Value::BigInt(value) => Self::BigInt(value.clone()),
             Value::Symbol(value) => Self::Symbol(value.clone()),
             Value::Object(value) => Self::Object(*value),
@@ -102,13 +106,62 @@ struct Entry {
     value: Value,
 }
 
+/// A hash is an index, not equality. Store insertion orders so long strings
+/// remain owned by one entry and colliding UTF-16 strings stay distinct.
+#[derive(Clone)]
+enum Orders {
+    One(u64),
+    Collision(Vec<u64>),
+}
+
+impl Orders {
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Self::One(order) => std::slice::from_ref(order),
+            Self::Collision(orders) => orders,
+        }
+    }
+
+    fn push(&mut self, order: u64) -> Result<(), JsError> {
+        let reserve = |orders: &mut Vec<u64>, count| {
+            orders.try_reserve(count).map_err(|_| {
+                JsError::new(ErrorKind::HeapLimit, "Collection collision allocation failed")
+            })
+        };
+        match self {
+            Self::One(first) => {
+                let mut orders = Vec::new();
+                reserve(&mut orders, 2)?;
+                orders.extend([*first, order]);
+                *self = Self::Collision(orders);
+            }
+            Self::Collision(orders) => {
+                reserve(orders, 1)?;
+                orders.push(order);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove(&mut self, order: u64) {
+        let Self::Collision(orders) = self else {
+            unreachable!("singleton index removed by caller");
+        };
+        orders.retain(|&saved| saved != order);
+        if let [remaining] = orders.as_slice() {
+            *self = Self::One(*remaining);
+        }
+    }
+}
+
 pub(crate) type CollectionCloneEntry = (Value, Option<Value>);
 
 #[derive(Clone)]
 pub(crate) struct CollectionData {
     kind: Kind,
-    by_key: BTreeMap<Key, u64>,
+    by_key: BTreeMap<Key, Orders>,
     entries: BTreeMap<u64, Entry>,
+    string_hashes: RandomState,
     next_order: u64,
 }
 
@@ -118,6 +171,7 @@ impl CollectionData {
             kind,
             by_key: BTreeMap::new(),
             entries: BTreeMap::new(),
+            string_hashes: RandomState::new(),
             next_order: 0,
         }
     }
@@ -146,9 +200,15 @@ impl CollectionData {
     }
 
     fn tree_work(&self) -> usize {
-        // Node-local comparisons in a B-tree are bounded, including for a
-        // string with a long common prefix. The order index compares integers.
+        // Node-local comparisons are bounded. The ordered index and the
+        // string-hash tree compare integers; BigInt keys still pay per word.
         4 * (1 + self.entries.len().max(1).ilog2() as usize)
+    }
+
+    fn exact_string_order(&self, orders: &Orders, value: &JsString) -> Option<u64> {
+        orders.as_slice().iter().copied().find(|order| {
+            self.entries.get(order).and_then(|entry| entry.key.as_string()) == Some(value)
+        })
     }
 }
 
@@ -212,9 +272,34 @@ impl Vm {
         value: &Value,
     ) -> Result<(Key, Option<u64>), JsError> {
         let units = key_units(value);
-        self.consume_work(self.collection(id)?.tree_work().saturating_mul(units))?;
-        let key = Key::from(value);
-        let order = self.collection(id)?.by_key.get(&key).copied();
+        let tree = self.collection(id)?.tree_work();
+        let text = value.as_string();
+        // Hashing may first flatten a string and then scan its UTF-16 units.
+        // Charge both passes before hashing; tree comparisons are fixed-size.
+        self.consume_work(if text.is_some() {
+            tree.saturating_add(units.saturating_mul(2))
+        } else {
+            tree.saturating_mul(units)
+        })?;
+        let key = Key::from_value(value, &self.collection(id)?.string_hashes);
+        let order = if let Some(text) = text {
+            if let Some(orders) = self.collection(id)?.by_key.get(&key) {
+                // Charge exact comparison and the integer order lookup for
+                // every bucket member, including adversarial long prefixes.
+                let count = orders.as_slice().len();
+                let work = tree.saturating_add(count.saturating_mul(tree.saturating_add(units)));
+                self.consume_work(work)?;
+                let data = self.collection(id)?;
+                data.exact_string_order(&data.by_key[&key], text)
+            } else {
+                None
+            }
+        } else {
+            self.collection(id)?
+                .by_key
+                .get(&key)
+                .map(|orders| orders.as_slice()[0])
+        };
         Ok((key, order))
     }
 
@@ -250,13 +335,28 @@ impl Vm {
                 "Collection insertion order exhausted",
             )
         })?;
-        let units = key_units(&key);
-        self.consume_work(data.tree_work().saturating_mul(units))?;
+        let work = if key.as_string().is_some() {
+            let collision_work = data
+                .by_key
+                .get(&index_key)
+                .map_or(0, |bucket| bucket.as_slice().len());
+            data.tree_work().saturating_mul(2).saturating_add(collision_work)
+        } else {
+            data.tree_work().saturating_mul(key_units(&key))
+        };
+        self.consume_work(work)?;
         let key = self.account_value(canonical_key(key))?;
         let value = self.account_value(value)?;
         self.reserve_allocation(ENTRY_BYTES + if count == 0 { INDEX_ROOT_BYTES } else { 0 })?;
         let data = self.collection_mut(id)?;
-        data.by_key.insert(index_key, data.next_order);
+        match data.by_key.entry(index_key) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(Orders::One(data.next_order));
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                slot.get_mut().push(data.next_order)?;
+            }
+        }
         data.entries.insert(data.next_order, Entry { key, value });
         data.next_order = next_order;
         Ok(())
@@ -295,10 +395,20 @@ impl Vm {
     fn collection_delete(&mut self, id: ObjectId, key: Value) -> Result<bool, JsError> {
         let (index_key, order) = self.collection_lookup(id, &key)?;
         let Some(order) = order else { return Ok(false) };
-        let units = key_units(&key);
-        self.consume_work(self.collection(id)?.tree_work().saturating_mul(units))?;
+        let data = self.collection(id)?;
+        let (count, work) = if key.as_string().is_some() {
+            let count = data.by_key[&index_key].as_slice().len();
+            (count, data.tree_work().saturating_mul(2).saturating_add(count))
+        } else {
+            (1, data.tree_work().saturating_mul(key_units(&key)))
+        };
+        self.consume_work(work)?;
         let data = self.collection_mut(id)?;
-        data.by_key.remove(&index_key);
+        if count == 1 {
+            data.by_key.remove(&index_key);
+        } else {
+            data.by_key.get_mut(&index_key).unwrap().remove(order);
+        }
         data.entries.remove(&order);
         Ok(true)
     }
@@ -364,6 +474,38 @@ fn add_iterable_entry(
     let key = vm.get_property(entry.clone(), "0")?;
     let value = vm.get_property(entry, "1")?;
     vm.invoke(adder, target, &[key, value])
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    #[test]
+    fn equal_hashes_do_not_merge_distinct_utf16_keys() {
+        let mut vm = Vm::new();
+        let map = vm.eval("new Map()").unwrap();
+        let id = map.as_object().unwrap();
+        let first = Value::String(JsString::from_utf16(vec![0xd800]));
+        let second = Value::String(JsString::from_utf16(vec![0xd801]));
+        vm.collection_insert(id, first.clone(), Value::Number(10.0)).unwrap();
+
+        // Force both entries into one index bucket without weakening how
+        // hashes are chosen for real JavaScript callers.
+        let data = vm.collection_mut(id).unwrap();
+        let old = Key::from_value(&first, &data.string_hashes);
+        let collision = Key::from_value(&second, &data.string_hashes);
+        let singleton = data.by_key.remove(&old).unwrap();
+        data.by_key.insert(collision.clone(), singleton);
+
+        vm.collection_insert(id, second.clone(), Value::Number(20.0)).unwrap();
+        let data = vm.collection(id).unwrap();
+        let bucket = &data.by_key[&collision];
+        assert_eq!(bucket.as_slice(), &[0, 1]);
+        assert_eq!(data.exact_string_order(bucket, first.as_string().unwrap()), Some(0));
+        assert_eq!(data.exact_string_order(bucket, second.as_string().unwrap()), Some(1));
+        assert!(vm.collection_delete(id, second).unwrap());
+        assert_eq!(vm.collection(id).unwrap().by_key[&collision].as_slice(), &[0]);
+    }
 }
 
 fn initialize(vm: &mut Vm, this: Value, kind: Kind, iterable: Value) -> Result<Value, JsError> {

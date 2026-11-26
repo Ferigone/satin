@@ -4738,7 +4738,7 @@ pub(crate) fn qa_budget_limit(
     use std::sync::atomic::AtomicUsize;
     static TRACES: AtomicUsize = AtomicUsize::new(0);
     if TRACES
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             (count < 128).then_some(count + 1)
         })
         .is_ok()
