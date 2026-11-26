@@ -271,6 +271,18 @@ fn detached_templates_import_and_clone_inert_contents() {
         "<!doctype html><main id=host></main><template id=parsed><b id=inside>hidden</b><template><i>nested</i></template></template>",
     );
     runtime.eval("var host=document.getElementById('host');var t=document.createElement('template');t.innerHTML='<tr><td>X</td></tr><script>throw new Error(\"must stay inert\")</script>';var content=t.content;var deep=t.cloneNode(true);var shallow=t.cloneNode(false);host.appendChild(t);host.appendChild(deep);var parsed=document.getElementById('parsed');var pc=parsed.cloneNode(true);host.appendChild(pc);").unwrap();
+    js(&mut runtime, r#"
+        var proto=HTMLTemplateElement.prototype, descriptor=Object.getOwnPropertyDescriptor(proto,'content');
+        var brand=false, illegal=false, wrong=document.createElement('div');
+        try { descriptor.get.call(wrong); } catch(e) { brand=e instanceof TypeError; }
+        try { new HTMLTemplateElement(); } catch(e) { illegal=e instanceof TypeError; }
+        Object.getPrototypeOf(HTMLTemplateElement)===HTMLElement &&
+        Object.getPrototypeOf(proto)===HTMLElement.prototype &&
+        [parsed,t,deep,shallow,pc].every(n=>Object.getPrototypeOf(n)===proto) &&
+        descriptor.get.call(t)===t.content && t.content instanceof DocumentFragment &&
+        Object.prototype.toString.call(t)==='[object HTMLTemplateElement]' &&
+        !('content' in wrong) && brand && illegal;
+    "#, true);
     js(
         &mut runtime,
         "content===t.content && content.nodeType===11 && content.parentNode===null && t.firstChild===null",

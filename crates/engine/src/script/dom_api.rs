@@ -1573,7 +1573,8 @@ fn install_cloning(
 ) -> Result<(), JsError> {
     let content_state = state.clone();
     let content_errors = errors.clone();
-    getter(vm, prototype.clone(), "content", move |vm, this, _| {
+    let template_prototype = state.borrow().template_prototype.clone();
+    getter(vm, template_prototype, "content", move |vm, this, _| {
         let id = node(&content_state, &this)?;
         charge(vm, &content_state, None, &[], Walk::Root, false, 1)?;
         let is_template = {
@@ -1582,7 +1583,7 @@ fn install_cloning(
                 && s.document.namespace(id) == crate::dom::Namespace::Html
         };
         if !is_template {
-            return Ok(Value::Undefined);
+            return Err(JsError::type_error("Expected HTMLTemplateElement"));
         }
         let content = ensure_template(&content_state, id)
             .map_err(|failure| content_errors.convert(vm, failure))?;

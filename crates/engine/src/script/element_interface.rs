@@ -266,6 +266,7 @@ fn install_character_interfaces(
 }
 
 pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
+    let template_prototype = state.borrow().template_prototype.clone();
     let state = state.clone();
     let constructor =
         webidl::interface(vm, prototype, "HTMLElement", 0, move |vm, _, _, target| {
@@ -274,6 +275,12 @@ pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Res
     let element = vm.get_global("Element")?;
     let object = vm.get_global("Object")?;
     let set_prototype = vm.get_property(object, "setPrototypeOf")?;
-    vm.call(set_prototype, Value::Undefined, &[constructor, element])?;
+    vm.call(set_prototype.clone(), Value::Undefined, &[constructor.clone(), element])?;
+    // Autonomous custom elements use HTMLElement. The registry currently
+    // rejects customized built-ins, leaving this HTMLConstructor illegal.
+    let template = webidl::interface(vm, template_prototype, "HTMLTemplateElement", 0, |_, _, _, _| {
+        Err(JsError::type_error("Illegal HTMLTemplateElement constructor"))
+    })?;
+    vm.call(set_prototype, Value::Undefined, &[template, constructor])?;
     Ok(())
 }

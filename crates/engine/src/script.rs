@@ -96,6 +96,7 @@ struct State {
     prototype: Value,
     element_prototype: Value,
     html_element_prototype: Value,
+    template_prototype: Value,
     document_prototype: Value,
     html_document_prototype: Value,
     doctype_prototype: Value,
@@ -323,6 +324,7 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.comment_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
             match state.document.namespace(id) {
+                crate::dom::Namespace::Html if state.document.tag(id) == "template" => state.template_prototype.clone(),
                 crate::dom::Namespace::Html => state.html_element_prototype.clone(),
                 crate::dom::Namespace::Svg => state.svg_element_prototype.clone(),
                 _ => state.element_prototype.clone(),
@@ -705,6 +707,8 @@ impl ScriptRuntime {
         vm.root(element_prototype.clone());
         let html_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(html_element_prototype.clone());
+        let template_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(template_prototype.clone());
         let iframe_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(iframe_prototype.clone());
         let script_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
@@ -753,6 +757,7 @@ impl ScriptRuntime {
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
+            template_prototype,
             document_prototype: document_prototype.clone(),
             html_document_prototype,
             doctype_prototype,
