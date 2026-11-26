@@ -1,6 +1,8 @@
 use super::{
-    super::{Canvas, Color, Fonts, Rect, TOP, rounded_chrome_rect, scaled_rect},
-    Store,
+    super::{
+        Canvas, Color, Fonts, Rect, quiet_cinder::CONTENT_TOP, rounded_chrome_rect, scaled_rect,
+    },
+    Access, Startup, Store,
 };
 use rust_browser_engine::fonts::{FontFamily, FontRequest, FontSet, FontStyle, GenericFamily, Run};
 use std::sync::{Arc, OnceLock};
@@ -26,30 +28,37 @@ const ACTION_WIDTH: f32 = 82.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Section {
+    Appearance,
     Startup,
     About,
 }
 
 impl Section {
+    const ALL: [Self; 3] = [Self::Appearance, Self::Startup, Self::About];
+
     fn label(self) -> &'static str {
         match self {
+            Self::Appearance => "Wygląd",
             Self::Startup => "Przy uruchamianiu",
             Self::About => "Informacje o Satin",
         }
     }
 
-    fn tab_order(self, unreadable: bool) -> &'static [Control] {
-        use Control::{Done, RestoreTabs, Shortcuts, Version};
+    fn tab_order(self, can_update: bool) -> &'static [Control] {
+        use Control::{BookmarksBar, Done, RestoreTabs, Shortcuts, Version};
         // Keep this order the same as the visual order: header, categories, card.
-        const NAV: [Control; 3] = [
+        const NAV: [Control; 4] = [
             Done,
+            Control::Section(Section::Appearance),
             Control::Section(Section::Startup),
             Control::Section(Section::About),
         ];
-        const STARTUP: [Control; 4] = [NAV[0], NAV[1], NAV[2], RestoreTabs];
-        const ABOUT: [Control; 5] = [NAV[0], NAV[1], NAV[2], Version, Shortcuts];
+        const APPEARANCE: [Control; 5] = [NAV[0], NAV[1], NAV[2], NAV[3], BookmarksBar];
+        const STARTUP: [Control; 5] = [NAV[0], NAV[1], NAV[2], NAV[3], RestoreTabs];
+        const ABOUT: [Control; 6] = [NAV[0], NAV[1], NAV[2], NAV[3], Version, Shortcuts];
         match self {
-            Self::Startup if unreadable => &NAV,
+            Self::Appearance | Self::Startup if !can_update => &NAV,
+            Self::Appearance => &APPEARANCE,
             Self::Startup => &STARTUP,
             Self::About => &ABOUT,
         }
@@ -60,6 +69,7 @@ impl Section {
 pub(super) enum Control {
     Done,
     Section(Section),
+    BookmarksBar,
     RestoreTabs,
     Version,
     Shortcuts,
@@ -71,14 +81,15 @@ struct PanelLayout {
     title_baseline: f32,
     subtitle_baseline: f32,
     done: Rect,
-    nav: [Rect; 2],
+    nav: [Rect; 3],
+    labels_only: bool,
     card: Rect,
 }
 
 impl PanelLayout {
-    fn new(width: f32, height: f32, section: Section) -> Self {
+    fn new(width: f32, height: f32, content_top: f32, section: Section) -> Self {
         let width = width.max(0.);
-        let surface_y = TOP.min(height);
+        let surface_y = content_top.min(height);
         let surface = rect(0., surface_y, width, height - surface_y);
         let narrow = width <= 660.;
         let short = surface.height < 320.;
@@ -103,12 +114,16 @@ impl PanelLayout {
         let subtitle_baseline = title_baseline + if short { 19. } else { 22. };
         let nav_y = subtitle_baseline + if short { 12. } else { 23. };
         let (nav, card_x, card_y) = if narrow {
-            let nav_width = ((w - 4.) * 0.5).clamp(0., 148.);
+            let nav_width = ((w - 8.) / 3.).clamp(0., 148.);
             (
-                [
-                    rect(x, nav_y, nav_width, NAV_HEIGHT),
-                    rect(x + nav_width + 4., nav_y, nav_width, NAV_HEIGHT),
-                ],
+                std::array::from_fn(|i| {
+                    rect(
+                        x + i as f32 * (nav_width + 4.),
+                        nav_y,
+                        nav_width,
+                        NAV_HEIGHT,
+                    )
+                }),
                 x,
                 nav_y + NAV_HEIGHT + if short { 8. } else { 12. },
             )
@@ -119,15 +134,19 @@ impl PanelLayout {
                 (188., 23.)
             };
             (
-                [
-                    rect(x, nav_y, nav_width, NAV_HEIGHT),
-                    rect(x, nav_y + NAV_HEIGHT + 4., nav_width, NAV_HEIGHT),
-                ],
+                std::array::from_fn(|i| {
+                    rect(
+                        x,
+                        nav_y + i as f32 * (NAV_HEIGHT + 4.),
+                        nav_width,
+                        NAV_HEIGHT,
+                    )
+                }),
                 x + nav_width + gap,
                 nav_y,
             )
         };
-        let rows = if section == Section::Startup { 1. } else { 2. };
+        let rows = if section == Section::About { 2. } else { 1. };
         let card = rect(
             card_x,
             card_y,
@@ -141,6 +160,7 @@ impl PanelLayout {
             subtitle_baseline,
             done: rect(x + w - ACTION_WIDTH, y, ACTION_WIDTH, BUTTON),
             nav,
+            labels_only: width <= 470.,
             card,
         }
     }
@@ -161,9 +181,10 @@ impl PanelLayout {
     fn bounds(&self, control: Control) -> Rect {
         match control {
             Control::Done => self.done,
-            Control::Section(Section::Startup) => self.nav[0],
-            Control::Section(Section::About) => self.nav[1],
-            Control::RestoreTabs => self.row_control(0, 44.),
+            Control::Section(Section::Appearance) => self.nav[0],
+            Control::Section(Section::Startup) => self.nav[1],
+            Control::Section(Section::About) => self.nav[2],
+            Control::BookmarksBar | Control::RestoreTabs => self.row_control(0, 44.),
             Control::Version => self.row_control(0, ACTION_WIDTH),
             Control::Shortcuts => self.row_control(1, ACTION_WIDTH),
         }
@@ -180,13 +201,13 @@ pub(in crate::app) struct Panel {
 }
 
 impl Panel {
-    pub(super) fn new(unreadable: bool) -> Self {
+    pub(super) fn new(can_update: bool) -> Self {
         Self {
-            section: Section::Startup,
-            focus: if unreadable {
-                Control::Section(Section::Startup)
+            section: Section::Appearance,
+            focus: if can_update {
+                Control::BookmarksBar
             } else {
-                Control::RestoreTabs
+                Control::Section(Section::Appearance)
             },
             focus_visible: true,
             hovered: None,
@@ -197,8 +218,12 @@ impl Panel {
 
     pub(super) fn select(&mut self, section: Section) {
         self.section = section;
-        self.focus = Control::Section(section);
+        self.focus_category();
         self.pressed = None;
+    }
+
+    pub(super) fn focus_category(&mut self) {
+        self.focus = Control::Section(self.section);
     }
 
     pub(super) fn focused_control(&mut self) -> Control {
@@ -206,8 +231,8 @@ impl Panel {
         self.focus
     }
 
-    pub(super) fn step_focus(&mut self, backward: bool, unreadable: bool) {
-        let order = self.section.tab_order(unreadable);
+    pub(super) fn step_focus(&mut self, backward: bool, can_update: bool) {
+        let order = self.section.tab_order(can_update);
         let index = order
             .iter()
             .position(|&control| control == self.focus)
@@ -247,15 +272,16 @@ impl Panel {
         &self,
         width: f32,
         height: f32,
+        content_top: f32,
         (x, y): (f32, f32),
-        unreadable: bool,
+        can_update: bool,
     ) -> Option<Control> {
-        let layout = PanelLayout::new(width, height, self.section);
+        let layout = PanelLayout::new(width, height, content_top, self.section);
         if !layout.surface.contains(x, y) {
             return None;
         }
         self.section
-            .tab_order(unreadable)
+            .tab_order(can_update)
             .iter()
             .copied()
             .find(|&control| layout.bounds(control).contains(x, y))
@@ -268,9 +294,21 @@ impl Panel {
         scale: f32,
         settings: &Store,
     ) {
+        self.draw_at(canvas, fonts, scale, settings, CONTENT_TOP);
+    }
+
+    // Use the live document origin once native chrome can collapse the bar.
+    pub(in crate::app) fn draw_at(
+        &self,
+        canvas: &mut Canvas,
+        fonts: &mut Fonts,
+        scale: f32,
+        settings: &Store,
+        content_top: f32,
+    ) {
         let width = canvas.width as f32 / scale;
         let height = canvas.height as f32 / scale;
-        let layout = PanelLayout::new(width, height, self.section);
+        let layout = PanelLayout::new(width, height, content_top, self.section);
         let mut p = Painter {
             canvas,
             fonts,
@@ -298,7 +336,7 @@ impl Panel {
             MUTED,
         );
         self.draw_action(&mut p, &layout, Control::Done, "Gotowe");
-        for section in [Section::Startup, Section::About] {
+        for section in Section::ALL {
             let control = Control::Section(section);
             let bounds = layout.bounds(control);
             self.draw_focus(&mut p, control, bounds, 6., PAGE);
@@ -316,21 +354,47 @@ impl Panel {
             } else {
                 TEXT
             };
-            p.section_icon(section, bounds.x + 9., bounds.y + 8., color);
-            p.label(
-                section.label(),
-                bounds.x + 34.,
-                bounds.y + 21.,
-                13.,
-                540,
-                color,
-            );
+            if layout.labels_only {
+                p.centered_label(section.label(), bounds, 12., 540, color);
+            } else {
+                p.section_icon(section, bounds.x + 9., bounds.y + 8., color);
+                p.label(
+                    section.label(),
+                    bounds.x + 34.,
+                    bounds.y + 21.,
+                    13.,
+                    540,
+                    color,
+                );
+            }
         }
 
         p.bordered(layout.card, 10., CARD, LINE);
         let x = layout.card.x + CARD_PAD;
         p.label(self.section.label(), x, layout.card.y + 25., 15., 670, TEXT);
         match self.section {
+            Section::Appearance => {
+                let caption = "Wyświetl zapisane strony pod paskiem nawigacji.";
+                let lines = [caption, "Tryb skupienia tymczasowo ukrywa ten pasek."];
+                self.draw_row(
+                    &mut p,
+                    &layout,
+                    0,
+                    "Pasek zakładek",
+                    if settings.current.quiet_mode {
+                        &lines
+                    } else {
+                        &lines[..1]
+                    },
+                );
+                self.draw_switch(
+                    &mut p,
+                    &layout,
+                    Control::BookmarksBar,
+                    settings.current.bookmarks_bar,
+                    settings.can_update(),
+                );
+            }
             Section::Startup => {
                 self.draw_row(
                     &mut p,
@@ -342,24 +406,13 @@ impl Panel {
                         "Gdy wyłączone, Satin otwiera stronę startową.",
                     ],
                 );
-                self.draw_switch(&mut p, &layout, settings);
-                let warning = if settings.unreadable {
-                    Some("Nie można odczytać ustawień. Użyto wartości domyślnej; plik zachowano.")
-                } else if self.write_failed {
-                    Some("Nie można zapisać ustawień. Nie wprowadzono zmian.")
-                } else {
-                    None
-                };
-                if let Some(warning) = warning {
-                    p.label(
-                        warning,
-                        x,
-                        layout.card.y + layout.card.height + 16.,
-                        11.,
-                        400,
-                        ACCENT,
-                    );
-                }
+                self.draw_switch(
+                    &mut p,
+                    &layout,
+                    Control::RestoreTabs,
+                    settings.current.startup == Startup::RestoreTabs,
+                    settings.can_update(),
+                );
             }
             Section::About => {
                 self.draw_row(
@@ -378,6 +431,23 @@ impl Panel {
                     &["Zobacz skróty dostępne w Satin."],
                 );
                 self.draw_action(&mut p, &layout, Control::Shortcuts, "Pokaż");
+            }
+        }
+        if self.section != Section::About {
+            let warning: &[&str] = match settings.access {
+                Access::Unreadable => &[
+                    "Nie można odczytać ustawień.",
+                    "Użyto wartości domyślnych; plik zachowano.",
+                ],
+                Access::ReadOnly => &["Plik ustawień jest tylko do odczytu."],
+                Access::ReadWrite if self.write_failed => {
+                    &["Nie można zapisać ustawień. Nie wprowadzono zmian."]
+                }
+                Access::ReadWrite => &[],
+            };
+            for (i, line) in warning.iter().enumerate() {
+                let y = layout.card.y + layout.card.height + 16. + 15. * i as f32;
+                p.label(line, x, y, 11., 400, ACCENT);
             }
         }
     }
@@ -418,7 +488,7 @@ impl Panel {
             CARD
         };
         p.bordered(bounds, 6., fill, LINE);
-        p.action_label(label, bounds);
+        p.centered_label(label, bounds, 13., 600, TEXT);
     }
 
     fn draw_row(
@@ -442,12 +512,16 @@ impl Panel {
         }
     }
 
-    fn draw_switch(&self, p: &mut Painter<'_>, layout: &PanelLayout, settings: &Store) {
-        let control = Control::RestoreTabs;
+    fn draw_switch(
+        &self,
+        p: &mut Painter<'_>,
+        layout: &PanelLayout,
+        control: Control,
+        on: bool,
+        enabled: bool,
+    ) {
         let bounds = layout.bounds(control);
         let track = rect(bounds.x + 4., bounds.y + 7., 36., 20.);
-        let enabled = !settings.unreadable;
-        let on = settings.current.startup == super::Startup::RestoreTabs;
         if enabled {
             let backdrop = if self.hovered == Some(control) {
                 let fill = if self.is_pressed(control) {
@@ -545,11 +619,11 @@ impl Painter<'_> {
         );
     }
 
-    fn action_label(&mut self, text: &str, r: Rect) {
-        let run = self.shape(text, 13., 600);
+    fn centered_label(&mut self, text: &str, r: Rect, size: f32, weight: u16, color: Color) {
+        let run = self.shape(text, size, weight);
         let x = (r.x + r.width * 0.5) * self.scale - run.advance * 0.5;
         let y = (r.y + r.height * 0.5 + 4.5) * self.scale;
-        self.canvas.text(x, y, &run, TEXT, self.fonts);
+        self.canvas.text(x, y, &run, color, self.fonts);
     }
 
     fn section_icon(&mut self, section: Section, x: f32, y: f32, color: Color) {
@@ -564,6 +638,30 @@ impl Painter<'_> {
             );
         };
         match section {
+            Section::Appearance => {
+                let points = [
+                    (3., 5.),
+                    (6., 2.),
+                    (11., 2.),
+                    (15., 5.),
+                    (15., 8.),
+                    (13., 10.),
+                    (10., 10.),
+                    (9., 11.),
+                    (9., 14.),
+                    (7., 15.),
+                    (4., 14.),
+                    (2., 11.),
+                    (2., 7.),
+                    (3., 5.),
+                ];
+                for pair in points.windows(2) {
+                    stroke(pair[0].0, pair[0].1, pair[1].0, pair[1].1);
+                }
+                for (x, y) in [(5., 8.), (8., 5.), (12., 6.)] {
+                    stroke(x, y, x + 0.65, y);
+                }
+            }
             Section::Startup => {
                 stroke(5., 3., 13., 8.5);
                 stroke(13., 8.5, 5., 14.);
@@ -597,62 +695,141 @@ mod tests {
 
     #[test]
     fn focus_wraps_and_only_visits_available_controls() {
+        let mut panel = Panel::new(true);
+        assert_eq!(panel.focused_control(), Control::BookmarksBar);
+        panel.step_focus(false, true);
+        assert_eq!(panel.focused_control(), Control::Done);
+        panel.step_focus(true, true);
+        assert_eq!(panel.focused_control(), Control::BookmarksBar);
+        panel.select(Section::Startup);
+        panel.step_focus(true, true);
+        assert_eq!(
+            panel.focused_control(),
+            Control::Section(Section::Appearance)
+        );
+
         let mut panel = Panel::new(false);
-        assert_eq!(panel.focused_control(), Control::RestoreTabs);
+        panel.step_focus(false, false);
+        assert_eq!(panel.focused_control(), Control::Section(Section::Startup));
+        panel.select(Section::Startup);
+        panel.step_focus(false, false);
+        assert_eq!(panel.focused_control(), Control::Section(Section::About));
         panel.step_focus(false, false);
         assert_eq!(panel.focused_control(), Control::Done);
+        panel.select(Section::Appearance);
         panel.step_focus(true, false);
-        assert_eq!(panel.focused_control(), Control::RestoreTabs);
-
-        let mut panel = Panel::new(true);
-        panel.step_focus(false, true);
+        assert_eq!(panel.focused_control(), Control::Done);
+        panel.step_focus(true, false);
         assert_eq!(panel.focused_control(), Control::Section(Section::About));
         panel.select(Section::About);
-        panel.step_focus(false, true);
+        panel.step_focus(false, false);
         assert_eq!(panel.focused_control(), Control::Version);
-        panel.step_focus(false, true);
+        panel.step_focus(false, false);
         assert_eq!(panel.focused_control(), Control::Shortcuts);
-        panel.step_focus(false, true);
+        panel.step_focus(false, false);
         assert_eq!(panel.focused_control(), Control::Done);
     }
 
     #[test]
     fn hit_targets_follow_the_current_category_and_fit_the_minimum_window() {
-        let mut panel = Panel::new(false);
-        for (w, h) in [(640., 400.), (750., 480.), (1440., 900.)] {
-            panel.select(Section::Startup);
-            let layout = PanelLayout::new(w, h, Section::Startup);
-            let center = |r: Rect| (r.x + r.width * 0.5, r.y + r.height * 0.5);
-            let switch = center(layout.bounds(Control::RestoreTabs));
-            assert_eq!(
-                panel.control_at(w, h, switch, false),
-                Some(Control::RestoreTabs)
-            );
-            assert_eq!(panel.control_at(w, h, switch, true), None);
-            assert_eq!(
-                panel.control_at(w, h, (layout.card.x + CARD_PAD, switch.1), false),
-                None
-            );
-
-            panel.select(Section::About);
-            let layout = PanelLayout::new(w, h, Section::About);
-            assert!(layout.card.y + layout.card.height <= h);
-            for &control in Section::About.tab_order(false) {
-                let bounds = layout.bounds(control);
-                assert_eq!(panel.control_at(w, h, center(bounds), false), Some(control));
+        let mut panel = Panel::new(true);
+        for top in [
+            super::super::chrome::ChromeState::new(true, true, true).content_top(),
+            CONTENT_TOP,
+        ] {
+            for (w, h) in [(390., 400.), (640., 400.), (750., 480.), (1440., 900.)] {
+                let center = |r: Rect| (r.x + r.width * 0.5, r.y + r.height * 0.5);
+                for (section, control) in [
+                    (Section::Appearance, Control::BookmarksBar),
+                    (Section::Startup, Control::RestoreTabs),
+                ] {
+                    panel.select(section);
+                    let layout = PanelLayout::new(w, h, top, section);
+                    let switch = center(layout.bounds(control));
+                    assert_eq!(panel.control_at(w, h, top, switch, true), Some(control));
+                    assert_eq!(panel.control_at(w, h, top, switch, false), None);
+                    assert_eq!(
+                        panel.control_at(w, h, top, (layout.card.x + CARD_PAD, switch.1), true),
+                        None
+                    );
+                }
+                panel.select(Section::About);
+                let layout = PanelLayout::new(w, h, top, Section::About);
+                assert!(layout.card.y + layout.card.height <= h);
+                for &control in Section::About.tab_order(false) {
+                    let bounds = layout.bounds(control);
+                    assert_eq!(
+                        panel.control_at(w, h, top, center(bounds), false),
+                        Some(control)
+                    );
+                }
             }
         }
     }
 
     #[test]
+    fn bookmarks_switch_paints_saved_state_even_when_quiet_overrides_row() {
+        use super::super::Preferences;
+        let mut fonts = Fonts::new().unwrap();
+        let state = |bookmarks_bar| Preferences {
+            bookmarks_bar,
+            quiet_mode: true,
+            ..Preferences::default()
+        };
+        let render = |fonts: &mut Fonts, current, access, scale: f32| {
+            let mut canvas =
+                Canvas::new((390. * scale) as u32, (400. * scale) as u32, Color::WHITE);
+            let settings = Store {
+                path: Default::default(),
+                current,
+                access,
+            };
+            let top = settings.chrome().content_top();
+            let bounds = PanelLayout::new(390., 400., top, Section::Appearance)
+                .bounds(Control::BookmarksBar);
+            Panel::new(settings.can_update()).draw_at(&mut canvas, fonts, scale, &settings, top);
+            let pixel = |x: f32, y: f32| {
+                let x = ((bounds.x + x) * scale).floor() as usize;
+                let y = ((bounds.y + y) * scale).floor() as usize;
+                canvas.pixels[y * canvas.width as usize + x]
+            };
+            // Left thumb, track between both thumb positions, right thumb and focus outline.
+            [
+                pixel(14., 17.),
+                pixel(22., 17.),
+                pixel(30., 17.),
+                pixel(22., 4.),
+            ]
+        };
+        let rgb = |color| Canvas::new(1, 1, color).pixels[0];
+        for scale in [1., 1.5] {
+            let on = render(&mut fonts, state(true), Access::ReadWrite, scale);
+            let off = render(&mut fonts, state(false), Access::ReadWrite, scale);
+            let disabled = render(&mut fonts, state(false), Access::ReadOnly, scale);
+            assert_eq!(
+                on,
+                [rgb(ACCENT), rgb(ACCENT), rgb(Color::WHITE), rgb(ACCENT)]
+            );
+            assert_eq!(
+                off,
+                [rgb(Color::WHITE), rgb(MUTED), rgb(MUTED), rgb(ACCENT)]
+            );
+            assert_eq!(
+                disabled,
+                [rgb(MUTED), rgb(ACCENT_SOFT), rgb(ACCENT_SOFT), rgb(CARD)]
+            );
+        }
+    }
+
+    #[test]
     fn cancelling_pointer_clears_hover_and_prevents_a_stale_release() {
-        let mut panel = Panel::new(false);
-        assert!(panel.set_hover(Some(Control::RestoreTabs)));
-        assert!(panel.press(Some(Control::RestoreTabs)));
-        assert!(panel.is_pressed(Control::RestoreTabs));
+        let mut panel = Panel::new(true);
+        assert!(panel.set_hover(Some(Control::BookmarksBar)));
+        assert!(panel.press(Some(Control::BookmarksBar)));
+        assert!(panel.is_pressed(Control::BookmarksBar));
         assert!(panel.cancel_pointer());
         assert!(panel.release().is_none());
-        assert!(!panel.is_pressed(Control::RestoreTabs));
+        assert!(!panel.is_pressed(Control::BookmarksBar));
         assert!(!panel.cancel_pointer());
     }
 }
