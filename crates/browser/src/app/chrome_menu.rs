@@ -14,13 +14,21 @@
 //! find-in-page, split view and quiet mode still need real browser routes.
 //! Native per-tab history is retained as such; fixed Cinder has no appearance row.
 
-mod glyphs;
-
 use super::{
     Action, ActiveEventLoop, App, Canvas, Color, Command, Fonts, MENU_ITEMS, Rect, elide,
-    rounded_chrome_rect, shortcuts,
+    icons::Glyph, paint_centered_glyph, rounded_chrome_rect, scaled_rect, shortcuts,
 };
-use glyphs::{Glyph, draw_glyph};
+
+fn draw_glyph(canvas: &mut Canvas, glyph: Glyph, x: f32, y: f32, scale: f32, color: Color) {
+    paint_centered_glyph(
+        canvas,
+        scaled_rect(1., x, y, ICON_SIZE, ICON_SIZE),
+        ICON_SIZE,
+        scale,
+        glyph,
+        color,
+    );
+}
 
 const CARD: Color = Color(41, 40, 44, 255);
 const LINE: Color = Color(62, 58, 66, 255);
@@ -123,13 +131,13 @@ const ROWS: &[Row] = &[
     ),
     Row::Item(
         Target::Browser(Action::Home),
-        Glyph::Home,
+        Glyph::House,
         "Strona startowa",
         None,
     ),
     Row::Item(
         Target::Browser(Action::StartShortcuts),
-        Glyph::Book,
+        Glyph::BookMarked,
         "Skróty startowe",
         None,
     ),
@@ -142,7 +150,7 @@ const ROWS: &[Row] = &[
     ),
     Row::Item(
         Target::Browser(Action::Bookmarks),
-        Glyph::Book,
+        Glyph::BookMarked,
         "Zakładki",
         None,
     ),
@@ -323,7 +331,7 @@ impl App {
             &mut self.fonts,
             scale,
             bounds,
-            Glyph::Zoom,
+            Glyph::ZoomIn,
             "Powiększenie",
             (5., x - 5.),
         );
