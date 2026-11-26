@@ -9,6 +9,8 @@ const PAGE_TITLE: &str = "Offline updater fixture";
 const HEIGHT: u32 = 800;
 const DOWNLOAD: Action = Action::UpdatePrimary(UpdateAction::Download);
 const RESTART: Action = Action::UpdatePrimary(UpdateAction::Restart);
+const FIRST_FAVORITE: Action = Action::Favorite(0);
+const LAST_FAVORITE: Action = Action::Favorite(5);
 
 #[derive(Clone, Copy, Debug)]
 enum Step {
@@ -23,6 +25,12 @@ enum Step {
     Ready,
     Dismissed,
     LinkReached,
+    ResizeWide,
+    ResizeNarrow,
+    FavoritesScrolled,
+    QuietPage,
+    QuietScrolled,
+    ResizeRestored,
 }
 
 struct Driver {
@@ -113,6 +121,20 @@ fn click(app: &mut App, events: &ActiveEventLoop, point: (f32, f32)) {
     app.left_release(events);
 }
 
+fn wheel(app: &mut App, events: &ActiveEventLoop, point: (f32, f32), dx: f64, dy: f64) {
+    let window = app.window.as_ref().unwrap().id();
+    let device_id = winit::event::DeviceId::dummy();
+    app.window_event(events, window, WindowEvent::CursorMoved {
+        device_id,
+        position: winit::dpi::PhysicalPosition::new(f64::from(point.0), f64::from(point.1)),
+    });
+    app.window_event(events, window, WindowEvent::MouseWheel {
+        device_id,
+        delta: winit::event::MouseScrollDelta::PixelDelta(winit::dpi::PhysicalPosition::new(-dx, -dy)),
+        phase: winit::event::TouchPhase::Moved,
+    });
+}
+
 // Winit's KeyEvent has platform-private fields. Use the same guard and App
 // key handler with explicit physical identity; never fake OS keyboard input.
 fn feed_key(
@@ -178,6 +200,11 @@ fn rgb_at(canvas: &Canvas, x: usize, y: usize, Color(r, g, b, _): Color) -> bool
 }
 
 impl Driver {
+    fn request_width(&mut self, app: &App, width: u32) {
+        self.size = PhysicalSize::new(width, HEIGHT);
+        let _ = app.window.as_ref().unwrap().request_inner_size(self.size);
+    }
+
     fn capture(&self, app: &App, name: &str) -> Result<(), String> {
         app.canvas.as_ref().ok_or("Missing presented canvas")?
             .save_png(&self.output.join(name))
@@ -212,8 +239,86 @@ impl Driver {
         self.advance(app, events)
     }
 
+    fn advance_resize(&mut self, app: &mut App, events: &ActiveEventLoop) -> Result<bool, String> {
+        let page = app.window_regions(app.active).page;
+        let scroll = app.tabs[app.active].scroll;
+        let canvas = app.canvas.as_ref().ok_or("Missing resize canvas")?;
+        require(app.tabs[app.active].url == self.url, "Unexpected fixture navigation")?;
+        commands(app, [0, 0, 0])?;
+        self.step = match self.step {
+            Step::ResizeWide => {
+                require(page.y == 121. && scroll == 0. && hit(app, LAST_FAVORITE).is_some(),
+                    "Wide frame should show all six favorites above unscrolled content")?;
+                self.capture(app, "00-wide.png")?;
+                self.request_width(app, 390);
+                Step::ResizeNarrow
+            }
+            Step::ResizeNarrow => {
+                let [x, y, w, h] = hit(app, FIRST_FAVORITE).ok_or("Missing first favorite")?;
+                require(page.y == 121. && scroll == 0. && hit(app, LAST_FAVORITE).is_none()
+                    && x + w <= 390., "Narrow layout did not clip the overflow")?;
+                self.capture(app, "01-narrow.png")?;
+                wheel(app, events, center([x, y, w, h]), 2000., 0.);
+                require(hit(app, FIRST_FAVORITE).is_none(),
+                    "Wheel retained a stale hit before the new paint")?;
+                Step::FavoritesScrolled
+            }
+            Step::FavoritesScrolled => {
+                let [x, y, w, h] = hit(app, LAST_FAVORITE).ok_or("Last favorite did not scroll into view")?;
+                require(scroll == 0. && x >= 0. && x + w <= 390. && hit(app, FIRST_FAVORITE).is_none(),
+                    "Favorites overflow changed page scroll or exposed an invalid hit")?;
+                app.mouse = center([x, y, w, h]);
+                require(app.chrome_action_at_pointer() == Some(LAST_FAVORITE),
+                    "Painted final favorite is not actionable at its new position")?;
+                self.capture(app, "02-favorites-scrolled.png")?;
+                let quiet = hit(app, Action::QuietMode).ok_or("Missing Quiet button")?;
+                click(app, events, center(quiet));
+                Step::QuietPage
+            }
+            Step::QuietPage => {
+                require(page.y == 91. && scroll == 0. && hit(app, LAST_FAVORITE).is_none()
+                    && rgb_at(canvas, 4, 105, Color(237, 240, 245, 255)),
+                    "Quiet did not expose page content at the former favorites bar")?;
+                self.capture(app, "03-quiet.png")?;
+                wheel(app, events, (4., 105.), 0., 480.);
+                Step::QuietScrolled
+            }
+            Step::QuietScrolled => {
+                if scroll < 400. {
+                    return Ok(false);
+                }
+                require(page.y == 91. && rgb_at(canvas, 4, 105, Color(37, 88, 116, 255)),
+                    "Wheel over the hidden favorites bar did not visibly scroll the page")?;
+                self.capture(app, "04-page-scrolled.png")?;
+                let quiet = hit(app, Action::QuietMode).ok_or("Missing Quiet button")?;
+                click(app, events, center(quiet));
+                self.request_width(app, 1280);
+                Step::ResizeRestored
+            }
+            Step::ResizeRestored => {
+                require(page.y == 121. && scroll >= 400. && hit(app, FIRST_FAVORITE).is_some()
+                    && hit(app, LAST_FAVORITE).is_some(),
+                    "Restored wide layout did not clamp favorites scroll and keep document scroll")?;
+                self.capture(app, "05-wide-restored.png")?;
+                fs::write(self.output.join("passed.txt"), format!(
+                    "1280x800 -> 390x800 -> 1280x800 @ 100%, {} presented frames; \
+                     clipped favorites scroll and hit invalidation, Quiet routing and page scroll passed.\n",
+                    app.presented_frames
+                )).map_err(|error| error.to_string())?;
+                return Ok(true);
+            }
+            _ => unreachable!("updater steps use the regular driver"),
+        };
+        Ok(false)
+    }
+
     fn advance(&mut self, app: &mut App, events: &ActiveEventLoop) -> Result<bool, String> {
         use ElementState::{Pressed, Released};
+        if matches!(self.step, Step::ResizeWide | Step::ResizeNarrow | Step::FavoritesScrolled
+            | Step::QuietPage | Step::QuietScrolled | Step::ResizeRestored)
+        {
+            return self.advance_resize(app, events);
+        }
         let narrow = self.size.width == 390;
         // Independent expected frame geometry at DPR 1 for the shared Toolbar.
         let (badge, address_before, address, quiet, menu, panel, downloads) = if narrow {
@@ -389,6 +494,7 @@ impl Driver {
                 )).map_err(|error| error.to_string())?;
                 return Ok(true);
             }
+            _ => unreachable!("resize steps routed separately"),
         };
         Ok(false)
     }
@@ -403,27 +509,48 @@ fn capture_installed_updater_chrome_offline() {
         _ => panic!("Set SATIN_QA_UPDATER_WIDTH to 390 or 1280"),
     };
     let output = PathBuf::from(std::env::var_os("SATIN_QA_UPDATER_OUTPUT").expect("Set output directory"));
+    run_fixture(output, width, Step::Baseline);
+}
+
+#[test]
+#[ignore = "requires an interactive Windows x64 desktop at 100% DPI"]
+fn capture_favorites_resize_and_scroll_offline() {
+    let output = PathBuf::from(std::env::var_os("SATIN_QA_FAVORITES_OUTPUT").expect("Set output directory"));
+    run_fixture(output, 1280, Step::ResizeWide);
+}
+
+fn run_fixture(output: PathBuf, width: u32, step: Step) {
     assert!(output.is_absolute(), "Use an absolute output directory in disposable scratch space");
     fs::create_dir(&output).expect("Output must not exist and its parent must exist");
+    let profile = output.join("profile");
+    if matches!(step, Step::ResizeWide) {
+        fs::create_dir(&profile).unwrap();
+        let entries: Vec<_> = (1..=6).map(|index| serde_json::json!({
+            "url": format!("http://127.0.0.1:1/bookmark-{index}"),
+            "title": format!("Favorite {index}: Offline fixture")
+        })).collect();
+        fs::write(profile.join(bookmarks::FILE_NAME),
+            serde_json::json!({"schema": 1, "entries": entries}).to_string()).unwrap();
+    }
     let page = output.join("offline-click-guard.html");
     fs::write(&page, format!(r#"<!doctype html><meta charset="utf-8"><title>{PAGE_TITLE}</title>
 <style>html{{overflow-y:auto}}body{{margin:0;background:#edf0f5;font-family:sans-serif}}
-a{{display:block;height:400px;padding:16px;color:#172340}}div{{height:1500px}}</style>
-<a href="{LINK}">Offline content click target</a><div></div>"#)).unwrap();
+ a{{display:block;height:400px;padding:16px;color:#172340}}div{{height:1500px;background:#255874}}</style>
+ <a href="{LINK}">Offline content click target</a><div></div>"#)).unwrap();
     let url = url::Url::from_file_path(page).expect("Absolute file URL").to_string();
     DRIVER.with(|cell| {
         *cell.borrow_mut() = Some(Driver {
             output: output.clone(),
             url: url.clone(),
             size: PhysicalSize::new(width, HEIGHT),
-            step: Step::Baseline,
+            step,
             deadline: Instant::now() + Duration::from_secs(30),
             previous_pixels: None,
             result: None,
         });
     });
     // Disable installed discovery and startup ACK; do not call main or the CLI.
-    let run_result = run(output.join("profile"), Some(url), None, None, None, None, None, None, false);
+    let run_result = run(profile, Some(url), None, None, None, None, None, None, false);
     let fixture_result = DRIVER.with(|cell| cell.borrow_mut().take().unwrap().result);
     run_result.expect("Offline Winit test window");
     fixture_result.expect("Fixture exited before completion").unwrap();

@@ -1,5 +1,16 @@
 # Quiet Cinder: offline updater UI capture
 
+This QA-only branch also has a separate resize test. Give it a fresh absolute
+`SATIN_QA_FAVORITES_OUTPUT` with an existing parent, then run the ignored
+`app::updater_ui_qa::capture_favorites_resize_and_scroll_offline` browser unit
+test in its own process. It resizes the same Winit window from 1280×800 to
+390×800 and back at 100%, sends wheel input through the browser's Winit
+handler without injecting OS input, and saves the settled frames. It checks
+clipped favorite hits, their invalidation before repaint, Quiet exposing the
+page at y=91, scrolling the document from the former bar area, and restoring
+the wide geometry while preserving page scroll. It makes no HTTP requests
+and does not establish Chromium pixel parity or higher-DPI behavior.
+
 This ignored test runs the real Windows x64 Winit app and presenter. It is
 QA-only. Run it **after** the build/run gate on an interactive 100% DPI
 desktop with enough space for a 1280×800 client. Do not interact with the
