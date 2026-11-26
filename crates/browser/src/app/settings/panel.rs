@@ -1,7 +1,5 @@
 use super::{
-    super::{
-        Canvas, Color, Fonts, Rect, quiet_cinder::CONTENT_TOP, rounded_chrome_rect, scaled_rect,
-    },
+    super::{Canvas, Color, Fonts, Rect, rounded_chrome_rect, scaled_rect},
     Access, Startup, Store,
 };
 use rust_browser_engine::fonts::{FontFamily, FontRequest, FontSet, FontStyle, GenericFamily, Run};
@@ -287,17 +285,7 @@ impl Panel {
             .find(|&control| layout.bounds(control).contains(x, y))
     }
 
-    pub(in crate::app) fn draw(
-        &self,
-        canvas: &mut Canvas,
-        fonts: &mut Fonts,
-        scale: f32,
-        settings: &Store,
-    ) {
-        self.draw_at(canvas, fonts, scale, settings, CONTENT_TOP);
-    }
-
-    // Use the live document origin once native chrome can collapse the bar.
+    // Match the live document origin for settings paint and pointer routing.
     pub(in crate::app) fn draw_at(
         &self,
         canvas: &mut Canvas,
@@ -735,7 +723,7 @@ mod tests {
         let mut panel = Panel::new(true);
         for top in [
             super::super::chrome::ChromeState::new(true, true, true).content_top(),
-            CONTENT_TOP,
+            crate::app::quiet_cinder::CONTENT_TOP,
         ] {
             for (w, h) in [(390., 400.), (640., 400.), (750., 480.), (1440., 900.)] {
                 let center = |r: Rect| (r.x + r.width * 0.5, r.y + r.height * 0.5);

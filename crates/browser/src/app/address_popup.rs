@@ -160,18 +160,20 @@ mod tests {
             caption: None,
         }];
         for width in [390., 1280.] {
-            for show_update in [false, true] {
-                let bar = quiet_cinder::Toolbar::new(width, show_update);
-                let popup = App::suggestion_popup_layout(&bar, width, 800., &rows, 0.).unwrap();
-                assert_eq!(popup.bounds.x, bar.address.x);
-                assert_eq!(popup.bounds.width, bar.address.w);
-                assert_eq!(popup.bounds.x + popup.bounds.width, bar.address.right());
-                let (index, hit) = popup.visible_targets().next().unwrap();
-                assert_eq!(index, 0);
-                assert!(hit.x + hit.width < bar.address.right());
-                assert_eq!(popup.hit(hit.x + 1., hit.y + 1.), Some(0));
-                let neighbor = bar.update.unwrap_or(bar.downloads);
-                assert_eq!(popup.hit(neighbor.x, hit.y + 1.), None);
+            for quiet in [false, true] {
+                for show_update in [false, true] {
+                    let bar = quiet_cinder::Toolbar::new(width, show_update, quiet);
+                    let popup = App::suggestion_popup_layout(&bar, width, 800., &rows, 0.).unwrap();
+                    assert_eq!(popup.bounds.x, bar.address.x);
+                    assert_eq!(popup.bounds.width, bar.address.w);
+                    assert_eq!(popup.bounds.x + popup.bounds.width, bar.address.right());
+                    let (index, hit) = popup.visible_targets().next().unwrap();
+                    assert_eq!(index, 0);
+                    assert!(hit.x + hit.width < bar.address.right());
+                    assert_eq!(popup.hit(hit.x + 1., hit.y + 1.), Some(0));
+                    let neighbor = bar.update.unwrap_or(bar.quiet);
+                    assert_eq!(popup.hit(neighbor.x, hit.y + 1.), None);
+                }
             }
         }
     }

@@ -68,6 +68,7 @@ use navigation_error::Recovery;
 use tab_strip::TabStrip;
 
 const TAB_H: f32 = tab_strip::TAB_ROW_HEIGHT;
+#[cfg(test)]
 const TOP: f32 = quiet_cinder::CONTENT_TOP;
 const MAX_TABS: usize = 24;
 const FOOT: f32 = 23.;
@@ -94,7 +95,7 @@ struct WindowRegions {
 impl WindowRegions {
     #[cfg(test)]
     fn new(width: f32, height: f32, footer: f32, dock_open: bool) -> Self {
-        Self::with_dock_height(width, height, footer, dock_open, None)
+        Self::with_dock_height(width, height, footer, dock_open, None, TOP)
     }
     fn with_dock_height(
         width: f32,
@@ -102,10 +103,11 @@ impl WindowRegions {
         footer: f32,
         dock_open: bool,
         preferred: Option<f32>,
+        content_top: f32,
     ) -> Self {
         // A mounted dock sits above a stable footer, including on the home page
         // where the status footer would otherwise overlay the dock.
-        let dock_space = (height - TOP - footer.max(FOOT)).max(0.);
+        let dock_space = (height - content_top - footer.max(FOOT)).max(0.);
         let dock =
             (dock_open && width > 0. && dock_space >= DOCK_MIN + PAGE_MIN_WITH_DOCK).then(|| {
                 let height = preferred
@@ -113,7 +115,7 @@ impl WindowRegions {
                     .clamp(DOCK_MIN, dock_space - PAGE_MIN_WITH_DOCK);
                 Rect {
                     x: 0.,
-                    y: TOP + dock_space - height,
+                    y: content_top + dock_space - height,
                     width,
                     height,
                 }
@@ -122,9 +124,9 @@ impl WindowRegions {
         Self {
             page: Rect {
                 x: 0.,
-                y: TOP,
+                y: content_top,
                 width,
-                height: (page_bottom - TOP).max(0.),
+                height: (page_bottom - content_top).max(0.),
             },
             dock,
         }
@@ -194,6 +196,7 @@ enum Action {
     Settings,
     Version,
     Bookmarks,
+    QuietMode,
     Downloads,
     ToggleBookmark,
     Favorite(usize),
@@ -244,6 +247,8 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::Version, "About Satin"),
     (Action::ShortcutHelp, "Keyboard shortcuts"),
     (Action::StartShortcuts, "Skróty startowe"),
+    (Action::Downloads, "Pobrane pliki"),
+    (Action::QuietMode, "Tryb skupienia"),
 ];
 
 struct ActiveDownload {
@@ -751,6 +756,7 @@ impl App {
             self.tabs[index].footer_height(),
             self.devtools_open,
             self.dock_height,
+            self.settings.chrome().content_top(),
         )
     }
 
@@ -944,7 +950,7 @@ impl App {
         }
         tab.layout.as_ref()?.element_at(
             self.mouse.0 / tab.zoom + tab.scroll_x,
-            (self.mouse.1 - TOP) / tab.zoom + tab.scroll,
+            (self.mouse.1 - self.window_regions(self.active).page.y) / tab.zoom + tab.scroll,
         )
     }
 
@@ -1681,6 +1687,7 @@ impl App {
             }
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
+            Action::QuietMode => self.toggle_quiet_mode(),
             Action::Downloads => self.toggle_downloads(false),
             Action::ToggleBookmark => {
                 let tab = &self.tabs[self.active];
@@ -1958,7 +1965,7 @@ impl App {
                 Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab) => {
                     let previous = key == Key::Named(NamedKey::ArrowUp)
                         || (key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
-                    self.chrome_menu = Some(Menu::Main(chrome_menu::step_item(selected, previous)));
+                    self.chrome_menu = Some(Menu::Main(self.step_main_menu(selected, previous)));
                     self.redraw();
                     return;
                 }
@@ -2283,7 +2290,7 @@ impl App {
             canvas.document_at(
                 layout,
                 &mut self.fonts,
-                TOP * u,
+                regions.page.y * u,
                 ScrollOffset {
                     x: tab.scroll_x,
                     y: tab.scroll,
@@ -2315,7 +2322,7 @@ impl App {
                 let scale = u * tab.zoom;
                 let rect = Rect {
                     x: (r.x - tab.scroll_x) * scale,
-                    y: TOP * u + (r.y - tab.scroll) * scale,
+                    y: regions.page.y * u + (r.y - tab.scroll) * scale,
                     width: r.width * scale,
                     height: r.height * scale,
                 };
@@ -2452,7 +2459,13 @@ impl App {
             canvas.clip(full_canvas);
         }
         if let Some(panel) = &self.settings_panel {
-            panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
+            panel.draw_at(
+                &mut canvas,
+                &mut self.fonts,
+                u,
+                &self.settings,
+                regions.page.y,
+            );
         }
         let downloads_frame = self.draw_downloads(&mut canvas, width, height);
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -2514,13 +2527,18 @@ impl App {
                 (1., Color(0x36, 0x31, 0x3e, 255)),
             ],
         );
+        let content_top = self.settings.chrome().content_top();
         canvas.fill_rect(
-            scaled_rect(u, 0., TAB_H, width, TOP - TAB_H),
+            scaled_rect(u, 0., TAB_H, width, content_top - TAB_H),
             NAVIGATION_BAR,
         );
         canvas.fill_rect(scaled_rect(u, 0., TAB_H - 1., width, 1.), CHROME_LINE);
-        for y in [quiet_cinder::TOOLBAR_END - 1., TOP - 1.] {
-            canvas.fill_rect(scaled_rect(u, 0., y, width, 1.), CHROME_LINE);
+        canvas.fill_rect(
+            scaled_rect(u, 0., quiet_cinder::TOOLBAR_END - 1., width, 1.),
+            CHROME_LINE,
+        );
+        if content_top > quiet_cinder::TOOLBAR_END {
+            canvas.fill_rect(scaled_rect(u, 0., content_top - 1., width, 1.), CHROME_LINE);
         }
         self.hits.clear();
         self.draw_tabs(canvas, width);
@@ -2543,7 +2561,9 @@ impl App {
             self.draw_caption_buttons(canvas, width, maximized);
         }
         self.draw_toolbar(canvas, width);
-        self.draw_favorites(canvas, width);
+        if self.settings.chrome().bookmarks_bar_visible() {
+            self.draw_favorites(canvas, width);
+        }
         self.draw_footer(canvas, width, height, dock_visible);
         self.draw_address_suggestions(canvas, width, height);
         self.draw_chrome_menu(canvas, width);
@@ -2735,7 +2755,7 @@ impl App {
         let show_update = self.update_view().is_some();
         #[cfg(not(all(windows, target_arch = "x86_64")))]
         let show_update = false;
-        quiet_cinder::Toolbar::new(width, show_update)
+        self.settings.chrome().toolbar(width, show_update)
     }
 
     fn update_panel_open(&self) -> bool {
@@ -2751,6 +2771,11 @@ impl App {
         #[cfg(all(windows, target_arch = "x86_64"))]
         if let Some(bounds) = layout.update {
             self.draw_update_button(canvas, chrome_box(bounds));
+        }
+        let quiet = self.settings.chrome().quiet_button(layout.quiet);
+        quiet.paint(canvas, u, self.chrome_hover == Some(Action::QuietMode));
+        if let Some(hit) = quiet.hit_rect() {
+            self.hits.push((hit, Action::QuietMode));
         }
         let tab = &self.tabs[self.active];
         let pointer = self.chrome_hover;
@@ -2775,7 +2800,7 @@ impl App {
             ),
             (layout.home, Action::Home, MotionButton::Home, true),
             (
-                Some(layout.downloads),
+                layout.downloads,
                 Action::Downloads,
                 MotionButton::Downloads,
                 true,
@@ -3696,7 +3721,7 @@ impl App {
         }
         let tab = &self.tabs[self.active];
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
-        let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
+        let y = (self.mouse.1 - self.window_regions(self.active).page.y) / tab.zoom + tab.scroll;
         tab.layout
             .as_ref()
             .and_then(|l| l.link_at(x, y))
@@ -3813,7 +3838,7 @@ impl App {
         }
         self.mouse = (
             (x - tab.scroll_x) * tab.zoom,
-            TOP + (y - tab.scroll) * tab.zoom,
+            self.window_regions(self.active).page.y + (y - tab.scroll) * tab.zoom,
         );
         self.pointer_inside = true;
         self.set_dock_focus(false);
@@ -4161,7 +4186,7 @@ impl App {
             return;
         }
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
-        let y = (self.mouse.1 - TOP) / tab.zoom + tab.scroll;
+        let y = (self.mouse.1 - self.window_regions(self.active).page.y) / tab.zoom + tab.scroll;
         let target = tab
             .layout
             .as_ref()
@@ -4287,14 +4312,14 @@ impl App {
             self.select_popup = None;
             return;
         }
-        let y = TOP + (element.y + element.height - tab.scroll) * tab.zoom;
+        let y = content.y + (element.y + element.height - tab.scroll) * tab.zoom;
         let popup_height = row_height * rows as f32;
         let y = if y + popup_height > bottom {
             y - element.height * tab.zoom - popup_height
         } else {
             y
         }
-        .clamp(TOP, bottom - popup_height);
+        .clamp(content.y, bottom - popup_height);
         let x = ((element.x - tab.scroll_x) * tab.zoom).clamp(0., (width - 120.).max(0.));
         let selected = control
             .options
@@ -5027,7 +5052,7 @@ fn downloads_geometry(toolbar: &quiet_cinder::Toolbar, width: f32, height: f32) 
     let top = quiet_cinder::TAB_ROW;
     (
         scaled_rect(1., 0., top, width, (height - top).max(0.)),
-        chrome_box(toolbar.downloads),
+        chrome_box(toolbar.downloads_anchor()),
     )
 }
 
@@ -5360,13 +5385,15 @@ mod download_wiring_tests {
     #[test]
     fn toolbar_slot_and_popup_anchor_share_geometry() {
         for width in [320., 390., 410., 640., 660., 661., 880., 881., 1280.] {
-            let normal = quiet_cinder::Toolbar::new(width, false);
-            for show_update in [false, true] {
-                let toolbar = quiet_cinder::Toolbar::new(width, show_update);
-                let (viewport, anchor) = downloads_geometry(&toolbar, width, 400.);
-                assert_eq!(anchor, chrome_box(normal.downloads));
-                assert_eq!(viewport.y, quiet_cinder::TAB_ROW);
-                assert_eq!(viewport.y + viewport.height, 400.);
+            for quiet in [false, true] {
+                let normal = quiet_cinder::Toolbar::new(width, false, quiet);
+                for show_update in [false, true] {
+                    let toolbar = quiet_cinder::Toolbar::new(width, show_update, quiet);
+                    let (viewport, anchor) = downloads_geometry(&toolbar, width, 400.);
+                    assert_eq!(anchor, chrome_box(normal.downloads_anchor()));
+                    assert_eq!(viewport.y, quiet_cinder::TAB_ROW);
+                    assert_eq!(viewport.y + viewport.height, 400.);
+                }
             }
         }
     }
@@ -5429,6 +5456,21 @@ mod form_frame_tests {
 #[cfg(test)]
 mod dock_tests {
     use super::*;
+
+    #[test]
+    fn quiet_viewport_and_hits_start_after_the_toolbar_not_the_hidden_bar() {
+        let top = quiet_cinder::TOOLBAR_END;
+        let quiet = WindowRegions::with_dock_height(390., 400., 0., false, None, top);
+        assert_eq!(quiet.page.y, 91.);
+        assert_eq!(quiet.page.height, 309.);
+        assert!(!quiet.page.contains(195., top - 0.5));
+        assert!(quiet.page.contains(195., top));
+        let quiet_dock = WindowRegions::with_dock_height(390., 400., 0., true, None, top);
+        assert_eq!(
+            quiet_dock.dock.unwrap().y,
+            quiet_dock.page.y + quiet_dock.page.height
+        );
+    }
 
     #[test]
     fn sources_wait_for_the_new_document_even_when_reloading_the_same_url() {

@@ -25,28 +25,26 @@ and unknown fields remain protected; an explicitly read-only file retains its
 loaded state and disables editing. Other filesystem write failures preserve
 the previous value and surface an error. No settings edit rewrites `session.json`.
 
-## Coordinator wiring (not live until mounted in App)
+## Native wiring
 
-1. **One source of toolbar paint, hits, and anchors.** Use
-   `let layout = self.settings.chrome().toolbar(width);` wherever the native
-   toolbar is laid out. `layout.toolbar` replaces the current
-   `Toolbar::new(width)` plus `reserve_downloads_button(...)`; do not reserve
-   anything a second time. Use those same address/edit bounds for draw, IME,
-   tool hit rectangles, and `address_popup` suggestion anchors.
-2. **Focus command.** Paint with
-   `layout.quiet.paint(canvas, self.scale, hovered)` and register the new
-   toggle action only from `layout.quiet.hit_rect()`. The descriptor also exposes
+1. **One source of toolbar paint, hits, and anchors.** `App::toolbar_layout`
+   combines the saved Quiet state and live update badge into one `Toolbar`.
+   Draw, hits, Downloads fallback, update popup, and address suggestions use
+   that geometry with no second reservation.
+2. **Focus command.** Paint the descriptor made by
+   `self.settings.chrome().quiet_button(layout.quiet)` and register
+   `Action::QuietMode` only from its `hit_rect()`. The descriptor also exposes
    `bounds`, `pressed`, `enabled`, and `label` (`Tryb skupienia`) for status,
    accessibility, or tooltips. In the menu use
    `self.settings.chrome().quiet_menu_label()` and `quiet_enabled()`.
-   `settings::chrome::paint_quiet_glyph(...)`
-   is available if needed. Both actions call `self.toggle_quiet_mode()`, which
+   Both actions call `self.toggle_quiet_mode()`, which
    handles saving, localized error feedback, and geometry invalidation.
 3. **Downloads.** Paint, hit-test and show the toolbar activity indicator only
    when `layout.downloads` is `Some`; convert `Box2` with `chrome_box`.
    For the flyout anchor use `chrome_box(layout.downloads_anchor())` in
    both paint and hit geometry. In Quiet this anchors to the overflow button
-   without making it a Downloads hit. Keep `Ctrl+J` and all transfer behavior
+   or on narrow windows without making it a Downloads hit. Keep `Ctrl+J`,
+   the overflow Downloads command, and all transfer behavior
    working; no cancellation on preference changes.
 4. **Favorites and viewport origin.** Use
    `self.settings.chrome().bookmarks_bar_visible()` to gate *both* favorites
@@ -56,17 +54,13 @@ the previous value and surface an error. No settings edit rewrites `session.json
    link/input/scroll hit mapping, anchored select popups, layout/viewports,
    status/chrome backgrounds and dock geometry currently use static `TOP`.
    Paint only one separator when the origins coincide.
-5. **Settings modal.** Change the `Panel::draw(...)` call to
+5. **Settings modal.** The renderer calls
    `panel.draw_at(&mut canvas, &mut self.fonts, u, &self.settings, regions.page.y)`.
    Settings input already uses `self.window_regions(self.active).page.y`.
-   The compatibility wrapper `Panel::draw` still uses the baseline `CONTENT_TOP`;
-   remove it once App calls `draw_at`. A successful switch save already
-   clears old hit maps and calls normal window-geometry invalidation.
+   A successful switch save clears old hit maps and runs normal
+   window-geometry invalidation.
 
-The Appearance switch itself is mounted and persists now; it does not yet
-change the App bookmark bar. The Quiet toolbar button/menu row, secondary
-toolbar hiding and dynamic viewport are not mounted by this lane. Keep the
-existing modal Escape, repeat, pointer cleanup and DPI routing.
+Keep the existing modal Escape, repeat, pointer cleanup and DPI routing.
 
 ## Checks
 

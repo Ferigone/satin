@@ -36,7 +36,8 @@ pub(super) struct Toolbar {
     pub reload: Box2,
     pub home: Option<Box2>,
     pub update: Option<Box2>,
-    pub downloads: Box2,
+    pub quiet: Box2,
+    pub downloads: Option<Box2>,
     pub menu: Box2,
     pub address: Box2,
     pub bookmark: Box2,
@@ -45,7 +46,7 @@ pub(super) struct Toolbar {
 }
 
 impl Toolbar {
-    pub(super) fn new(width: f32, show_update: bool) -> Self {
+    pub(super) fn new(width: f32, show_update: bool, quiet_mode: bool) -> Self {
         let (padding, gap, button, inline) = if width <= 410. {
             (3., 1., 25., 22.)
         } else if width <= 880. {
@@ -57,12 +58,15 @@ impl Toolbar {
         let center = TAB_ROW + (TOOLBAR_ROW - 1.) / 2.;
         let control = |x| Box2::new(x, center - 15.5, button, 31.);
         let nav = |i: u8| control(padding + f32::from(i) * (button + gap));
-        let home = (width > 660.).then(|| nav(3));
+        let wide = width > 660.;
+        let home = wide.then(|| nav(3));
         let menu = control(width - padding - button);
-        let downloads = control(menu.x - button - gap);
-        let update = show_update.then(|| control(downloads.x - button - gap));
+        let preceding = |bounds: Box2| control(bounds.x - button - gap);
+        let downloads = (wide && !quiet_mode).then(|| preceding(menu));
+        let quiet = preceding(downloads.unwrap_or(menu));
+        let update = show_update.then(|| preceding(quiet));
         let left = home.unwrap_or_else(|| nav(2)).right() + gap;
-        let right = update.unwrap_or(downloads).x - gap;
+        let right = update.unwrap_or(quiet).x - gap;
         let address = Box2::new(left, center - 17., (right - left).max(0.), 34.);
         let location = Box2::new(left + 4., center - 13.5, inline, 27.);
         let bookmark = Box2::new(address.right() - inline - 4., center - 13.5, inline, 27.);
@@ -78,6 +82,7 @@ impl Toolbar {
             reload: nav(2),
             home,
             update,
+            quiet,
             downloads,
             menu,
             address,
@@ -85,6 +90,10 @@ impl Toolbar {
             location,
             edit,
         }
+    }
+
+    pub(super) fn downloads_anchor(&self) -> Box2 {
+        self.downloads.unwrap_or(self.menu)
     }
 }
 
@@ -101,7 +110,7 @@ mod tests {
 
     #[test]
     fn desktop_places_supported_navigation_controls_on_the_reference_grid() {
-        let bar = Toolbar::new(1280., false);
+        let bar = Toolbar::new(1280., false, false);
         assert_eq!(bar.back, Box2::new(11., 51.5, 31., 31.));
         assert_eq!(bar.forward.x, 50.);
         assert_eq!(bar.reload.x, 89.);
@@ -114,21 +123,22 @@ mod tests {
     #[test]
     fn responsive_controls_stay_in_window_and_do_not_overlap() {
         for width in [320., 390., 410., 411., 660., 661., 880., 881., 1280.] {
-            let normal = Toolbar::new(width, false);
-            let offered = Toolbar::new(width, true);
+            let normal = Toolbar::new(width, false, false);
+            let offered = Toolbar::new(width, true, false);
             let update = offered.update.unwrap();
             assert_eq!(normal.downloads, offered.downloads);
             assert_eq!(normal.menu, offered.menu);
             assert_eq!(normal.location, offered.location);
             assert_eq!(normal.address.x, offered.address.x);
             assert!(offered.address.right() < update.x);
-            assert!(update.right() < offered.downloads.x);
+            assert!(update.right() < offered.quiet.x);
             for bar in [normal, offered] {
                 assert_eq!(bar.home.is_some(), width > 660.);
                 assert_eq!(bar.back.w, if width <= 410. { 25. } else { 31. });
                 assert!(bar.menu.right() <= width);
-                assert!(bar.downloads.right() < bar.menu.x);
-                assert!(bar.address.right() < bar.downloads.x);
+                assert_eq!(bar.downloads.is_some(), width > 660.);
+                assert!(bar.quiet.right() < bar.downloads_anchor().x);
+                assert!(bar.address.right() < bar.quiet.x);
                 assert!(bar.location.right() < bar.edit.x);
                 assert!(bar.edit.right() < bar.bookmark.x);
                 assert!(bar.bookmark.right() < bar.address.right());

@@ -154,6 +154,12 @@ const ROWS: &[Row] = &[
         "Zakładki",
         None,
     ),
+    Row::Item(
+        Target::Browser(Action::Downloads),
+        Glyph::Download,
+        "Pobrane pliki",
+        Some(Command::Downloads),
+    ),
     Row::Divider,
     Row::Zoom,
     Row::Item(
@@ -163,6 +169,12 @@ const ROWS: &[Row] = &[
         Some(Command::ToggleDevtools),
     ),
     Row::Divider,
+    Row::Item(
+        Target::Browser(Action::QuietMode),
+        Glyph::Focus,
+        "Tryb skupienia",
+        None,
+    ),
     Row::Item(
         Target::Browser(Action::Settings),
         Glyph::Settings,
@@ -221,7 +233,7 @@ impl Layout {
         let bottom = window_height - VIEWPORT_GAP;
         let height = (rows_height + 2. * PADDING).min(bottom - floor);
         let density = (height - 2. * PADDING) / rows_height;
-        if width < 190. || density < 0.75 {
+        if width < 190. || density < 0.7 {
             return None;
         }
         let right = anchor.x + anchor.width;
@@ -255,6 +267,17 @@ impl Layout {
 }
 
 impl App {
+    pub(super) fn step_main_menu(&self, selected: usize, previous: bool) -> usize {
+        let next = step_item(selected, previous);
+        if !self.settings.chrome().quiet_enabled()
+            && Target::at(next) == Some(Target::Browser(Action::QuietMode))
+        {
+            step_item(next, previous)
+        } else {
+            next
+        }
+    }
+
     pub(super) fn draw_main_menu(&mut self, canvas: &mut Canvas, selected: usize) {
         let Some(anchor) = self
             .hits
@@ -279,8 +302,15 @@ impl App {
             match row {
                 Row::Item(target, glyph, label, hint) => {
                     let index = target.index();
-                    let hovered = self.pointer_in(bounds);
-                    let focused = index == selected;
+                    let quiet = target == Target::Browser(Action::QuietMode);
+                    let enabled = !quiet || self.settings.chrome().quiet_enabled();
+                    let label = if quiet {
+                        self.settings.chrome().quiet_menu_label()
+                    } else {
+                        label
+                    };
+                    let hovered = enabled && self.pointer_in(bounds);
+                    let focused = enabled && index == selected;
                     draw_row_highlight(canvas, bounds, scale, hovered, focused);
                     let text_right = hint.map_or(bounds.x + bounds.width - ROW_INSET, |command| {
                         let hint = shortcuts::label(command);
@@ -298,7 +328,9 @@ impl App {
                         label,
                         (10., text_right),
                     );
-                    self.hits.push((bounds, Action::MenuItem(index)));
+                    if enabled {
+                        self.hits.push((bounds, Action::MenuItem(index)));
+                    }
                 }
                 Row::Divider => {
                     let line = Rect {
@@ -533,7 +565,7 @@ mod tests {
     #[test]
     fn follows_the_toolbar_anchor_and_keeps_all_rows_inside_the_minimum_window() {
         let anchor = |width| {
-            let menu = crate::app::quiet_cinder::Toolbar::new(width).menu;
+            let menu = crate::app::quiet_cinder::Toolbar::new(width, false, false).menu;
             crate::app::chrome_box(menu)
         };
         let normal = Layout::new(1280., 800., anchor(1280.)).unwrap();
@@ -543,7 +575,7 @@ mod tests {
                 x: 917.,
                 y: 87.5,
                 width: 352.,
-                height: 407.,
+                height: 477.,
             }
         );
         assert_eq!(normal.density, 1.);

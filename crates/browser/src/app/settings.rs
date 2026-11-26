@@ -352,6 +352,8 @@ impl App {
         self.chrome_hover = None;
         self.dismiss_address_suggestions();
         self.dismiss_downloads();
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.dismiss_update_panel();
         self.window_geometry_changed();
     }
 }

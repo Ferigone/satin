@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn offer_and_restart_have_distinct_hits_inside_both_panels() {
         for width in [390., 1280.] {
-            let bar = quiet_cinder::Toolbar::new(width, true);
+            let bar = quiet_cinder::Toolbar::new(width, true, false);
             let badge = bar.update.unwrap();
             let panel = panel_rect(width, chrome_box(badge));
             let download = primary_rect(panel, UpdateAction::Download);
