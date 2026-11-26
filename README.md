@@ -28,6 +28,12 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.42
+
+Satin applies CSS cascade layers across stylesheets, including nested layers and reversed ordering for important declarations. On the Tailwind documentation page, the preview paragraph now uses the requested font and occupies three lines. At a 390 px viewport it measures 254 × 72 px in Satin and Chromium. At 1280 px both measure 320 × 72 px. The page’s example still begins lower in Satin. [Native comparison and remaining differences](docs/compatibility/css.md#author-cascade-layers-on-tailwind-css)
+
+Two original WPT documents covering layer order improved from 6 to 43 passes among 43 assertions. The 6,536 static pixel comparisons retained all 1,981 passes and the additional 1,388 Ahem comparisons retained all 315. [Individual assertion results](docs/compatibility/css.md#synchronous-wpt-comparison-for-layers)
+
 ## Changes in alpha.41
 
 Long Brave Search result titles now fit on one line and end with an ellipsis on narrow screens. At a 390 px viewport the first title shrank from 52 to 26 px, matching Chromium. A three-line MDN preview shrank from six lines to three. Editing the line count or resizing the window reflows the following content.
