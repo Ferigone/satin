@@ -23,6 +23,22 @@ The final selector change preserved every status in both pixel cohorts, includin
 
 One remaining Tailwind difference is visible above the example. At 390 px, its table header uses a nested column subgrid. Chromium places the two cells side by side in one 48 px row. Satin stacks them in a 96 px row. Layered imports, layered font-face precedence, `revert-layer` and the specialized CSSOM layer interfaces also remain open.
 
+### Synchronous WPT comparison for layers
+
+| Outcome | Alpha.41 | Layers and reset |
+| --- | ---: | ---: |
+| Reported assertions passing | 10,523 / 37,180 (28.30%) | 10,574 / 37,180 (28.44%) |
+| Pages marked COMPLETE | 3,472 | 3,472 |
+| Pages marked PARTIAL | 269 | 269 |
+| Pages marked HARNESS_ERROR | 223 | 223 |
+| Pages marked NOT_RUN | 4,352 | 4,352 |
+| Assertions marked FAIL | 26,656 | 26,605 |
+| Assertions marked PASS | 10,523 | 10,574 |
+| Assertions marked PRECONDITION_FAILED | 1 | 1 |
+| Runner timeouts within harness errors | 0 | 0 |
+
+51 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 prior passes were unobserved in the candidate. [Individual WPT results](css-layers-testharness.tsv.gz)
+
 ## Alpha.41 line clamping
 
 At 390 × 800 CSS px, Satin wrapped the first Brave Search result title onto a second line. The page requested a one-line preview. Alpha.41 measures the line, reserves space for the ellipsis, and stops emitting text and inline hit regions beyond it. The description moves up by 26 px. At 1280 × 800 the title already fit, and all three browsers measured it at 648 × 26 px. The screenshots below show the same result in alpha.40, alpha.41 and Chromium, left to right.
