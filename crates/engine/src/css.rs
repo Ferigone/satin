@@ -5574,10 +5574,14 @@ pub fn color(value: &str) -> Option<Color> {
                 // Re-read boundary values in f64: rounding lightness to an
                 // endpoint before multiplying can erase chroma. The f32
                 // parses above still bound the accepted inputs.
-                let s = color_number(saturation_token)?.max(0.) / 100.;
-                let l = color_number(lightness_token)? / 100.;
-                if s > 1. || !(0. ..=1.).contains(&l) {
-                    let amplitude = s * l.min(1. - l);
+                let saturation_pct = color_number(saturation_token)?.max(0.);
+                let lightness_pct = color_number(lightness_token)?;
+                if saturation_pct > 100. || !(0. ..=100.).contains(&lightness_pct) {
+                    let s = saturation_pct / 100.;
+                    let l = lightness_pct / 100.;
+                    // Subtract in percentage units so division cannot round
+                    // away the small distance from 100% before amplification.
+                    let amplitude = s * (lightness_pct.min(100. - lightness_pct) / 100.);
                     let channel = |offset: f64| {
                         let k = (offset + h / 30.) % 12.;
                         l - amplitude * (k - 3.).min(9. - k).clamp(-1., 1.)

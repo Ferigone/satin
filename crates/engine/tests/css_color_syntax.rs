@@ -76,18 +76,39 @@ fn extended_range_hsl_paints_like_its_srgb_equivalent() {
             &["hsl(60deg, 5701%, 100.96%)", "hsl(60 5701% 100.96%)"],
         ),
         (
+            "color(srgb 0.462304 0.462304 1.556896 / 60%)",
+            &[
+                "hsla(60deg, 5701%, 100.96%, 60%)",
+                "hsl(60 5701% 100.96% / .6)",
+            ],
+        ),
+        (
             "color(srgb 0.60146 0.60146 -0.61846)",
             &["hsl(240 7176% -0.85%)"],
         ),
         ("color(srgb -0.2 1.2 -0.2)", &["hsl(120 140% 50%)"]),
+        // The first f64 above 100 is 100 + 2^-46. The chosen saturation
+        // amplifies that exact percentage offset to a half-unit amplitude;
+        // dividing the lightness before subtracting instead gives 0.78125.
         (
-            "color(srgb 0.50000001 0.50000001 1.50000001)",
-            &["hsl(60 5000000000% 100.000001%)"],
+            "color(srgb 0.5 0.5 1.5)",
+            &["hsl(60 351843720888320000% 100.00000000000001%)"],
         ),
+        // Finite f32 tokens whose product would overflow in f32. The
+        // extended sRGB channels are near [-x, -x, x], mapping to black.
+        ("#000000", &["hsl(60 3e38% 3e38%)"]),
         ("#999999", &["hsl(30, -50%, 60%)"]),
         ("#008000", &["hsl(120 100% 25%)"]),
         ("#ff3333", &["hsla(0turn, 100%, 50%, 80%)"]),
-        ("#ff0000", &["hsl(120, 140% 50%)"]),
+        (
+            "#ff0000",
+            &[
+                "hsl(120, 140% 50%)",
+                "hsl(60 1e100% 50%)",
+                "hsl(60 50% -1e100%)",
+                "hsl(60 NaN% 50%)",
+            ],
+        ),
     ];
     const WIDTH: u32 = 16;
     let mut html =
@@ -108,15 +129,14 @@ fn extended_range_hsl_paints_like_its_srgb_equivalent() {
     canvas.document(&layout, &mut fonts, 0., 0.);
     assert!(!layout.limited && !canvas.limited);
     let pixel = |row: usize| canvas.pixels[(row * 4 + 2) * WIDTH as usize + 2];
-    assert_ne!(pixel(0), 0xffffff, "the hsl-009 reference is not white");
-    assert_ne!(
-        pixel(0),
-        0xff0000,
-        "the hsl-009 reference is not fallback red"
-    );
+    assert_ne!(pixel(0), pixel(3), "alpha must change the painted swatch");
     let mut row = 0;
     for (reference, inputs) in cases {
         let expected = pixel(row);
+        if reference.starts_with("color(") {
+            assert_ne!(expected, 0xffffff, "{reference} painted canvas white");
+            assert_ne!(expected, 0xff0000, "{reference} painted fallback red");
+        }
         row += 1;
         for input in *inputs {
             assert_eq!(pixel(row), expected, "{input} vs {reference}");
