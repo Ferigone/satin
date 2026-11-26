@@ -575,6 +575,20 @@ struct Plan {
 }
 impl Plan {
     fn commit(self, state: &mut State) -> Vec<NodeId> {
+        // A new leaf at the end of a child list preserves the order of all
+        // previously connected nodes. Moves, fragments and replacements do not.
+        let append = match (self.input.as_slice(), self.roots.as_slice()) {
+            ([id], [root])
+                if id == root
+                    && self.removed.is_empty()
+                    && self.next.is_none()
+                    && state.document.nodes[id.0].parent.is_none()
+                    && state.document.nodes[id.0].children.is_empty() =>
+            {
+                Some((self.parent, *id))
+            }
+            _ => None,
+        };
         let mut changed_scripts = Vec::new();
         let mut seen = HashSet::new();
         for id in self.input {
@@ -617,6 +631,7 @@ impl Plan {
             },
         );
         mark_dirty(state);
+        state.appended_leaf = append;
         dynamic_scripts::inserted(state, self.parent, self.roots, changed_scripts)
     }
 }

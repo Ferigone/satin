@@ -291,7 +291,11 @@ impl LoadedPage {
                     {
                         Some(Arc::from(self.document.text(id)))
                     }
-                    "link" if self.document.attr(id, "disabled").is_none() => {
+                    "link"
+                        if self.document.attr(id, "disabled").is_none()
+                            && self.document.has_link_relation(id, "stylesheet")
+                            && !self.document.has_link_relation(id, "alternate") =>
+                    {
                         self.linked_stylesheets.get(&id).cloned()
                     }
                     _ => None,
@@ -1012,10 +1016,7 @@ impl Loader {
             let node = &page.document.nodes[id.0];
             if let NodeKind::Element { tag, .. } = &node.kind
                 && tag == "link"
-                && page.document.attr(id, "rel").is_some_and(|s| {
-                    s.split_ascii_whitespace()
-                        .any(|v| v.eq_ignore_ascii_case("stylesheet"))
-                })
+                && page.document.has_link_relation(id, "stylesheet")
             {
                 if stylesheet_count >= 8 || Instant::now() > deadline {
                     page.stats.skipped_resources += 1;

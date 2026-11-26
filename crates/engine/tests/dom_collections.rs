@@ -167,3 +167,33 @@ fn repeated_fragment_views_keep_identity_and_charge_only_the_searched_subtree() 
         Value::Bool(true)
     );
 }
+
+#[test]
+fn live_tag_query_tracks_appended_leaves_without_rescanning_unrelated_subtrees() {
+    let page = rust_browser_engine::LoadedPage::from_html(
+        "https://example.test/",
+        &format!("<head><link></head><body>{}</body>", "<i></i>".repeat(5000)),
+    );
+    let mut runtime = rust_browser_engine::script::ScriptRuntime::new(&page).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"
+        const q=document.getElementsByTagName('LINK');
+        for(let i=0;i<240;i++){
+            let link=document.createElement('link');
+            link.setAttribute('id','n'+i);
+            document.head.appendChild(link);
+            if(q.length!==i+2 || q[q.length-1]!==link)throw Error('stale query');
+        }
+        let later=document.createElement('link');document.body.appendChild(later);
+        let earlier=document.createElement('link');document.head.appendChild(earlier);
+        let sorted=q[q.length-1]===later && q[q.length-2]===earlier;
+        document.head.removeChild(earlier);
+        sorted && q.length===242 && q[q.length-1]===later
+    "#
+            )
+            .unwrap(),
+        rust_browser_javascript::Value::Bool(true)
+    );
+}

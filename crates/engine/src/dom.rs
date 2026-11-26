@@ -342,6 +342,14 @@ impl Document {
         }
     }
 
+    pub(crate) fn has_link_relation(&self, id: NodeId, relation: &str) -> bool {
+        self.attr(id, "rel").is_some_and(|value| {
+            value
+                .split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case(relation))
+        })
+    }
+
     pub fn text(&self, id: NodeId) -> String {
         let mut result = String::new();
         let mut pending = vec![id];

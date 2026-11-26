@@ -211,3 +211,23 @@ fn shared_large_strings_keep_separate_vm_charges_across_collection() {
     right.set_global("retained", Value::Null).unwrap();
     assert!(before - right.estimated_heap_bytes() >= 64 * 1024);
 }
+
+#[test]
+fn string_equality_rejects_different_lengths_without_scanning_code_units() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_instructions: 1000,
+        ..VmLimits::default()
+    });
+    vm.set_global("a", Value::from("x".repeat(4096))).unwrap();
+    vm.set_global("b", Value::from("x".repeat(4097))).unwrap();
+    vm.set_global("c", Value::from("x".repeat(4096))).unwrap();
+    assert_eq!(vm.eval("a !== b && a != b").unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm.eval("a === c").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
+    );
+    assert_eq!(
+        vm.eval("a < b").unwrap_err().kind,
+        ErrorKind::ExecutionLimit
+    );
+}
