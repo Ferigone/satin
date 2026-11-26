@@ -157,6 +157,10 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_native_work: u64,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_last_native_site: Option<&'static std::panic::Location<'static>>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -284,6 +288,10 @@ impl Vm {
             next_root: 1,
             next_private_id: 1,
             remaining: limits.max_instructions,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_native_work: 0,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_last_native_site: None,
             limits,
             interrupt: None,
             task_deadline: None,
@@ -565,6 +573,11 @@ impl Vm {
             self.check_interrupt()?;
             self.remaining = instructions;
             self.task_deadline = deadline;
+            #[cfg(feature = "media-startup-diagnostics")]
+            {
+                self.qa_native_work = 0;
+                self.qa_last_native_site = None;
+            }
         }
         self.active += 1;
         let result = callback(self);
@@ -764,10 +777,21 @@ impl Vm {
             .saturating_add(self.code_bytes)
             .saturating_add(self.bigint_storage.bytes)
     }
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub(crate) fn ensure_allocation(&self, bytes: usize) -> Result<(), JsError> {
         if !self.initializing
             && self.estimated_heap_bytes().saturating_add(bytes) > self.limits.max_heap_bytes
         {
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_budget_limit(
+                "heap",
+                Some(std::panic::Location::caller()),
+                bytes as u64,
+                self.limits
+                    .max_heap_bytes
+                    .saturating_sub(self.estimated_heap_bytes()) as u64,
+                self.qa_native_work,
+            );
             Err(JsError::new(
                 ErrorKind::HeapLimit,
                 "Aggregate allocation byte budget exhausted; collect between script tasks",
@@ -776,7 +800,10 @@ impl Vm {
             Ok(())
         }
     }
-    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
+    #[cfg_attr(
+        any(feature = "twitch-bootstrap-profile", feature = "media-startup-diagnostics"),
+        track_caller
+    )]
     pub(crate) fn reserve_allocation(&mut self, bytes: usize) -> Result<(), JsError> {
         #[cfg(feature = "twitch-bootstrap-profile")]
         qa_charge("reserve_allocation", bytes);
@@ -1314,6 +1341,8 @@ impl Vm {
             self.check_interrupt()?;
         }
         if self.remaining == 0 {
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_budget_limit("instruction", self.qa_last_native_site, 1, 0, self.qa_native_work);
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Instruction budget exhausted",
@@ -1328,28 +1357,46 @@ impl Vm {
         }
         Ok(())
     }
-    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
+    #[cfg_attr(
+        any(feature = "twitch-bootstrap-profile", feature = "media-startup-diagnostics"),
+        track_caller
+    )]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
         #[cfg(feature = "twitch-bootstrap-profile")]
         qa_charge("consume_work", units);
         self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_budget_limit(
+                "native",
+                Some(std::panic::Location::caller()),
+                units,
+                self.remaining,
+                self.qa_native_work,
+            );
             self.remaining = 0;
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Native work budget exhausted",
             ));
         }
+        #[cfg(feature = "media-startup-diagnostics")]
+        {
+            self.qa_native_work = self.qa_native_work.saturating_add(units);
+            self.qa_last_native_site = Some(std::panic::Location::caller());
+        }
         self.remaining -= units;
         Ok(())
     }
     /// Charge native DOM/host work to the current shared execution budget.
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
     /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
     /// One nonempty operation always costs at least one instruction.
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
     }
@@ -4676,6 +4723,29 @@ type ProfileHistogram =
 thread_local! {
     static QA_DATA: std::cell::RefCell<Option<ProfileHistogram>> = Default::default();
     static QA_STACK: std::cell::RefCell<Vec<u64>> = Default::default();
+}
+
+// The diagnostic binary emits only Rust source locations and counters, never
+// JavaScript source, URL, or runtime values. Release builds contain no hook.
+#[cfg(feature = "media-startup-diagnostics")]
+pub(crate) fn qa_budget_limit(
+    kind: &str,
+    site: Option<&'static std::panic::Location<'static>>,
+    requested: u64,
+    remaining: u64,
+    native_work: u64,
+) {
+    use std::sync::atomic::AtomicUsize;
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+    if TRACES
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < 128).then_some(count + 1)
+        })
+        .is_ok()
+    {
+        let (file, line) = site.map_or(("-", 0), |loc| (loc.file(), loc.line()));
+        eprintln!("SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
+    }
 }
 
 #[cfg(feature = "twitch-bootstrap-profile")]

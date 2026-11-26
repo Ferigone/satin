@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [features]
 twitch-bootstrap-profile = []
+media-startup-diagnostics = []
 
 [dependencies]
 icu_normalizer = "=2.4.0"

@@ -186,8 +186,17 @@ impl Lexer {
         self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))
     }
 
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     fn reserve_compilation_bytes(&mut self, bytes: usize) -> Result<(), JsError> {
         self.compilation_bytes = self.compilation_bytes.checked_sub(bytes).ok_or_else(|| {
+            #[cfg(feature = "media-startup-diagnostics")]
+            crate::vm::qa_budget_limit(
+                "compiler",
+                Some(std::panic::Location::caller()),
+                bytes as u64,
+                self.compilation_bytes as u64,
+                0,
+            );
             JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted")
         })?;
         Ok(())

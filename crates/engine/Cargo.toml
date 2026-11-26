@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 twitch-bootstrap-profile = ["rust-browser-javascript/twitch-bootstrap-profile"]
+media-startup-diagnostics = ["rust-browser-javascript/media-startup-diagnostics"]
 
 [[test]]
 name = "twitch_bootstrap_profile"

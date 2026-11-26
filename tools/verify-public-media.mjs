@@ -7,6 +7,7 @@ import { arch, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { budgetTrace, safeDiagnostic } from './public-media-diagnostics.mjs';
 
 const cases = [
   { site: 'twitch', url: 'https://www.twitch.tv/theburntpeanut_247' },
@@ -21,15 +22,6 @@ const player = {
   },
   youtube: { shell: '#movie_player', play: '#movie_player .ytp-play-button', seek: '#movie_player .ytp-progress-bar' },
 };
-const errorKinds = /\b(?:ReferenceError|TypeError|SyntaxError|UnsupportedFeature|ExecutionLimit|HeapLimit|RangeError|TimeoutError|NetworkError|SecurityError)\b/;
-function safeDiagnostic(line) {
-  return {
-    kind: line.match(errorKinds)?.[0] ?? 'Other',
-    cause: line.match(/Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
-    inline: line.match(/\binline script #(\d+)\b/i)?.[1] ?? null,
-  };
-}
-
 async function sha256(path) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk);
@@ -40,10 +32,12 @@ const capture = promisify(execFile);
 async function run(exe, args, timeout, env) {
   const options = { timeout, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
   try {
-    return { stdout: (await capture(exe, args, options)).stdout, exit: 0, killed: false };
+    const { stdout, stderr } = await capture(exe, args, options);
+    return { stdout, stderr, exit: 0, killed: false };
   } catch (error) {
     return {
       stdout: error.stdout ?? '',
+      stderr: error.stderr ?? '',
       exit: Number.isInteger(error.code) ? error.code : null,
       killed: error.killed ?? false,
     };
@@ -91,6 +85,7 @@ async function satinCase(exe, { site, url }, dir) {
     diagnosticCount: diagnostics?.length ?? null,
     nestingDiagnostics: diagnostics?.filter(line => line.includes('Expression nesting limit exceeded')).length ?? null,
     firstDiagnostics: diagnostics?.slice(0, 8).map(safeDiagnostic) ?? null,
+    budgetTrace: budgetTrace(outcome.stderr),
     document, media,
     timeProgress: 'not sampled within one run',
     controls: 'not tried by this headless probe',
@@ -292,7 +287,7 @@ async function reaCase(chrome, cli, { site, url }, dir) {
   try { result = JSON.parse(runResult.stdout); } catch { /* no raw output retained */ }
   const evidence = result?.data ?? result;
   const contents = evidence?.normalized_result;
-  const { stdout: _discard, ...status } = runResult;
+  const { stdout: _stdout, stderr: _stderr, ...status } = runResult;
   return {
     site, url, startedUtc, ...status, ok: result?.ok ?? null,
     evidenceId: evidence?.evidence_id ?? null,
