@@ -3818,7 +3818,8 @@ impl App {
         label: &str,
         check_hit: bool,
     ) -> Result<(), String> {
-        let height = self.tab_viewport(self.active).height;
+        let regions = self.window_regions(self.active);
+        let height = regions.viewport(&self.tabs[self.active]).height;
         let tab = &mut self.tabs[self.active];
         let layout = tab.layout.as_ref().ok_or("Missing native layout")?;
         let rect = layout
@@ -3838,7 +3839,7 @@ impl App {
         }
         self.mouse = (
             (x - tab.scroll_x) * tab.zoom,
-            self.window_regions(self.active).page.y + (y - tab.scroll) * tab.zoom,
+            regions.page.y + (y - tab.scroll) * tab.zoom,
         );
         self.pointer_inside = true;
         self.set_dock_focus(false);
@@ -4179,6 +4180,7 @@ impl App {
             return;
         }
         let mut link = self.pointer_link();
+        let content_top = self.window_regions(self.active).page.y;
         let tab = &mut self.tabs[self.active];
         if tab.recovery.is_retry_link(link.as_deref(), &tab.url) {
             let url = tab.url.clone();
@@ -4186,7 +4188,7 @@ impl App {
             return;
         }
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
-        let y = (self.mouse.1 - self.window_regions(self.active).page.y) / tab.zoom + tab.scroll;
+        let y = (self.mouse.1 - content_top) / tab.zoom + tab.scroll;
         let target = tab
             .layout
             .as_ref()
