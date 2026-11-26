@@ -132,6 +132,8 @@ pub(crate) enum Op {
     SuperConstruct,
     Class(Rc<ClassCode>, ClassName),
     Property,
+    NamedProperty(JsString),
+    LoadProperty(JsString),
     PrivateProperty(JsString),
     PrivateIn(JsString),
     Get,
@@ -400,6 +402,8 @@ pub(crate) fn retained_size(
                 | Op::CopyAnnexFunction(s)
                 | Op::Name(s)
                 | Op::LoadName(s)
+                | Op::NamedProperty(s)
+                | Op::LoadProperty(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
                 | Op::InferName(s)
@@ -1489,7 +1493,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     for link in links.iter().rev() {
                         match link {
                             ChainLink::Member(key, optional) => {
-                                pending.extend([I(Op::Property), E(key)]);
+                                if let Expr::Literal(Value::String(name)) = key {
+                                    pending.push(I(Op::NamedProperty(name.clone())));
+                                } else {
+                                    pending.extend([I(Op::Property), E(key)]);
+                                }
                                 if *optional {
                                     pending.push(Emit::Optional(branches.clone(), false));
                                 }
@@ -1535,8 +1543,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([I(Op::SuperProperty), E(key), I(Op::This)])
                 }
                 Expr::Member(object, key) => {
-                    pending.push(I(Op::Property));
-                    pending.push(E(key));
+                    if let Expr::Literal(Value::String(name)) = key.as_ref() {
+                        pending.push(I(Op::NamedProperty(name.clone())));
+                    } else {
+                        pending.extend([I(Op::Property), E(key)]);
+                    }
                     pending.push(E(object));
                 }
                 Expr::PrivateMember(object, name) => {
@@ -1594,7 +1605,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([I(Op::Get), I(Op::SuperProperty), E(key), I(Op::This)])
                 }
                 Expr::Member(object, key) => {
-                    pending.extend([I(Op::Get), I(Op::Property), E(key), E(object)]);
+                    if let Expr::Literal(Value::String(name)) = key.as_ref() {
+                        pending.extend([I(Op::LoadProperty(name.clone())), E(object)]);
+                    } else {
+                        pending.extend([I(Op::Get), I(Op::Property), E(key), E(object)]);
+                    }
                 }
                 Expr::PrivateMember(..) => pending.extend([I(Op::Get), R(e, false)]),
                 Expr::PrivateIn(name, object) => {

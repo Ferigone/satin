@@ -67,6 +67,17 @@ passed (`target/native-media-byzFsG/`). On the public repeat
 instruction limit. YouTube still hit both the native-work and compilation
 memory limits. No public playback, controls, or Twitch chat were verified.
 
+`7f4e3a7` stores entirely ASCII source at one byte per code unit instead of
+four, with Unicode and lone surrogates preserved on their existing path.
+140 focused Rust tests and four diagnostic tests passed. All four local
+progressive/MSE scenarios passed in `target/native-media-ZhvR61/`.
+The current live capture (`target/public-media/satin-DkHnr7/`) still hits
+both JS limits. Its failing YouTube compilation processed 2,536,233 of
+10,935,744 source code points (23.2%) before exhausting an initial
+88,731,616-byte structural allowance. This source used the wide backing
+(43,742,976 bytes), so the ASCII improvement did not address that failure.
+These are bounded lexer diagnostics, not a measured allocation high-water mark.
+
 ## Compiler memory policy
 
 There is no universal compiler-memory quota in ECMAScript. Its
@@ -90,7 +101,8 @@ quota to particular sites:
 
 Satin already derives the classic-document compiler allowance from the
 512 MiB VM allocation cap minus estimated heap use and a source/scratch
-reservation (`16 * source bytes + 4096`). The 12 MiB classic source cap is
+reservation (`16 * source bytes + 4096` in the baseline, now `13 * source bytes + 4096`
+for wholly ASCII scripts). The 12 MiB classic source cap is
 separate. The lexer typically debits 384 bytes per structural token, even
 though only three lookahead tokens are held. This is an AST/bytecode proxy,
 not allocation tracking. Satin already validates and releases one eligible

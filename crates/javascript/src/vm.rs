@@ -2459,6 +2459,22 @@ impl Vm {
         }
         Ok(key)
     }
+
+    fn read_named_property(&mut self, object: Value, name: &JsString) -> Result<Value, JsError> {
+        if object.is_nullish() {
+            return Err(JsError::type_error("Cannot access a property of null or undefined"));
+        }
+        if let Some(id) = object.as_object()
+            && let Some(value) = self.heap.cached_own_data(id, name)
+        {
+            // Exact identity match: no UTF-16 scan, coercion or property search.
+            self.consume_work(1)?;
+            return Ok(value);
+        }
+        self.consume_work(name.len())?;
+        self.get_string_property(object, name, true)
+    }
+
     pub(crate) fn read_reference(&mut self, reference: Reference) -> Result<Value, JsError> {
         match reference {
             Reference::Binding(env, key) => {
@@ -2486,21 +2502,10 @@ impl Vm {
                 }
             }
             Reference::Global(object, key) => self.get(Value::Object(object), &key),
+            Reference::Property(object, Value::String(name)) => self.read_named_property(object, &name),
             Reference::Property(object, key) => {
-                if let Value::String(name) = &key
-                    && let Some(id) = object.as_object()
-                    && let Some(value) = self.heap.cached_own_data(id, name)
-                {
-                    // The object and exact key identity matched; no coercion,
-                    // UTF-16 scan, or prototype/property search took place.
-                    self.consume_work(1)?;
-                    return Ok(value);
-                }
                 let key = self.property_reference_key(&object, &key)?;
-                match key {
-                    PropertyKey::String(name) => self.get_string_property(object, &name, true),
-                    key => self.get_property_key(object, key),
-                }
+                self.get_property_key(object, key)
             }
             Reference::Private(object, id) => self.private_get(object, id),
             Reference::Unresolvable(key) => Err(JsError::new(
@@ -3555,6 +3560,8 @@ impl Vm {
             | Op::SuperConstructor
             | Op::SuperConstruct) => self.run_class_op(op, stack, env)?,
             op @ (Op::Property
+            | Op::NamedProperty(..)
+            | Op::LoadProperty(..)
             | Op::Get
             | Op::NormalizeReference
             | Op::InvalidCallAssignment
@@ -3703,6 +3710,18 @@ impl Vm {
         strict: bool,
     ) -> Result<(), JsError> {
         match op {
+            Op::NamedProperty(name) => {
+                let key = self.account_value(Value::String(name.clone()))?;
+                let object = self.pop_value(stack)?;
+                stack.push(Item::Reference(Reference::Property(object, key)));
+            }
+            Op::LoadProperty(name) => {
+                self.check_string_length(name.len())?;
+                self.account_string(name)?;
+                let object = self.pop_value(stack)?;
+                let value = self.read_named_property(object, name)?;
+                stack.push(Item::Value(value));
+            }
             Op::Property => {
                 let key = self.pop_value(stack)?;
                 let object = self.pop_value(stack)?;
