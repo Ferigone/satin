@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+pub(super) mod chrome;
+
 const MAX_ADDRESS_BYTES: usize = 16_384;
 
 pub(crate) enum Movement {
