@@ -7,7 +7,7 @@ use rust_browser_engine::{
 };
 use std::{
     env, fs,
-    io::{self, BufRead},
+    io::{self, BufRead, Cursor, Read},
     path::Path,
     sync::Arc,
 };
@@ -17,9 +17,13 @@ fn render(
     path: &str,
     fonts: &mut Fonts,
     ahem: Option<&Arc<FontSet>>,
+    png: Option<&(String, Arc<image::RgbaImage>)>,
 ) -> Result<serde_json::Value, String> {
     let source = fs::read_to_string(root.join(path)).map_err(|error| error.to_string())?;
     let mut page = LoadedPage::from_html(&format!("https://web-platform.test/{path}"), &source);
+    if let Some((url, image)) = png {
+        page.images.insert(url.clone(), Arc::clone(image));
+    }
     if let Some(font_set) = ahem
         && page.document.html_elements("link").any(|id| {
             page.document.attr(id, "href") == Some("/fonts/ahem.css")
@@ -78,10 +82,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    // The PNG pilot stages one verified file in a private root. The URL is
+    // only a layout resource key; it is never fetched or used as a filename.
+    let png = if env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--local-png")) {
+        let url = env::args().nth(3).ok_or("missing local PNG URL")?;
+        let mut bytes = Vec::new();
+        fs::File::open(root.join("binding.png"))?
+            .take(4097)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 4096 {
+            return Err("PNG input budget exceeded".into());
+        }
+        let mut reader =
+            image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(100);
+        limits.max_image_height = Some(100);
+        limits.max_alloc = Some(1 << 20);
+        reader.limits(limits);
+        Some((url, Arc::new(reader.decode()?.to_rgba8())))
+    } else {
+        None
+    };
     let mut fonts = Fonts::new()?;
     for line in io::stdin().lock().lines() {
         let path = line?;
-        let result = render(root, &path, &mut fonts, ahem.as_ref())
+        let result = render(root, &path, &mut fonts, ahem.as_ref(), png.as_ref())
             .unwrap_or_else(|error| serde_json::json!({"error":error}));
         println!("{result}");
     }
