@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
 mod devtools;
-mod file_picker;
 mod downloads;
+mod file_picker;
 mod headless;
 mod jobs;
 mod media;
@@ -201,7 +201,7 @@ fn run() -> Result<(), String> {
         let height = value("--height").and_then(|height| height.parse::<u32>().ok());
         (width.is_some() || height.is_some()).then(|| {
             winit::dpi::PhysicalSize::new(
-                width.unwrap_or(1180).clamp(640, 4096),
+                width.unwrap_or(1180).clamp(390, 4096),
                 height.unwrap_or(840).clamp(400, 4096),
             )
         })

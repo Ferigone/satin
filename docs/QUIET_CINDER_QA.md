@@ -136,11 +136,13 @@ and DPI and records cursor coordinates relative to the client; still inspect
 for occlusion or tooltips. Do not move the mouse while saving. Reject captures
 that show another window or a mismatched action state.
 
-At `9b20e48` a restored window supports a 390 px logical minimum, but
-`--smoke-window --width 390` is still clamped by the CLI to 640 *physical*
-pixels. For `narrow-390` use the visible-window method above and require the
-receipt's client dimensions to be exactly `390,800`; never crop or resize a
-640 px frame. A binary that cannot create that client is a viewport gap.
+Early candidates (including `9b20e48` and `2bfe648`) support a 390 px logical
+minimum in a restored window but clamp `--smoke-window --width 390` to 640
+physical pixels; use the visible-window method for those binaries. Builds
+with the 390 px CLI floor may use `--smoke-window --width 390 --height 800`
+at 100% scaling for settled, non-hover states. Require an actual 390×800
+PNG or client rectangle; never crop, resample, or count a different size.
+A binary that cannot create that client is a viewport gap.
 For non-hover cases at `desktop` and `narrow`, `--smoke-window` can instead save its
 native client canvas, if its synthetic actions reach the same state. Verify
 the JSON receipt (`window_smoke`, `frames_presented > 0`, expected URL/title,
