@@ -28,6 +28,10 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.43
+
+Satin lays out nested column subgrids against the parent tracks. In the Tailwind CSS documentation, the two table headings now share a 48 px row at a 390 px viewport. The example below the table moved up by 208 px and starts approximately 12 px below its position in Chromium. The pinned screen comparison improved from 1,981 to 1,993 passes among 6,536 cases. Fifteen cases gained a pass and three lost one. The separate Ahem comparison improved from 315 to 316 passes among 1,388. [Screenshots, individual outcomes and remaining grid differences](docs/compatibility/css.md#column-subgrid-development)
+
 ## Changes in alpha.42
 
 Satin applies CSS cascade layers across stylesheets, including nested layers and reversed ordering for important declarations. On the Tailwind documentation page, the preview paragraph now uses the requested font and occupies three lines. At a 390 px viewport it measures 254 × 72 px in Satin and Chromium. At 1280 px both measure 320 × 72 px. The page’s example still begins lower in Satin. [Native comparison and remaining differences](docs/compatibility/css.md#author-cascade-layers-on-tailwind-css)

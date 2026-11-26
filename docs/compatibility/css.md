@@ -16,6 +16,8 @@ Across the same 6,536 eligible screen comparisons, passes rose from 1,981 to 1,9
 
 The complete Linux workspace run for this candidate passed 1,470 tests, with three existing opt-in tests ignored. Blob URL fetches use zero-delay timer tasks. Their tests now drive pending tasks through a frame yield before comparing all six request outcomes.
 
+On a separate wide-window check of the original Brave Search results, Chromium placed the sidebar under `#mixed-side` at x = 823 px. Satin left it under `#mixed-main` at x = 103 px. A second load in the versioned alpha.42 binary recorded three executed scripts, 30 skipped resources, zero pending requests, and a dynamic import ending with `ExecutionLimit: Native work budget exhausted`. The DOM and runtime observations do not isolate which module moves the sidebar. [Brave result page](https://search.brave.com/search?q=test)
+
 ## Author cascade layers on Tailwind CSS
 
 The Tailwind CSS documentation applies its component utilities inside five `@layer` blocks. Alpha.41 fetched the stylesheet but discarded those blocks. The example paragraph used the default font, wrapped to 14 lines at 390 × 800 and occupied 268.8 px. The cascade-layer implementation applies the three-line limit, the Inter font stack and the requested 24 px line height. The paragraph measures 72 px at both viewport sizes. [Original Tailwind example](https://tailwindcss.com/docs/line-clamp) · [Measured implementation](https://github.com/Ferigone/satin/commit/f1ff062)
