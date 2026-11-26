@@ -12,7 +12,7 @@ pub(super) const FILE_NAME: &str = "bookmarks.json";
 const SCHEMA: u32 = 1;
 const MAX_ENTRIES: usize = 128;
 const MAX_URL_BYTES: usize = 8192;
-const MAX_TITLE_CHARS: usize = 120;
+pub(super) const MAX_TITLE_CHARS: usize = 120;
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -163,6 +163,24 @@ impl Bookmarks {
         entries.remove(index);
         self.commit(entries)?;
         Ok(true)
+    }
+
+    pub(super) fn rename(&mut self, url: &Url, input: &str) -> Result<(), String> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| &entry.url == url)
+            .ok_or("Bookmark no longer exists.")?;
+        let title = page_title(input);
+        if title.is_empty() {
+            return Err("Enter a bookmark name.".into());
+        }
+        if title == self.entries[index].title {
+            return Ok(());
+        }
+        let mut entries = self.entries.clone();
+        entries[index].title = title;
+        self.commit(entries)
     }
 
     fn commit(&mut self, entries: Vec<Bookmark>) -> Result<(), String> {
@@ -327,10 +345,32 @@ mod tests {
         assert!(bookmarks.remove(&page_url(ALPHA).unwrap()).is_err());
         assert!(bookmarks.contains(&page_url(ALPHA).unwrap()));
         assert!(
+            bookmarks
+                .rename(&page_url(ALPHA).unwrap(), "Not published")
+                .is_err()
+        );
+        assert_eq!(bookmarks.entries()[0].title, "Authored page Alpha");
+        assert!(
             Bookmarks::open(path)
                 .unwrap()
                 .contains(&page_url(ALPHA).unwrap())
         );
         fs::remove_dir(pending).unwrap();
+    }
+
+    #[test]
+    fn rename_reuses_title_validation_and_keeps_url_and_order() {
+        let profile = DisposableProfile::new();
+        let path = profile.bookmarks();
+        let mut bookmarks = Bookmarks::open(path.clone()).unwrap();
+        bookmarks.add(ALPHA, "Alpha").unwrap();
+        bookmarks.add(BETA, "Beta").unwrap();
+        let url = page_url(ALPHA).unwrap();
+        assert!(bookmarks.rename(&url, "  \u{202e}  ").is_err());
+        bookmarks.rename(&url, "  Nowy \u{202e} tytuł  ").unwrap();
+        let bookmarks = Bookmarks::open(path).unwrap();
+        assert_eq!(bookmarks.entries()[0].url.as_str(), BETA);
+        assert_eq!(bookmarks.entries()[1].url, url);
+        assert_eq!(bookmarks.entries()[1].title, "Nowy tytuł");
     }
 }
