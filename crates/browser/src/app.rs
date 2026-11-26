@@ -2858,11 +2858,7 @@ impl App {
             chrome_box(layout.location),
             17.,
             u,
-            if tab.is_home() {
-                icons::Glyph::Compass
-            } else {
-                icons::Glyph::Search
-            },
+            icons::Glyph::Search,
             CHROME_ICON,
         );
 
@@ -3028,8 +3024,9 @@ impl App {
         };
         let mut x = manager.x + manager.width + 3.;
         let font = 11. * u;
+        let label_inset = 8. + 15. + 6.;
         for (index, bookmark) in store.entries().iter().take(9).enumerate() {
-            let available = (width - 11. - x - 16.).min(166.);
+            let available = (width - 11. - x - label_inset - 8.).min(166.);
             if available < 24. {
                 break;
             }
@@ -3040,21 +3037,26 @@ impl App {
             } else {
                 &bookmark.title
             };
-            let label = elide(&self.fonts, text, available * u, font);
-            let advance = self.fonts.shape(&label, font, false, false, false).advance / u;
-            let bounds = scaled_rect(1., x, y + 3., advance + 16., 23.);
+            let label = chrome_elide(&self.fonts, text, available * u, font, 400);
+            let run = chrome_shape(&self.fonts, &label, font, 400);
+            let bounds = scaled_rect(1., x, y + 2.25, run.advance / u + label_inset + 8., 24.5);
             let action = Action::Favorite(index);
             let hovered = self.chrome_hover == Some(action);
             if hovered {
                 rounded_chrome_rect(canvas, physical_rect(u, bounds), 4. * u, CHROME_HOVER);
             }
-            canvas.label(
-                &label,
-                (x + 8.) * u,
+            let icon = scaled_rect(1., x + 8., y + 7., 15., 15.);
+            if let Some(bitmap) = built_in_site_icon(bookmark.url.as_str()) {
+                canvas.image(physical_rect(u, icon), bitmap);
+            } else {
+                rounded_chrome_rect(canvas, physical_rect(u, icon), 4. * u, CHROME_ACCENT_SOFT);
+                paint_centered_glyph(canvas, icon, 11., u, icons::Glyph::Globe, CHROME_ACCENT);
+            }
+            canvas.text(
+                (x + label_inset) * u,
                 (y + 18.) * u,
-                font,
+                &run,
                 if hovered { CHROME_TEXT } else { CHROME_ICON },
-                false,
                 &mut self.fonts,
             );
             self.hits.push((bounds, action));
