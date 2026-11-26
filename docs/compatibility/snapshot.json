@@ -18,11 +18,11 @@
     },
     {
       "label": "Static CSS reftests",
-      "date": "2026-11-25",
-      "satinRevision": "7d5477a24b8876a5ee24ad717a5ffce6a541d8bd",
-      "pass": 1968, "total": 6536,
-      "scope": "Alpha.37 static screen comparisons in the pinned WPT CSS tree",
-      "source": "docs/compatibility/css.md#alpha37-static-css-rerun"
+      "date": "2026-11-26",
+      "satinRevision": "4ebaf760fd136017262a0a21284e76a00ac798bb",
+      "pass": 1981, "total": 6536,
+      "scope": "Alpha.41 static screen comparisons in the pinned WPT CSS tree",
+      "source": "docs/compatibility/css.md#alpha41-line-clamping"
     }
   ],
   "web": [

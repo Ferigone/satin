@@ -962,6 +962,8 @@ fn dom_rect(vm: &mut Vm, rect: Rect) -> Result<Value, JsError> {
 }
 
 const PROPERTIES: &[(&str, &str)] = &[
+    ("webkitLineClamp", "-webkit-line-clamp"),
+    ("webkitBoxOrient", "-webkit-box-orient"),
     ("display", "display"),
     ("listStyleType", "list-style-type"),
     ("opacity", "opacity"),
@@ -1393,8 +1395,27 @@ fn resolved_values<'a>(
     Some(move |name: &str| {
         let name = physical_css_name(name, style.rtl);
         match name {
+            "-webkit-line-clamp" => style
+                .webkit_line_clamp
+                .map_or_else(|| "none".into(), |v| v.to_string()),
+            "-webkit-box-orient" => if style.vertical_box {
+                "vertical"
+            } else {
+                "horizontal"
+            }
+            .into(),
+            "display"
+                if style.vertical_box
+                    && style.webkit_line_clamp.is_some()
+                    && style.display == css::Display::WebkitBox =>
+            {
+                "flow-root".into()
+            }
             "display" => format!("{:?}", style.display)
                 .to_ascii_lowercase()
+                .replace("inlinewebkitbox", "-webkit-inline-box")
+                .replace("webkitbox", "-webkit-box")
+                .replace("flowroot", "flow-root")
                 .replace("inlineblock", "inline-block")
                 .replace("inlineflex", "inline-flex")
                 .replace("inlinegrid", "inline-grid")

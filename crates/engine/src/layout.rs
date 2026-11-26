@@ -616,6 +616,8 @@ impl Layout {
 enum Item {
     Text {
         run: Run,
+        collapsed_space: bool,
+        clamp_text: Option<Box<str>>,
         color: Color,
         background: Option<Color>,
         underline: bool,
@@ -654,6 +656,8 @@ struct Line<'a> {
     parent: &'a Style,
     containing_height: Option<f32>,
     previous_margin: Option<f32>,
+    remaining_lines: Option<u32>,
+    deferred_break: bool,
 }
 impl<'a> Line<'a> {
     fn new(x: f32, y: f32, width: f32, parent: &'a Style, containing_height: Option<f32>) -> Self {
@@ -667,6 +671,8 @@ impl<'a> Line<'a> {
             parent,
             containing_height,
             previous_margin: None,
+            remaining_lines: None,
+            deferred_break: false,
         }
     }
 }
@@ -3026,6 +3032,9 @@ impl Builder<'_> {
     fn child_inner(&mut self, id: NodeId, line: &mut Line<'_>, href: Option<Arc<str>>) {
         let doc = &self.page.document;
         let s = &self.styles[id.0];
+        if line.remaining_lines == Some(0) && !s.position.out_of_flow() {
+            return;
+        }
         match &doc.nodes[id.0].kind {
             NodeKind::Comment(_)
             | NodeKind::ProcessingInstruction { .. }
@@ -3059,7 +3068,7 @@ impl Builder<'_> {
         }
         let tag = doc.tag(id);
         if tag == "br" {
-            self.flush(line, true);
+            self.forced_break(line, id);
             return;
         }
         let href = if tag == "a" {
@@ -3077,7 +3086,12 @@ impl Builder<'_> {
         }
         if matches!(
             s.display,
-            Display::Block | Display::ListItem | Display::Flex | Display::Grid
+            Display::Block
+                | Display::WebkitBox
+                | Display::FlowRoot
+                | Display::ListItem
+                | Display::Flex
+                | Display::Grid
         ) {
             self.flush(line, false);
             let top = s.margin[0].resolve(line.width, s.font_size).unwrap_or(0.);
@@ -3107,7 +3121,10 @@ impl Builder<'_> {
             || self.is_replaced_control(id)
             || matches!(
                 s.display,
-                Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+                Display::InlineBlock
+                    | Display::InlineWebkitBox
+                    | Display::InlineFlex
+                    | Display::InlineGrid
             )
         {
             let m = BoxMetrics::new(s, line.width, Constraints::default());
@@ -3369,13 +3386,20 @@ impl Builder<'_> {
             };
             self.grid(id, cx, cy, m.width, [block, inline], href.clone())
         } else {
-            let independent = c.flex_item
+            let independent = matches!(
+                s.display,
+                Display::FlowRoot | Display::WebkitBox | Display::InlineWebkitBox
+            ) || c.flex_item
                 || s.position.out_of_flow()
                 || s.float != css::Float::None
                 || s.overflow.iter().any(|o| o.scrollable())
                 || self.page.document.nodes[id.0].parent == Some(self.page.document.root);
             let outer = independent.then(|| std::mem::take(&mut self.floats));
             let mut line = Line::new(cx, cy, m.width, s, percentage_basis);
+            if matches!(s.display, Display::WebkitBox | Display::InlineWebkitBox) && s.vertical_box
+            {
+                line.remaining_lines = s.webkit_line_clamp;
+            }
             if matches!(tag, "input" | "button" | "select" | "textarea")
                 && let Some(label) = self
                     .page
@@ -3574,6 +3598,10 @@ impl Builder<'_> {
         }
     }
     fn inline_fragment(&mut self, f: Fragment, s: &Style, line: &mut Line<'_>, node: NodeId) {
+        if line.deferred_break {
+            self.break_inline(line, true, node);
+            return;
+        }
         let space = if line.pending_space && !line.items.is_empty() {
             self.shape(" ", s).advance
         } else {
@@ -3583,7 +3611,9 @@ impl Builder<'_> {
             && !line.items.is_empty()
             && line.used + space + f.width > self.float_interval(line).width()
         {
-            self.flush(line, false);
+            if !self.break_inline(line, false, node) {
+                return;
+            }
         }
         self.fit_empty_line(line, f.width);
         self.pending_space(s, line, None, node);
@@ -4033,6 +4063,8 @@ impl Builder<'_> {
                     if matches!(
                         s.display,
                         Display::Block
+                            | Display::WebkitBox
+                            | Display::FlowRoot
                             | Display::ListItem
                             | Display::Flex
                             | Display::Grid
@@ -4120,7 +4152,7 @@ impl Builder<'_> {
         if s.pre {
             for (index, part) in text.split('\n').enumerate() {
                 if index > 0 {
-                    self.flush(line, true);
+                    self.forced_break(line, node);
                 }
                 if s.wrap {
                     for token in part.split_inclusive([' ', '\t']) {
@@ -4167,6 +4199,8 @@ impl Builder<'_> {
             let run = self.shape(" ", s);
             line.used += run.advance;
             line.items.push(Item::Text {
+                collapsed_space: true,
+                clamp_text: None,
                 run,
                 color: s.color,
                 background: s.background,
@@ -4187,14 +4221,18 @@ impl Builder<'_> {
         node: NodeId,
         wrap: bool,
     ) {
-        if word.is_empty() {
+        if word.is_empty() || line.remaining_lines == Some(0) {
+            return;
+        }
+        if line.deferred_break {
+            self.break_inline(line, true, node);
             return;
         }
         // Emergency wrapping never shapes every growing prefix. Pathological
         // tokens use bounded chunks; ordinary words preserve shaping clusters.
         if wrap && s.break_words && word.len() > 4096 {
-            if !line.items.is_empty() {
-                self.flush(line, false);
+            if !line.items.is_empty() && !self.break_inline(line, false, node) {
+                return;
             }
             let width = self.float_interval(line).width();
             let runs = self.fonts.break_word_text(
@@ -4207,8 +4245,8 @@ impl Builder<'_> {
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
                 self.push_run(run, s, line, href.clone(), node);
-                if i + 1 < count {
-                    self.flush(line, false);
+                if i + 1 < count && !self.break_inline(line, false, node) {
+                    return;
                 }
             }
             return;
@@ -4226,7 +4264,9 @@ impl Builder<'_> {
             && !line.items.is_empty()
             && line.used + space + run.advance > self.float_interval(line).width()
         {
-            self.flush(line, false);
+            if !self.break_inline(line, false, node) {
+                return;
+            }
         }
         self.fit_empty_line(line, run.advance);
         let width = self.float_interval(line).width();
@@ -4241,14 +4281,20 @@ impl Builder<'_> {
             let count = runs.len();
             for (i, run) in runs.into_iter().enumerate() {
                 self.push_run(run, s, line, href.clone(), node);
-                if i + 1 < count {
-                    self.flush(line, false);
+                if i + 1 < count && !self.break_inline(line, false, node) {
+                    return;
                 }
             }
             return;
         }
         self.pending_space(s, line, href.clone(), node);
         self.push_run(run, s, line, href, node);
+        if line.remaining_lines == Some(1)
+            && word.len() <= crate::fonts::MAX_SHAPE_INPUT_BYTES
+            && let Some(Item::Text { clamp_text, .. }) = line.items.last_mut()
+        {
+            *clamp_text = Some(word.into());
+        }
     }
     fn push_run(
         &mut self,
@@ -4262,6 +4308,8 @@ impl Builder<'_> {
         line.pending_space = false;
         line.used += run.advance;
         line.items.push(Item::Text {
+            collapsed_space: false,
+            clamp_text: None,
             run,
             color: s.color,
             background: s.background,
@@ -4271,7 +4319,74 @@ impl Builder<'_> {
             line_height: s.line_height_px(),
         });
     }
+    fn forced_break(&mut self, line: &mut Line<'_>, node: NodeId) {
+        // A trailing newline or br does not by itself produce another line.
+        if line.remaining_lines == Some(1) && !line.deferred_break {
+            line.deferred_break = true;
+        } else {
+            self.break_inline(line, true, node);
+        }
+    }
+
+    /// A following inline item needs a new line. At the clamp boundary,
+    /// reserve room for the ellipsis before emitting paint and hit regions.
+    fn break_inline(&mut self, line: &mut Line<'_>, force: bool, node: NodeId) -> bool {
+        if line.remaining_lines == Some(0) {
+            return false;
+        }
+        if line.remaining_lines == Some(1) {
+            let style = line.parent;
+            let ellipsis = self.shape("…", style);
+            let width = self.float_interval(line).width();
+            while line.used + ellipsis.advance > width {
+                let Some(item) = line.items.pop() else { break };
+                line.used -= item.advance();
+            }
+            while matches!(
+                line.items.last(),
+                Some(Item::Text {
+                    collapsed_space: true,
+                    ..
+                })
+            ) {
+                line.used -= line.items.pop().unwrap().advance();
+            }
+            // Shape adjacent text and the ellipsis together so kerning and
+            // fractional glyph origins agree with an authored ellipsis.
+            if let Some(Item::Text {
+                clamp_text: Some(text),
+                run,
+                color,
+                underline,
+                background,
+                href: None,
+                node: previous,
+                ..
+            }) = line.items.last_mut()
+                && *background == style.background
+                && *color == style.color
+                && *underline == style.underline
+                && self.styles[previous.0].font_size == style.font_size
+                && self.styles[previous.0].font_request() == style.font_request()
+            {
+                let joined = self.shape(&format!("{text}…"), style);
+                line.used += joined.advance - run.advance;
+                *run = joined;
+            } else {
+                self.push_run(ellipsis, style, line, None, node);
+            }
+        }
+        self.flush(line, force);
+        line.remaining_lines != Some(0)
+    }
+
     fn flush(&mut self, line: &mut Line<'_>, force: bool) {
+        line.deferred_break = false;
+        if (force || !line.items.is_empty())
+            && let Some(left) = &mut line.remaining_lines
+        {
+            *left = left.saturating_sub(1);
+        }
         if line.items.is_empty() {
             if force {
                 line.y += line.parent.line_height_px();
@@ -4521,7 +4636,12 @@ impl Builder<'_> {
                     let block = !text
                         && matches!(
                             cs.display,
-                            Display::Block | Display::ListItem | Display::Flex | Display::Grid
+                            Display::Block
+                                | Display::WebkitBox
+                                | Display::FlowRoot
+                                | Display::ListItem
+                                | Display::Flex
+                                | Display::Grid
                         );
                     let floated = !text && cs.float != css::Float::None;
                     if (block || floated)

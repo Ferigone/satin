@@ -4,7 +4,10 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from contextlib import suppress
 from functools import cache
@@ -13,14 +16,23 @@ from pathlib import Path, PurePosixPath
 
 # A static document cannot execute script, advance animation time, fetch resources,
 # perform navigation or honor runner configuration. Check references just as strictly.
-EXTERNAL_CSS = re.compile(r"\burl\s*\(|@(?:import|font-face)\b|\bimage-set\s*\(|\bAhem\b", re.I)
+EXTERNAL_CSS = re.compile(r"\burl\s*\(|@(?:import|font-face)\b|\bimage-set\s*\(", re.I)
 TIMED_CSS = re.compile(r"(?:^|[;{\s])(?:animation|transition)(?:-[\w-]+)?\s*:", re.I)
 
 
+AHEM_FILES = {
+    "fonts/Ahem.ttf": "b719ecb31c5b21fc573c03f6421c74ac63c271a5a3ff841e34f9705fb94b8448",
+    "fonts/ahem.css": "5d8b9526d7be573871022125d5ec44f4893e4d851c26ab3fb6df44219422111c",
+}
+
+
 class StaticPage(HTMLParser):
-    def __init__(self):
+    def __init__(self, allow_ahem=False):
         super().__init__()
         self.reason = None
+        self.allow_ahem = allow_ahem
+        self.linked_ahem = False
+        self.needs_ahem = False
         self.in_style = False
 
     def handle_starttag(self, tag, attrs):
@@ -32,6 +44,15 @@ class StaticPage(HTMLParser):
             self.reason = "script, embedded content or resource"
         elif any(k.startswith("on") or k in {"src", "srcset", "background", "poster"} for k in attrs):
             self.reason = "event or resource attribute"
+        elif (self.allow_ahem and tag == "link" and attrs.get("href") == "/fonts/ahem.css"
+              and attrs.get("rel", "").lower() == "stylesheet"
+              and attrs.get("type", "text/css").lower() == "text/css"
+              and attrs.keys() <= {"href", "rel", "type"}):
+            self.linked_ahem = True
+        elif (self.allow_ahem and tag == "meta" and attrs.get("name", "").lower() == "flags"
+              and attrs.get("content", "").lower().split() == ["ahem"]
+              and attrs.keys() == {"name", "content"}):
+            self.needs_ahem = True
         elif tag == "link" and set(attrs.get("rel", "").lower().split()) - {
                 "help", "author", "reviewer", "match", "mismatch", "assert", "license"}:
             self.reason = "external link dependency"
@@ -54,7 +75,10 @@ class StaticPage(HTMLParser):
             self.check_css(data)
 
     def check_css(self, value):
-        if EXTERNAL_CSS.search(value):
+        ahem = re.search(r"\bAhem\b", value, re.I)
+        if ahem:
+            self.needs_ahem = True
+        if EXTERNAL_CSS.search(value) or (ahem and not self.allow_ahem):
             self.reason = "stylesheet resource or font"
         elif TIMED_CSS.search(value):
             self.reason = "time-dependent CSS"
@@ -69,7 +93,8 @@ def leaves(tree, prefix):
             yield from leaves(value, path)
 
 
-def select_tests(root, manifest):
+def select_tests(root, manifest, ahem_only=False):
+    linked_ahem = set()
     kinds = Counter()
     source_hash = {}
     reftests = {}
@@ -100,12 +125,16 @@ def select_tests(root, manifest):
             return "requires encoding sniffing"
         if "{{" in html or ".sub." in path or (root / (path + ".headers")).exists():
             return "requires WPT server or headers"
-        parser = StaticPage()
+        parser = StaticPage(ahem_only)
         try:
             parser.feed(html)
             parser.close()
         except (ValueError, AssertionError):
             return "document classification failed"
+        if parser.linked_ahem:
+            linked_ahem.add(path)
+        elif ahem_only and parser.needs_ahem:
+            return "Ahem font has no supported stylesheet link"
         return parser.reason
 
     rows = []
@@ -129,6 +158,9 @@ def select_tests(root, manifest):
                     if reason:
                         break
                     references.append((ref, relation))
+            if ahem_only and not reason and path not in linked_ahem and not any(
+                    ref in linked_ahem for ref, _ in references):
+                reason = "outside supplemental Ahem cohort"
             if reason:
                 row.update(status="SKIP", reason=reason)
             else:
@@ -150,6 +182,7 @@ async def fingerprints(paths, args):
                 if proc is None:
                     proc = await asyncio.create_subprocess_exec(
                         str(args.renderer.resolve()), str(args.root.resolve()),
+                        *(["--ahem"] if args.ahem_only else []),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
                 try:
                     proc.stdin.write((path + "\n").encode())
@@ -192,12 +225,38 @@ def compare(row, rendered):
     return {"status": "PASS"}
 
 
+def verify_ahem(args):
+    for path, sha in AHEM_FILES.items():
+        if hashlib.sha256((args.root / path).read_bytes()).hexdigest() != sha:
+            raise ValueError(f"unexpected pinned font resource: {path}")
+    # Two 20px Ahem X glyphs occupy a solid 40-by-20 green rectangle.
+    # Check the entire canvas so fallback fonts and identical blank pages fail.
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        (root / "fonts").mkdir()
+        for path in AHEM_FILES:
+            shutil.copyfile(args.root / path, root / path)
+        (root / "control.html").write_text(
+            '<!doctype html><link rel="stylesheet" href="/fonts/ahem.css">'
+            '<style>body{margin:0;color:green;font:20px/20px Ahem}</style>XX',
+            encoding="utf-8")
+        run = subprocess.run([args.renderer.resolve(), root, "--ahem"], input="control.html\n",
+                             capture_output=True, check=True, text=True, timeout=args.timeout)
+        green = (0x008000).to_bytes(4, "little")
+        white = (0xffffff).to_bytes(4, "little")
+        pixels = (green * 40 + white * 760) * 20 + white * (800 * 580)
+        if json.loads(run.stdout) != {"sha256": hashlib.sha256(pixels).hexdigest(), "uniform": False}:
+            raise ValueError("renderer failed the WPT Ahem pixel control")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("renderer", type=Path)
     parser.add_argument("report", type=Path)
+    parser.add_argument("--ahem-only", action="store_true",
+                        help="measure the supplemental cohort using the pinned WPT Ahem stylesheet")
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=30)
     args = parser.parse_args()
@@ -207,7 +266,9 @@ def main():
     manifest = json.loads(data)
     if manifest["version"] != 9:
         parser.error("expected a version 9 WPT manifest")
-    kinds, rows, paths = select_tests(args.root, manifest)
+    if args.ahem_only:
+        verify_ahem(args)
+    kinds, rows, paths = select_tests(args.root, manifest, args.ahem_only)
     print(f"{len(paths)} distinct pages to paint", file=sys.stderr, flush=True)
     rendered = asyncio.run(fingerprints(paths, args))
     by_module = defaultdict(Counter)
@@ -219,6 +280,8 @@ def main():
         by_module[row["test"].lstrip("/").split("/")[1]][row["status"]] += 1
     report = {"manifestSha256": hashlib.sha256(data).hexdigest(), "viewport": [800, 600],
               "inventory": kinds, "counts": counts, "modules": by_module, "results": rows}
+    if args.ahem_only:
+        report.update(cohort="linked WPT Ahem stylesheet", resources=AHEM_FILES)
     args.report.write_text(json.dumps(report, separators=(",", ":")) + "\n")
     print(json.dumps(counts, sort_keys=True))
 

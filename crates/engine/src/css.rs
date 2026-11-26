@@ -180,6 +180,9 @@ impl Length {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Display {
+    WebkitBox,
+    InlineWebkitBox,
+    FlowRoot,
     None,
     Block,
     ListItem,
@@ -435,6 +438,8 @@ impl Visibility {
 #[derive(Clone, Debug)]
 pub struct Style {
     pub display: Display,
+    pub webkit_line_clamp: Option<u32>,
+    pub vertical_box: bool,
     pub marker: MarkerType,
     pub opacity: f32,
     pub visibility: Visibility,
@@ -522,6 +527,8 @@ impl Default for Style {
         static DEFAULT_FAMILIES: OnceLock<Arc<[FontFamily]>> = OnceLock::new();
         Self {
             display: Display::Inline,
+            webkit_line_clamp: None,
+            vertical_box: false,
             marker: MarkerType::Disc,
             opacity: 1.,
             visibility: Visibility::Visible,
@@ -2735,6 +2742,8 @@ enum Property {
     Mono,
     Underline,
     WhiteSpace,
+    WebkitLineClamp,
+    WebkitBoxOrient,
     TextAlign,
     LineHeight,
     MarginTop,
@@ -2833,6 +2842,8 @@ const PROPERTIES: [Property; Property::TransformOrigin as usize + 1] = [
     Property::Mono,
     Property::Underline,
     Property::WhiteSpace,
+    Property::WebkitLineClamp,
+    Property::WebkitBoxOrient,
     Property::TextAlign,
     Property::LineHeight,
     Property::MarginTop,
@@ -2984,6 +2995,7 @@ enum Value {
     Color(Option<Color>),
     Length(SpecifiedLength),
     Number(f32),
+    Clamp(Option<u32>),
     Bool(bool),
     FontWeight(u16),
     RelativeWeight(bool),
@@ -3478,6 +3490,7 @@ impl Stylesheet {
                 Display::Inline | Display::InlineBlock => Display::Block,
                 Display::InlineFlex => Display::Flex,
                 Display::InlineGrid => Display::Grid,
+                Display::InlineWebkitBox => Display::WebkitBox,
                 v => v,
             };
         }
@@ -3780,6 +3793,8 @@ fn copy_property(s: &mut Style, from: &Style, p: Property, source: Property) {
     match p {
         FontSize => s.font_size = from.font_size,
         Color => s.color = from.color,
+        WebkitLineClamp => s.webkit_line_clamp = from.webkit_line_clamp,
+        WebkitBoxOrient => s.vertical_box = from.vertical_box,
         Display => s.display = from.display,
         ListStyleType => s.marker = from.marker,
         Opacity => s.opacity = from.opacity,
@@ -3921,6 +3936,8 @@ fn apply_value(
         }
         (Color, Value::Color(color)) => s.color = color.unwrap_or(parent.color),
         (Background, Value::Color(color)) => s.background = Some(color.unwrap_or(s.color)),
+        (WebkitLineClamp, Value::Clamp(lines)) => s.webkit_line_clamp = *lines,
+        (WebkitBoxOrient, Value::Bool(vertical)) => s.vertical_box = *vertical,
         (Display, Value::Display(v)) => s.display = *v,
         (ListStyleType, Value::Marker(v)) => s.marker = *v,
         (Opacity, Value::Number(v)) => s.opacity = *v,
@@ -4083,6 +4100,8 @@ fn targets(name: &str) -> Vec<Property> {
         "all" => PROPERTIES.to_vec(),
         "color" => vec![Color],
         "background" | "background-color" => vec![Background],
+        "-webkit-line-clamp" => vec![WebkitLineClamp],
+        "-webkit-box-orient" => vec![WebkitBoxOrient],
         "display" => vec![Display],
         "list-style" | "list-style-type" => vec![ListStyleType],
         "opacity" => vec![Opacity],
@@ -4855,7 +4874,25 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "inline-end" => crate::css::Clear::InlineEnd,
             _ => return None,
         })),
+        WebkitLineClamp => {
+            if v == "none" {
+                Some(Value::Clamp(None))
+            } else {
+                v.parse::<u32>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .map(|n| Value::Clamp(Some(n)))
+            }
+        }
+        WebkitBoxOrient => Some(Value::Bool(match v {
+            "vertical" => true,
+            "horizontal" => false,
+            _ => return None,
+        })),
         Display => Some(Value::Display(match v {
+            "-webkit-box" => crate::css::Display::WebkitBox,
+            "-webkit-inline-box" => crate::css::Display::InlineWebkitBox,
+            "flow-root" => crate::css::Display::FlowRoot,
             "none" => crate::css::Display::None,
             "block" | "table" => crate::css::Display::Block,
             "list-item" => crate::css::Display::ListItem,
