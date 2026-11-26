@@ -365,7 +365,19 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
-    let session = settings.initial_session(session);
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let startup_signal = (enable_updates && url.is_none())
+        .then(crate::updater::StartupSignal::from_parent)
+        .flatten();
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let restore_upgrade_session = startup_signal.is_some();
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    let restore_upgrade_session = false;
+    let session = if restore_upgrade_session {
+        session
+    } else {
+        settings.initial_session(session)
+    };
     let bookmarks_path = path.join(bookmarks::FILE_NAME);
     let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let fonts = Fonts::new()?;
@@ -482,9 +494,11 @@ pub(crate) fn run(
         update_panel: false,
         #[cfg(all(windows, target_arch = "x86_64"))]
         update_restart: None,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        startup_signal,
     };
-    events.run_app(&mut app).map_err(|e| e.to_string())?;
-    if smoke_requested {
+    let event_result = events.run_app(&mut app);
+    if event_result.is_ok() && smoke_requested {
         app.smoke_result
             .take()
             .ok_or("Window check did not finish")??;
@@ -514,10 +528,13 @@ pub(crate) fn run(
     #[cfg(all(windows, target_arch = "x86_64"))]
     if let Some(restart) = restart {
         // Profile::drop flushes data and drops its exclusive lock. Starting the
-        // launcher any earlier would race the child for the same profile.
-        restart.launch()?;
+        // next browser any earlier would race the child for the same profile.
+        return match event_result {
+            Ok(()) => restart.launch(),
+            Err(error) => restart.recover(&format!("Could not close the old window: {error}")),
+        };
     }
-    Ok(())
+    event_result.map_err(|error| error.to_string())
 }
 
 struct App {
@@ -580,6 +597,8 @@ struct App {
     update_panel: bool,
     #[cfg(all(windows, target_arch = "x86_64"))]
     update_restart: Option<crate::updater::Restart>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    startup_signal: Option<crate::updater::StartupSignal>,
     // Keep the profile lock held until the page and background workers drop.
     profile: Profile,
 }
@@ -2145,6 +2164,10 @@ impl App {
                 self.tab_hits_current = true;
                 self.presented_frames += 1;
                 self.last_present_error = None;
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if let Some(signal) = self.startup_signal.take() {
+                    signal.ready();
+                }
             }
             Err(e) => {
                 self.tab_hits_current = false;

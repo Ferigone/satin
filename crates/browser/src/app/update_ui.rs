@@ -17,7 +17,7 @@ fn panel_rect(width: f32) -> Rect {
         x: (width - BUTTON_X + 46. - width_available).max(12.),
         y: TOP + 4.,
         width: width_available,
-        height: 120.,
+        height: 137.,
     }
 }
 
@@ -267,6 +267,15 @@ impl App {
             canvas.fill_rect(rect(x + 16., y + 69., track * progress, 5.), ACCENT);
         }
         if let Some((action, label)) = view.button {
+            canvas.label(
+                "Enter / Space to select · Esc to close",
+                (x + 16.) * u,
+                (y + 123.) * u,
+                11. * u,
+                CHROME_MUTED,
+                false,
+                &mut self.fonts,
+            );
             let button_width = 150.;
             // Separate Download and Restart hit regions, including across frames.
             let button_x = if action == UpdateAction::Restart {

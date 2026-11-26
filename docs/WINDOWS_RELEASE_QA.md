@@ -118,8 +118,11 @@ speedup or a meaningful memory change beyond this fixture.
   startup check fetches only release metadata. **Download update** stages the
   verified binary without changing either manifest. **Restart and update**
   re-verifies the stage, activates it under the publication lock, closes the
-  browser and releases the profile, and then runs the installed launcher with
-  the same profile. See [interactive updater QA](#interactive-updater-qa).
+  browser and releases the profile, and then supervises the verified browser
+  directly with the same profile. The installed desktop launcher is unchanged:
+  its exit status does not mean a browser opened. The update is confirmed only
+  after the new process acquires the profile and presents its first native
+  frame. See [interactive updater QA](#interactive-updater-qa).
 - `Rollback.ps1` verifies the previous target's SHA-256, then swaps the
   manifests under the same lock. Relaunch to use it. When a newer installed
   version is now in `previous.json`, that version is the updater's floor, so
@@ -137,26 +140,39 @@ cargo test --locked -p rust-browser updater::tests
 These tests use disposable manifests and a loopback stream. They check passive
 discovery, duplicate/stale commands, intermediate progress, corrupt bytes,
 unchanged manifests after staging, active-version/rollback-floor checks at
-apply, and failing publication with a live `current.json` file lock.
+apply, and failing publication with a live `current.json` file lock. They also
+cover a replaced pending payload, immediate process spawn failure and recovery
+refusing to overwrite a superseding manifest.
 
-For the additional offline **process** smoke, use a previously built workspace
-launcher and compile the stand-alone probe. The test copies both into a
-temporary install; it never uses the actual user's install, shortcut or profile.
-Use an absolute path to each binary and a disposable output folder:
+For the additional offline **process** smoke, compile the stand-alone probe.
+The test copies it into a temporary installation; it never uses the actual
+user's install, shortcut or profile. Use a disposable output folder:
 
 ```powershell
 rustc --edition 2024 crates/browser/tests/fixtures/updater_probe.rs -o "$scratch\updater-probe.exe"
-$env:SATIN_TEST_LAUNCHER = 'C:\path\to\target\debug\rust-browser-launcher.exe'
 $env:SATIN_TEST_UPDATER_PROBE = "$scratch\updater-probe.exe"
-cargo test --locked -p rust-browser restart_through_installed_launcher_reopens_exact_profile -- --ignored
+cargo test --locked -p rust-browser supervised_restart_requires_ack_and_reopens_exact_profile -- --ignored
 ```
 
 The probe must receive only the original effective profile (no startup URL),
 take its exclusive lock, and read the saved two-tab session with the correct
-active tab. It makes no network requests.
+active tab. It makes no network requests. The same test launches a candidate
+that exits without acknowledgment and one that hangs while holding the
+profile. Both must restore the exact original manifests and saved session,
+then reopen the old executable without contending for the profile.
 
-For manual UI QA when two authentic releases already exist, stage the older
-interactive browser, its original launcher (`RustBrowser.exe`), and a matching
+The startup acknowledgment is bounded (25 seconds, with up to 5 seconds to
+confirm termination after a failed start). Older candidate builds without
+the readiness protocol cannot be confirmed and are rolled back. Do not treat
+a launcher exit, process creation, or a version query as startup proof. If
+termination cannot be confirmed or manifests have changed out of band, the
+updater reports the issue without reopening another browser. This is not a
+persistent crash-recovery journal: forced termination of the updater itself
+and power loss are outside the automatic rollback guarantee.
+
+For manual UI QA when two authentic builds with the readiness protocol already
+exist, stage the older interactive browser, its original launcher
+(`RustBrowser.exe`), and a matching
 `current.json` under a disposable process-local `LOCALAPPDATA\RustBrowser`.
 Launch the versioned executable directly, with a relative, nondefault
 `--profile` and a working directory different from that of the launcher.
@@ -173,7 +189,9 @@ Do **not** run the installer or publish a release for this check.
    selecting **Restart and update**. Verify no manifest switch or window exit,
    and that the panel offers retry after dismissing and reopening it. Remove the
    lock, then retry; a verified stage can be reused.
-4. Select **Restart and update**. Verify `previous.json` is the original current,
-   the launcher starts the new build, and the same profile and active tab reopen
-   with no profile-lock error. Repeat the launch in headless/smoke-window mode
-   or from an unmanaged copy and verify no updater check or icon.
+4. Set normal startup to **Start page**, then select **Restart and update**.
+   Verify `previous.json` is the original current and the new native window
+   opens the same profile, tabs and active tab without a profile-lock error.
+   An ordinary subsequent launch must still respect the Start page preference.
+   Repeat in headless/smoke-window mode or from an unmanaged copy and verify
+   no updater check or icon.

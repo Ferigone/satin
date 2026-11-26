@@ -35,6 +35,40 @@ pub fn default_path() -> PathBuf {
         .join("User Data")
 }
 
+fn profile_lock(path: &Path) -> Result<File, String> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.join("profile.lock"))
+        .map_err(|e| e.to_string())?;
+    lock.try_lock_exclusive().map_err(|_|"Ten profil jest już otwarty w Satin. Zamknij jego okno przed uruchomieniem nowej wersji.".to_owned())?;
+    Ok(lock)
+}
+
+/// Keep only the saved tab session across an unacknowledged update. Take the
+/// same exclusive lock as the browser so this never reads a live session.
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(crate) fn snapshot_update_session(path: &Path) -> Result<Vec<u8>, String> {
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    let _lock = profile_lock(path)?;
+    let mut session = Vec::new();
+    File::open(path.join("session.json"))
+        .and_then(|file| file.take(LIMIT + 1).read_to_end(&mut session))
+        .map_err(|error| error.to_string())?;
+    if session.len() as u64 > LIMIT {
+        return Err("The saved session is too large for an update restart".into());
+    }
+    Ok(session)
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(crate) fn restore_update_session(path: &Path, session: &[u8]) -> Result<(), String> {
+    let _lock = profile_lock(path)?;
+    atomic_write(&path.join("session.json"), session)
+}
+
 pub struct Profile {
     path: PathBuf,
     _lock: File,
@@ -45,14 +79,7 @@ pub struct Profile {
 impl Profile {
     pub fn open(path: PathBuf) -> Result<(Self, Session), String> {
         fs::create_dir_all(&path).map_err(|e| e.to_string())?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.join("profile.lock"))
-            .map_err(|e| e.to_string())?;
-        lock.try_lock_exclusive().map_err(|_|"Ten profil jest już otwarty w Satin. Zamknij jego okno przed uruchomieniem nowej wersji.".to_owned())?;
+        let lock = profile_lock(&path)?;
         let file = path.join("session.json");
         let session = if file.exists() {
             let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
