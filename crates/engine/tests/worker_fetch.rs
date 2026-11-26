@@ -134,8 +134,11 @@ fn same_origin_chunked_wasm_exposes_headers_before_eof_and_posts_42() {
 
 #[test]
 fn cross_origin_fetch_uses_the_creator_origin_and_explicit_credentials() {
-    let (_, origin) = loopback();
+    // Reserve the creator port until the foreign listener has its own address.
+    let (creator_listener, origin) = loopback();
     let (listener, foreign) = loopback();
+    assert_ne!(origin, foreign);
+    drop(creator_listener);
     let allowed = origin.clone();
     let server = std::thread::spawn(move || {
         for (path, cookie, header) in [

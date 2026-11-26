@@ -23,6 +23,22 @@ The final selector change preserved every status in both pixel cohorts, includin
 
 One remaining Tailwind difference is visible above the example. At 390 px, its table header uses a nested column subgrid. Chromium places the two cells side by side in one 48 px row. Satin stacks them in a 96 px row. Layered imports, layered font-face precedence, `revert-layer` and the specialized CSSOM layer interfaces also remain open.
 
+### Synchronous WPT comparison for layers
+
+| Outcome | Alpha.41 | Layers and reset |
+| --- | ---: | ---: |
+| Reported assertions passing | 10,523 / 37,180 (28.30%) | 10,574 / 37,180 (28.44%) |
+| Pages marked COMPLETE | 3,472 | 3,472 |
+| Pages marked PARTIAL | 269 | 269 |
+| Pages marked HARNESS_ERROR | 223 | 223 |
+| Pages marked NOT_RUN | 4,352 | 4,352 |
+| Assertions marked FAIL | 26,656 | 26,605 |
+| Assertions marked PASS | 10,523 | 10,574 |
+| Assertions marked PRECONDITION_FAILED | 1 | 1 |
+| Runner timeouts within harness errors | 0 | 0 |
+
+51 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 prior passes were unobserved in the candidate. [Individual WPT results](css-layers-testharness.tsv.gz)
+
 ## Alpha.41 line clamping
 
 At 390 × 800 CSS px, Satin wrapped the first Brave Search result title onto a second line. The page requested a one-line preview. Alpha.41 measures the line, reserves space for the ellipsis, and stops emitting text and inline hit regions beyond it. The description moves up by 26 px. At 1280 × 800 the title already fit, and all three browsers measured it at 648 × 26 px. The screenshots below show the same result in alpha.40, alpha.41 and Chromium, left to right.
@@ -59,7 +75,44 @@ All 1,968 prior passes held. Twelve new passes are in the line-clamp directory, 
 
 Run the optional cohort with the same command under **Reproduce**, adding `--ahem-only` and writing a separate report. Use the alpha.41 Python adapter and renderer example on both engine revisions. The adapter verifies the SHA-256 hashes of the canonical WPT font and stylesheet, decodes the font with Satin, and checks that two 20 px Ahem X glyphs paint an exact 40 × 20 green rectangle on the white canvas. It checks eligibility on each reference as well as the test.
 
-All 823 property probes ran. Of 625 distinguishing computed values, exact matches rose from 92 to 94, missing readbacks fell from 532 to 530, and one serialization still differed. Five reference inputs had no distinguishing change and 193 had no reference sample. The six pinned relational-selector pages again passed all 87 assertions on both revisions.
+All 823 property probes ran. Of 625 distinguishing computed values, exact matches rose from 92 to 94, missing readbacks fell from 532 to 530, and one serialization still differed. Five reference inputs had no distinguishing change and 193 had no reference sample. The six pinned relational-selector pages again passed all 87 assertions on both revisions. [Property inputs and readbacks for both builds](css-properties-alpha41.tsv.gz)
+
+The candidate passed 1,464 workspace tests with three existing opt-in tests ignored. The complete Linux run used `RUST_TEST_THREADS=1 cargo test --workspace --locked`. The locked workspace build also succeeded. The pull request records the separate Windows verification and the original synchronous WPT assertion comparison. [Alpha.41 verification](https://github.com/Ferigone/satin/pull/24)
+
+#### Synchronous CSS testharness
+
+The runner inventoried 8,316 entries. The individual records preserve partial pages and assertions observed in only one revision.
+
+| Outcome | Alpha.40 | Alpha.41 |
+| --- | ---: | ---: |
+| Reported assertions passing | 10,511 / 37,179 (28.27%) | 10,523 / 37,180 (28.30%) |
+| Pages marked COMPLETE | 3,472 | 3,472 |
+| Pages marked PARTIAL | 269 | 269 |
+| Pages marked HARNESS_ERROR | 223 | 223 |
+| Pages marked NOT_RUN | 4,352 | 4,352 |
+| Runner timeouts within harness errors | 0 | 0 |
+| Assertions marked FAIL | 26,667 | 26,656 |
+| Assertions marked PASS | 10,511 | 10,523 |
+| Assertions marked PRECONDITION_FAILED | 1 | 1 |
+
+12 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 previous passes were unobserved in the candidate. [Page and assertion statuses](css-js-alpha41.tsv.gz)
+
+#### Property-parsing directory
+
+The runner inventoried 1,325 entries. The individual records preserve partial pages and assertions observed in only one revision.
+
+| Outcome | Alpha.40 | Alpha.41 |
+| --- | ---: | ---: |
+| Reported assertions passing | 6,086 / 15,943 (38.17%) | 6,088 / 15,944 (38.18%) |
+| Pages marked COMPLETE | 1,112 | 1,112 |
+| Pages marked PARTIAL | 21 | 21 |
+| Pages marked HARNESS_ERROR | 0 | 0 |
+| Pages marked NOT_RUN | 192 | 192 |
+| Runner timeouts within harness errors | 0 | 0 |
+| Assertions marked FAIL | 9,857 | 9,856 |
+| Assertions marked PASS | 6,086 | 6,088 |
+
+2 matched assertions changed from FAIL to PASS and 0 changed from PASS to FAIL. 0 previous passes were unobserved in the candidate. [Page and assertion statuses](css-parsing-alpha41.tsv.gz)
 
 [Download native and Chromium screenshots, per-element geometry, scroll observations and source hashes (ZIP)](css-alpha41-native.zip)
 
