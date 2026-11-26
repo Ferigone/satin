@@ -861,10 +861,7 @@ pub(super) fn resolve_resource(client: &Url, base: &Url, source: &str) -> Result
         "http" | "https" => url.as_str().len() <= MAX_HTTP_URL,
         "data" => url.as_str().len() <= MAX_URL_SOURCE,
         "file" => client.scheme() == "file" && url.as_str().len() <= MAX_HTTP_URL,
-        "about" => {
-            matches!(url.path(), "sample-image" | "document-image")
-                || (client.scheme() == "about" && crate::loader::is_home_image(url.as_str()))
-        }
+        "about" => matches!(url.path(), "sample-image" | "document-image"),
         _ => false,
     };
     if !allowed {

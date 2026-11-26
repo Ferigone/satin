@@ -23,7 +23,6 @@ pub(crate) mod transport;
 mod worker_policy;
 pub(crate) use connect_policy::ConnectPolicy;
 pub use home_assets::built_in_site_icon;
-pub(crate) use home_assets::is_home_image;
 pub(crate) use resources::decode_oriented_bitmap;
 pub use resources::{
     DocumentResource, HttpResourceObservation, ResourceBody, ResourceKind, ResourceRequest,
@@ -33,6 +32,9 @@ use svg_image::svg_mime;
 use transport::{BodyError, CancelSignal, Interrupted, RequestControl};
 pub(crate) use worker_policy::DocumentPolicy;
 
+/// UI intent from the built-in start page. A native host should consume it
+/// only from its active, committed `about:home` document, without navigating.
+pub const HOME_FOCUS_ADDRESS_URL: &str = "about:home?focus=address";
 pub const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(18);
 pub(crate) const USER_AGENT: &str = concat!(
     "Mozilla/5.0 Satin/",
@@ -1694,7 +1696,7 @@ fn text_encoding(bytes: &[u8], content_type: &str) -> (&'static encoding_rs::Enc
 }
 
 const BASE_STYLE: &str = "body{margin:0;background:#f8fafc;color:#172936;font-family:sans-serif}main{max-width:820px;margin:48px auto;padding:28px}h1{font-size:42px;line-height:1.15;margin:16px 0 24px}p{font-size:18px;line-height:1.6}h2{font-size:23px;margin-top:32px}.eyebrow{font-size:13px;font-weight:bold;color:#16836a}a{color:#126f5e}.card{display:block;padding:18px;margin:12px 0;background:white;border:1px solid #dde5e8;text-decoration:none}.muted{color:#62727f;font-size:15px}pre{font-size:14px;padding:18px;background:#edf1f5}li{margin:10px 0}code{color:#13725d}";
-fn builtin_source(name: &str) -> (String, bool) {
+fn builtin_source(name: &str) -> String {
     let (title, body) = match name {
         "media" => ("Video playback", include_str!("../data/pages/media.html")),
         "streaming" => (
@@ -1747,7 +1749,7 @@ fn builtin_source(name: &str) -> (String, bool) {
             r#"<p class='eyebrow'>WŁASNY SILNIK · PRÓBA LOKALNA</p><h1>Od tekstu do pikseli.</h1><p>Ta strona przechodzi przez parser HTML, kaskadę CSS, układ i renderer napisane w Rust.</p><h2>Tekst i style</h2><p>Zwykły tekst, <strong>pogrubienie</strong>, <em>kursywa</em>, <code>kod o stałej szerokości</code> i <a href='#kotwica'>link do kotwicy</a>. Polskie litery: zażółć gęślą jaźń. Encje: &copy; &euro; &rarr;.</p><blockquote style='border:2px solid #16836a;padding:16px;background:#eaf6f0'>Układ jest przeliczany po zmianie rozmiaru okna.</blockquote><h2>Lista i obraz</h2><ol><li>Nawigacja przez wpisanie adresu lub kliknięcie linku.</li><li>Przewijanie kółkiem, Page Down i klawiszami strzałek.</li><li>Wstecz, dalej i odświeżanie oraz wiele kart.</li></ol><img src='about:sample-image' width='400' alt='Próbny obraz renderera'><h2 id='kotwica'>Jesteś przy kotwicy.</h2><pre>fn main() { println!("Rust Browser"); }</pre><p><a href='about:home'>Wróć na start</a> · <a href='about:version'>Informacje o wersji</a></p>"#,
         ),
         "version" => ("About Satin", include_str!("../data/pages/version.html")),
-        _ => ("New Tab", include_str!("../data/pages/home.html")),
+        _ => return include_str!("../data/pages/home.html").into(),
     };
     let body = body
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
@@ -1769,23 +1771,19 @@ fn builtin_source(name: &str) -> (String, bool) {
             ),
         _ => body,
     };
-    let home = title == "New Tab";
-    let lang = if matches!(name, "media" | "streaming" | "version" | "workers") || home {
+    let lang = if matches!(name, "media" | "streaming" | "version" | "workers") {
         "en"
     } else {
         "pl"
     };
-    let source = format!(
+    format!(
         "<!doctype html><html lang='{lang}'><head><meta charset='utf-8'><title>{title}</title><style>{BASE_STYLE}</style></head><body><main>{}</main></body></html>",
         body
-    );
-    (source, home)
+    )
 }
 
-fn builtin_images(page: &mut LoadedPage, name: &str, home: bool) {
-    if home {
-        home_assets::add_to(page);
-    } else if name == "demo" {
+fn builtin_images(page: &mut LoadedPage, name: &str) {
+    if name == "demo" {
         let mut bitmap = image::RgbaImage::new(400, 160);
         for (x, y, p) in bitmap.enumerate_pixels_mut() {
             let grid = (x / 24 + y / 24) % 2;
@@ -1827,14 +1825,14 @@ impl OpenedPage {
 
     pub fn internal(url: &Url, cookies: CookieStore) -> Self {
         let started = Instant::now();
-        let (source, home) = builtin_source(url.path());
+        let source = builtin_source(url.path());
         let mut page = LoadedPage::empty(
             url.clone(),
             cookies,
             CookieContext::navigation(None, url, "GET"),
         );
         page.stats.bytes = source.len();
-        builtin_images(&mut page, url.path(), home);
+        builtin_images(&mut page, url.path());
         Self {
             page,
             input: DocumentInput::Html(source),
@@ -1847,9 +1845,9 @@ impl OpenedPage {
 }
 
 pub fn builtin(name: &str) -> LoadedPage {
-    let (source, home) = builtin_source(name);
+    let source = builtin_source(name);
     let mut page = LoadedPage::from_html(&format!("about:{name}"), &source);
-    builtin_images(&mut page, name, home);
+    builtin_images(&mut page, name);
     page
 }
 
