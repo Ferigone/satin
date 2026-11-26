@@ -42,6 +42,7 @@ const VIEWPORT_GAP: f32 = 8.;
 const ANCHOR_GAP: f32 = 5.;
 const PADDING: f32 = 7.; // 1 px border plus 6 px internal padding.
 const ROW_HEIGHT: f32 = 35.;
+const MIN_ROW_HEIGHT: f32 = 22.;
 const DIVIDER_HEIGHT: f32 = 11.;
 const ZOOM_BUTTON: f32 = 31.;
 const ZOOM_HEIGHT: f32 = ZOOM_BUTTON + 2. * 7.;
@@ -239,7 +240,7 @@ impl Layout {
         let bottom = window_height - VIEWPORT_GAP;
         let height = (rows_height + 2. * PADDING).min(bottom - floor);
         let density = (height - 2. * PADDING) / rows_height;
-        if width < 190. || density < 0.7 {
+        if width < 190. || ROW_HEIGHT * density < MIN_ROW_HEIGHT {
             return None;
         }
         let right = anchor.x + anchor.width;
@@ -355,6 +356,9 @@ impl App {
     fn draw_zoom_row(&mut self, canvas: &mut Canvas, row: Row, bounds: Rect, selected: usize) {
         let scale = self.scale;
         let mid = bounds.y + bounds.height / 2.;
+        // In a compact menu the zoom hitboxes must remain within their row,
+        // independent of the unchanged preferred horizontal button width.
+        let button_height = ZOOM_BUTTON.min(bounds.height - 2.);
         // The reference's - / current percent / + cluster uses a 5 px gap.
         let percent = format!("{:.0}%", self.tabs[self.active].zoom * 100.);
         let label_width = self
@@ -385,9 +389,9 @@ impl App {
             let index = target.index();
             let bounds = Rect {
                 x,
-                y: mid - ZOOM_BUTTON / 2.,
+                y: mid - button_height / 2.,
                 width,
-                height: ZOOM_BUTTON,
+                height: button_height,
             };
             let hovered = self.pointer_in(bounds);
             draw_row_highlight(canvas, bounds, scale, hovered, index == selected);
@@ -581,7 +585,7 @@ mod tests {
                 x: 917.,
                 y: 87.5,
                 width: 352.,
-                height: 477.,
+                height: 512.,
             }
         );
         assert_eq!(normal.density, 1.);
@@ -597,6 +601,9 @@ mod tests {
                 assert_eq!(bounds.x, minimum.panel.x + PADDING);
                 assert_eq!(bounds.width, minimum.panel.width - 2. * PADDING);
                 assert_eq!(bounds.height, row.height() * minimum.density);
+                if matches!(row, Row::Item(..)) {
+                    assert!(bounds.height >= MIN_ROW_HEIGHT);
+                }
                 edge += bounds.height;
             }
             assert!((edge + PADDING - minimum.panel.y - minimum.panel.height).abs() < 0.01);
