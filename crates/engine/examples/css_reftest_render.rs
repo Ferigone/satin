@@ -1,15 +1,36 @@
 //! Pixel fingerprint worker for tools/css-wpt.py. Inputs are local, static HTML pages.
 use ring::digest::{Context, SHA256};
 use rust_browser_engine::{Fonts, Layout, LoadedPage, layout::Viewport, paint::Canvas};
+use rust_browser_engine::{
+    css,
+    fonts::{FontFace, FontFaceEntry, FontSet},
+};
 use std::{
     env, fs,
     io::{self, BufRead},
     path::Path,
+    sync::Arc,
 };
 
-fn render(root: &Path, path: &str, fonts: &mut Fonts) -> Result<serde_json::Value, String> {
+fn render(
+    root: &Path,
+    path: &str,
+    fonts: &mut Fonts,
+    ahem: Option<&Arc<FontSet>>,
+) -> Result<serde_json::Value, String> {
     let source = fs::read_to_string(root.join(path)).map_err(|error| error.to_string())?;
-    let page = LoadedPage::from_html(&format!("https://web-platform.test/{path}"), &source);
+    let mut page = LoadedPage::from_html(&format!("https://web-platform.test/{path}"), &source);
+    if let Some(font_set) = ahem
+        && page.document.html_elements("link").any(|id| {
+            page.document.attr(id, "href") == Some("/fonts/ahem.css")
+                && page
+                    .document
+                    .attr(id, "rel")
+                    .is_some_and(|rel| rel.eq_ignore_ascii_case("stylesheet"))
+        })
+    {
+        page.fonts = Arc::clone(font_set);
+    }
     if page.document.truncated {
         return Err("document parse limit".into());
     }
@@ -46,10 +67,21 @@ fn render(root: &Path, path: &str, fonts: &mut Fonts) -> Result<serde_json::Valu
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = env::args_os().nth(1).ok_or("missing WPT checkout")?;
+    let root = Path::new(&root);
+    let ahem = if env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--ahem")) {
+        let sheet = fs::read_to_string(root.join("fonts/ahem.css"))?;
+        let [rule]: [_; 1] = css::font_faces(&sheet, 800.)
+            .try_into()
+            .map_err(|_| "expected one Ahem font rule")?;
+        let face = FontFace::decode(&fs::read(root.join("fonts/Ahem.ttf"))?)?;
+        Some(Arc::new(FontSet::new(vec![FontFaceEntry { rule, face }])?))
+    } else {
+        None
+    };
     let mut fonts = Fonts::new()?;
     for line in io::stdin().lock().lines() {
         let path = line?;
-        let result = render(Path::new(&root), &path, &mut fonts)
+        let result = render(root, &path, &mut fonts, ahem.as_ref())
             .unwrap_or_else(|error| serde_json::json!({"error":error}));
         println!("{result}");
     }
