@@ -51,6 +51,8 @@ mod quiet_cinder;
 mod scroll;
 mod settings;
 mod tab_strip;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod update_ui;
 use self::address_bar::{
     AddressBar, Movement,
     suggestions::{Direction as SuggestionDirection, Suggestions},
@@ -202,6 +204,12 @@ enum Action {
     Minimize,
     Maximize,
     CloseWindow,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdatePanel,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdatePrimary(crate::updater::UpdateAction),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdateSurface,
 }
 
 impl Action {
@@ -450,10 +458,25 @@ pub(crate) fn run(
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
     devtools: Option<crate::devtools::DevTools>,
+    #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let startup_signal = if enable_updates && url.is_none() {
+        crate::updater::StartupSignal::from_parent()?
+    } else {
+        None
+    };
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
-    let session = settings.initial_session(session);
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let restore_upgrade_session = startup_signal.is_some();
+    #[cfg(not(all(windows, target_arch = "x86_64")))]
+    let restore_upgrade_session = false;
+    let session = if restore_upgrade_session {
+        session
+    } else {
+        settings.initial_session(session)
+    };
     let bookmarks_path = path.join(bookmarks::FILE_NAME);
     let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let fonts = Fonts::new()?;
@@ -559,9 +582,35 @@ pub(crate) fn run(
         smoke_result: None,
         presented_frames: 0,
         last_present_error: None,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        // A trial handoff intentionally starts before current.json is changed.
+        // Do not discover/offer another update in that entire browser session.
+        updater: (enable_updates && startup_signal.is_none())
+            .then(|| {
+                crate::updater::Updates::start(
+                    &path,
+                    Arc::new({
+                        let proxy = events.create_proxy();
+                        move || {
+                            let _ = proxy.send_event(());
+                        }
+                    }),
+                )
+            })
+            .flatten(),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_panel: false,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_keys: update_ui::OwnedKeys::default(),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_ime_blocked: false,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_restart: None,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        startup_signal,
     };
-    events.run_app(&mut app).map_err(|e| e.to_string())?;
-    if smoke_requested {
+    let event_result = events.run_app(&mut app);
+    if event_result.is_ok() && smoke_requested {
         app.smoke_result
             .take()
             .ok_or("Window check did not finish")??;
@@ -585,7 +634,19 @@ pub(crate) fn run(
         println!("{summary}");
         app.smoke_checkpoint_outputs.commit();
     }
-    Ok(())
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let restart = app.update_restart.take();
+    drop(app);
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if let Some(restart) = restart {
+        // Profile::drop flushes data and drops its exclusive lock. Starting the
+        // next browser any earlier would race the child for the same profile.
+        return match event_result {
+            Ok(()) => restart.launch(),
+            Err(error) => restart.recover(&format!("Could not close the old window: {error}")),
+        };
+    }
+    event_result.map_err(|error| error.to_string())
 }
 
 struct App {
@@ -606,7 +667,6 @@ struct App {
     graphics: Option<Graphics>,
     canvas: Option<Canvas>,
     fonts: Fonts,
-    profile: Profile,
     bookmarks: Result<bookmarks::Bookmarks, String>,
     settings: settings::Store,
     settings_panel: Option<settings::Panel>,
@@ -650,6 +710,20 @@ struct App {
     downloads_hover: Option<downloads_ui::Action>,
     scale: f32,
     clipboard: Option<arboard::Clipboard>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    updater: Option<crate::updater::Updates>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_panel: bool,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_keys: update_ui::OwnedKeys,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_ime_blocked: bool,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_restart: Option<crate::updater::Restart>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    startup_signal: Option<crate::updater::StartupSignal>,
+    // Keep the profile lock held until the page and background workers drop.
+    profile: Profile,
 }
 impl App {
     fn window_regions(&self, index: usize) -> WindowRegions {
@@ -898,7 +972,9 @@ impl App {
             }
             if let Some(window) = &self.window {
                 window.set_ime_allowed(
-                    self.settings_panel.is_none() && self.downloads_panel.is_none(),
+                    self.settings_panel.is_none()
+                        && self.downloads_panel.is_none()
+                        && !self.update_panel_open(),
                 );
             }
             self.redraw();
@@ -1176,12 +1252,15 @@ impl App {
         }
     }
     fn save(&self) {
+        let _ = self.save_session();
+    }
+    fn save_session(&self) -> Result<(), String> {
         let session = Session {
             schema: 1,
             tabs: self.tabs.iter().map(|t| t.url.clone()).collect(),
             active: self.active,
         };
-        let _ = self.profile.save(&session);
+        self.profile.save(&session)
     }
     fn sync_address(&mut self) {
         self.dismiss_address_suggestions();
@@ -1539,6 +1618,12 @@ impl App {
             self.chrome_menu = None;
         }
         match action {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdatePanel => self.toggle_update_panel(),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdatePrimary(command) => self.update_command(command),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdateSurface => {}
             Action::Address => self.focus_address(),
             Action::Suggestion(index) => {
                 if self.suggestions_visible()
@@ -1683,6 +1768,10 @@ impl App {
                 if i >= self.tabs.len() {
                     return;
                 }
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if self.tabs.len() == 1 && self.update_applying() {
+                    return;
+                }
                 let tab = &self.tabs[i];
                 self.media.close_page(tab.id, tab.document_navigation);
                 tab.cancel.cancel();
@@ -1708,14 +1797,26 @@ impl App {
     }
 
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_applying() {
+            return;
+        }
+        self.finish_close(event_loop);
+    }
+
+    fn finish_close(&mut self, event_loop: &ActiveEventLoop) {
         self.save();
         for tab in &self.tabs {
             tab.cancel.cancel();
+            if let Some(download) = &tab.download {
+                download.cancel.cancel();
+            }
         }
+        event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.exit();
     }
     fn insert(&mut self, text: &str) {
-        if self.downloads_panel.is_some() {
+        if self.downloads_panel.is_some() || self.update_panel_open() {
             return;
         }
         if self.devtools_focused
@@ -1793,6 +1894,10 @@ impl App {
 
     fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_key(&key, repeat) {
+            return;
+        }
         if WINDOW_FRAME
             && self.modifiers == ModifiersState::ALT
             && key == Key::Named(NamedKey::Space)
@@ -2338,6 +2443,8 @@ impl App {
             panel.draw(&mut canvas, &mut self.fonts, u, &self.settings);
         }
         let downloads_frame = self.draw_downloads(&mut canvas, width, height);
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.draw_update_panel(&mut canvas, width);
         let presented = (|| -> Result<(), String> {
             let graphics = self
                 .graphics
@@ -2360,6 +2467,10 @@ impl App {
                 self.tab_hits_current = true;
                 self.presented_frames += 1;
                 self.last_present_error = None;
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if let Some(signal) = self.startup_signal.take() {
+                    signal.ready();
+                }
             }
             Err(e) => {
                 self.downloads_frame = None;
@@ -2568,11 +2679,29 @@ impl App {
         }
     }
 
+    fn toolbar_layout(&self, width: f32) -> quiet_cinder::Toolbar {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        let show_update = self.update_view().is_some();
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        let show_update = false;
+        quiet_cinder::Toolbar::new(width, show_update)
+    }
+
+    fn update_panel_open(&self) -> bool {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        return self.update_panel;
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        false
+    }
+
     fn draw_toolbar(&mut self, canvas: &mut Canvas, width: f32) {
         let u = self.scale;
+        let layout = self.toolbar_layout(width);
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if let Some(bounds) = layout.update {
+            self.draw_update_button(canvas, chrome_box(bounds));
+        }
         let tab = &self.tabs[self.active];
-        let mut layout = quiet_cinder::Toolbar::new(width);
-        let downloads_button = reserve_downloads_button(&mut layout);
         let pointer = self.chrome_hover;
         for (bounds, action, enabled) in [
             (
@@ -2587,7 +2716,7 @@ impl App {
             ),
             (Some(layout.reload), Action::Reload, true),
             (layout.home, Action::Home, true),
-            (Some(downloads_button), Action::Downloads, true),
+            (Some(layout.downloads), Action::Downloads, true),
             (Some(layout.menu), Action::Menu, true),
         ] {
             let Some(bounds) = bounds.map(chrome_box) else {
@@ -2627,8 +2756,10 @@ impl App {
         }
 
         let address_rect = chrome_box(layout.address);
-        let address_focus =
-            self.address_focus && !self.devtools_focused && self.downloads_panel.is_none();
+        let address_focus = self.address_focus
+            && !self.devtools_focused
+            && self.downloads_panel.is_none()
+            && !self.update_panel_open();
         address_bar::chrome::paint_address_field(canvas, address_rect, u, address_focus);
         paint_centered_glyph(
             canvas,
@@ -2745,11 +2876,11 @@ impl App {
         width: f32,
         height: f32,
     ) -> Option<downloads_ui::HitFrame> {
-        if self.settings_panel.is_some() {
+        if self.settings_panel.is_some() || self.update_panel_open() {
             return None;
         }
         let panel = self.downloads_panel.as_ref()?;
-        let (window, anchor) = downloads_geometry(width, height);
+        let (window, anchor) = downloads_geometry(&self.toolbar_layout(width), width, height);
         let layout = panel.layout(&self.downloads, window, anchor)?;
         downloads_ui::draw(
             canvas,
@@ -3253,12 +3384,33 @@ impl App {
     }
     fn chrome_action_at_pointer(&self) -> Option<Action> {
         let content = self.hits.iter().rev().find_map(|(rect, action)| {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            if self.update_panel
+                && !matches!(
+                    action,
+                    Action::UpdatePanel | Action::UpdatePrimary(_) | Action::UpdateSurface
+                )
+            {
+                return None;
+            }
+            if !self.tab_hits_current
+                && ((TAB_H..quiet_cinder::TOOLBAR_END).contains(&rect.y)
+                    || action.address_suggestion())
+            {
+                return None;
+            }
             let current = match action {
                 action if action.caption() => false,
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
                 Action::TabListItem(_) => matches!(self.chrome_menu, Some(Menu::Tabs(_))),
                 action if action.address_suggestion() => self.suggestions_visible(),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdatePanel => self.update_view().is_some(),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdatePrimary(_) => self.update_panel && self.tab_hits_current,
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdateSurface => self.update_panel,
                 _ => true,
             };
             (current && self.pointer_in(*rect)).then_some(*action)
@@ -3335,6 +3487,15 @@ impl App {
             }
             return;
         }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_panel {
+            if self.caption_action_at_pointer().is_some() {
+                self.dismiss_update_panel();
+            } else {
+                self.update_press();
+                return;
+            }
+        }
         // The native frame remains operable above browser overlays. Other
         // outside presses dismiss Downloads without reaching the page/dock.
         if self.downloads_panel.is_some() {
@@ -3346,9 +3507,10 @@ impl App {
             }
         }
         let action = self.chrome_action_at_pointer();
-        // A keyboard tab switch/close or resize can precede the next frame.
-        // Don't apply an old tab hit to the new layout or tab indices.
-        if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
+        // Geometry can change before its presentation (including an updater
+        // offer resizing the omnibox). Don't fall through from a stale chrome
+        // hit or an old suggestion row to the page.
+        if !self.tab_hits_current && !action.is_some_and(Action::caption) {
             return;
         }
         if !action.is_some_and(|action| action == Action::Address || action.address_suggestion()) {
@@ -3451,6 +3613,7 @@ impl App {
         if self.settings_panel.is_some()
             || self.history_menu.is_some()
             || self.downloads_panel.is_some()
+            || self.update_panel_open()
             || !self.pointer_in(self.window_regions(self.active).page)
         {
             return None;
@@ -3474,6 +3637,11 @@ impl App {
         }
         if self.downloads_panel.is_some() {
             self.update_downloads_pointer();
+            return;
+        }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_panel {
+            self.update_panel_pointer();
             return;
         }
         let regions = self.window_regions(self.active);
@@ -3668,7 +3836,7 @@ impl App {
         }
     }
     fn toggle_downloads(&mut self, keyboard: bool) {
-        if self.settings_panel.is_some() {
+        if self.settings_panel.is_some() || self.update_panel_open() {
             return;
         }
         if self.downloads_panel.is_some() {
@@ -3697,7 +3865,7 @@ impl App {
             self.downloads_frame = None;
             self.downloads_hover = None;
             if let Some(window) = &self.window {
-                window.set_ime_allowed(self.settings_panel.is_none());
+                window.set_ime_allowed(self.settings_panel.is_none() && !self.update_panel_open());
                 window.set_cursor(CursorIcon::Default);
             }
             self.redraw();
@@ -3706,8 +3874,10 @@ impl App {
 
     fn downloads_viewport(&self) -> Option<(Rect, Rect)> {
         let size = self.window.as_ref()?.inner_size();
+        let width = size.width as f32 / self.scale;
         Some(downloads_geometry(
-            size.width as f32 / self.scale,
+            &self.toolbar_layout(width),
+            width,
             size.height as f32 / self.scale,
         ))
     }
@@ -4330,6 +4500,10 @@ impl ApplicationHandler<()> for App {
         self.finish_smoke(event_loop);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.poll_updates(event_loop) {
+            return;
+        }
         if self.drain_network_observations() {
             self.redraw();
         }
@@ -4491,12 +4665,30 @@ impl ApplicationHandler<()> for App {
                 self.preedit = false;
                 self.dismiss_history_menu();
                 self.dismiss_downloads();
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                self.dismiss_update_panel();
             }
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
                 ..
-            } if event.state == ElementState::Pressed => {
+            } => {
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                {
+                    let owns_key = self.update_owns_key(&event.logical_key);
+                    if self.update_keys.blocks(
+                        event.physical_key,
+                        event.state,
+                        event.repeat,
+                        is_synthetic,
+                        owns_key,
+                    ) {
+                        return;
+                    }
+                }
+                if event.state != ElementState::Pressed {
+                    return;
+                }
                 if is_synthetic && event.logical_key == Key::Named(NamedKey::F12) {
                     return;
                 }
@@ -4520,11 +4712,26 @@ impl ApplicationHandler<()> for App {
                     event_loop,
                 );
             }
+            // Windows sends Enabled at the start of a new composition. A
+            // pending Commit from disabling IME belongs to the old surface,
+            // even if Escape or a click has since closed the flyout.
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            WindowEvent::Ime(Ime::Enabled) if !self.update_panel => {
+                self.update_ime_blocked = false;
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit = false;
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if self.update_ime_blocked {
+                    return;
+                }
                 self.insert(&text);
             }
             WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if self.update_ime_blocked {
+                    return;
+                }
                 self.preedit = self.settings_panel.is_none()
                     && self.downloads_panel.is_none()
                     && !text.is_empty();
@@ -4573,6 +4780,7 @@ impl ApplicationHandler<()> for App {
                     && self.pointer_inside
                     && self.history_menu.is_none()
                     && self.downloads_panel.is_none()
+                    && !self.update_panel_open()
                     && WINDOW_FRAME
                     && self.settings_panel.is_none()
                     && self.tab_hits_current
@@ -4584,12 +4792,13 @@ impl ApplicationHandler<()> for App {
                 } else if button == MouseButton::Middle
                     && self.settings_panel.is_none()
                     && self.downloads_panel.is_none()
+                    && !self.update_panel_open()
+                    && self.tab_hits_current
                     && !self
                         .chrome_action_at_pointer()
                         .is_some_and(Action::address_suggestion)
                 {
-                    if self.tab_hits_current
-                        && matches!(self.chrome_menu, None)
+                    if matches!(self.chrome_menu, None)
                         && let Some(Action::Select(index) | Action::Close(index)) =
                             self.chrome_action_at_pointer()
                     {
@@ -4606,7 +4815,10 @@ impl ApplicationHandler<()> for App {
                 ..
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.settings_panel.is_some() || self.history_menu.is_some() {
+                if self.settings_panel.is_some()
+                    || self.history_menu.is_some()
+                    || self.update_panel_open()
+                {
                     return;
                 }
                 if self
@@ -4618,6 +4830,9 @@ impl ApplicationHandler<()> for App {
                 let (delta, detent) = scroll::wheel_delta(delta, self.scale);
                 if self.downloads_panel.is_some() {
                     self.downloads_wheel(delta.y);
+                    return;
+                }
+                if !self.tab_hits_current {
                     return;
                 }
                 let regions = self.window_regions(self.active);
@@ -4665,7 +4880,11 @@ impl ApplicationHandler<()> for App {
                     self.queue_wheel(delta, detent);
                 }
             }
-            WindowEvent::DroppedFile(path) if self.settings_panel.is_none() => {
+            WindowEvent::DroppedFile(path)
+                if self.settings_panel.is_none()
+                    && !self.update_panel_open()
+                    && self.tab_hits_current =>
+            {
                 self.dismiss_history_menu();
                 self.dismiss_downloads();
                 if let Ok(url) = url::Url::from_file_path(path) {
@@ -4709,28 +4928,13 @@ fn chrome_box(bounds: quiet_cinder::Box2) -> Rect {
     scaled_rect(1., bounds.x, bounds.y, bounds.w, bounds.h)
 }
 
-fn reserve_downloads_button(toolbar: &mut quiet_cinder::Toolbar) -> quiet_cinder::Box2 {
-    // Use the existing gap and control dimensions. Keep the button reachable
-    // at the minimum window size, where Satin has no overflow Downloads row.
-    let gap = (toolbar.menu.x - toolbar.address.right()).max(0.);
-    let reserve = toolbar.menu.w + gap;
-    toolbar.address.w = (toolbar.address.w - reserve).max(0.);
-    toolbar.bookmark.x -= reserve;
-    toolbar.edit.w = (toolbar.edit.w - reserve).max(0.);
-    quiet_cinder::Box2 {
-        x: toolbar.menu.x - reserve,
-        ..toolbar.menu
-    }
-}
-
-fn downloads_geometry(width: f32, height: f32) -> (Rect, Rect) {
-    let mut toolbar = quiet_cinder::Toolbar::new(width);
+fn downloads_geometry(toolbar: &quiet_cinder::Toolbar, width: f32, height: f32) -> (Rect, Rect) {
     // At short window sizes the popover can slide upward, but not over the
     // native title/caption buttons which retain pointer priority.
     let top = quiet_cinder::TAB_ROW;
     (
         scaled_rect(1., 0., top, width, (height - top).max(0.)),
-        chrome_box(reserve_downloads_button(&mut toolbar)),
+        chrome_box(toolbar.downloads),
     )
 }
 
@@ -5036,18 +5240,15 @@ mod download_wiring_tests {
 
     #[test]
     fn toolbar_slot_and_popup_anchor_share_geometry() {
-        for width in [320., 410., 640., 660., 661., 880., 881., 1280.] {
-            let mut toolbar = quiet_cinder::Toolbar::new(width);
-            let original_gap = toolbar.menu.x - toolbar.address.right();
-            let button = reserve_downloads_button(&mut toolbar);
-            assert_eq!(toolbar.menu.x - button.right(), original_gap);
-            assert_eq!(button.x - toolbar.address.right(), original_gap);
-            assert!(toolbar.bookmark.right() < toolbar.address.right());
-            assert!(toolbar.edit.w > 0.);
-            let (viewport, anchor) = downloads_geometry(width, 400.);
-            assert_eq!(anchor, chrome_box(button));
-            assert_eq!(viewport.y, quiet_cinder::TAB_ROW);
-            assert_eq!(viewport.y + viewport.height, 400.);
+        for width in [320., 390., 410., 640., 660., 661., 880., 881., 1280.] {
+            let normal = quiet_cinder::Toolbar::new(width, false);
+            for show_update in [false, true] {
+                let toolbar = quiet_cinder::Toolbar::new(width, show_update);
+                let (viewport, anchor) = downloads_geometry(&toolbar, width, 400.);
+                assert_eq!(anchor, chrome_box(normal.downloads));
+                assert_eq!(viewport.y, quiet_cinder::TAB_ROW);
+                assert_eq!(viewport.y + viewport.height, 400.);
+            }
         }
     }
 }

@@ -35,6 +35,8 @@ pub(super) struct Toolbar {
     pub forward: Box2,
     pub reload: Box2,
     pub home: Option<Box2>,
+    pub update: Option<Box2>,
+    pub downloads: Box2,
     pub menu: Box2,
     pub address: Box2,
     pub bookmark: Box2,
@@ -43,7 +45,7 @@ pub(super) struct Toolbar {
 }
 
 impl Toolbar {
-    pub(super) fn new(width: f32) -> Self {
+    pub(super) fn new(width: f32, show_update: bool) -> Self {
         let (padding, gap, button, inline) = if width <= 410. {
             (3., 1., 25., 22.)
         } else if width <= 880. {
@@ -57,8 +59,11 @@ impl Toolbar {
         let nav = |i: u8| control(padding + f32::from(i) * (button + gap));
         let home = (width > 660.).then(|| nav(3));
         let menu = control(width - padding - button);
+        let downloads = control(menu.x - button - gap);
+        let update = show_update.then(|| control(downloads.x - button - gap));
         let left = home.unwrap_or_else(|| nav(2)).right() + gap;
-        let address = Box2::new(left, center - 17., (menu.x - gap - left).max(0.), 34.);
+        let right = update.unwrap_or(downloads).x - gap;
+        let address = Box2::new(left, center - 17., (right - left).max(0.), 34.);
         let location = Box2::new(left + 4., center - 13.5, inline, 27.);
         let bookmark = Box2::new(address.right() - inline - 4., center - 13.5, inline, 27.);
         let edit = Box2::new(
@@ -72,6 +77,8 @@ impl Toolbar {
             forward: nav(1),
             reload: nav(2),
             home,
+            update,
+            downloads,
             menu,
             address,
             bookmark,
@@ -94,7 +101,7 @@ mod tests {
 
     #[test]
     fn desktop_places_supported_navigation_controls_on_the_reference_grid() {
-        let bar = Toolbar::new(1280.);
+        let bar = Toolbar::new(1280., false);
         assert_eq!(bar.back, Box2::new(11., 51.5, 31., 31.));
         assert_eq!(bar.forward.x, 50.);
         assert_eq!(bar.reload.x, 89.);
@@ -107,15 +114,26 @@ mod tests {
     #[test]
     fn responsive_controls_stay_in_window_and_do_not_overlap() {
         for width in [320., 390., 410., 411., 660., 661., 880., 881., 1280.] {
-            let bar = Toolbar::new(width);
-            assert_eq!(bar.home.is_some(), width > 660.);
-            assert_eq!(bar.back.w, if width <= 410. { 25. } else { 31. });
-            assert!(bar.menu.right() <= width);
-            assert!(bar.address.right() < bar.menu.x);
-            assert!(bar.location.right() < bar.edit.x);
-            assert!(bar.edit.right() < bar.bookmark.x);
-            assert!(bar.bookmark.right() < bar.address.right());
-            assert!(bar.edit.w > 0.);
+            let normal = Toolbar::new(width, false);
+            let offered = Toolbar::new(width, true);
+            let update = offered.update.unwrap();
+            assert_eq!(normal.downloads, offered.downloads);
+            assert_eq!(normal.menu, offered.menu);
+            assert_eq!(normal.location, offered.location);
+            assert_eq!(normal.address.x, offered.address.x);
+            assert!(offered.address.right() < update.x);
+            assert!(update.right() < offered.downloads.x);
+            for bar in [normal, offered] {
+                assert_eq!(bar.home.is_some(), width > 660.);
+                assert_eq!(bar.back.w, if width <= 410. { 25. } else { 31. });
+                assert!(bar.menu.right() <= width);
+                assert!(bar.downloads.right() < bar.menu.x);
+                assert!(bar.address.right() < bar.downloads.x);
+                assert!(bar.location.right() < bar.edit.x);
+                assert!(bar.edit.right() < bar.bookmark.x);
+                assert!(bar.bookmark.right() < bar.address.right());
+                assert!(bar.edit.w > 0.);
+            }
         }
     }
 }

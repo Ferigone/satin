@@ -6,7 +6,7 @@ use super::{
     address_bar::suggestions::{Direction, Source},
     chrome_box,
     icons::Glyph,
-    paint_centered_glyph, quiet_cinder, reserve_downloads_button, scaled_rect,
+    paint_centered_glyph, quiet_cinder, scaled_rect,
 };
 
 impl App {
@@ -51,17 +51,17 @@ impl App {
             && self.history_menu.is_none()
             && self.settings_panel.is_none()
             && self.downloads_panel.is_none()
+            && !self.update_panel_open()
             && !self.address_suggestions.rows().is_empty()
     }
 
     fn suggestion_popup_layout<'a>(
+        toolbar: &quiet_cinder::Toolbar,
         width: f32,
         height: f32,
         rows: &'a [super::address_bar::chrome::SuggestionRow<'a>],
         scroll: f32,
     ) -> Option<SuggestionPopup<'a>> {
-        let mut toolbar = quiet_cinder::Toolbar::new(width);
-        reserve_downloads_button(&mut toolbar);
         SuggestionPopup::new(
             chrome_box(toolbar.address),
             scaled_rect(1., 0., 0., width, height),
@@ -76,6 +76,7 @@ impl App {
         }
         if let Some(window) = &self.window {
             let size = window.inner_size();
+            let width = size.width as f32 / self.scale;
             let rows: Vec<_> = self
                 .address_suggestions
                 .rows()
@@ -84,7 +85,8 @@ impl App {
                 .collect();
             let selected = self.address_suggestions.selected();
             if let Some(scroll) = Self::suggestion_popup_layout(
-                size.width as f32 / self.scale,
+                &self.toolbar_layout(width),
+                width,
                 size.height as f32 / self.scale,
                 &rows,
                 self.suggestion_scroll,
@@ -112,8 +114,9 @@ impl App {
         }
         let suggestions = self.address_suggestions.rows();
         let rows: Vec<_> = suggestions.iter().map(|row| row.display()).collect();
+        let toolbar = self.toolbar_layout(width);
         let Some(popup) =
-            Self::suggestion_popup_layout(width, height, &rows, self.suggestion_scroll)
+            Self::suggestion_popup_layout(&toolbar, width, height, &rows, self.suggestion_scroll)
         else {
             return;
         };
@@ -142,5 +145,34 @@ impl App {
                 .visible_targets()
                 .map(|(index, bounds)| (bounds, Action::Suggestion(index))),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::address_bar::chrome::SuggestionRow;
+
+    #[test]
+    fn suggestion_panel_and_hits_follow_the_reserved_address_width() {
+        let rows = [SuggestionRow {
+            label: "Local bookmark",
+            caption: None,
+        }];
+        for width in [390., 1280.] {
+            for show_update in [false, true] {
+                let bar = quiet_cinder::Toolbar::new(width, show_update);
+                let popup = App::suggestion_popup_layout(&bar, width, 800., &rows, 0.).unwrap();
+                assert_eq!(popup.bounds.x, bar.address.x);
+                assert_eq!(popup.bounds.width, bar.address.w);
+                assert_eq!(popup.bounds.x + popup.bounds.width, bar.address.right());
+                let (index, hit) = popup.visible_targets().next().unwrap();
+                assert_eq!(index, 0);
+                assert!(hit.x + hit.width < bar.address.right());
+                assert_eq!(popup.hit(hit.x + 1., hit.y + 1.), Some(0));
+                let neighbor = bar.update.unwrap_or(bar.downloads);
+                assert_eq!(popup.hit(neighbor.x, hit.y + 1.), None);
+            }
+        }
     }
 }
