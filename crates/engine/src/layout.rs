@@ -679,6 +679,7 @@ struct Fragment {
     anchors: HashMap<String, f32>,
     subgrid_spans: HashMap<(NodeId, bool), usize>,
     intrinsic_subgrid_rows: Vec<GridContribution>,
+    baselines: Option<[f32; 2]>,
     width: f32,
     height: f32,
 }
@@ -920,6 +921,7 @@ struct Builder<'a> {
     anchors: HashMap<String, f32>,
     subgrid_spans: HashMap<(NodeId, bool), usize>,
     intrinsic_subgrid_rows: Vec<GridContribution>,
+    baselines: Option<[f32; 2]>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
     fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
@@ -956,6 +958,7 @@ impl<'a> Builder<'a> {
             anchors: HashMap::new(),
             subgrid_spans: HashMap::new(),
             intrinsic_subgrid_rows: Vec::new(),
+            baselines: None,
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             fragment_cache: HashMap::new(),
@@ -2369,6 +2372,7 @@ impl Builder<'_> {
         );
         let mut measured = Vec::with_capacity(placement.items.len());
         let mut row_contributions = Vec::with_capacity(placement.items.len());
+        let mut baseline_groups = HashMap::<(usize, bool), f32>::new();
         for &item in &placement.items {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let style = &self.styles[item.node.0];
@@ -2521,7 +2525,45 @@ impl Builder<'_> {
                 auto_minimum: text || (style.min_height == Length::Auto && auto_height),
                 floor: m.extra_y() + m.margin[0] + m.margin[2],
             });
-            measured.push((fragment, border_width, justify));
+            let align = if style.align_self == Align::Auto {
+                container.align_items
+            } else {
+                style.align_self
+            };
+            let baseline = if matches!(align, Align::FirstBaseline | Align::LastBaseline)
+                && style.margin[0] != Length::Auto
+                && style.margin[2] != Length::Auto
+            {
+                let last = align == Align::LastBaseline;
+                let key = (
+                    if last {
+                        item.row + item.rows - 1
+                    } else {
+                        item.row
+                    },
+                    last,
+                );
+                // A box without a line synthesizes its baseline at its border end.
+                let line = fragment
+                    .baselines
+                    .map_or(fragment.height - m.margin[2], |b| b[usize::from(last)]);
+                let distance = if last { fragment.height - line } else { line };
+                let group = baseline_groups.entry(key).or_insert(distance);
+                *group = group.max(distance);
+                Some((key, distance, row_contributions.len() - 1))
+            } else {
+                None
+            };
+            measured.push((fragment, border_width, justify, baseline));
+        }
+        for (_, _, _, baseline) in &measured {
+            if let Some((key, distance, index)) = baseline {
+                let shim = baseline_groups[key] - distance;
+                let contribution = &mut row_contributions[*index];
+                contribution.minimum += shim;
+                contribution.min_content += shim;
+                contribution.maximum += shim;
+            }
         }
         let row_sizes = if let Some(r) = &inherited.rows {
             r.adjusted(gap_y)
@@ -2568,7 +2610,9 @@ impl Builder<'_> {
             used_height,
             container.align_content,
         );
-        for (item, (mut fragment, border_width, justify)) in placement.items.iter().zip(measured) {
+        for (item, (mut fragment, border_width, justify, baseline)) in
+            placement.items.iter().zip(measured)
+        {
             let area_width = grid_area(&column_sizes, item.column, item.columns, used_gap_x);
             let area_height = grid_area(&row_sizes, item.row, item.rows, used_gap_y);
             let style = &self.styles[item.node.0];
@@ -2693,6 +2737,9 @@ impl Builder<'_> {
                 } else {
                     0.
                 }
+            } else if let Some((key, distance, _)) = baseline {
+                let shim = baseline_groups[&key] - distance;
+                if key.1 { free_y - shim } else { shim }
             } else {
                 offset(align, free_y)
             };
@@ -3773,6 +3820,7 @@ impl Builder<'_> {
             anchors: std::mem::take(&mut self.anchors),
             subgrid_spans: std::mem::take(&mut self.subgrid_spans),
             intrinsic_subgrid_rows: std::mem::take(&mut self.intrinsic_subgrid_rows),
+            baselines: self.baselines.take(),
             ..Fragment::default()
         };
         let s = &self.styles[id.0];
@@ -3811,6 +3859,7 @@ impl Builder<'_> {
                 &mut self.intrinsic_subgrid_rows,
                 old.intrinsic_subgrid_rows,
             ),
+            baselines: std::mem::replace(&mut self.baselines, old.baselines),
             width,
             height,
         };
@@ -3834,7 +3883,15 @@ impl Builder<'_> {
         }
         fragment
     }
+    fn add_baselines(&mut self, first: f32, last: f32) {
+        let edges = self.baselines.get_or_insert([first, last]);
+        edges[0] = edges[0].min(first);
+        edges[1] = edges[1].max(last);
+    }
     fn append_fragment(&mut self, mut f: Fragment, x: f32, y: f32) {
+        if let Some([first, last]) = f.baselines {
+            self.add_baselines(first + y, last + y);
+        }
         for command in &mut f.commands {
             match command {
                 DrawCommand::PushState { transform, clip } => {
@@ -4690,6 +4747,7 @@ impl Builder<'_> {
         }
         let height = (ascent + descent).max(0.);
         let baseline = line.y + ascent;
+        self.add_baselines(baseline, baseline);
         let slot = self.float_interval(line);
         let extra = (slot.width() - line.used).max(0.);
         let mut x = slot.left

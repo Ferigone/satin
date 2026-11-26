@@ -376,6 +376,8 @@ pub enum FlexWrap {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
+    FirstBaseline,
+    LastBaseline,
     Left,
     Right,
     FlexStart,
@@ -5178,6 +5180,10 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 "flex-start" => Align::FlexStart,
                 "flex-end" => Align::FlexEnd,
                 "center" => Align::Center,
+                "baseline" | "first baseline" if matches!(p, AlignItems | AlignSelf) => {
+                    Align::FirstBaseline
+                }
+                "last baseline" if matches!(p, AlignItems | AlignSelf) => Align::LastBaseline,
                 "auto" if matches!(p, AlignSelf | JustifySelf) => Align::Auto,
                 "space-between" if matches!(p, JustifyContent | AlignContent) => {
                     Align::SpaceBetween

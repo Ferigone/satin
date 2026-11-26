@@ -68,3 +68,19 @@ fn subgrid_grandchildren_contribute_to_individual_auto_rows() {
         "33,120|48,135".into()
     );
 }
+
+#[test]
+fn grid_items_share_first_and_last_baselines_across_a_row() {
+    let page = LoadedPage::from_html(
+        "https://example.test/",
+        r#"<style>
+    body{margin:0} #grid{display:grid;grid:100px / repeat(2,40px);align-items:first baseline}
+    #grid.end{align-items:last baseline} #short{height:20px} #tall{height:40px}
+    </style><div id=grid><div id=short></div><div id=tall></div></div>"#,
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+      function ys(){return [document.getElementById('short').offsetTop,document.getElementById('tall').offsetTop].join(',')}
+      let first=ys(); document.getElementById('grid').className='end';[first,ys()].join('|')
+    "#).unwrap(),"20,0|80,60".into());
+}
