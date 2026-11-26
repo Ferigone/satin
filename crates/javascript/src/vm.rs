@@ -373,7 +373,7 @@ impl Vm {
         self.realm.wasm_compilation_allowed = allowed;
     }
     pub fn check_syntax(&mut self, source: &str) -> Result<(), JsError> {
-        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+        let chunk = self.compile_classic(source)?;
         self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
 
@@ -384,9 +384,8 @@ impl Vm {
         source: &str,
         phase: impl FnMut(&'static str),
     ) -> Result<usize, JsError> {
-        let budget = self.compilation_budget(source)?;
         let chunk = bytecode::compile_with_phases(
-            crate::lexer::Lexer::new(source, budget, true),
+            self.classic_lexer(source)?,
             source.len(),
             false,
             crate::parser::EvalContext::default(),
@@ -396,6 +395,16 @@ impl Vm {
         self.ensure_allocation(retained)?;
         Ok(retained)
     }
+    fn compile_classic(&self, source: &str) -> Result<Rc<Chunk>, JsError> {
+        bytecode::compile_eval(self.classic_lexer(source)?, source.len(), false, crate::parser::EvalContext::default())
+    }
+
+    fn classic_lexer(&self, source: &str) -> Result<crate::lexer::Lexer, JsError> {
+        let width = if source.is_ascii() { 1 } else { 4 };
+        let budget = self.compilation_budget_for_bytes(source.len(), 12 + width)?;
+        Ok(crate::lexer::Lexer::budgeted_script(source, budget, source.len().saturating_mul(width)))
+    }
+
     pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
         // The ASCII lexer backs its spans with one byte instead of four
         // per source character. Keep the same decoded-literal scratch allowance.
@@ -517,7 +526,7 @@ impl Vm {
         let chunk = {
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             let _scope = startup_profile::enter(startup_profile::Area::Compile);
-            let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+            let chunk = self.compile_classic(source)?;
             self.retain_compiled_chunk(&chunk)?;
             chunk
         };

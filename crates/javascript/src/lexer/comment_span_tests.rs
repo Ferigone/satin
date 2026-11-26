@@ -24,3 +24,20 @@ fn scanning_a_shared_subspan_cannot_consume_a_delimiter_beyond_its_end() {
     let token = Lexer::from_utf16(&source, usize::MAX).next();
     assert_eq!((token.line, token.column, token.kind), (2, 1, TokenKind::Number(1.0)));
 }
+#[test]
+fn budgeted_backing_refunds_only_completed_source_storage() {
+    let narrow = "x".repeat(65_536) + "π";
+    let paid = narrow.len() * 4;
+    let mut lexer = super::Lexer::budgeted_script(&narrow, 50_000, paid);
+    let actual = lexer.chars.storage().1;
+    assert_eq!(lexer.remaining_compilation_bytes(), 50_000 + paid - actual);
+    let before = lexer.remaining_compilation_bytes();
+    let token = lexer.next();
+    assert_eq!(lexer.lookahead_charge(&token), before - lexer.remaining_compilation_bytes());
+    let mut delimiters = super::Lexer::new(" ):x", 1024, true);
+    for _ in 0..4 {
+        let before = delimiters.remaining_compilation_bytes();
+        let token = delimiters.next();
+        assert_eq!(delimiters.lookahead_charge(&token), before - delimiters.remaining_compilation_bytes());
+    }
+}

@@ -15,6 +15,13 @@ const BIGINT_SOURCE_WORK: usize = 8_388_608;
 const STRUCTURAL_TOKEN_BYTES: usize = 384;
 const CLOSING_DELIMITER_BYTES: usize = 32;
 
+fn structural_charge(point: Option<char>) -> usize {
+    match point {
+        Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
+        _ => STRUCTURAL_TOKEN_BYTES,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
     Word(String),
@@ -73,6 +80,14 @@ pub(crate) struct Lexer {
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
         Self::from_span(SourceSpan::from_text(source), compilation_bytes, script_goal)
+    }
+
+    pub(crate) fn budgeted_script(source: &str, budget: usize, source_reservation: usize) -> Self {
+        let chars = SourceSpan::from_text(source);
+        // The VM already admitted the worst-case source and decoded-literal
+        // scratch. Construction has finished; only the actual backing remains.
+        let unused = source_reservation.saturating_sub(chars.storage().1);
+        Self::from_span(chars, budget.saturating_add(unused), true)
     }
 
     pub(crate) fn from_utf16(source: &[u16], compilation_bytes: usize) -> Self {
@@ -146,10 +161,13 @@ impl Lexer {
         self.compilation_bytes
     }
 
+    pub(crate) fn lookahead_charge(&self, token: &Token) -> usize {
+        structural_charge(self.chars.point(token.start).map(|p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER)))
+    }
+
     pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
-        // Up to three already-lexed tokens following the closing brace survive this body.
         self.compilation_bytes = before;
-        self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))?;
+        self.reserve_compilation_bytes(retained)?;
         #[cfg(feature = "media-startup-diagnostics")]
         {
             self.compacted_bodies = self.compacted_bodies.saturating_add(1);
@@ -181,10 +199,7 @@ impl Lexer {
 
     pub(crate) fn next(&mut self) -> Token {
         let trivia = self.skip_trivia().and_then(|()| {
-            let bytes = match self.peek(0) {
-                Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
-                _ => STRUCTURAL_TOKEN_BYTES,
-            };
+            let bytes = structural_charge(self.peek(0));
             self.reserve_compilation_bytes(bytes)
         });
         self.before_first_token = false;

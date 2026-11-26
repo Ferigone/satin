@@ -1074,7 +1074,14 @@ impl Parser {
         }
     }
     fn function(&mut self, start: usize, is_async: bool, require_name: bool) -> Result<Function, JsError> {
-        let before = self.lexer.remaining_compilation_bytes();
+        // The lookahead tokens at function entry all belong to the function:
+        // even the shortest tail, (){}, has four tokens. Their structural
+        // credit is replaced by the callable and by the actual next lookahead.
+        let before = if self.defer_large_functions && self.function_depth == 1 {
+            self.lexer.remaining_compilation_bytes().saturating_add(self.lookahead_charge())
+        } else {
+            self.lexer.remaining_compilation_bytes()
+        };
         let kind = self.function_kind(is_async);
         let old_counts = (self.await_count, self.yield_count);
         let name = if !self.at("(") {

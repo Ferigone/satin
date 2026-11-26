@@ -2,6 +2,10 @@ use super::{Ast, Function, FunctionKind, Parser, simple_parameter};
 use crate::JsError;
 
 impl Parser {
+    pub(super) fn lookahead_charge(&self) -> usize {
+        self.tokens.iter().map(|token| self.lexer.lookahead_charge(token)).sum()
+    }
+
     /// Large bundles often register many ordinary functions in their outer
     /// wrapper. Validate each eligible function now, but leave only callable
     /// metadata and a shared source span until somebody actually invokes it.
@@ -27,7 +31,7 @@ impl Parser {
             function.body = Vec::new();
             function.params = Vec::new();
             function.validated = Some(code);
-            self.lexer.finish_deferred_function(before, retained)?;
+            self.lexer.finish_deferred_function(before, retained.saturating_add(self.lookahead_charge()))?;
         }
         Ok(())
     }
