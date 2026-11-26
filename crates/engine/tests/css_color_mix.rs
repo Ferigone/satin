@@ -201,3 +201,88 @@ fn foreground_mix_has_depth_node_and_input_budgets() {
     let large = format!("color-mix(in{}srgb, red, blue)", " ".repeat(16 * 1024));
     assert!(!supports_declaration("color", &large));
 }
+
+#[test]
+fn foreground_mix_preserves_extended_srgb_until_final_mapping() {
+    for (value, expected) in [
+        (
+            "color-mix(in srgb, color(srgb 1.2 0 0), black)",
+            Color(153, 0, 0, 255),
+        ),
+        (
+            "color-mix(in srgb, color(srgb -.4 .2 0), color(srgb .8 0 0))",
+            Color(51, 26, 0, 255),
+        ),
+        (
+            "color-mix(in srgb, color-mix(in srgb, color(srgb 1.4 0 0), red), black)",
+            Color(153, 0, 0, 255),
+        ),
+        (
+            concat!(
+                "color-mix(in srgb, color(srgb 1.7976931348623157e308 .4 .8), ",
+                "color(srgb -1.7976931348623157e308 .6 0))",
+            ),
+            Color(0, 128, 102, 255),
+        ),
+    ] {
+        assert_eq!(compute_foreground(value), expected, "{value}");
+    }
+    let literal = "color(srgb -.2 .4 .7)";
+    assert_eq!(
+        compute_foreground(&format!("color-mix(in srgb, {literal} 100%, black)")),
+        compute_foreground(literal),
+        "an out-of-gamut result uses the same final mapper as an absolute color"
+    );
+}
+
+#[test]
+fn foreground_mix_borrows_missing_components_before_premultiplication() {
+    for (value, expected) in [
+        (
+            "color-mix(in srgb, rgb(0 255 0 / .5), rgb(0 255 0 / none))",
+            Color(0, 255, 0, 128),
+        ),
+        (
+            "color-mix(in srgb, color(srgb none .4 0 / .25), rgb(204 0 255 / .75))",
+            Color(204, 26, 191, 128),
+        ),
+        (
+            concat!(
+                "color-mix(in srgb, ",
+                "color-mix(in srgb, color(srgb none .2 0 / none), rgb(none 102 0 / none)), ",
+                "color(srgb .8 .7 .5 / .4))",
+            ),
+            Color(204, 128, 64, 102),
+        ),
+        (
+            "color-mix(in srgb, rgb(none 204 0), color(srgb none .4 .2))",
+            Color(0, 153, 26, 255),
+        ),
+        (
+            "color-mix(in srgb, rgb(255 0 0 / none), rgb(0 0 255 / none))",
+            Color(0, 0, 0, 0),
+        ),
+    ] {
+        assert!(supports_declaration("color", value), "{value}");
+        assert_eq!(compute_foreground(value), expected, "{value}");
+    }
+}
+
+#[test]
+fn foreground_mix_rejects_nonfinite_channels_and_invalid_none_syntax() {
+    for invalid in [
+        "color-mix(in srgb, color(srgb 1e999 0 0), black)",
+        "color-mix(in srgb, color(srgb none% 0 0), black)",
+        "color-mix(in srgb, color(srgb none 0 / .5), black)",
+        "color-mix(in srgb, color(srgb none, 0, 0), black)",
+        "color-mix(in srgb, rgb(none, 0, 0), black)",
+        "color-mix(in srgb, rgba(0, 0, 0, none), black)",
+    ] {
+        assert!(!supports_declaration("color", invalid), "{invalid}");
+        assert_eq!(
+            compute_foreground(invalid),
+            Color(18, 52, 86, 255),
+            "{invalid}"
+        );
+    }
+}

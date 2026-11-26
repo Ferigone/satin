@@ -1,7 +1,7 @@
 //! Foreground `color-mix(in srgb, …)` expressions awaiting the inherited color.
 use super::{
-    Color, color, color_number, functional_color_components, matching_close, split_top,
-    whitespace_tokens,
+    Color, color, color_number, functional_color_components, matching_close,
+    oklab::encoded_srgb_to_color, split_top, whitespace_tokens,
 };
 
 const MAX_BYTES: usize = 16 * 1024;
@@ -17,10 +17,14 @@ pub(super) struct Mix {
 
 #[derive(Debug)]
 enum Operand {
-    Absolute([f64; 4]),
+    Absolute(Components),
     Current,
     Mix(Mix),
 }
+
+// Straight, encoded RGB and alpha. A missing channel survives until interpolation
+// with a counterpart supplies it, including across nested mixes.
+type Components = [Option<f64>; 4];
 
 pub(super) fn parse(source: &str) -> Option<Mix> {
     if source.len() > MAX_BYTES {
@@ -95,8 +99,8 @@ fn weighted(source: &str) -> Option<(&str, Option<f64>)> {
     }
 }
 
-fn from_color(Color(r, g, b, a): Color) -> [f64; 4] {
-    [r, g, b, a].map(|c| f64::from(c) / 255.)
+fn from_color(Color(r, g, b, a): Color) -> Components {
+    [r, g, b, a].map(|c| Some(f64::from(c) / 255.))
 }
 
 fn fraction(token: &str, scale: f64) -> Option<f64> {
@@ -107,13 +111,21 @@ fn fraction(token: &str, scale: f64) -> Option<f64> {
     }
 }
 
-fn absolute(source: &str) -> Option<[f64; 4]> {
-    // Keep in-range sRGB literals at full precision through nesting.
-    let srgb = |body: &str, rgb_function: bool| -> Option<[f64; 4]> {
+fn absolute(source: &str) -> Option<Components> {
+    let srgb = |body: &str, rgb_function: bool| -> Option<Components> {
+        let legacy = body.contains(',');
         let ([r, g, b], alpha) = functional_color_components(body, rgb_function)?;
         let scale = if rgb_function { 255. } else { 1. };
-        let [r, g, b] = [r, g, b].map(|c| fraction(c, scale));
-        let a = fraction(alpha.unwrap_or("1"), 1.)?.clamp(0., 1.);
+        let component = |token, scale| {
+            if token == "none" && !legacy {
+                return Some(None);
+            }
+            fraction(token, scale).map(Some)
+        };
+        let [r, g, b] = [r, g, b].map(|c| {
+            component(c, scale).map(|v| v.map(|v| if rgb_function { v.clamp(0., 1.) } else { v }))
+        });
+        let a = component(alpha.unwrap_or("1"), 1.)?.map(|v| v.clamp(0., 1.));
         Some([r?, g?, b?, a])
     };
     if let Some(body) = source
@@ -121,7 +133,7 @@ fn absolute(source: &str) -> Option<[f64; 4]> {
         .or_else(|| source.strip_prefix("rgba("))
         .and_then(|body| body.strip_suffix(')'))
     {
-        return srgb(body, true).map(|rgba| rgba.map(|c| c.clamp(0., 1.)));
+        return srgb(body, true);
     }
     if let Some(body) = source
         .strip_prefix("color(")
@@ -134,44 +146,77 @@ fn absolute(source: &str) -> Option<[f64; 4]> {
         if channels.contains(',') {
             return None;
         }
-        let rgba = srgb(channels, false)?;
-        if rgba.iter().all(|c| (0. ..=1.).contains(c)) {
-            return Some(rgba);
-        }
+        return srgb(channels, false);
     }
-    // Other supported absolute syntaxes (including out-of-gamut profiles)
-    // go through the renderer's existing sRGB conversion.
+    // Other supported absolute syntaxes still use the existing sRGB fallback.
     color(source).map(from_color)
 }
 
-fn premultiply([r, g, b, a]: [f64; 4]) -> [f64; 4] {
-    [r * a, g * a, b * a, a]
+fn interpolate(left: f64, right: f64, p: f64, q: f64) -> f64 {
+    if left == right {
+        return left;
+    }
+    let (min, max) = (left.min(right), left.max(right));
+    if left.abs().max(right.abs()) > f64::MAX / 2. {
+        // Room for rounding at the largest finite magnitude, without
+        // subtracting opposite-sign endpoints or discarding tiny weights.
+        (left * 0.5 * p + right * 0.5 * q).clamp(min * 0.5, max * 0.5) * 2.
+    } else {
+        (left * p + right * q).clamp(min, max)
+    }
 }
 
 impl Operand {
-    fn premultiplied(&self, inherited: [f64; 4]) -> [f64; 4] {
+    fn components(&self, inherited: Components) -> Components {
         match self {
-            Self::Absolute(rgba) => premultiply(*rgba),
+            Self::Absolute(rgba) => *rgba,
             Self::Current => inherited,
-            Self::Mix(mix) => mix.premultiplied(inherited),
+            Self::Mix(mix) => mix.components(inherited),
         }
     }
 }
 
 impl Mix {
-    fn premultiplied(&self, inherited: [f64; 4]) -> [f64; 4] {
-        let [left, right] = self.operands.each_ref().map(|c| c.premultiplied(inherited));
+    fn components(&self, inherited: Components) -> Components {
+        let [left, right] = self.operands.each_ref().map(|c| c.components(inherited));
         let [p, q] = self.weights;
-        // Scaling alpha after interpolation also scales premultiplied channels.
-        std::array::from_fn(|i| (left[i] * p + right[i] * q) * self.alpha_multiplier)
+        let alpha_missing = left[3].is_none() && right[3].is_none();
+        // Borrow alpha first. If neither side has it, interpolate the raw
+        // channels and keep the result's alpha missing.
+        let a = left[3].or(right[3]).unwrap_or(1.);
+        let b = right[3].or(left[3]).unwrap_or(1.);
+        // Normalize the alpha contributions, equivalent to premultiplying and
+        // then undoing premultiplication, without dividing large RGB values.
+        let peak = a.max(b);
+        let (p, q) = if peak == 0. {
+            (0., 0.)
+        } else {
+            (a / peak * p, b / peak * q)
+        };
+        let sum = p + q;
+        let channel = |i: usize| match (left[i], right[i]) {
+            (None, None) => None,
+            _ if sum == 0. => Some(0.),
+            (Some(l), Some(r)) => Some(interpolate(l, r, p / sum, q / sum)),
+            // With a component missing on one side, both sides use the
+            // other side's value before premultiplication.
+            (l, r) => l.or(r),
+        };
+        [
+            channel(0),
+            channel(1),
+            channel(2),
+            (!alpha_missing).then_some((sum * peak * self.alpha_multiplier).min(1.)),
+        ]
     }
 
     pub(super) fn resolve(&self, inherited: Color) -> Color {
-        let [r, g, b, a] = self.premultiplied(premultiply(from_color(inherited)));
-        let byte = |c: f64| (c.clamp(0., 1.) * 255. + 1e-12).round() as u8;
+        let [r, g, b, a] = self
+            .components(from_color(inherited))
+            .map(|v| v.unwrap_or(0.));
         if a == 0. {
             return Color(0, 0, 0, 0);
         }
-        Color(byte(r / a), byte(g / a), byte(b / a), byte(a))
+        encoded_srgb_to_color([r, g, b], (a * 255. + 1e-12).round() as u8)
     }
 }
