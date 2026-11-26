@@ -215,7 +215,12 @@ fn canvas_encoders_serialize_the_source_bitmap_and_to_blob_is_a_later_task() {
     );
     assert_eq!(result, "data:,");
     assert_eq!(text(&mut runtime, "order.join(',')"), "");
-    runtime.pump();
+    for _ in 0..8 {
+        runtime.pump();
+        if text(&mut runtime, "String(order.length === 3 && !!bytes)") == "true" {
+            break;
+        }
+    }
     assert_eq!(
         text(&mut runtime, "order.join(',')"),
         "microtask,image/png,empty"
