@@ -2,6 +2,46 @@
 
 The alpha.35–alpha.36 audit ran on Linux x86_64 on 2026-11-25, against Satin `57e1dbd` (alpha.35) and [the CSS implementation released in alpha.36](https://github.com/Ferigone/satin/commit/8f8882f3d68d8eaaf8112194dac75f7ca61658c6). Both runs used Rust 1.99.1, the same system fonts and the same source pages. The candidate workspace test suite on Linux recorded 1,403 passes, zero failures and three pre-existing opt-in checks. The upstream [WPT revision is pinned to `9b8b1be`](https://github.com/web-platform-tests/wpt/tree/9b8b1beec730060783726b7c538b21e25e63b1f4/css).
 
+## Alpha.41 line clamping
+
+At 390 × 800 CSS px, Satin wrapped the first Brave Search result title onto a second line. The page requested a one-line preview. Alpha.41 measures the line, reserves space for the ellipsis, and stops emitting text and inline hit regions beyond it. The description moves up by 26 px. At 1280 × 800 the title already fit, and all three browsers measured it at 648 × 26 px. The screenshots below show the same result in alpha.40, alpha.41 and Chromium, left to right.
+
+![The first Brave result wraps to two lines in alpha.40. Alpha.41 and Chromium end the first line with an ellipsis after “Global”.](css-alpha41-brave.png)
+
+| Element and viewport | Alpha.40 rectangle (x, y, width, height) | Alpha.41 | Chromium 156.0.8078.79 |
+| --- | --- | --- | --- |
+| Brave result, 390 × 800 | 16, 622.18, 358, 52 | 16, 622.18, 358, 26 | 16, 625, 358, 26 |
+| Brave result, 1280 × 800 | 127, 594.18, 648, 26 | 127, 594.18, 648, 26 | 127, 569, 648, 26 |
+| MDN paragraph, 300 px wide, controlled font | 0, 16, 300, 120 | 0, 16, 300, 60 | 0, 16, 300, 60 |
+
+The Linux native-window comparison used a 1× display and 100% zoom. The Brave query was `test`, and the selector was `.search-snippet-title`. The linked 1,259,798-byte stylesheet sets `display: -webkit-box`, `-webkit-box-orient: vertical`, and `-webkit-line-clamp: 1`. Both engines used the page’s Inter Variable family and a computed line height of 26 px. The alpha.40 CSSOM returned an empty clamp value and `block`. The candidate returned `1` and `flow-root`. The same native tab was resized and scrolled down and back up. The title kept its clamped height. The original page and a replay of identical server HTML, stylesheet and font bytes were checked separately. [Brave results](https://search.brave.com/search?q=test)
+
+On the original MDN Playground example, the paragraph height dropped from 115.2 to 57.6 px in Satin. Chromium measured 54 px using its default font and line height. A replay fixed both engines to DejaVu Sans at 16 px with a 20 px line height. Both viewport widths then gave the rectangles above. The regression also changes a custom property and the element class in place, checks the following block, and resizes without reloading. A pixel test checks the visible ellipsis, a trailing break and an absolutely positioned child after the cutoff. [MDN example](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties/line-clamp#truncating_a_paragraph_with_the_legacy_property) · [Regression tests](../../crates/engine/tests/css_line_clamp.rs)
+
+The wide Brave page still differs. Its server HTML places the information card under `#mixed-main`. In the live native windows Satin retained that parent at x = 103, while Chromium moved the card under `#mixed-side` at x = 823 after script execution. The title’s vertical offset also still differs by 25.18 px on desktop. This release covers inline text in vertical legacy boxes. Nested block clamping, the unprefixed shorthand, custom ellipsis strings and vertical writing remain open.
+
+### Pixel and CSSOM measurements
+
+The before/after runs used Rust 1.99.1 on one Linux x86_64 host and the pinned WPT checkout and manifest under **Reproduce**. The original 26,318 screen entries had identical test and reference paths in both runs. Every alpha.40 status also matched the archived alpha.37 status. [Measured alpha.40 commit](https://github.com/Ferigone/satin/commit/f37b33a5f9b5f93b849418ea0899eb88dc86259c) · [Measured candidate engine](https://github.com/Ferigone/satin/commit/4ebaf760fd136017262a0a21284e76a00ac798bb)
+
+| Screen comparison outcome | Original cohort, alpha.40 | Original cohort, alpha.41 | Additional linked-Ahem cohort, each build |
+| --- | ---: | ---: | ---: |
+| Eligible comparisons | 6,536 | 6,536 | 1,388 |
+| Satisfied pixel relation | 1,968 (30.11%) | 1,981 (30.31%) | 315 (22.69%) |
+| Failed pixel relation | 4,431 | 4,418 | 1,063 |
+| Identical single-color canvases | 136 | 136 | 10 |
+| Engine work limit | 1 | 1 | 0 |
+| Process errors or timeouts | 0 | 0 | 0 |
+| Outside this cohort | 19,782 | 19,782 | 24,930 |
+
+All 1,968 prior passes held. Twelve new passes are in the line-clamp directory, which now has 36 passes, 221 failures and two inconclusive results in the original cohort. A separate float containment reference also passed with the new flow-root formatting context. The additional cohort changed no statuses. Across both cohorts, 18,394 screen entries still require other resources, document formats, scripting, interactions or configuration. [All screen outcomes with paths and references](css-reftest-alpha41.tsv.gz)
+
+Run the optional cohort with the same command under **Reproduce**, adding `--ahem-only` and writing a separate report. Use the alpha.41 Python adapter and renderer example on both engine revisions. The adapter verifies the SHA-256 hashes of the canonical WPT font and stylesheet, decodes the font with Satin, and checks that two 20 px Ahem X glyphs paint an exact 40 × 20 green rectangle on the white canvas. It checks eligibility on each reference as well as the test.
+
+All 823 property probes ran. Of 625 distinguishing computed values, exact matches rose from 92 to 94, missing readbacks fell from 532 to 530, and one serialization still differed. Five reference inputs had no distinguishing change and 193 had no reference sample. The six pinned relational-selector pages again passed all 87 assertions on both revisions.
+
+[Download native and Chromium screenshots, per-element geometry, scroll observations and source hashes (ZIP)](css-alpha41-native.zip)
+
 ## Alpha.37 static CSS rerun
 
 On 2026-11-25 the alpha.37 renderer completed six Grid comparisons that had reached the engine work limit in alpha.36. The orthogonal writing-mode subgrid case matched its reference. The other five produced pixel differences. All 1,967 previous passes held and one work-limit error remains.

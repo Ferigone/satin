@@ -28,6 +28,12 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.41
+
+Long Brave Search result titles now fit on one line and end with an ellipsis on narrow screens. At a 390 px viewport the first title shrank from 52 to 26 px, matching Chromium. A three-line MDN preview shrank from six lines to three. Editing the line count or resizing the window reflows the following content.
+
+Satin passed **1,981 of 6,536** static CSS reference comparisons, up from 1,968. All 13 changes were new passes. A separate runner with the pinned WPT Ahem font measured 1,388 more comparisons. Both versions passed the same 315. [Measurements, native-window screenshots and remaining differences](docs/compatibility/css.md#alpha41-line-clamping)
+
 ## Changes in alpha.40
 
 The native Windows browser completed all **16,436 tests** on the original 2016 Test262 website. The Run and Results tabs recorded **16,193 passed, 243 failed and zero failed to load**, 42 more passes than Windows alpha.39. A separate Linux browser-engine session recorded **16,194 passed and 242 failed**, with 188 failures at the previously reported stopping point of 8,276. Opening Results after that run produced 4,911 rows and 4,826 links to test source. [Windows evidence and per-case browser results](docs/compatibility/legacy-test262.md#full-run-all-in-alpha40)
@@ -84,7 +90,7 @@ The CSS tiles show results for the named suites. The static reftest tile compare
 | Staging | 2,561 / 2,791 | 91.76% | Test262 · `staging` |
 | Sticky positioning | 52 / 52 | 100.00% | [19 pinned WPT pages](crates/engine/tests/fixtures/wpt-sticky/README.md) |
 | Logical properties | 12 / 12 | 100.00% | [One WPT page on logical properties with CSS variables](crates/engine/tests/css_logical.rs) |
-| Static CSS reftests | 1,968 / 6,536 | 30.11% | [Alpha.37 static screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md#alpha37-static-css-rerun) |
+| Static CSS reftests | 1,981 / 6,536 | 30.31% | [Alpha.41 static screen comparisons in the pinned WPT CSS tree](docs/compatibility/css.md#alpha41-line-clamping) |
 | HTML tokenizer | 7,028 / 7,036 | 99.89% | [html5lib initial-state variants](crates/engine/data/html5lib/README.md) |
 | HTML tree builder | 3,541 / 3,553 | 99.66% | [html5lib scripting-flag variants](crates/engine/data/html5lib/README.md) |
 | Canvas pixel data | 25 / 26 | 96.15% | [Selected WPT pixel readback cases, including a known float16 failure](crates/engine/tests/canvas_pixels.rs) |
