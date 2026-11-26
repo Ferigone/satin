@@ -8,11 +8,17 @@ pub(crate) fn constructed_rules(input: &str) -> (Vec<String>, bool) {
     let mut top_level_count = 0usize;
     while let Some((open, delimiter)) = first_top_delimiter(tail, b"{;") {
         top_level_count += 1;
+        if rules.len() >= 8192 {
+            break;
+        }
+        let header = trim_boundary(&tail[..open]);
         if delimiter == b';' {
+            if layers::header(header).and_then(layers::order).is_some() {
+                rules.push(format!("{};", serialized_tokens(header)));
+            }
             tail = &tail[open + 1..];
             continue;
         }
-        let header = trim_boundary(&tail[..open]);
         let end = stylesheet_block_end(tail, open).unwrap_or(tail.len());
         let body = &tail[open + 1..end];
         if !header.starts_with('@') {
@@ -38,18 +44,19 @@ pub(crate) fn constructed_rules(input: &str) -> (Vec<String>, bool) {
                 rule.push('}');
                 rules.push(rule);
             }
-        } else if header.split_ascii_whitespace().next().is_some_and(|k| {
-            [
-                "@media",
-                "@supports",
-                "@font-face",
-                "@keyframes",
-                "@layer",
-                "@container",
-            ]
-            .iter()
-            .any(|t| k.eq_ignore_ascii_case(t))
-        }) {
+        } else if layers::header(header).is_some_and(layers::valid_block)
+            || header.split_ascii_whitespace().next().is_some_and(|k| {
+                [
+                    "@media",
+                    "@supports",
+                    "@font-face",
+                    "@keyframes",
+                    "@container",
+                ]
+                .iter()
+                .any(|t| k.eq_ignore_ascii_case(t))
+            })
+        {
             rules.push(format!(
                 "{} {{ {} }}",
                 serialized_tokens(header),

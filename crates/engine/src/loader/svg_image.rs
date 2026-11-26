@@ -58,14 +58,8 @@ impl SvgImage {
         SvgScene::intrinsic_size(&self.document, self.root)
     }
     pub fn scene(&self, width: f32, height: f32) -> SvgScene {
-        let mut rules = vec![];
-        for sheet in &self.sheets {
-            rules.extend(crate::css::parse_for_viewport(sheet, (width, height)));
-            if rules.len() > 8192 {
-                rules.truncate(8192);
-                break;
-            }
-        }
+        let rules =
+            crate::css::parse_stylesheets(self.sheets.iter().map(String::as_str), (width, height));
         let stylesheet = Stylesheet::with_viewport(rules, width, height);
         let mut computed = vec![Style::default(); self.document.nodes.len()];
         let mut stack = vec![self.document.root];
