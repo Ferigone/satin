@@ -45,6 +45,7 @@ mod chrome_menu;
 mod history_ui;
 mod icons;
 mod navigation_error;
+mod quiet_cinder;
 mod scroll;
 mod settings;
 mod tab_strip;
@@ -55,25 +56,26 @@ use crate::testing::{
     SmokeAction,
 };
 use navigation_error::Recovery;
-use tab_strip::{NEW_TAB_WIDTH, TabStrip};
+use tab_strip::TabStrip;
 
-const TAB_H: f32 = 58.;
-const TOP: f32 = TAB_H + 64.;
+const TAB_H: f32 = tab_strip::TAB_ROW_HEIGHT;
+const TOP: f32 = quiet_cinder::CONTENT_TOP;
 const MAX_TABS: usize = 24;
 const FOOT: f32 = 23.;
 const DOCK_MIN: f32 = 96.;
 const DOCK_MAX: f32 = 320.;
 const PAGE_MIN_WITH_DOCK: f32 = 64.;
 const WINDOW_FRAME: bool = cfg!(windows);
-const CAPTION_BUTTON_WIDTH: f32 = 59.;
-const CAPTION_BUTTON_HEIGHT: f32 = 52.;
-const TAB_STRIP: Color = Color(17, 16, 18, 255);
-const NAVIGATION_BAR: Color = Color(26, 26, 28, 255);
-const CHROME_PANEL: Color = Color(42, 41, 43, 255);
-const CHROME_HOVER: Color = Color(54, 53, 55, 255);
-const CHROME_LINE: Color = Color(55, 54, 55, 255);
-const CHROME_TEXT: Color = Color(242, 241, 241, 255);
-const CHROME_MUTED: Color = Color(169, 165, 167, 255);
+const TAB_STRIP: Color = Color(0x22, 0x21, 0x24, 255);
+const NAVIGATION_BAR: Color = Color(0x25, 0x24, 0x29, 255);
+const CHROME_PANEL: Color = Color(0x29, 0x28, 0x2c, 255);
+const CHROME_HOVER: Color = Color(0x33, 0x30, 0x38, 255);
+const CHROME_LINE: Color = Color(0x3e, 0x3a, 0x42, 255);
+const CHROME_TEXT: Color = Color(0xf0, 0xed, 0xf0, 255);
+const CHROME_MUTED: Color = Color(0xb8, 0xaf, 0xb5, 255);
+const CHROME_ICON: Color = Color(0xc6, 0xbb, 0xc3, 255);
+const CHROME_ACCENT: Color = Color(0xc4, 0xa3, 0xf4, 255);
+const CHROME_ACCENT_SOFT: Color = Color(0x44, 0x3d, 0x50, 255);
 
 struct WindowRegions {
     page: Rect,
@@ -174,12 +176,17 @@ enum Action {
     Reload,
     Home,
     NewTab,
+    TabList,
+    TabListItem(usize),
     Select(usize),
     Close(usize),
     Settings,
     Version,
     Bookmarks,
+    ToggleBookmark,
+    Favorite(usize),
     ShortcutHelp,
+    StartShortcuts,
     Menu,
     TabHistory,
     MenuItem(usize),
@@ -195,7 +202,14 @@ impl Action {
     }
 
     fn in_menu(self) -> bool {
-        matches!(self, Self::Menu | Self::MenuItem(_) | Self::BookmarkItem(_))
+        matches!(
+            self,
+            Self::Menu
+                | Self::MenuItem(_)
+                | Self::BookmarkItem(_)
+                | Self::TabList
+                | Self::TabListItem(_)
+        )
     }
 }
 
@@ -207,6 +221,7 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::TabHistory, "Tab history"),
     (Action::Version, "About Satin"),
     (Action::ShortcutHelp, "Keyboard shortcuts"),
+    (Action::StartShortcuts, "Skróty startowe"),
 ];
 
 struct ActiveDownload {
@@ -294,8 +309,15 @@ impl Tab {
     fn reveal_edited_control(&mut self, height: f32) {
         if let Some((document, node)) = self.reveal_form_focus.take()
             && document == self.document_navigation
-            && self.runtime.as_ref().and_then(ScriptRuntime::focused_control) == Some(node)
-            && let Some(rect) = self.layout.as_ref().and_then(|layout| layout.rect_for(node))
+            && self
+                .runtime
+                .as_ref()
+                .and_then(ScriptRuntime::focused_control)
+                == Some(node)
+            && let Some(rect) = self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.rect_for(node))
         {
             if rect.y < self.scroll {
                 self.scroll = rect.y;
@@ -428,6 +450,7 @@ pub(crate) fn run(
         select_popup: None,
         hits: vec![],
         tab_hits_current: false,
+        tab_scroll: 0.,
         chrome_hover: None,
         chrome_menu: None,
         history_menu: None,
@@ -529,6 +552,7 @@ struct App {
     select_popup: Option<SelectPopup>,
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
+    tab_scroll: f32,
     chrome_hover: Option<Action>,
     chrome_menu: Option<Menu>,
     history_menu: Option<history_ui::HistoryMenu>,
@@ -560,6 +584,15 @@ impl App {
 
     fn tab_viewport(&self, index: usize) -> Viewport {
         self.window_regions(index).viewport(&self.tabs[index])
+    }
+
+    fn tab_strip(&self, width: f32) -> TabStrip {
+        let caption = if WINDOW_FRAME {
+            3. * tab_strip::caption_button_width(width)
+        } else {
+            0.
+        };
+        TabStrip::new(width, caption, self.tabs.len()).scroll_to(self.tab_scroll)
     }
 
     fn pointer_in(&self, rect: Rect) -> bool {
@@ -809,12 +842,19 @@ impl App {
     fn window_geometry_changed(&mut self) {
         self.wheel = None;
         self.tab_hits_current = false;
+        self.caption_pressed = None;
+        self.last_title_press = None;
+        let width = self.window_regions(self.active).page.width;
+        self.tab_scroll = self.tab_strip(width).reveal(self.active).scroll();
         self.select_popup = None;
         self.hover = None;
         if self.window_regions(self.active).dock.is_none() {
             self.set_dock_focus(false);
         }
         self.ensure_layout();
+        if self.settings_panel.is_some() {
+            self.settings_cursor();
+        }
         self.redraw();
     }
 
@@ -1329,6 +1369,19 @@ impl App {
                 self.navigate_tab(index, tab.url.clone(), NavigationMode::Reload, None, None)
             }
             Some(ScriptNavigation::Navigate { url, mode }) => {
+                if url.as_str() == rust_browser_engine::loader::HOME_FOCUS_ADDRESS_URL
+                    && index == self.active
+                    && tab.url == "about:home"
+                    && tab.document_navigation == tab.navigation
+                    && tab.displayed_navigation == tab.navigation
+                    && tab
+                        .page
+                        .as_ref()
+                        .is_some_and(|page| page.url == "about:home")
+                {
+                    self.focus_address();
+                    return;
+                }
                 let address = url.as_str().to_owned();
                 let request = NavigationRequest::from_document(url, tab.history.url());
                 self.navigate_tab(index, address, mode, Some(request), None);
@@ -1336,6 +1389,20 @@ impl App {
             None => {}
         }
     }
+    fn focus_address(&mut self) {
+        self.set_dock_focus(false);
+        if let Some(runtime) = &mut self.tabs[self.active].runtime
+            && let Err(error) = runtime.focus_control(None)
+        {
+            self.status = error.to_string();
+        }
+        self.sync_runtime(self.active);
+        self.select_popup = None;
+        self.address_focus = true;
+        self.address.select_all();
+        self.redraw();
+    }
+
     fn activate(&mut self, index: usize) {
         if index != self.active
             && let Some(dock) = &mut self.devtools
@@ -1347,6 +1414,10 @@ impl App {
         }
         self.tab_hits_current = false;
         self.active = index;
+        self.tab_scroll = self
+            .tab_strip(self.window_regions(index).page.width)
+            .reveal(index)
+            .scroll();
         self.select_popup = None;
         self.address_focus = false;
         self.sync_address();
@@ -1364,19 +1435,7 @@ impl App {
             self.chrome_menu = None;
         }
         match action {
-            Action::Address => {
-                self.set_dock_focus(false);
-                if let Some(runtime) = &mut self.tabs[self.active].runtime
-                    && let Err(error) = runtime.focus_control(None)
-                {
-                    self.status = error.to_string();
-                }
-                self.sync_runtime(self.active);
-                self.select_popup = None;
-                self.address_focus = true;
-                self.address.select_all();
-                self.redraw();
-            }
+            Action::Address => self.focus_address(),
             Action::Back => self.traverse_history(self.active, -1),
             Action::Forward => self.traverse_history(self.active, 1),
             Action::Reload => {
@@ -1414,18 +1473,64 @@ impl App {
             }
             Action::Version => self.navigate("about:version".into(), true),
             Action::Bookmarks => self.show_bookmarks(),
+            Action::ToggleBookmark => {
+                let tab = &self.tabs[self.active];
+                let result = self.bookmarks.as_mut().ok().and_then(|store| {
+                    let url = bookmarks::page_url(&tab.url)?;
+                    if store.contains(&url) {
+                        Some(store.remove(&url))
+                    } else if tab.document_session.is_some()
+                        && tab.document_navigation == tab.navigation
+                    {
+                        Some(store.add(&tab.url, &tab.title))
+                    } else {
+                        None
+                    }
+                });
+                if let Some(Err(error)) = result {
+                    self.status = error;
+                }
+                self.hits
+                    .retain(|(_, hit)| !matches!(hit, Action::Favorite(_)));
+                self.redraw();
+            }
+            Action::Favorite(index) => {
+                if let Some(bookmark) = self
+                    .bookmarks
+                    .as_ref()
+                    .ok()
+                    .and_then(|store| store.entries().get(index))
+                {
+                    self.navigate(bookmark.url.to_string(), true);
+                }
+            }
             Action::ShortcutHelp => self.navigate(shortcuts::HELP_URL.into(), true),
+            Action::StartShortcuts => self.navigate(
+                rust_browser_engine::loader::START_SHORTCUTS_URL.into(),
+                true,
+            ),
             Action::TabHistory => self.open_history_menu(),
             Action::Menu => {
                 self.select_popup = None;
-                self.chrome_menu = self.chrome_menu.is_none().then_some(Menu::Main(0));
+                self.chrome_menu = (!matches!(self.chrome_menu, Some(Menu::Main(_))))
+                    .then(|| Menu::Main(chrome_menu::first_item()));
                 self.redraw();
             }
             Action::MenuItem(index) => {
-                if matches!(self.chrome_menu, Some(Menu::Main(_)))
-                    && let Some((action, _)) = MENU_ITEMS.get(index).copied()
-                {
-                    self.action(action, event_loop);
+                if matches!(self.chrome_menu, Some(Menu::Main(_))) {
+                    self.activate_main_menu_item(index, event_loop);
+                }
+            }
+            Action::TabList => {
+                self.select_popup = None;
+                self.chrome_menu = (!matches!(self.chrome_menu, Some(Menu::Tabs(_))))
+                    .then_some(Menu::Tabs(self.active));
+                self.redraw();
+            }
+            Action::TabListItem(index) => {
+                if matches!(self.chrome_menu, Some(Menu::Tabs(_))) && index < self.tabs.len() {
+                    self.chrome_menu = None;
+                    self.activate(index);
                 }
             }
             Action::BookmarkItem(index) => {
@@ -1571,7 +1676,19 @@ impl App {
 
     fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        if WINDOW_FRAME
+            && self.modifiers == ModifiersState::ALT
+            && key == Key::Named(NamedKey::Space)
+        {
+            if !repeat && let Some(window) = &self.window {
+                window.show_window_menu(LogicalPosition::new(0., TAB_H));
+            }
+            return;
+        }
         if key == Key::Named(NamedKey::Escape)
+            && self.settings_panel.is_none()
+            && self.chrome_menu.is_none()
+            && self.history_menu.is_none()
             && let Some(d) = &self.tabs[self.active].download
         {
             d.cancel.cancel();
@@ -1604,8 +1721,7 @@ impl App {
                 Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab) => {
                     let previous = key == Key::Named(NamedKey::ArrowUp)
                         || (key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
-                    let step = if previous { MENU_ITEMS.len() - 1 } else { 1 };
-                    self.chrome_menu = Some(Menu::Main((selected + step) % MENU_ITEMS.len()));
+                    self.chrome_menu = Some(Menu::Main(chrome_menu::step_item(selected, previous)));
                     self.redraw();
                     return;
                 }
@@ -1615,6 +1731,28 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if let Some(Menu::Tabs(selected)) = self.chrome_menu {
+            match key {
+                Key::Named(NamedKey::Escape) => self.chrome_menu = None,
+                Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                    if !repeat {
+                        self.action(Action::TabListItem(selected), event_loop);
+                    }
+                    return;
+                }
+                Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp | NamedKey::Tab) => {
+                    let previous = key == Key::Named(NamedKey::ArrowUp)
+                        || (key == Key::Named(NamedKey::Tab) && self.modifiers.shift_key());
+                    let count = self.tabs.len();
+                    self.chrome_menu = Some(Menu::Tabs(
+                        (selected + if previous { count - 1 } else { 1 }) % count,
+                    ));
+                }
+                _ => return,
+            }
+            self.redraw();
+            return;
         }
         if self.select_popup.is_some()
             && matches!(
@@ -1650,12 +1788,6 @@ impl App {
         }
         if let Some(command) = shortcuts::command(&key, self.modifiers) {
             self.run_shortcut(command, event_loop);
-            return;
-        }
-        if self.modifiers.alt_key() && WINDOW_FRAME && key == Key::Named(NamedKey::Space) {
-            if let Some(window) = &self.window {
-                window.show_window_menu(LogicalPosition::new(0., TAB_H));
-            }
             return;
         }
         let ctrl = self.modifiers.control_key() && !self.modifiers.alt_key();
@@ -2087,25 +2219,47 @@ impl App {
         dock_visible: bool,
     ) {
         let u = self.scale;
-        canvas.fill_rect(scaled_rect(u, 0., 0., width, TAB_H), TAB_STRIP);
+        let strip = scaled_rect(u, 0., 0., width, TAB_H);
+        canvas.fill_rect(strip, TAB_STRIP);
+        canvas.fill_linear_gradient(
+            strip,
+            110.,
+            [
+                (0., Color(0x26, 0x23, 0x28, 255)),
+                (0.69, TAB_STRIP),
+                (1., Color(0x36, 0x31, 0x3e, 255)),
+            ],
+        );
         canvas.fill_rect(
             scaled_rect(u, 0., TAB_H, width, TOP - TAB_H),
             NAVIGATION_BAR,
         );
         canvas.fill_rect(scaled_rect(u, 0., TAB_H - 1., width, 1.), CHROME_LINE);
-        canvas.fill_rect(
-            scaled_rect(u, 0., TOP - 1., width, 1.),
-            Color(36, 35, 36, 255),
-        );
-        if WINDOW_FRAME && !maximized {
-            canvas.fill_rect(scaled_rect(u, 0., 0., width, 1.), Color(39, 37, 39, 255));
+        for y in [quiet_cinder::TOOLBAR_END - 1., TOP - 1.] {
+            canvas.fill_rect(scaled_rect(u, 0., y, width, 1.), CHROME_LINE);
         }
         self.hits.clear();
         self.draw_tabs(canvas, width);
+        let compact = width <= tab_strip::NARROW_WIDTH;
+        let mark = if compact { 18. } else { 16. };
+        let mark_x = if compact { 14. } else { 19. };
+        paint_centered_glyph(
+            canvas,
+            scaled_rect(1., mark_x, (TAB_H - mark) / 2., mark, mark),
+            mark,
+            u,
+            icons::Glyph::Brand,
+            CHROME_ACCENT,
+        );
+        if !compact {
+            let wordmark = chrome_shape(&self.fonts, "Satin", 11. * u, 700);
+            canvas.text(41. * u, 26. * u, &wordmark, CHROME_TEXT, &mut self.fonts);
+        }
         if WINDOW_FRAME {
             self.draw_caption_buttons(canvas, width, maximized);
         }
         self.draw_toolbar(canvas, width);
+        self.draw_favorites(canvas, width);
         self.draw_footer(canvas, width, height, dock_visible);
         self.draw_chrome_menu(canvas, width);
         self.draw_history_menu(canvas, width);
@@ -2113,162 +2267,110 @@ impl App {
 
     fn draw_tabs(&mut self, canvas: &mut Canvas, width: f32) {
         let u = self.scale;
-        let caption = if WINDOW_FRAME {
-            CAPTION_BUTTON_WIDTH * 3.
-        } else {
-            0.
-        };
-        let strip = TabStrip::new(width, caption, self.tabs.len(), self.active);
-        let compact = strip.slot < 62.;
-        let full_canvas = scaled_rect(1., 0., 0., canvas.width as f32, canvas.height as f32);
+        let strip = self.tab_strip(width);
+        self.tab_scroll = strip.scroll();
         let pointer = self.chrome_hover;
-
-        // The normal active shoulders join the toolbar and overlap adjacent edges.
-        for index in 0..self.tabs.len() {
-            if index != self.active {
-                let tab = strip.tab(index);
-                let hover =
-                    matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-                draw_tab_face(canvas, tab.x, tab.face, u, false, hover);
-            }
-        }
-        let active_slot = strip.tab(self.active);
-        if compact {
-            // Don't paint the active shoulders over narrow neighbours' targets.
-            canvas.clip(scaled_rect(
-                u,
-                active_slot.x - 2.,
-                0.,
-                active_slot.face + 4.,
-                TAB_H,
-            ));
-        }
-        draw_tab_face(canvas, active_slot.x, active_slot.face, u, true, true);
-        if compact {
-            canvas.clip(full_canvas);
-        }
-
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let slot = strip.tab(index);
-            let select = slot.select();
-            let x = slot.x;
+        canvas.clip(physical_rect(u, strip.list));
+        for slot in strip.visible_tabs() {
+            let index = slot.index;
+            let tab = &self.tabs[index];
             let close = Action::Close(index);
             let active = index == self.active;
             let hovered =
                 matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-            let icon = if strip.slot >= 94. {
-                built_in_site_icon(&tab.url)
+            draw_tab_face(canvas, slot.face, u, active, hovered);
+            if let Some(icon) = built_in_site_icon(&tab.url) {
+                canvas.image(physical_rect(u, slot.favicon), icon);
             } else {
-                None
-            };
-            let padding = if let Some(icon) = icon {
-                canvas.image(scaled_rect(u, x + 14., 22., 24., 24.), icon);
-                48.
-            } else if compact {
-                5.
-            } else if active {
-                24.
-            } else {
-                16.
-            };
-            let font = if compact { 12. } else { 17. } * u;
-            let text_width = (select.end - x - padding - 3.) * u;
-            if text_width >= 7. * u {
-                let title = if tab.is_home() { "New tab" } else { &tab.title };
-                let title = elide(&self.fonts, title, text_width, font);
-                if !compact
-                    || title != "…"
-                    || self.fonts.shape(&title, font, false, false, false).advance <= text_width
-                {
-                    if compact {
-                        canvas.clip(scaled_rect(u, x + padding, 0., text_width / u, TAB_H));
-                    }
-                    canvas.label(
-                        &title,
-                        (x + padding) * u,
-                        40. * u,
-                        font,
-                        CHROME_TEXT,
-                        false,
-                        &mut self.fonts,
-                    );
-                    if compact {
-                        canvas.clip(full_canvas);
-                    }
-                }
-            }
-            self.hits.push((
-                Rect {
-                    x,
-                    y: 8.,
-                    width: select.end - select.start,
-                    height: TAB_H - 8.,
-                },
-                Action::Select(index),
-            ));
-            if let Some(target) = slot.close() {
-                let close_x = target.start;
-                let close_width = target.end - target.start;
-                if pointer == Some(close) {
-                    rounded_chrome_rect(
-                        canvas,
-                        scaled_rect(u, close_x, 21., close_width, 25.),
-                        8. * u,
-                        CHROME_HOVER,
-                    );
-                }
-                let mark = 18.;
-                let icon_scale = mark / 20.;
-                let offset = if strip.slot >= 90. { 5. } else { 0. };
-                chrome_icon(
+                rounded_chrome_rect(
                     canvas,
-                    (close_x + (close_width - mark) / 2. - offset) / icon_scale,
-                    (34. - mark / 2.) / icon_scale,
-                    u * icon_scale,
-                    close,
-                    false,
+                    physical_rect(u, slot.favicon),
+                    5. * u,
+                    CHROME_ACCENT_SOFT,
+                );
+                paint_centered_glyph(
+                    canvas,
+                    slot.favicon,
+                    13.,
+                    u,
+                    if tab.is_home() {
+                        icons::Glyph::Compass
+                    } else {
+                        icons::Glyph::Globe
+                    },
+                    CHROME_ACCENT,
+                );
+            }
+            let title = if tab.is_home() {
+                "Nowa karta"
+            } else {
+                &tab.title
+            };
+            let weight = if active { 620 } else { 400 };
+            let size = tab_strip::TAB_FONT_SIZE * u;
+            let title = chrome_elide(&self.fonts, title, slot.title.width * u, size, weight);
+            let run = chrome_shape(&self.fonts, &title, size, weight);
+            if run.advance <= slot.title.width * u {
+                canvas.text(
+                    slot.title.x * u,
+                    (slot.title.y + 20.) * u,
+                    &run,
                     if active || hovered {
                         CHROME_TEXT
                     } else {
                         CHROME_MUTED
                     },
+                    &mut self.fonts,
                 );
-                self.hits.push((
-                    Rect {
-                        x: close_x,
-                        y: 13.,
-                        width: close_width,
-                        height: TAB_H - 13.,
-                    },
-                    close,
-                ));
+            }
+            self.hits.push((slot.visible_face, Action::Select(index)));
+            if let Some(button) = slot.close {
+                if pointer == Some(close) {
+                    rounded_chrome_rect(
+                        canvas,
+                        physical_rect(u, button.hover_circle),
+                        8. * u,
+                        Color(CHROME_TEXT.0, CHROME_TEXT.1, CHROME_TEXT.2, 38),
+                    );
+                }
+                if active || hovered {
+                    paint_centered_glyph(
+                        canvas,
+                        button.glyph,
+                        10.,
+                        u,
+                        icons::Glyph::X,
+                        CHROME_MUTED,
+                    );
+                }
+                self.hits.push((button.hit, close));
             }
         }
-        let plus_x = strip.new_tab_x;
-        let button = Rect {
-            x: plus_x,
-            y: 12.,
-            width: NEW_TAB_WIDTH,
-            height: 43.,
-        };
-        if pointer == Some(Action::NewTab) {
-            rounded_chrome_rect(
-                canvas,
-                scaled_rect(u, plus_x, 12., NEW_TAB_WIDTH, 43.),
-                10. * u,
-                CHROME_HOVER,
-            );
+        canvas.clip(scaled_rect(
+            1.,
+            0.,
+            0.,
+            canvas.width as f32,
+            canvas.height as f32,
+        ));
+        for (button, action, glyph) in [
+            (strip.new_tab, Action::NewTab, icons::Glyph::Plus),
+            (strip.tab_list, Action::TabList, icons::Glyph::ChevronDown),
+        ] {
+            let Some(button) = button else { continue };
+            if pointer == Some(action)
+                || action == Action::TabList && matches!(self.chrome_menu, Some(Menu::Tabs(_)))
+            {
+                rounded_chrome_rect(
+                    canvas,
+                    physical_rect(u, button.bounds),
+                    tab_strip::CONTROL_RADIUS * u,
+                    CHROME_HOVER,
+                );
+            }
+            paint_centered_glyph(canvas, button.glyph, 17., u, glyph, CHROME_ICON);
+            self.hits.push((button.bounds, action));
         }
-        chrome_icon(
-            canvas,
-            plus_x + 11.,
-            23.,
-            u,
-            Action::NewTab,
-            false,
-            CHROME_TEXT,
-        );
-        self.hits.push((button, Action::NewTab));
     }
 
     fn draw_caption_buttons(&mut self, canvas: &mut Canvas, width: f32, maximized: bool) {
@@ -2277,152 +2379,139 @@ impl App {
             .into_iter()
             .enumerate()
         {
-            let x = width - CAPTION_BUTTON_WIDTH * (3 - index) as f32;
+            let bounds = chrome_box(quiet_cinder::caption(width, index));
             let hovered = self.chrome_hover == Some(action);
             let pressed = self.caption_pressed == Some(action);
             if hovered || pressed {
                 let color = match (action, pressed) {
-                    (Action::CloseWindow, true) => Color(169, 20, 37, 255),
-                    (Action::CloseWindow, false) => Color(194, 26, 46, 255),
-                    (_, true) => CHROME_HOVER,
-                    _ => CHROME_PANEL,
+                    (Action::CloseWindow, true) => Color(0xa9, 0x14, 0x25, 255),
+                    (Action::CloseWindow, false) => Color(0xc9, 0x38, 0x46, 255),
+                    _ => CHROME_HOVER,
                 };
-                canvas.fill_rect(
-                    scaled_rect(u, x, 1., CAPTION_BUTTON_WIDTH, CAPTION_BUTTON_HEIGHT - 1.),
-                    color,
-                );
+                canvas.fill_rect(physical_rect(u, bounds), color);
             }
-            chrome_icon(
+            centered_chrome_icon(
                 canvas,
-                x + (CAPTION_BUTTON_WIDTH - 20.) / 2.,
-                16.,
+                bounds,
+                13.,
                 u,
                 action,
                 maximized,
-                CHROME_TEXT,
-            );
-            self.hits.push((
-                Rect {
-                    x,
-                    y: 1.,
-                    width: CAPTION_BUTTON_WIDTH,
-                    height: CAPTION_BUTTON_HEIGHT - 1.,
+                if action == Action::CloseWindow && (hovered || pressed) {
+                    Color(255, 255, 255, 255)
+                } else {
+                    CHROME_ICON
                 },
-                action,
-            ));
+            );
+            self.hits.push((bounds, action));
         }
     }
 
     fn draw_toolbar(&mut self, canvas: &mut Canvas, width: f32) {
         let u = self.scale;
         let tab = &self.tabs[self.active];
-        let row_y = TAB_H + 9.;
-        let row_height = 46.;
+        let layout = quiet_cinder::Toolbar::new(width);
         let pointer = self.chrome_hover;
-        for (x, action, enabled) in [
-            (18., Action::Back, tab.history.can_traverse(-1)),
-            (70., Action::Forward, tab.history.can_traverse(1)),
-            (124., Action::Reload, true),
-            (width - 162., Action::Home, true),
-            (width - 110., Action::Version, true),
-            (width - 59., Action::Menu, true),
+        for (bounds, action, enabled) in [
+            (
+                Some(layout.back),
+                Action::Back,
+                tab.history.can_traverse(-1),
+            ),
+            (
+                Some(layout.forward),
+                Action::Forward,
+                tab.history.can_traverse(1),
+            ),
+            (Some(layout.reload), Action::Reload, true),
+            (layout.home, Action::Home, true),
+            (Some(layout.menu), Action::Menu, true),
         ] {
-            if (enabled && pointer == Some(action))
-                || (action == Action::Menu && self.chrome_menu.is_some())
-            {
-                rounded_chrome_rect(
-                    canvas,
-                    scaled_rect(u, x, row_y, 46., row_height),
-                    10. * u,
-                    CHROME_HOVER,
-                );
+            let Some(bounds) = bounds.map(chrome_box) else {
+                continue;
+            };
+            let on = enabled
+                && (pointer == Some(action)
+                    || action == Action::Menu && self.chrome_menu.is_some());
+            if on {
+                rounded_chrome_rect(canvas, physical_rect(u, bounds), 6. * u, CHROME_HOVER);
             }
-            chrome_icon(
+            centered_chrome_icon(
                 canvas,
-                x + 13.,
-                row_y + 13.,
+                bounds,
+                17.,
                 u,
                 action,
                 tab.loading,
-                if enabled {
+                if on {
                     CHROME_TEXT
+                } else if enabled {
+                    CHROME_ICON
                 } else {
-                    Color(141, 137, 139, 255)
+                    Color(CHROME_ICON.0, CHROME_ICON.1, CHROME_ICON.2, 84)
                 },
             );
-            self.hits.push((
-                Rect {
-                    x,
-                    y: row_y,
-                    width: 46.,
-                    height: row_height,
-                },
-                action,
-            ));
+            if enabled {
+                self.hits.push((bounds, action));
+            }
         }
 
-        let address_x = 185.;
-        let address_width = (width - 176. - address_x).max(80.);
-        let address_rect = Rect {
-            x: address_x,
-            y: row_y,
-            width: address_width,
-            height: row_height,
-        };
+        let address_rect = chrome_box(layout.address);
         let address_focus = self.address_focus && !self.devtools_focused;
-        let border = if address_focus { 2. } else { 1. };
-        let border_color = if address_focus {
-            Color(132, 130, 132, 255)
-        } else if pointer == Some(Action::Address) {
-            Color(96, 94, 96, 255)
-        } else {
-            Color(68, 67, 69, 255)
-        };
-        rounded_chrome_rect(
+        address_bar::chrome::paint_address_field(canvas, address_rect, u, address_focus);
+        paint_centered_glyph(
             canvas,
-            scaled_rect(u, address_x, row_y, address_width, row_height),
-            23. * u,
-            border_color,
-        );
-        rounded_chrome_rect(
-            canvas,
-            scaled_rect(
-                u,
-                address_x + border,
-                row_y + border,
-                address_width - 2. * border,
-                row_height - 2. * border,
-            ),
-            (23. - border) * u,
-            Color(25, 25, 27, 255),
-        );
-        chrome_icon(
-            canvas,
-            address_x + 23.,
-            row_y + 13.,
+            chrome_box(layout.location),
+            17.,
             u,
-            Action::Address,
-            false,
-            CHROME_TEXT,
+            if tab.is_home() {
+                icons::Glyph::Compass
+            } else {
+                icons::Glyph::Search
+            },
+            CHROME_ICON,
         );
 
-        let text_x = address_x + 62.;
-        let available = (address_width - 81.).max(12.);
-        let font_size = if available < 225. { 16. } else { 19. } * u;
-        canvas.clip(scaled_rect(
-            u,
-            text_x,
-            row_y + 4.,
-            available,
-            row_height - 8.,
-        ));
+        let url = bookmarks::page_url(&tab.url);
+        let marked = url.as_ref().is_some_and(|url| {
+            self.bookmarks
+                .as_ref()
+                .is_ok_and(|store| store.contains(url))
+        });
+        let can_bookmark = marked
+            || url.is_some()
+                && self.bookmarks.is_ok()
+                && tab.document_session.is_some()
+                && tab.document_navigation == tab.navigation;
+        let star_rect = chrome_box(layout.bookmark);
+        if pointer == Some(Action::ToggleBookmark) && can_bookmark {
+            rounded_chrome_rect(canvas, physical_rect(u, star_rect), 6. * u, CHROME_HOVER);
+        }
+        if marked {
+            paint_bookmarked_star(canvas, star_rect, u);
+        } else {
+            paint_centered_glyph(
+                canvas,
+                star_rect,
+                17.,
+                u,
+                icons::Glyph::Star,
+                if can_bookmark {
+                    CHROME_ICON
+                } else {
+                    Color(CHROME_ICON.0, CHROME_ICON.1, CHROME_ICON.2, 84)
+                },
+            );
+        }
+
+        let text_x = layout.edit.x;
+        let available = layout.edit.w;
+        let center = layout.edit.y + layout.edit.h / 2.;
+        let font_size = 13. * u;
+        canvas.clip(physical_rect(u, chrome_box(layout.edit)));
         let address = self.address.text();
-        let measure = |index| {
-            self.fonts
-                .shape(&address[..index], font_size, false, false, false)
-                .advance
-                / u
-        };
+        let measure =
+            |index| chrome_shape(&self.fonts, &address[..index], font_size, 400).advance / u;
         let caret = self.address.caret();
         let cursor_width = if address_focus { measure(caret) } else { 0. };
         let shift = (cursor_width - available + 8.).max(0.);
@@ -2439,31 +2528,31 @@ impl App {
                 measure(selected.end)
             };
             canvas.fill_rect(
-                scaled_rect(u, text_x + start - shift, row_y + 10., end - start, 26.),
-                Color(67, 87, 105, 255),
+                scaled_rect(u, text_x + start - shift, center - 9., end - start, 18.),
+                CHROME_ACCENT_SOFT,
             );
         }
         let empty = address.is_empty();
-        canvas.label(
+        let address_run = chrome_shape(
+            &self.fonts,
             if empty {
-                "Search or enter an address"
+                "Wyszukaj lub wpisz adres"
             } else {
                 address
             },
-            (text_x - shift) * u,
-            (row_y + 30.) * u,
             font_size,
-            if empty && address_focus {
-                CHROME_MUTED
-            } else {
-                CHROME_TEXT
-            },
-            false,
+            400,
+        );
+        canvas.text(
+            (text_x - shift) * u,
+            (center + 4.5) * u,
+            &address_run,
+            if empty { CHROME_MUTED } else { CHROME_TEXT },
             &mut self.fonts,
         );
         if address_focus && selected.is_empty() {
             canvas.fill_rect(
-                scaled_rect(u, text_x + cursor_width - shift, row_y + 12., 1., 22.),
+                scaled_rect(u, text_x + cursor_width - shift, center - 8., 1., 16.),
                 CHROME_TEXT,
             );
         }
@@ -2474,6 +2563,68 @@ impl App {
             height: canvas.height as f32,
         });
         self.hits.push((address_rect, Action::Address));
+        if can_bookmark {
+            self.hits.push((star_rect, Action::ToggleBookmark));
+        }
+    }
+
+    fn draw_favorites(&mut self, canvas: &mut Canvas, width: f32) {
+        let u = self.scale;
+        let y = quiet_cinder::TOOLBAR_END;
+        let manager = scaled_rect(1., 11., y, 31., quiet_cinder::FAVORITES_ROW - 1.);
+        let manager_hovered = self.chrome_hover == Some(Action::Bookmarks);
+        let manager_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
+        if manager_hovered || manager_open {
+            rounded_chrome_rect(canvas, physical_rect(u, manager), 6. * u, CHROME_HOVER);
+        }
+        centered_chrome_icon(
+            canvas,
+            manager,
+            17.,
+            u,
+            Action::Bookmarks,
+            false,
+            CHROME_ICON,
+        );
+        self.hits.push((manager, Action::Bookmarks));
+
+        let Ok(store) = &self.bookmarks else {
+            return;
+        };
+        let mut x = manager.x + manager.width + 3.;
+        let font = 11. * u;
+        for (index, bookmark) in store.entries().iter().take(9).enumerate() {
+            let available = (width - 11. - x - 16.).min(166.);
+            if available < 24. {
+                break;
+            }
+            // These titles were normalized by the bookmark store. For empty
+            // titles, use only the host, not an unbounded URL.
+            let text = if bookmark.title.is_empty() {
+                bookmark.url.host_str().unwrap_or_default()
+            } else {
+                &bookmark.title
+            };
+            let label = elide(&self.fonts, text, available * u, font);
+            let advance = self.fonts.shape(&label, font, false, false, false).advance / u;
+            let bounds = scaled_rect(1., x, y + 3., advance + 16., 23.);
+            let action = Action::Favorite(index);
+            let hovered = self.chrome_hover == Some(action);
+            if hovered {
+                rounded_chrome_rect(canvas, physical_rect(u, bounds), 4. * u, CHROME_HOVER);
+            }
+            canvas.label(
+                &label,
+                (x + 8.) * u,
+                (y + 18.) * u,
+                font,
+                if hovered { CHROME_TEXT } else { CHROME_ICON },
+                false,
+                &mut self.fonts,
+            );
+            self.hits.push((bounds, action));
+            x += bounds.width + 3.;
+        }
     }
 
     fn draw_footer(&mut self, canvas: &mut Canvas, width: f32, height: f32, dock_visible: bool) {
@@ -2537,67 +2688,70 @@ impl App {
     }
 
     fn draw_chrome_menu(&mut self, canvas: &mut Canvas, width: f32) {
-        let selected = match self.chrome_menu {
-            Some(Menu::Main(selected)) => selected,
-            Some(Menu::Bookmarks(_)) => return self.draw_bookmarks(canvas, width),
-            None => return,
-        };
+        match self.chrome_menu {
+            Some(Menu::Main(selected)) => self.draw_main_menu(canvas, selected),
+            Some(Menu::Bookmarks(_)) => self.draw_bookmarks(canvas, width),
+            Some(Menu::Tabs(selected)) => self.draw_tab_list(canvas, width, selected),
+            None => {}
+        }
+    }
+
+    fn draw_tab_list(&mut self, canvas: &mut Canvas, width: f32, selected: usize) {
         let u = self.scale;
-        let x = width - 212.;
-        let y = TOP + 4.;
-        let height = MENU_ITEMS.len() as f32 * 35. + 12.;
-        rounded_chrome_rect(
-            canvas,
-            scaled_rect(u, x, y, 200., height),
-            10. * u,
-            CHROME_LINE,
+        let Some(button) = self.tab_strip(width).tab_list else {
+            return;
+        };
+        let panel_width = 352_f32.min(width - 18.);
+        let x = button.bounds.x.clamp(8., width - panel_width - 8.);
+        let y = button.bounds.y + button.bounds.height + 5.;
+        let count = (((canvas.height as f32 / u - y - 54.) / 35.).floor() as usize)
+            .clamp(1, self.tabs.len());
+        let start = selected.saturating_sub(count - 1);
+        let panel = scaled_rect(1., x, y, panel_width, 43. + count as f32 * 35.);
+        let physical = physical_rect(u, panel);
+        canvas.fill_rounded_rect(physical, [10. * u; 4], CHROME_PANEL);
+        canvas.outline_rounded_rect(physical, [10. * u; 4], -u, u, CHROME_LINE);
+        self.hits.push((panel, Action::TabListItem(usize::MAX)));
+        let title = chrome_shape(&self.fonts, "Otwarte karty", 13. * u, 700);
+        canvas.text(
+            (x + 14.) * u,
+            (y + 26.) * u,
+            &title,
+            CHROME_TEXT,
+            &mut self.fonts,
         );
-        rounded_chrome_rect(
-            canvas,
-            scaled_rect(u, x + 1., y + 1., 198., height - 2.),
-            9. * u,
-            CHROME_PANEL,
-        );
-        for (index, (item, label)) in MENU_ITEMS.iter().enumerate() {
-            let item_y = y + 6. + index as f32 * 35.;
-            let action = Action::MenuItem(index);
-            let bounds = Rect {
-                x: x + 6.,
-                y: item_y,
-                width: 188.,
-                height: 35.,
-            };
+        for (offset, tab) in self.tabs.iter().skip(start).take(count).enumerate() {
+            let index = start + offset;
+            let action = Action::TabListItem(index);
+            let row = scaled_rect(
+                1.,
+                x + 7.,
+                y + 36. + 35. * offset as f32,
+                panel_width - 14.,
+                35.,
+            );
             chrome_menu::draw_row_highlight(
                 canvas,
-                bounds,
+                row,
                 u,
-                self.chrome_hover == Some(action),
+                self.pointer_in(row),
                 index == selected,
             );
-            canvas.label(
-                label,
-                (x + 17.) * u,
-                (item_y + 23.) * u,
-                15. * u,
+            let name = if tab.is_home() {
+                "Nowa karta"
+            } else {
+                &tab.title
+            };
+            let name = chrome_elide(&self.fonts, name, (row.width - 16.) * u, 13. * u, 400);
+            let run = chrome_shape(&self.fonts, &name, 13. * u, 400);
+            canvas.text(
+                (row.x + 8.) * u,
+                (row.y + 22.) * u,
+                &run,
                 CHROME_TEXT,
-                false,
                 &mut self.fonts,
             );
-            if *item == Action::NewTab {
-                let hint = shortcuts::label(Command::NewTab);
-                let size = 13. * u;
-                let advance = self.fonts.shape(hint, size, false, false, false).advance;
-                canvas.label(
-                    hint,
-                    (x + 183.) * u - advance,
-                    (item_y + 23.) * u,
-                    size,
-                    CHROME_MUTED,
-                    false,
-                    &mut self.fonts,
-                );
-            }
-            self.hits.push((bounds, action));
+            self.hits.push((row, action));
         }
     }
 
@@ -2895,14 +3049,31 @@ impl App {
         event_loop.exit();
     }
     fn chrome_action_at_pointer(&self) -> Option<Action> {
-        self.hits.iter().rev().find_map(|(rect, action)| {
+        let content = self.hits.iter().rev().find_map(|(rect, action)| {
             let current = match action {
+                action if action.caption() => false,
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
+                Action::TabListItem(_) => matches!(self.chrome_menu, Some(Menu::Tabs(_))),
                 _ => true,
             };
             (current && self.pointer_in(*rect)).then_some(*action)
-        })
+        });
+        self.caption_action_at_pointer().or(content)
+    }
+
+    fn caption_action_at_pointer(&self) -> Option<Action> {
+        if !WINDOW_FRAME || !self.pointer_inside {
+            return None;
+        }
+        let width = self.window.as_ref()?.inner_size().width as f32 / self.scale;
+        [Action::Minimize, Action::Maximize, Action::CloseWindow]
+            .into_iter()
+            .enumerate()
+            .find_map(|(i, action)| {
+                self.pointer_in(chrome_box(quiet_cinder::caption(width, i)))
+                    .then_some(action)
+            })
     }
     fn frame_resize_at_pointer(&self) -> Option<ResizeDirection> {
         let window = self.window.as_ref()?;
@@ -3733,7 +3904,7 @@ impl ApplicationHandler<()> for App {
                 },
                 Size::Physical,
             ))
-            .with_min_inner_size(LogicalSize::new(640., 400.));
+            .with_min_inner_size(LogicalSize::new(390., 400.));
         #[cfg(windows)]
         {
             attributes = attributes
@@ -3905,10 +4076,13 @@ impl ApplicationHandler<()> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         if matches!(
             event,
-            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }
-        ) && self.tabs.get(self.active).is_some_and(|tab| {
-            tab.runtime.is_some() && tab.layout.is_none()
-        })
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+        ) && self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.runtime.is_some() && tab.layout.is_none())
         {
             // Hit testing can precede the redraw requested by an input handler.
             self.ensure_layout();
@@ -3928,6 +4102,8 @@ impl ApplicationHandler<()> for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Focused(false) => {
+                self.caption_pressed = None;
+                self.settings_cancel_pointer();
                 self.wheel = None;
                 self.resizing_dock = false;
                 self.preedit = false;
@@ -3990,6 +4166,7 @@ impl ApplicationHandler<()> for App {
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_inside = false;
                 self.mouse = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+                self.settings_cancel_pointer();
                 self.clear_history_hover();
                 self.chrome_hover = None;
                 self.caption_pressed = None;
@@ -4008,16 +4185,23 @@ impl ApplicationHandler<()> for App {
                     && self.history_menu.is_none()
                     && WINDOW_FRAME
                     && self.settings_panel.is_none()
+                    && self.tab_hits_current
                     && self.mouse.1 < TAB_H
                     && self.chrome_action_at_pointer().is_none()
                     && let Some(window) = &self.window
                 {
                     window.show_window_menu(LogicalPosition::new(self.mouse.0, self.mouse.1));
-                } else if button == MouseButton::Middle
-                    && let Some(url) = self.pointer_link()
-                {
-                    self.action(Action::NewTab, event_loop);
-                    self.navigate(url, true);
+                } else if button == MouseButton::Middle && self.settings_panel.is_none() {
+                    if self.tab_hits_current
+                        && matches!(self.chrome_menu, None)
+                        && let Some(Action::Select(index) | Action::Close(index)) =
+                            self.chrome_action_at_pointer()
+                    {
+                        self.action(Action::Close(index), event_loop);
+                    } else if let Some(url) = self.pointer_link() {
+                        self.action(Action::NewTab, event_loop);
+                        self.navigate(url, true);
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -4031,6 +4215,39 @@ impl ApplicationHandler<()> for App {
                 }
                 let (delta, detent) = scroll::wheel_delta(delta, self.scale);
                 let regions = self.window_regions(self.active);
+                if let Some(Menu::Tabs(selected)) = self.chrome_menu {
+                    if matches!(
+                        self.chrome_action_at_pointer(),
+                        Some(Action::TabListItem(_))
+                    ) {
+                        let next = if delta.y > 0. {
+                            (selected + 1).min(self.tabs.len() - 1)
+                        } else if delta.y < 0. {
+                            selected.saturating_sub(1)
+                        } else {
+                            selected
+                        };
+                        self.chrome_menu = Some(Menu::Tabs(next));
+                        self.redraw();
+                    }
+                    return;
+                }
+                if self.chrome_menu.is_some()
+                    && self.chrome_action_at_pointer().is_some_and(Action::in_menu)
+                {
+                    return;
+                }
+                let strip = self.tab_strip(regions.page.width);
+                if self.pointer_in(strip.list) {
+                    let dx = if delta.x != 0. { delta.x } else { delta.y };
+                    let next = strip.scroll_to(self.tab_scroll + dx).scroll();
+                    if self.tab_scroll != next {
+                        self.tab_scroll = next;
+                        self.tab_hits_current = false;
+                        self.redraw();
+                    }
+                    return;
+                }
                 if let Some(bounds) = regions.dock
                     && self.pointer_in(bounds)
                 {
@@ -4081,80 +4298,149 @@ fn scaled_rect(scale: f32, x: f32, y: f32, width: f32, height: f32) -> Rect {
     }
 }
 
-fn draw_tab_face(canvas: &mut Canvas, x: f32, width: f32, scale: f32, active: bool, hovered: bool) {
-    // Shoulder offsets in logical pixels from the reference's 48 px tab face.
-    const SHOULDER: [(f32, f32); 14] = [
-        (0., 19.),
-        (2., 13.),
-        (4., 10.),
-        (8., 6.),
-        (12., 3.),
-        (17., 2.),
-        (22., 0.),
-        (28., -1.),
-        (32., -3.),
-        (36., -5.),
-        (40., -9.),
-        (44., -14.),
-        (46., -20.),
-        (48., -24.),
-    ];
-    let first = (10. * scale).round() as u32;
-    let end = ((TAB_H - if active { 0. } else { 1. }) * scale).round() as u32;
-    let radius = (width * 0.45).min(19.);
-    let shoulder_scale = (width / 100.).min(1.);
-    for y in first..end {
-        let row = (y as f32 - first as f32) / scale;
-        let inset = if active {
-            let next = SHOULDER
-                .partition_point(|&(position, _)| position <= row)
-                .clamp(1, SHOULDER.len() - 1);
-            let (start, left) = SHOULDER[next - 1];
-            let (stop, right) = SHOULDER[next];
-            (left + (right - left) * ((row - start) / (stop - start)).clamp(0., 1.))
-                * shoulder_scale
-        } else {
-            let rise = (radius - row - 0.5).max(0.);
-            radius - (radius * radius - rise * rise).sqrt()
-        };
-        let left = ((x + inset) * scale).round();
-        let right = ((x + width - inset) * scale).round();
-        if right <= left {
-            continue;
-        }
-        let fill = if active {
-            let shade = 42 + (7. * (1. - ((row - 18.) / 19.).abs()).max(0.)).round() as u8;
-            Color(shade, shade, shade + 1, 255)
-        } else if hovered {
-            CHROME_PANEL
-        } else {
-            Color(24, 23, 24, 255)
-        };
-        let outline = if active {
-            let shade = (123. - row * 1.37).round() as u8;
-            Color(shade, shade, shade + 1, 255)
-        } else {
-            Color(40, 38, 40, 255)
-        };
-        let strip = Rect {
-            x: left,
-            y: y as f32,
-            width: right - left,
-            height: 1.,
-        };
-        canvas.fill_rect(strip, outline);
-        let line = scale.round().max(1.);
-        if y as f32 - first as f32 >= line && strip.width > line * 2. {
-            canvas.fill_rect(
-                Rect {
-                    x: left + line,
-                    width: strip.width - line * 2.,
-                    ..strip
-                },
-                fill,
-            );
-        }
+fn chrome_box(bounds: quiet_cinder::Box2) -> Rect {
+    scaled_rect(1., bounds.x, bounds.y, bounds.w, bounds.h)
+}
+
+fn centered_chrome_icon(
+    canvas: &mut Canvas,
+    bounds: Rect,
+    size: f32,
+    scale: f32,
+    action: Action,
+    loading: bool,
+    color: Color,
+) {
+    use icons::Glyph;
+    let glyph = match action {
+        Action::Back => Glyph::ArrowLeft,
+        Action::Forward => Glyph::ArrowRight,
+        Action::Home => Glyph::House,
+        Action::Reload if loading => Glyph::X,
+        Action::Reload => Glyph::RotateCw,
+        Action::Bookmarks => Glyph::BookMarked,
+        Action::Menu => Glyph::Ellipsis,
+        Action::Minimize => Glyph::Minus,
+        Action::Maximize if loading => Glyph::Copy,
+        Action::Maximize => Glyph::Square,
+        Action::CloseWindow => Glyph::X,
+        _ => return,
+    };
+    paint_centered_glyph(canvas, bounds, size, scale, glyph, color);
+}
+
+fn paint_centered_glyph(
+    canvas: &mut Canvas,
+    bounds: Rect,
+    size: f32,
+    scale: f32,
+    glyph: icons::Glyph,
+    color: Color,
+) {
+    let zoom = size / 20.;
+    paint_glyph(
+        canvas,
+        (bounds.x + (bounds.width - size) / 2.) / zoom,
+        (bounds.y + (bounds.height - size) / 2.) / zoom,
+        zoom * scale,
+        glyph,
+        color,
+    );
+}
+
+fn paint_bookmarked_star(canvas: &mut Canvas, bounds: Rect, scale: f32) {
+    let size = 17.;
+    icons::Glyph::rasterize_bookmarked_star(
+        (bounds.x + (bounds.width - size) / 2.) * scale,
+        (bounds.y + (bounds.height - size) / 2.) * scale,
+        size * scale,
+        canvas.width,
+        canvas.height,
+        |x, y, stroke, fill| {
+            let (stroke, fill) = (u32::from(stroke), u32::from(fill));
+            let coverage = stroke + fill;
+            if coverage != 0 {
+                let mix = |a: u8, b: u8| {
+                    ((u32::from(a) * stroke + u32::from(b) * fill + coverage / 2) / coverage) as u8
+                };
+                canvas.fill_rect(
+                    scaled_rect(1., x as f32, y as f32, 1., 1.),
+                    Color(
+                        mix(CHROME_ACCENT.0, CHROME_ACCENT_SOFT.0),
+                        mix(CHROME_ACCENT.1, CHROME_ACCENT_SOFT.1),
+                        mix(CHROME_ACCENT.2, CHROME_ACCENT_SOFT.2),
+                        coverage.min(255) as u8,
+                    ),
+                );
+            }
+        },
+    );
+}
+
+fn draw_tab_face(canvas: &mut Canvas, bounds: Rect, u: f32, active: bool, hovered: bool) {
+    let radii = [tab_strip::TAB_RADIUS * u; 4];
+    let bounds = physical_rect(u, bounds);
+    if active {
+        canvas.fill_rounded_linear_gradient(
+            bounds,
+            radii,
+            110.,
+            [
+                (0., Color(0x30, 0x2e, 0x34, 255)),
+                (0.73, Color(0x3b, 0x35, 0x42, 255)),
+                (1., Color(0x48, 0x3c, 0x51, 255)),
+            ],
+        );
+        canvas.outline_rounded_rect(bounds, radii, -2. * u, u, CHROME_ACCENT_SOFT);
+        canvas.outline_rounded_rect(bounds, radii, -u, u, Color(125, 107, 150, 255));
+    } else if hovered {
+        canvas.fill_rounded_rect(bounds, radii, CHROME_HOVER);
     }
+}
+
+fn chrome_shape(
+    fonts: &Fonts,
+    text: &str,
+    size: f32,
+    weight: u16,
+) -> rust_browser_engine::fonts::Run {
+    use rust_browser_engine::fonts::{FontFamily, FontRequest, FontSet, FontStyle, GenericFamily};
+    use std::sync::OnceLock;
+    static FAMILIES: OnceLock<Arc<[FontFamily]>> = OnceLock::new();
+    static EMPTY: OnceLock<FontSet> = OnceLock::new();
+    let families = FAMILIES.get_or_init(|| {
+        [
+            FontFamily::Named("Segoe UI Variable Text".into()),
+            FontFamily::Named("Segoe UI".into()),
+            FontFamily::Generic(GenericFamily::SystemUi),
+            FontFamily::Generic(GenericFamily::SansSerif),
+        ]
+        .into()
+    });
+    fonts.shape_text(
+        text,
+        size,
+        &FontRequest {
+            families: families.clone(),
+            weight,
+            style: FontStyle::Normal,
+        },
+        EMPTY.get_or_init(FontSet::default),
+    )
+}
+
+fn chrome_elide(fonts: &Fonts, text: &str, width: f32, size: f32, weight: u16) -> String {
+    if chrome_shape(fonts, text, size, weight).advance <= width {
+        return text.into();
+    }
+    let mut prefix: String = text.chars().take(80).collect();
+    while !prefix.is_empty()
+        && chrome_shape(fonts, &format!("{prefix}…"), size, weight).advance > width
+    {
+        prefix.pop();
+    }
+    prefix.push('…');
+    prefix
 }
 
 fn omnibox_target(input: &str) -> String {
@@ -4181,130 +4467,7 @@ fn omnibox_target(input: &str) -> String {
 }
 
 fn rounded_chrome_rect(canvas: &mut Canvas, rect: Rect, radius: f32, color: Color) {
-    let radius = radius
-        .round()
-        .clamp(0., (rect.width.min(rect.height) * 0.5).floor());
-    canvas.fill_rect(
-        Rect {
-            y: rect.y + radius,
-            height: rect.height - 2. * radius,
-            ..rect
-        },
-        color,
-    );
-    for row in 0..radius as u32 {
-        let row = row as f32;
-        let dy = radius - row - 0.5;
-        let inset = (radius - (radius * radius - dy * dy).sqrt()).round();
-        let scanline = Rect {
-            x: rect.x + inset,
-            y: rect.y + row,
-            width: rect.width - 2. * inset,
-            height: 1.,
-        };
-        canvas.fill_rect(scanline, color);
-        canvas.fill_rect(
-            Rect {
-                y: rect.y + rect.height - row - 1.,
-                ..scanline
-            },
-            color,
-        );
-    }
-}
-
-fn chrome_icon(
-    canvas: &mut Canvas,
-    x: f32,
-    y: f32,
-    scale: f32,
-    action: Action,
-    loading: bool,
-    color: Color,
-) {
-    let mut line = |a: f32, b: f32, c: f32, d: f32| {
-        canvas.stroke_line(
-            (x + a) * scale,
-            (y + b) * scale,
-            (x + c) * scale,
-            (y + d) * scale,
-            1.3 * scale,
-            color,
-        )
-    };
-    match action {
-        Action::Back => paint_glyph(canvas, x, y, scale, icons::Glyph::Back, color),
-        Action::Forward => paint_glyph(canvas, x, y, scale, icons::Glyph::Forward, color),
-        Action::Address => paint_glyph(canvas, x, y, scale, icons::Glyph::Search, color),
-        Action::Home => {
-            line(2., 9., 10., 2.);
-            line(10., 2., 18., 9.);
-            line(4., 8., 4., 18.);
-            line(4., 18., 16., 18.);
-            line(16., 18., 16., 8.);
-            line(8., 18., 8., 12.);
-            line(8., 12., 12., 12.);
-            line(12., 12., 12., 18.);
-        }
-        Action::Reload if loading => {
-            line(5., 5., 15., 15.);
-            line(15., 5., 5., 15.);
-        }
-        Action::Reload => paint_glyph(canvas, x, y, scale, icons::Glyph::Reload, color),
-        Action::Close(_) => {
-            line(4.5, 4.5, 15.5, 15.5);
-            line(15.5, 4.5, 4.5, 15.5);
-        }
-        Action::NewTab => {
-            line(2., 10., 18., 10.);
-            line(10., 2., 10., 18.);
-        }
-        Action::Version => {
-            for step in 0..24 {
-                let a = step as f32 * std::f32::consts::TAU / 24.;
-                let b = (step + 1) as f32 * std::f32::consts::TAU / 24.;
-                line(
-                    10. + 8. * a.cos(),
-                    10. + 8. * a.sin(),
-                    10. + 8. * b.cos(),
-                    10. + 8. * b.sin(),
-                );
-            }
-            line(10., 9., 10., 14.);
-            line(10., 6.5, 10., 6.75);
-        }
-        Action::Minimize => line(4., 10., 16., 10.),
-        Action::Maximize if loading => {
-            line(7., 4., 16., 4.);
-            line(16., 4., 16., 13.);
-            line(4., 7., 13., 7.);
-            line(13., 7., 13., 16.);
-            line(13., 16., 4., 16.);
-            line(4., 16., 4., 7.);
-        }
-        Action::Maximize => {
-            line(4., 4., 16., 4.);
-            line(16., 4., 16., 16.);
-            line(16., 16., 4., 16.);
-            line(4., 16., 4., 4.);
-        }
-        Action::CloseWindow => {
-            line(4., 4., 16., 16.);
-            line(16., 4., 4., 16.);
-        }
-        Action::Menu => {
-            for offset in [3., 10., 17.] {
-                line(offset, 9., offset, 10.);
-            }
-        }
-        Action::Settings
-        | Action::Select(_)
-        | Action::Bookmarks
-        | Action::ShortcutHelp
-        | Action::TabHistory
-        | Action::MenuItem(_)
-        | Action::BookmarkItem(_) => {}
-    }
+    canvas.fill_rounded_rect(rect, [radius; 4], color);
 }
 
 fn paint_glyph(canvas: &mut Canvas, x: f32, y: f32, scale: f32, glyph: icons::Glyph, color: Color) {
@@ -4382,7 +4545,9 @@ mod form_frame_tests {
         }
         let runtime = tab.runtime.as_mut().unwrap();
         assert_eq!(
-            runtime.eval("document.getElementById('q').value === 'ab'").unwrap(),
+            runtime
+                .eval("document.getElementById('q').value === 'ab'")
+                .unwrap(),
             true.into()
         );
         tab.layout = Some(runtime.layout_for_paint(viewport).unwrap());

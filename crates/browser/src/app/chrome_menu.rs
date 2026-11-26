@@ -127,6 +127,12 @@ const ROWS: &[Row] = &[
         "Strona startowa",
         None,
     ),
+    Row::Item(
+        Target::Browser(Action::StartShortcuts),
+        Glyph::Book,
+        "Skróty startowe",
+        None,
+    ),
     Row::Divider,
     Row::Item(
         Target::Browser(Action::TabHistory),
@@ -265,14 +271,13 @@ impl App {
                     let hovered = self.pointer_in(bounds);
                     let focused = index == selected;
                     draw_row_highlight(canvas, bounds, scale, hovered, focused);
-                    let text_right =
-                        hint.map_or(bounds.x + bounds.width - ROW_INSET, |command| {
-                            let hint = shortcuts::label(command);
-                            // The reference advertises the primary F12 binding.
-                            let primary = hint.split_once(" / ").map_or(hint, |(first, _)| first);
-                            let bg = if hovered || focused { HOVER } else { CARD };
-                            draw_hint(canvas, &mut self.fonts, bounds, scale, primary, bg) - 10.
-                        });
+                    let text_right = hint.map_or(bounds.x + bounds.width - ROW_INSET, |command| {
+                        let hint = shortcuts::label(command);
+                        // The reference advertises the primary F12 binding.
+                        let primary = hint.split_once(" / ").map_or(hint, |(first, _)| first);
+                        let bg = if hovered || focused { HOVER } else { CARD };
+                        draw_hint(canvas, &mut self.fonts, bounds, scale, primary, bg) - 10.
+                    });
                     draw_row_label(
                         canvas,
                         &mut self.fonts,
@@ -397,25 +402,21 @@ fn inset(bounds: Rect, amount: f32) -> Rect {
 }
 
 fn draw_panel(canvas: &mut Canvas, bounds: Rect, scale: f32) {
-    // Approximate the reference's 0 16px 48px translucent shadow on the
-    // software canvas with a few progressively denser rounded layers.
-    for (spread, alpha) in [(31., 5), (24., 7), (18., 9), (12., 13), (6., 18)] {
-        let shadow = inset(
-            Rect {
-                y: bounds.y + 16.,
-                ..bounds
-            },
-            -spread,
-        );
-        rounded_chrome_rect(
-            canvas,
-            snap_rect(shadow, scale),
-            (10. + spread) * scale,
-            Color(0, 0, 0, alpha),
-        );
-    }
-    rounded_chrome_rect(canvas, snap_rect(bounds, scale), 10. * scale, LINE);
-    rounded_chrome_rect(canvas, snap_rect(inset(bounds, 1.), scale), 9. * scale, CARD);
+    let bounds = snap_rect(bounds, scale);
+    let radii = [10. * scale; 4];
+    canvas.shadow_rounded_rect(
+        bounds,
+        radii,
+        rust_browser_engine::paint::RoundedShadow {
+            offset_x: 0.,
+            offset_y: 16. * scale,
+            blur_radius: 48. * scale,
+            spread: 0.,
+            color: Color(0, 0, 0, 136),
+        },
+    );
+    canvas.fill_rounded_rect(bounds, radii, CARD);
+    canvas.outline_rounded_rect(bounds, radii, -scale, scale, LINE);
 }
 
 fn draw_hint(
@@ -436,7 +437,12 @@ fn draw_hint(
         height: 18.,
     };
     rounded_chrome_rect(canvas, snap_rect(bounds, scale), 4. * scale, LINE);
-    rounded_chrome_rect(canvas, snap_rect(inset(bounds, 1.), scale), 3. * scale, background);
+    rounded_chrome_rect(
+        canvas,
+        snap_rect(inset(bounds, 1.), scale),
+        3. * scale,
+        background,
+    );
     canvas.label(
         hint,
         (bounds.x + 5.) * scale,
@@ -466,7 +472,15 @@ fn draw_row_label(
     let available = (right - x) * scale;
     if available >= fonts.shape("…", size, false, false, false).advance {
         let label = elide(fonts, label, available, size);
-        canvas.label(&label, x * scale, (mid + 4.5) * scale, size, TEXT, false, fonts);
+        canvas.label(
+            &label,
+            x * scale,
+            (mid + 4.5) * scale,
+            size,
+            TEXT,
+            false,
+            fonts,
+        );
     }
 }
 
@@ -552,7 +566,10 @@ mod tests {
             "Alt+F, ArrowUp, Enter must still open the shortcut help"
         );
         for (i, &id) in order.iter().enumerate() {
-            assert_eq!(order.iter().filter(|&&candidate| candidate == id).count(), 1);
+            assert_eq!(
+                order.iter().filter(|&&candidate| candidate == id).count(),
+                1
+            );
             assert_eq!(step_item(id, false), order[(i + 1) % order.len()]);
             assert_eq!(
                 step_item(id, true),

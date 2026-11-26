@@ -47,6 +47,7 @@ impl RowCommand {
 pub(super) enum Menu {
     Main(usize),
     Bookmarks(BookmarkPanel),
+    Tabs(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
