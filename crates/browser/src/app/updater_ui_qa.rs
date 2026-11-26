@@ -170,8 +170,8 @@ fn feed_key(
     repeat: bool,
     synthetic: bool,
 ) -> bool {
-    let owns_key = app.update_owns_key(&key);
-    let blocked = app.update_keys.blocks(PhysicalKey::Code(code), state, repeat, synthetic, owns_key);
+    let owns_key = app.site_info.is_some() || app.update_owns_key(&key);
+    let blocked = app.chrome_keys.blocks(PhysicalKey::Code(code), state, repeat, synthetic, owns_key);
     if !blocked && state == ElementState::Pressed {
         app.key(key, None, repeat, events);
     }
