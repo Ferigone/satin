@@ -23,6 +23,7 @@ pub(crate) mod transport;
 mod worker_policy;
 pub(crate) use connect_policy::ConnectPolicy;
 pub use home_assets::built_in_site_icon;
+pub(crate) use home_assets::is_home_image;
 pub(crate) use resources::decode_oriented_bitmap;
 pub use resources::{
     DocumentResource, HttpResourceObservation, ResourceBody, ResourceKind, ResourceRequest,
@@ -35,6 +36,8 @@ pub(crate) use worker_policy::DocumentPolicy;
 /// UI intent from the built-in start page. A native host should consume it
 /// only from its active, committed `about:home` document, without navigating.
 pub const HOME_FOCUS_ADDRESS_URL: &str = "about:home?focus=address";
+/// Normal navigation target for the legacy start shortcuts and demos.
+pub const START_SHORTCUTS_URL: &str = "about:start-shortcuts";
 pub const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(18);
 pub(crate) const USER_AGENT: &str = concat!(
     "Mozilla/5.0 Satin/",
@@ -1698,6 +1701,10 @@ fn text_encoding(bytes: &[u8], content_type: &str) -> (&'static encoding_rs::Enc
 const BASE_STYLE: &str = "body{margin:0;background:#f8fafc;color:#172936;font-family:sans-serif}main{max-width:820px;margin:48px auto;padding:28px}h1{font-size:42px;line-height:1.15;margin:16px 0 24px}p{font-size:18px;line-height:1.6}h2{font-size:23px;margin-top:32px}.eyebrow{font-size:13px;font-weight:bold;color:#16836a}a{color:#126f5e}.card{display:block;padding:18px;margin:12px 0;background:white;border:1px solid #dde5e8;text-decoration:none}.muted{color:#62727f;font-size:15px}pre{font-size:14px;padding:18px;background:#edf1f5}li{margin:10px 0}code{color:#13725d}";
 fn builtin_source(name: &str) -> String {
     let (title, body) = match name {
+        "start-shortcuts" => (
+            "Start shortcuts",
+            include_str!("../data/pages/start-shortcuts.html"),
+        ),
         "media" => ("Video playback", include_str!("../data/pages/media.html")),
         "streaming" => (
             "Segmented playback",
@@ -1771,7 +1778,10 @@ fn builtin_source(name: &str) -> String {
             ),
         _ => body,
     };
-    let lang = if matches!(name, "media" | "streaming" | "version" | "workers") {
+    let lang = if matches!(
+        name,
+        "media" | "streaming" | "version" | "workers" | "start-shortcuts"
+    ) {
         "en"
     } else {
         "pl"
@@ -1783,7 +1793,9 @@ fn builtin_source(name: &str) -> String {
 }
 
 fn builtin_images(page: &mut LoadedPage, name: &str) {
-    if name == "demo" {
+    if name == "start-shortcuts" {
+        home_assets::add_to(page);
+    } else if name == "demo" {
         let mut bitmap = image::RgbaImage::new(400, 160);
         for (x, y, p) in bitmap.enumerate_pixels_mut() {
             let grid = (x / 24 + y / 24) % 2;

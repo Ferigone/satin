@@ -100,7 +100,11 @@ impl TabStorage {
 pub fn storage_origin(url: &url::Url) -> Option<String> {
     match url.scheme() {
         "http" | "https" => Some(url.origin().ascii_serialization()),
-        "about" if url.as_str() == "about:home" => Some("about:home".into()),
+        "about" => match url.as_str() {
+            // Keep the legacy origin and persisted file ID for both exact URLs.
+            "about:home" | crate::loader::START_SHORTCUTS_URL => Some("about:home".into()),
+            _ => None,
+        },
         _ => None,
     }
 }

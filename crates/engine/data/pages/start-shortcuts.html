@@ -1,0 +1,285 @@
+<style>
+  body { background: #080809; color: #eeeceb; }
+  main { position: relative; width: 100%; max-width: 100vw; height: 100vh; margin: 0; padding: 0; overflow: hidden; }
+  .home-backdrop { position: absolute; left: 0; display: block; width: 100%; height: 50vh; }
+  .home-art { top: 0; }
+  .home-bloom { top: 50vh; }
+
+  .home-query-band { position: absolute; top: 50.115vh; left: 0; width: 100%; }
+  .home-query-panel { position: relative; width: 58.512vw; max-width: 1020px; height: 4.2245vw; min-height: 49px; max-height: 74px; margin: 0 auto; }
+  .home-query-surface { display: block; width: 100%; height: 100%; }
+  .home-search { position: absolute; top: 0; left: 0; box-sizing: border-box; width: 100%; height: 100%; display: grid; grid-template-columns: 2vw minmax(0, 1fr) 2.78vw; align-items: center; gap: 1.75vw; padding: 0 1.64vw 0 2.1vw; }
+  .home-search-glyph { display: block; width: 100%; height: 2vw; }
+  .home-query-slot { position: relative; height: 42px; min-width: 0; }
+  .home-query-slot label { display: block; height: 42px; color: #d0cdcb; font-size: 1.58vw; line-height: 42px; white-space: nowrap; }
+  .home-query-slot input { position: absolute; top: 0; left: 0; box-sizing: border-box; display: block; width: 100%; min-width: 0; height: 42px; padding: 5px 0; border: 0; background: transparent; color: #f0eeed; font-size: 1.58vw; }
+  .home-go { display: block; width: 2.78vw; height: 2.78vw; margin: 0; padding: 0; border: 0; background: transparent; }
+  .home-go img { display: block; width: 100%; height: 100%; }
+
+  .home-shortcuts-band { position: absolute; top: 65.632vh; left: 0; width: 100%; }
+  .home-sites { position: relative; left: 0.21vw; display: grid; grid-template-columns: repeat(5, 1fr); width: 48.2vw; max-width: 832px; margin: 0 auto; }
+  .home-site { display: flex; flex-direction: column; align-items: center; gap: 9px; min-width: 0; padding: 0; border: 0; background: transparent; color: #eeeceb; text-decoration: none; font-size: 1.12vw; line-height: 1.33; }
+  .home-site img { display: block; width: 3.027vw; height: 3.027vw; max-width: 53px; max-height: 53px; }
+  .home-custom-sites { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; max-width: 720px; margin: 14px auto 0; }
+  .home-custom-site { max-width: 144px; padding: 6px 11px; border: 1px solid #34302f; background: #1c1919; color: #e4dfdd; text-decoration: none; font-size: 13px; }
+
+  .home-settings { position: absolute; right: 1.64vw; bottom: 3.6vh; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; }
+  .home-settings img { display: block; width: 27px; height: 24px; }
+  .home-panel { position: absolute; z-index: 3; box-sizing: border-box; max-width: 91vw; padding: 16px; border: 1px solid #3b3735; background: #1c1a1a; color: #eeeceb; font-size: 14px; }
+  .home-demos { right: 25px; bottom: 78px; display: flex; flex-wrap: wrap; gap: 10px 14px; width: 380px; }
+  .home-demos a { color: #ded9d6; }
+  .home-add-panel { top: 77vh; left: 0; right: 0; width: 446px; margin: 0 auto; }
+  .home-add-panel h2 { margin: 0 0 10px; font-size: 16px; }
+  .home-add-fields { display: grid; grid-template-columns: 1fr 1.4fr; gap: 8px; }
+  .home-add-fields input { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px; border: 1px solid #45413f; background: #141313; color: #f1eeed; font-size: 14px; }
+  .home-panel-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .home-panel-actions button { margin: 0; padding: 5px 11px; border: 1px solid #4c4542; background: #302c2a; color: #eeeceb; font-size: 13px; }
+  .home-add-error { margin: 7px 0 0; color: #f5ad98; font-size: 12px; }
+  main [hidden] { display: none; }
+
+  @media (max-width: 900px) {
+    .home-query-panel { width: 75vw; height: 49px; }
+    .home-search { grid-template-columns: 25px minmax(0, 1fr) 33px; gap: 12px; padding: 0 14px 0 17px; }
+    .home-query-slot label, .home-query-slot input { font-size: 17px; }
+    .home-search-glyph { width: 25px; height: 25px; }
+    .home-go { width: 33px; height: 33px; }
+    .home-sites { width: 66vw; }
+    .home-site { font-size: 13px; }
+    .home-site img { width: 32px; height: 32px; }
+  }
+  @media (max-width: 620px) {
+    .home-art { left: 50%; width: 975px; height: 267px; transform: translateX(-50%); }
+    .home-bloom { top: 267px; height: 75vh; }
+    .home-query-panel { width: 91vw; }
+    .home-query-slot { height: 38px; }
+    .home-query-slot label, .home-query-slot input { height: 38px; font-size: 15px; line-height: 38px; }
+    .home-query-slot input { padding: 0; line-height: 20px; }
+    .home-sites { width: 89vw; }
+    .home-settings { right: 8px; bottom: 10px; }
+    .home-demos { right: 10px; bottom: 56px; }
+  }
+  @media (max-height: 620px) {
+    .home-query-band { top: 49vh; }
+    .home-shortcuts-band { top: 71vh; }
+    .home-site { gap: 4px; }
+    .home-add-panel { top: auto; bottom: 10px; }
+  }
+  @media (max-height: 400px) {
+    .home-art { left: 50%; width: 550px; height: 151px; transform: translateX(-50%); }
+    .home-bloom { top: 151px; height: 52vh; }
+    .home-query-band { top: 46vh; }
+    .home-shortcuts-band { top: 74vh; }
+    .home-settings { right: 6px; bottom: 5px; }
+    .home-demos { bottom: 51px; }
+  }
+</style>
+<img class="home-backdrop home-art" src="about:satin-mark" width="1586" height="435" alt="">
+<img class="home-backdrop home-bloom" src="about:satin-bloom" width="512" height="160" alt="">
+<div class="home-query-band">
+  <div class="home-query-panel">
+    <img class="home-query-surface" src="about:satin-search-surface" width="928" height="67" alt="">
+    <form id="home-search-form" class="home-search" action="https://search.brave.com/search" method="get" role="search">
+      <img class="home-search-glyph" src="about:satin-search-icon" width="32" height="32" alt="">
+      <div class="home-query-slot">
+        <label id="home-query-hint" for="home-query">Search or enter an address</label>
+        <input id="home-query" type="search" name="q" aria-label="Search with Brave or enter an address" title="Search with Brave or enter an address" required>
+      </div>
+      <button id="home-search" class="home-go" type="submit" aria-label="Go">
+        <img src="about:satin-submit-icon" width="44" height="44" alt="">
+      </button>
+    </form>
+  </div>
+</div>
+<div class="home-shortcuts-band">
+  <nav class="home-sites" aria-label="Site shortcuts">
+    <a class="home-site" href="https://github.com/"><img src="about:satin-github-icon" width="48" height="48" alt="">GitHub</a>
+    <a class="home-site" href="https://www.youtube.com/"><img src="about:satin-youtube-icon" width="48" height="48" alt="">YouTube</a>
+    <a class="home-site" href="https://www.figma.com/"><img src="about:satin-figma-icon" width="48" height="48" alt="">Figma</a>
+    <a class="home-site" id="home-wikipedia" href="https://www.wikipedia.org/"><img src="about:satin-wikipedia-icon" width="48" height="48" alt="">Wikipedia</a>
+    <button class="home-site" id="home-add-toggle" type="button" aria-expanded="false" aria-controls="home-add-panel"><img src="about:satin-add-icon" width="44" height="44" alt="">Add</button>
+  </nav>
+  <nav id="home-custom-sites" class="home-custom-sites" aria-label="Saved shortcuts" hidden></nav>
+</div>
+<button id="home-demos-toggle" class="home-settings" type="button" aria-label="Built-in demos" title="Built-in demos" aria-expanded="false" aria-controls="home-demos">
+  <img src="about:satin-settings-icon" width="32" height="28" alt="">
+</button>
+<nav id="home-demos" class="home-panel home-demos" aria-label="Built-in demos" hidden>
+  <a id="home-video" href="about:media">Video playback</a>
+  <a href="about:streaming">Segmented playback</a>
+  <a href="about:graphics">Graphics and layout</a>
+  <a href="about:canvas">Canvas 2D</a>
+  <a href="about:version">About Satin</a>
+  <a href="about:javascript">JavaScript</a>
+  <a href="about:forms">Forms</a>
+  <a href="about:platform">Web APIs</a>
+  <a href="about:demo">HTML and CSS</a>
+  <a href="about:numbers">Integers</a>
+  <a href="about:bytes">Bytes and streams</a>
+  <a href="about:files">File preview</a>
+  <a href="about:messages">Message ports</a>
+  <a href="about:time">Time and layout</a>
+  <a href="about:routes">History</a>
+  <a href="about:async">Async tasks</a>
+  <a href="about:modules">Modules</a>
+</nav>
+<section id="home-add-panel" class="home-panel home-add-panel" hidden>
+  <h2>Add a shortcut</h2>
+  <form id="home-add-form">
+    <div class="home-add-fields">
+      <input id="home-shortcut-name" aria-label="Name" placeholder="Name" maxlength="48">
+      <input id="home-shortcut-url" aria-label="Web address" placeholder="Web address" maxlength="2048" required>
+    </div>
+    <div class="home-panel-actions">
+      <button id="home-shortcut-save" type="submit">Save</button>
+      <button id="home-shortcut-cancel" type="button">Cancel</button>
+    </div>
+    <p id="home-add-error" class="home-add-error" aria-live="polite" hidden></p>
+  </form>
+</section>
+<script>
+  function show(element, visible) {
+    if (visible) element.removeAttribute("hidden");
+    else element.setAttribute("hidden", "");
+  }
+
+  function webAddress(text) {
+    const explicit = /^https?:\/\//i.test(text);
+    const domain = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::[0-9]+)?(?:[\/?#]\S*)?$/i.test(text);
+    if (!explicit && !domain) return null;
+    try {
+      return new URL(explicit ? text : "https://" + text);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  const query = document.getElementById("home-query");
+  const hint = document.getElementById("home-query-hint");
+  query.addEventListener("input", () => show(hint, query.value.length === 0));
+  document.getElementById("home-search-form").addEventListener("submit", event => {
+    const text = query.value.trim();
+    if (!text) {
+      event.preventDefault();
+      return;
+    }
+    const address = webAddress(text);
+    if (address) {
+      event.preventDefault();
+      location.assign(address.href);
+    }
+  });
+
+  const demosButton = document.getElementById("home-demos-toggle");
+  const demosPanel = document.getElementById("home-demos");
+  const addButton = document.getElementById("home-add-toggle");
+  const addPanel = document.getElementById("home-add-panel");
+  const titleField = document.getElementById("home-shortcut-name");
+  const addressField = document.getElementById("home-shortcut-url");
+  const errorText = document.getElementById("home-add-error");
+  const customSites = document.getElementById("home-custom-sites");
+  const storageKey = "satin.home.shortcuts";
+  const maxShortcuts = 5;
+
+  function openPanel(button, panel, open) {
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    show(panel, open);
+  }
+
+  function displayError(message) {
+    errorText.textContent = message;
+    show(errorText, message.length > 0);
+  }
+
+  function savedShortcuts() {
+    try {
+      const items = JSON.parse(localStorage.getItem(storageKey) || "[]");
+      if (!Array.isArray(items)) return [];
+      const valid = [];
+      for (const item of items) {
+        if (valid.length === maxShortcuts) break;
+        if (!item || typeof item.url !== "string" || typeof item.name !== "string") continue;
+        if (!item.name || item.name.length > 48 || item.url.length > 2048) continue;
+        const address = webAddress(item.url);
+        if (address) valid.push({ name: item.name, url: address.href });
+      }
+      return valid;
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function renderShortcuts(shortcuts) {
+    customSites.replaceChildren();
+    for (let index = 0; index < shortcuts.length; index++) {
+      const shortcut = shortcuts[index];
+      const link = document.createElement("a");
+      link.setAttribute("id", "home-custom-" + index);
+      link.setAttribute("class", "home-custom-site");
+      link.setAttribute("href", shortcut.url);
+      link.textContent = shortcut.name;
+      customSites.appendChild(link);
+    }
+    show(customSites, shortcuts.length > 0);
+  }
+
+  addButton.addEventListener("click", () => {
+    const open = addButton.getAttribute("aria-expanded") !== "true";
+    openPanel(demosButton, demosPanel, false);
+    openPanel(addButton, addPanel, open);
+    if (open) {
+      displayError("");
+      titleField.focus();
+    }
+  });
+
+  demosButton.addEventListener("click", () => {
+    const open = demosButton.getAttribute("aria-expanded") !== "true";
+    openPanel(addButton, addPanel, false);
+    openPanel(demosButton, demosPanel, open);
+  });
+
+  document.getElementById("home-shortcut-cancel").addEventListener("click", () => {
+    openPanel(addButton, addPanel, false);
+    addButton.focus();
+  });
+
+  document.getElementById("home-add-form").addEventListener("submit", event => {
+    event.preventDefault();
+    const address = webAddress(addressField.value.trim());
+    if (!address) {
+      displayError("Enter an HTTP or HTTPS address.");
+      return;
+    }
+
+    const shortcuts = savedShortcuts();
+    if (shortcuts.some(shortcut => shortcut.url === address.href)) {
+      displayError("This address is already saved.");
+      return;
+    }
+    if (shortcuts.length === maxShortcuts) {
+      displayError("You can save up to five shortcuts.");
+      return;
+    }
+
+    const name = (titleField.value.trim() || address.hostname).slice(0, 48);
+    shortcuts.push({ name, url: address.href });
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(shortcuts));
+    } catch (error) {
+      displayError("This shortcut could not be saved.");
+      return;
+    }
+
+    renderShortcuts(shortcuts);
+    titleField.value = "";
+    addressField.value = "";
+    displayError("");
+    openPanel(addButton, addPanel, false);
+    addButton.focus();
+  });
+
+  window.addEventListener("storage", event => {
+    if (event.key === storageKey) renderShortcuts(savedShortcuts());
+  });
+  renderShortcuts(savedShortcuts());
+</script>

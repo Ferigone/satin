@@ -2,11 +2,13 @@ use rust_browser_engine::{
     DrawCommand, Fonts, Layout, LoadedPage,
     css::Color,
     dom::NodeId,
-    history::ScriptNavigation,
+    history::{ScriptNavigation, SessionHistory},
     layout::Viewport,
-    loader::{HOME_FOCUS_ADDRESS_URL, OpenedPage, builtin},
+    loader::{HOME_FOCUS_ADDRESS_URL, OpenedPage, START_SHORTCUTS_URL, builtin},
     script::{DocumentSession, FormKey, ScriptRuntime},
+    web_storage::{StorageProfile, TabStorage},
 };
+use url::Url;
 
 fn viewport(width: f32, height: f32) -> Viewport {
     Viewport {
@@ -16,16 +18,21 @@ fn viewport(width: f32, height: f32) -> Viewport {
     }
 }
 
-fn open_home(viewport: Viewport) -> (LoadedPage, ScriptRuntime) {
-    let opened = OpenedPage::internal(&"about:home".parse().unwrap(), Default::default());
-    let (mut page, mut session) = DocumentSession::start(opened).unwrap();
+fn open_builtin(url: &str, viewport: Viewport, storage: TabStorage) -> (LoadedPage, ScriptRuntime) {
+    let url = Url::parse(url).unwrap();
+    let opened = OpenedPage::internal(&url, Default::default());
+    let (mut page, mut session) =
+        DocumentSession::start_in_tab(opened, SessionHistory::new(url), storage).unwrap();
     let mut runtime = None;
     for _ in 0..64 {
         if session.done() {
             break;
         }
         session.advance(&mut page, &mut runtime, viewport).unwrap();
-        assert!(session.next_resource().is_none(), "home must load offline");
+        assert!(
+            session.next_resource().is_none(),
+            "built-in start pages must load offline"
+        );
     }
     assert!(session.done());
     let runtime = runtime.unwrap();
@@ -34,11 +41,21 @@ fn open_home(viewport: Viewport) -> (LoadedPage, ScriptRuntime) {
     (page, runtime)
 }
 
-fn search_button(page: &LoadedPage) -> NodeId {
+fn open_home(viewport: Viewport) -> (LoadedPage, ScriptRuntime) {
+    open_builtin("about:home", viewport, TabStorage::default())
+}
+
+fn node_by_id(page: &LoadedPage, id: &str) -> NodeId {
     page.document
-        .elements("button")
-        .find(|&id| page.document.attr(id, "id") == Some("home-search"))
+        .connected_nodes()
+        .find(|&node| page.document.attr(node, "id") == Some(id))
         .unwrap()
+}
+
+fn search_button(page: &LoadedPage) -> NodeId {
+    let node = node_by_id(page, "home-search");
+    assert_eq!(page.document.tag(node), "button");
+    node
 }
 
 #[test]
@@ -133,5 +150,85 @@ fn engine_layout_centers_the_quiet_surface_at_desktop_and_narrow_widths() {
                 .count(),
             2
         );
+    }
+}
+
+#[test]
+fn alternate_start_route_keeps_custom_shortcuts_and_demos_off_the_quiet_home() {
+    let view = viewport(1280., 708.);
+    let profile = StorageProfile::default();
+    let storage = TabStorage::new(profile.clone());
+    let (_, mut old_home) = open_builtin("about:home", view, storage.clone());
+    old_home
+        .eval(
+            r#"localStorage.setItem('satin.home.shortcuts', '[{"name":"Mój skrót","url":"https://saved.test/"}]');"#,
+        )
+        .unwrap();
+    let (quiet, _) = open_builtin("about:home", view, storage.clone());
+    assert!(quiet.document.elements("a").next().is_none());
+    assert!(quiet.document.elements("nav").next().is_none());
+    assert!(
+        !quiet
+            .document
+            .text(quiet.document.root)
+            .contains("Mój skrót")
+    );
+
+    let (page, mut shortcuts) = open_builtin(START_SHORTCUTS_URL, view, storage);
+    let (_, mut other_tab) = open_builtin(START_SHORTCUTS_URL, view, TabStorage::new(profile));
+    assert_eq!(page.url, START_SHORTCUTS_URL);
+    assert_eq!(page.title(), "Start shortcuts");
+    assert!(page.images.contains_key("about:satin-mark"));
+    assert!(page.images.contains_key("about:satin-add-icon"));
+    let saved = node_by_id(&page, "home-custom-0");
+    assert_eq!(page.document.text(saved), "Mój skrót");
+    assert_eq!(
+        page.document.attr(saved, "href"),
+        Some("https://saved.test/")
+    );
+
+    let demos = node_by_id(&page, "home-demos-toggle");
+    assert!(shortcuts.click(demos));
+    assert_eq!(
+        shortcuts
+            .eval("!document.getElementById('home-demos').hasAttribute('hidden')")
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        shortcuts
+            .click_link(node_by_id(&page, "home-video"))
+            .as_deref(),
+        Some("about:media")
+    );
+
+    assert!(shortcuts.click(node_by_id(&page, "home-add-toggle")));
+    shortcuts
+        .eval(
+            "document.getElementById('home-shortcut-name').value = 'Added'; \
+             document.getElementById('home-shortcut-url').value = 'https://added.test/';",
+        )
+        .unwrap();
+    assert!(shortcuts.click(node_by_id(&page, "home-shortcut-save")));
+    assert_eq!(
+        old_home
+            .eval(
+                "JSON.parse(localStorage.getItem('satin.home.shortcuts'))[1].url === 'https://added.test/'"
+            )
+            .unwrap()
+            .as_bool(),
+        Some(true)
+    );
+    other_tab.pump();
+    for runtime in [&mut shortcuts, &mut other_tab] {
+        assert_eq!(
+            runtime
+                .eval("document.getElementById('home-custom-1').textContent === 'Added'")
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+        assert!(runtime.diagnostics().is_empty());
     }
 }

@@ -1,7 +1,8 @@
 use rust_browser_engine::{
     LoadedPage,
+    loader::START_SHORTCUTS_URL,
     script::ScriptRuntime,
-    web_storage::{StoragePersistence, StorageProfile, TabStorage},
+    web_storage::{StoragePersistence, StorageProfile, TabStorage, storage_origin},
 };
 use rust_browser_javascript::Value;
 use std::{
@@ -193,6 +194,57 @@ fn persistence_restores_utf16_and_retries_failed_origin_writes() {
         "var blocked; try{localStorage.setItem('new', 'item')}catch(error){blocked=error.name}; blocked==='SecurityError'",
     );
     assert_eq!(disk.files.borrow().values().next().unwrap().len(), 4);
+}
+
+#[test]
+fn alternate_start_uses_the_existing_home_shortcut_file_without_migration() {
+    let home_url = "about:home";
+    assert_eq!(
+        storage_origin(&START_SHORTCUTS_URL.parse().unwrap()).as_deref(),
+        Some(home_url)
+    );
+    let disk = Rc::new(Disk::default());
+    {
+        let profile = StorageProfile::with_persistence(disk.clone());
+        realm(home_url, &TabStorage::new(profile.clone()))
+            .eval(r#"localStorage.setItem('satin.home.shortcuts', '[{"name":"Saved","url":"https://saved.test/"}]')"#)
+            .unwrap();
+        profile.flush().unwrap();
+    }
+    let original = disk.files.borrow().clone();
+    assert_eq!(original.len(), 1);
+    {
+        let profile = StorageProfile::with_persistence(disk.clone());
+        let mut alternate = realm(START_SHORTCUTS_URL, &TabStorage::new(profile.clone()));
+        check(
+            &mut alternate,
+            "JSON.parse(localStorage.getItem('satin.home.shortcuts'))[0].name === 'Saved'",
+        );
+        profile.flush().unwrap();
+        assert_eq!(
+            *disk.files.borrow(),
+            original,
+            "reading does not rewrite the file"
+        );
+
+        alternate
+            .eval(r#"localStorage.setItem('satin.home.shortcuts', '[{"name":"Updated","url":"https://saved.test/"}]')"#)
+            .unwrap();
+        profile.flush().unwrap();
+    }
+    let files = disk.files.borrow();
+    assert!(
+        files.keys().eq(original.keys()),
+        "writes keep the existing file ID"
+    );
+    drop(files);
+    check(
+        &mut realm(
+            home_url,
+            &TabStorage::new(StorageProfile::with_persistence(disk)),
+        ),
+        "JSON.parse(localStorage.getItem('satin.home.shortcuts'))[0].name === 'Updated'",
+    );
 }
 
 #[test]

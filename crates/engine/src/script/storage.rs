@@ -352,7 +352,7 @@ mod tests {
     use crate::{loader::LoadedPage, script::ScriptRuntime, web_storage::StorageProfile};
 
     #[test]
-    fn home_shortcut_storage_is_private_to_the_exact_builtin_page() {
+    fn home_shortcut_storage_is_private_to_the_two_exact_builtin_pages() {
         let profile = StorageProfile::default();
         let open = |url| {
             ScriptRuntime::with_storage(
@@ -380,11 +380,19 @@ mod tests {
                 .unwrap(),
             Value::Bool(true)
         );
+        assert_eq!(
+            open(crate::loader::START_SHORTCUTS_URL)
+                .eval("localStorage.getItem('satin.home.shortcuts') === 'home only'")
+                .unwrap(),
+            Value::Bool(true)
+        );
 
         for url in [
             "about:version",
             "about:home?other",
             "about:home#other",
+            "about:start-shortcuts?other",
+            "about:start-shortcuts#other",
             "data:text/html,opaque",
         ] {
             assert_eq!(
