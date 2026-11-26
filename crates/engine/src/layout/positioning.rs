@@ -1552,6 +1552,7 @@ impl Builder<'_> {
             links,
             elements,
             anchors: self.anchors,
+            subgrid_spans: self.subgrid_spans,
             height,
             content_width: bounds[doc.root.0]
                 .map(|r| r.x + r.width)

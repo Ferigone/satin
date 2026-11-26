@@ -101,6 +101,12 @@ impl<'a> Axis<'a> {
         }
     }
 
+    pub(super) fn inherited_columns(mut self, count: usize) -> Self {
+        self.count = count;
+        self.explicit = count;
+        self
+    }
+
     // Within the same node and axis the template, areas and line names
     // are immutable. Expansion is the only size-dependent placement input.
     pub(super) fn placement_key(&self) -> [usize; 3] {
@@ -413,6 +419,11 @@ pub(super) struct Tracks {
 }
 
 impl Tracks {
+    pub(super) fn needs_contributions(&self, basis: Option<f32>, font: f32) -> bool {
+        self.iter().any(|track| [track.min, track.max].iter().any(|breadth| {
+            !matches!(breadth, GridBreadth::Length(length) if length.resolve_with_basis(basis, font).is_some())
+        }))
+    }
     pub(super) fn gaps(&self, gap: f32) -> f32 {
         gap * self.active.saturating_sub(1) as f32
     }

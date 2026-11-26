@@ -295,6 +295,7 @@ pub struct Layout {
     pub links: Vec<Link>,
     pub elements: Vec<ElementBox>,
     pub anchors: HashMap<String, f32>,
+    pub(crate) subgrid_spans: HashMap<NodeId, usize>,
     pub height: f32,
     pub content_width: f32,
     pub background: Color,
@@ -679,6 +680,7 @@ struct Fragment {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
+    subgrid_spans: HashMap<NodeId, usize>,
     width: f32,
     height: f32,
 }
@@ -719,6 +721,7 @@ struct FragmentKey {
     intrinsic_width: bool,
     flex_item: bool,
     href: Option<Arc<str>>,
+    inherited_columns: Option<InheritedColumns>,
 }
 
 impl Fragment {
@@ -732,6 +735,7 @@ impl Fragment {
             .saturating_add(self.positioned.len())
             .saturating_add(self.links.len())
             .saturating_add(self.elements.len())
+            .saturating_add(self.subgrid_spans.len())
             .saturating_add(1);
         for command in self.commands.iter() {
             match command {
@@ -857,7 +861,15 @@ fn collapse_margins(a: f32, b: f32) -> f32 {
 fn is_css_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct InheritedColumns {
+    // Fragment keys compare exact track sizes even when the area width is unchanged.
+    sizes: Arc<[u32]>,
+    gap: u32,
+}
+
 struct Builder<'a> {
+    subgrid: Option<(NodeId, InheritedColumns)>,
     page: &'a LoadedPage,
     fonts: &'a Fonts,
     // Layout treats computed styles as immutable. Borrow them across recursive
@@ -872,6 +884,7 @@ struct Builder<'a> {
     links: Vec<Link>,
     elements: Vec<ElementBox>,
     anchors: HashMap<String, f32>,
+    subgrid_spans: HashMap<NodeId, usize>,
     list_ordinals: HashMap<NodeId, i64>,
     intrinsic: Vec<Option<(f32, f32)>>,
     fragment_cache: HashMap<FragmentKey, (Fragment, usize)>,
@@ -896,6 +909,7 @@ impl<'a> Builder<'a> {
             page,
             fonts,
             styles,
+            subgrid: None,
             commands: TrackedCommands::default(),
             positioned: vec![],
             viewport,
@@ -905,6 +919,7 @@ impl<'a> Builder<'a> {
             links: vec![],
             elements: vec![],
             anchors: HashMap::new(),
+            subgrid_spans: HashMap::new(),
             list_ordinals: HashMap::new(),
             intrinsic: vec![None; page.document.nodes.len()],
             fragment_cache: HashMap::new(),
@@ -1091,6 +1106,7 @@ struct GridItem {
     columns: usize,
     rows: usize,
 }
+#[derive(Clone)]
 struct GridPlacement {
     items: Vec<GridItem>,
     columns: usize,
@@ -1098,6 +1114,21 @@ struct GridPlacement {
     column_origin: i32,
     row_origin: i32,
 }
+impl GridPlacement {
+    fn for_subgrid_columns(&self, count: usize) -> Self {
+        let mut placed = self.clone();
+        for item in &mut placed.items {
+            let start = item.column as i32 + self.column_origin;
+            let end = (start + item.columns as i32).clamp(1, count as i32);
+            item.column = start.clamp(0, end - 1) as usize;
+            item.columns = end as usize - item.column;
+        }
+        placed.column_origin = 0;
+        placed.columns = count;
+        placed
+    }
+}
+
 #[derive(Clone)]
 struct GridText {
     merged: Option<Arc<str>>,
@@ -1827,7 +1858,7 @@ fn grid_track_sizes(
         .collect()
 }
 fn grid_area(sizes: &[f32], start: usize, span: usize, gap: f32) -> f32 {
-    sizes[start..start + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32
+    (sizes[start..start + span].iter().sum::<f32>() + gap * span.saturating_sub(1) as f32).max(0.)
 }
 fn grid_offsets(
     sizes: &[f32],
@@ -2025,6 +2056,76 @@ impl Builder<'_> {
             floor: m.extra_x() + margin,
         }
     }
+    fn grid_contributions(&mut self, items: &[GridItem], width: f32) -> Vec<GridContribution> {
+        let mut out = Vec::with_capacity(items.len());
+        for &item in items {
+            self.add_grid_contribution(item, width, 0, &mut out);
+        }
+        out
+    }
+
+    fn add_grid_contribution(
+        &mut self,
+        item: GridItem,
+        width: f32,
+        depth: usize,
+        out: &mut Vec<GridContribution>,
+    ) {
+        if depth > 0 && (out.len() >= GRID_ITEM_LIMIT || self.work_remaining == 0) {
+            self.limited = true;
+            return;
+        }
+        let style = &self.styles[item.node.0];
+        if !style.grid_template_columns.subgrid
+            || !matches!(style.display, Display::Grid | Display::InlineGrid)
+        {
+            out.push(self.grid_inline_contribution(item, width));
+            return;
+        }
+        if depth >= MAX_LAYOUT_RECURSION || self.work_remaining == 0 || out.len() >= GRID_ITEM_LIMIT
+        {
+            self.limited = true;
+            return;
+        }
+        self.work_remaining -= 1;
+        let metrics = BoxMetrics::new(style, width, Constraints::default());
+        let rows = Axis::new(
+            style,
+            true,
+            AxisSize::from_style(style, true, None, metrics),
+        );
+        let columns =
+            Axis::new(style, false, AxisSize::fixed(width)).inherited_columns(item.columns);
+        let Some(placement) = self.grid_placement_cached(item.node, &rows, &columns) else {
+            self.limited = true;
+            return;
+        };
+        let children = placement.for_subgrid_columns(item.columns);
+        let left = metrics.padding[3] + metrics.border[3] + metrics.margin[3];
+        let right = metrics.padding[1] + metrics.border[1] + metrics.margin[1];
+        let start = out.len();
+        for mut child in children.items {
+            child.column += item.column;
+            self.add_grid_contribution(child, width, depth + 1, out);
+        }
+        for contribution in &mut out[start..] {
+            let extra =
+                (if contribution.start == item.column {
+                    left
+                } else {
+                    0.
+                }) + (if contribution.start + contribution.span == item.column + item.columns {
+                    right
+                } else {
+                    0.
+                });
+            contribution.minimum += extra;
+            contribution.min_content += extra;
+            contribution.maximum += extra;
+            contribution.floor += extra;
+        }
+    }
+
     fn grid_intrinsic(&mut self, id: NodeId) -> (f32, f32) {
         let container = &self.styles[id.0];
         let metrics = BoxMetrics::new(container, 0., Constraints::default());
@@ -2047,11 +2148,11 @@ impl Builder<'_> {
         let gap = container.gap[1]
             .resolve(0., container.font_size)
             .unwrap_or(0.);
-        let contributions: Vec<_> = placement
-            .items
-            .iter()
-            .map(|&item| self.grid_inline_contribution(item, 0.))
-            .collect();
+        let contributions = if tracks.needs_contributions(None, container.font_size) {
+            self.grid_contributions(&placement.items, 0.)
+        } else {
+            Vec::new()
+        };
         let minimum = grid_track_sizes(
             &tracks,
             None,
@@ -2077,6 +2178,36 @@ impl Builder<'_> {
         let extra = metrics.extra_x() + tracks.gaps(gap);
         (minimum + extra, maximum + extra)
     }
+    fn grid_item_fragment(
+        &mut self,
+        item: GridItem,
+        sizes: &[f32],
+        gap: f32,
+        available: f32,
+        href: Option<Arc<str>>,
+        constraints: Constraints,
+    ) -> Fragment {
+        if !self.styles[item.node.0].grid_template_columns.subgrid {
+            return self.fragment(item.node, available, href, constraints);
+        }
+        let style = &self.styles[item.node.0];
+        let metrics = BoxMetrics::new(style, available, constraints);
+        let mut occupied = sizes[item.column..item.column + item.columns].to_vec();
+        let last = occupied.len() - 1;
+        occupied[0] -= metrics.margin[3] + metrics.border[3] + metrics.padding[3];
+        occupied[last] -= metrics.margin[1] + metrics.border[1] + metrics.padding[1];
+        let sizes = occupied.into_iter().map(f32::to_bits).collect();
+        let previous = self.subgrid.replace((
+            item.node,
+            InheritedColumns {
+                sizes,
+                gap: gap.to_bits(),
+            },
+        ));
+        let result = self.fragment(item.node, available, href, constraints);
+        self.subgrid = previous;
+        result
+    }
     fn grid(
         &mut self,
         id: NodeId,
@@ -2098,7 +2229,16 @@ impl Builder<'_> {
                 ..block_size
             },
         );
-        let column_template = Axis::new(container, false, inline_size);
+        let inherited = self
+            .subgrid
+            .as_ref()
+            .filter(|(node, _)| *node == id)
+            .map(|(_, c)| c.clone());
+        let mut column_template = Axis::new(container, false, inline_size);
+        if let Some(c) = &inherited {
+            column_template = column_template.inherited_columns(c.sizes.len());
+            self.subgrid_spans.insert(id, c.sizes.len());
+        }
         self.limited |= row_template.limited || column_template.limited;
         let Some(placement) = self.grid_placement_cached(id, &row_template, &column_template)
         else {
@@ -2110,30 +2250,51 @@ impl Builder<'_> {
             self.flush(&mut line, false);
             return (line.y - y).max(0.);
         };
+        let placement = if let Some(c) = &inherited {
+            // Place on the hypothetical implicit grid, then clamp to the subgrid edges.
+            Arc::new(placement.for_subgrid_columns(c.sizes.len()))
+        } else {
+            placement
+        };
         let columns = column_template.tracks(&container.grid_auto_columns, &placement);
         let rows = row_template.tracks(&container.grid_auto_rows, &placement);
         let gap_x = container.gap[1]
             .resolve(width, container.font_size)
-            .unwrap_or(0.)
+            .unwrap_or_else(|| inherited.as_ref().map_or(0., |c| f32::from_bits(c.gap)))
             .max(0.);
         let gap_y = container.gap[0]
             .resolve(height.unwrap_or(0.), container.font_size)
             .unwrap_or(0.)
             .max(0.);
-        let contributions: Vec<_> = placement
-            .items
-            .iter()
-            .map(|&item| self.grid_inline_contribution(item, width))
-            .collect();
-        let column_sizes = grid_track_sizes(
-            &columns,
-            Some(width),
-            gap_x,
-            container.font_size,
-            &contributions,
-            container.justify_content,
-            false,
-        );
+        let column_sizes = if let Some(c) = &inherited {
+            let delta = (f32::from_bits(c.gap) - gap_x) / 2.;
+            let last = c.sizes.len() - 1;
+            c.sizes
+                .iter()
+                .enumerate()
+                .map(|(i, bits)| {
+                    // Keep signed distances between grid lines when a gutter exceeds a
+                    // track. Only the final grid area is clamped to nonnegative size.
+                    f32::from_bits(*bits) + if i != 0 { delta } else { 0. }
+                        + if i != last { delta } else { 0. }
+                })
+                .collect()
+        } else {
+            let contributions = if columns.needs_contributions(Some(width), container.font_size) {
+                self.grid_contributions(&placement.items, width)
+            } else {
+                Vec::new()
+            };
+            grid_track_sizes(
+                &columns,
+                Some(width),
+                gap_x,
+                container.font_size,
+                &contributions,
+                container.justify_content,
+                false,
+            )
+        };
         let (column_offsets, used_gap_x) = grid_offsets(
             &column_sizes,
             &columns,
@@ -2177,7 +2338,14 @@ impl Builder<'_> {
                     && columns[item.column..item.column + item.columns]
                         .iter()
                         .any(|track| matches!(track.max, GridBreadth::Flex(_))));
-            let (min_content, max_content) = self.intrinsic_width(item.node);
+            let shrink_to_fit = style.width == Length::FitContent
+                || (style.width == Length::Auto && (justify != Align::Stretch || auto_margins));
+            let needs_minimum = automatic && style.min_width == Length::Auto;
+            let (min_content, max_content) = if !text && (shrink_to_fit || needs_minimum) {
+                self.intrinsic_width(item.node)
+            } else {
+                (0., 0.)
+            };
             let available = (area_width - m.margin[1] - m.margin[3]).max(0.);
             let mut border_width = if text {
                 available
@@ -2221,8 +2389,10 @@ impl Builder<'_> {
                     });
                 border_width = border_width.min(maximum).max(minimum).max(m.extra_x());
             }
-            let fragment = self.fragment(
-                item.node,
+            let fragment = self.grid_item_fragment(
+                item,
+                &column_sizes,
+                used_gap_x,
                 area_width,
                 href.clone(),
                 Constraints {
@@ -2373,8 +2543,10 @@ impl Builder<'_> {
                 || style.min_height.has_percent()
                 || style.max_height.has_percent();
             if !text && needs_final_layout {
-                fragment = self.fragment(
-                    item.node,
+                fragment = self.grid_item_fragment(
+                    *item,
+                    &column_sizes,
+                    used_gap_x,
                     area_width,
                     href.clone(),
                     Constraints {
@@ -3474,6 +3646,11 @@ impl Builder<'_> {
             intrinsic_width: c.intrinsic_width,
             flex_item: c.flex_item,
             href: href.clone(),
+            inherited_columns: self
+                .subgrid
+                .as_ref()
+                .filter(|(node, _)| *node == id)
+                .map(|(_, c)| c.clone()),
         });
         if let Some((cached, cost)) = key.as_ref().and_then(|key| self.fragment_cache.get(key)) {
             let charge = 1 + cost / 64;
@@ -3490,6 +3667,7 @@ impl Builder<'_> {
             links: std::mem::take(&mut self.links),
             elements: std::mem::take(&mut self.elements),
             anchors: std::mem::take(&mut self.anchors),
+            subgrid_spans: std::mem::take(&mut self.subgrid_spans),
             ..Fragment::default()
         };
         let s = &self.styles[id.0];
@@ -3523,6 +3701,7 @@ impl Builder<'_> {
             links: std::mem::replace(&mut self.links, old.links),
             elements: std::mem::replace(&mut self.elements, old.elements),
             anchors: std::mem::replace(&mut self.anchors, old.anchors),
+            subgrid_spans: std::mem::replace(&mut self.subgrid_spans, old.subgrid_spans),
             width,
             height,
         };
@@ -3589,6 +3768,7 @@ impl Builder<'_> {
             }));
         self.links.extend(f.links);
         self.elements.extend(f.elements);
+        self.subgrid_spans.extend(f.subgrid_spans);
         for (name, pos) in f.anchors {
             self.anchors.insert(name, pos + y);
         }
@@ -4502,6 +4682,21 @@ impl Builder<'_> {
             self.intrinsic[id.0] = Some((0., 0.));
             return (0., 0.);
         }
+        if s.grid_template_columns.subgrid
+            && matches!(s.display, Display::Grid | Display::InlineGrid)
+            && d.nodes[id.0].parent.is_some_and(|p| {
+                matches!(
+                    self.styles[p.0].display,
+                    Display::Grid | Display::InlineGrid
+                )
+            })
+        {
+            // The parent sizes these tracks from this item's descendants. Running
+            // a separate placement here would invent an unrelated implicit grid.
+            let edge = BoxMetrics::new(s, 0., Constraints::default()).extra_x();
+            self.intrinsic[id.0] = Some((edge, edge));
+            return (edge, edge);
+        }
         if matches!(s.display, Display::Grid | Display::InlineGrid)
             && (matches!(s.width, Length::Auto | Length::FitContent) || s.width.has_percent())
         {
@@ -4617,6 +4812,7 @@ impl Builder<'_> {
                 let (mut min, mut max, mut current) = (0f32, 0f32, 0f32);
                 let mut float_sides = [false; 2];
                 let mut has_inline_content = false;
+                let mut unbreakable = 0.;
                 for &child in &d.nodes[id.0].children {
                     let cs = &self.styles[child.0];
                     let text = d.nodes[child.0].kind.text_data().is_some();
@@ -4639,7 +4835,17 @@ impl Builder<'_> {
                                 | Display::Flex
                                 | Display::Grid
                         );
+                    if !s.wrap && !text && d.tag(child) == "br" {
+                        max = max.max(current);
+                        current = 0.;
+                        unbreakable = 0.;
+                        has_inline_content = false;
+                        continue;
+                    }
                     let floated = !text && cs.float != css::Float::None;
+                    if block || floated || cs.wrap {
+                        unbreakable = 0.;
+                    }
                     if (block || floated)
                         && cs
                             .clear
@@ -4672,6 +4878,10 @@ impl Builder<'_> {
                             has_inline_content = false;
                         } else {
                             current += b;
+                            if !s.wrap && !cs.wrap {
+                                unbreakable += b;
+                                min = min.max(unbreakable);
+                            }
                             has_inline_content |= b > 0.;
                         }
                         min = min.max(a);
