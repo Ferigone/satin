@@ -31,7 +31,9 @@ impl Parser {
             function.body = Vec::new();
             function.params = Vec::new();
             function.validated = Some(code);
-            self.lexer.finish_deferred_function(before, retained.saturating_add(self.lookahead_charge()))?;
+            self.lexer.finish_deferred_function(
+                before, retained.saturating_add(self.lookahead_charge()), &function.source,
+            )?;
         }
         Ok(())
     }

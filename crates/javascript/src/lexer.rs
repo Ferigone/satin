@@ -14,6 +14,9 @@ const BIGINT_SOURCE_WORK: usize = 8_388_608;
 // A closing delimiter finishes an already charged node. It has no node of its own.
 const STRUCTURAL_TOKEN_BYTES: usize = 384;
 const CLOSING_DELIMITER_BYTES: usize = 32;
+// The VM reserves this scratch per input byte before constructing a classic
+// script lexer. UTF-8 uses at least one byte per source code point.
+pub(crate) const LITERAL_SCRATCH_PER_BYTE: usize = 12;
 
 fn structural_charge(point: Option<char>) -> usize {
     match point {
@@ -72,6 +75,9 @@ pub(crate) struct Lexer {
     templates: Vec<usize>,
     bigint_work: usize,
     compilation_bytes: usize,
+    // Only a VM-admitted UTF-8 script has a separate prepaid literal reserve.
+    // Source positions are monotone even when finishing an enclosing function.
+    last_released_source_end: Option<usize>,
     #[cfg(feature = "media-startup-diagnostics")]
     initial_compilation_bytes: usize,
     #[cfg(feature = "media-startup-diagnostics")]
@@ -87,7 +93,9 @@ impl Lexer {
         // The VM already admitted the worst-case source and decoded-literal
         // scratch. Construction has finished; only the actual backing remains.
         let unused = source_reservation.saturating_sub(chars.storage().1);
-        Self::from_span(chars, budget.saturating_add(unused), true)
+        let mut lexer = Self::from_span(chars, budget.saturating_add(unused), true);
+        lexer.last_released_source_end = Some(0);
+        lexer
     }
 
     pub(crate) fn from_utf16(source: &[u16], compilation_bytes: usize) -> Self {
@@ -112,6 +120,7 @@ impl Lexer {
             templates: Vec::new(),
             bigint_work: BIGINT_SOURCE_WORK,
             compilation_bytes,
+            last_released_source_end: None,
             #[cfg(feature = "media-startup-diagnostics")]
             initial_compilation_bytes: compilation_bytes,
             #[cfg(feature = "media-startup-diagnostics")]
@@ -165,8 +174,23 @@ impl Lexer {
         structural_charge(self.chars.point(token.start).map(|p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER)))
     }
 
-    pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
-        self.compilation_bytes = before;
+    pub(crate) fn finish_deferred_function(
+        &mut self,
+        before: usize,
+        retained: usize,
+        source: &SourceSpan,
+    ) -> Result<(), JsError> {
+        // The AST, decoded literal temporaries and validation bytecode are
+        // gone. The surviving callable graph (including names/parameters) is
+        // debited below. Materialization pays for its own scratch on invocation.
+        // Use code points as a conservative lower bound on released UTF-8 bytes.
+        let mut credit = 0;
+        if let Some(last) = &mut self.last_released_source_end {
+            let range = source.range();
+            credit = range.end.saturating_sub(range.start.max(*last)).saturating_mul(LITERAL_SCRATCH_PER_BYTE);
+            *last = (*last).max(range.end);
+        }
+        self.compilation_bytes = before.saturating_add(credit);
         self.reserve_compilation_bytes(retained)?;
         #[cfg(feature = "media-startup-diagnostics")]
         {

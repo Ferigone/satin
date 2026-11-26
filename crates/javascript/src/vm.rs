@@ -401,7 +401,7 @@ impl Vm {
 
     fn classic_lexer(&self, source: &str) -> Result<crate::lexer::Lexer, JsError> {
         let width = if source.is_ascii() { 1 } else { 4 };
-        let budget = self.compilation_budget_for_bytes(source.len(), 12 + width)?;
+        let budget = self.compilation_budget_for_bytes(source.len(), crate::lexer::LITERAL_SCRATCH_PER_BYTE + width)?;
         Ok(crate::lexer::Lexer::budgeted_script(source, budget, source.len().saturating_mul(width)))
     }
 

@@ -37,10 +37,22 @@ function corpus() {
   ];
 }
 
-async function fixtures(directory) {
+function regexpCorpus() {
+  const exercise = (literal, good, bad, subject) =>
+    `(function(){const p=${literal},s=${JSON.stringify(subject)};let ok=true;` +
+    `for(let i=0;i<80;i++)if(p.test(s))ok=false;` +
+    `return ok&&p.test(${JSON.stringify(good)})&&!p.test(${JSON.stringify(bad)});})()`;
+  return [
+    ['absolute-anchor', exercise('/^(?:x?)z/', 'xz', 'axz', 'x'.repeat(480)), 'ok', true],
+    ['multiline-anchor', exercise('/^z/m', 'a\nz', 'az', 'x'.repeat(480)), 'ok', true],
+    ['alternate-anchor', exercise('/^z|w/', 'aw', 'az', 'x'.repeat(480)), 'ok', true],
+  ];
+}
+
+async function fixtures(directory, casesToWrite = corpus()) {
   await mkdir(directory, { recursive: false });
   const cases = [];
-  for (const [name, text, expected, evaluate] of corpus()) {
+  for (const [name, text, expected, evaluate] of casesToWrite) {
     const bytes = Buffer.from(text);
     assert.ok(bytes.length < 12 * 1024 * 1024);
     const file = `${name}.js`;
@@ -168,6 +180,8 @@ async function paired(directory, destination, rounds, ...variants) {
 
 if (command === 'fixtures' && args.length === 1) {
   await fixtures(resolve(args[0]));
+} else if (command === 'regexp-fixtures' && args.length === 1) {
+  await fixtures(resolve(args[0]), regexpCorpus());
 } else if (command === 'run' && [4, 5].includes(args.length)) {
   await run(...args);
 } else if (command === 'v8' && args.length === 2) {

@@ -41,3 +41,21 @@ fn budgeted_backing_refunds_only_completed_source_storage() {
         assert_eq!(delimiters.lookahead_charge(&token), before - delimiters.remaining_compilation_bytes());
     }
 }
+
+#[test]
+fn retired_literal_reserve_cannot_be_reused_twice_or_created_by_a_plain_lexer() {
+    let mut vm_input = Lexer::budgeted_script("abcdefghijkl", 2000, 12);
+    let inner = vm_input.span(2, 6);
+    let outer = vm_input.span(0, 10);
+    let end = vm_input.span(10, 12);
+    vm_input.finish_deferred_function(2000, 100, &inner).unwrap();
+    assert_eq!(vm_input.remaining_compilation_bytes(), 1900 + 4 * LITERAL_SCRATCH_PER_BYTE);
+    vm_input.finish_deferred_function(2000, 200, &outer).unwrap();
+    assert_eq!(vm_input.remaining_compilation_bytes(), 1800 + 4 * LITERAL_SCRATCH_PER_BYTE);
+    let remaining = vm_input.remaining_compilation_bytes();
+    vm_input.finish_deferred_function(remaining, 50, &end).unwrap();
+    assert_eq!(vm_input.remaining_compilation_bytes(), remaining - 50 + 2 * LITERAL_SCRATCH_PER_BYTE);
+    let mut other = Lexer::new("abcdefghijkl", 2000, true);
+    other.finish_deferred_function(2000, 100, &inner).unwrap();
+    assert_eq!(other.remaining_compilation_bytes(), 1900);
+}

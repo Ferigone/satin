@@ -55,6 +55,10 @@ impl SourceSpan {
         self.range.len()
     }
 
+    pub(super) fn range(&self) -> Range<usize> {
+        self.range.clone()
+    }
+
     /// Count ordinary code points before a comment delimiter or line break.
     /// Respect the end of a shared function span when reparsing a cold body.
     pub(super) fn comment_prefix<const BLOCK: bool>(&self, pos: usize) -> usize {
