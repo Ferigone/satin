@@ -64,3 +64,24 @@ fn changing_a_loaded_links_relation_restyles_the_document() {
         "90,30,90".into()
     );
 }
+
+#[test]
+fn repeated_link_reads_reuse_serialization_and_observe_href_and_base_changes() {
+    let page = LoadedPage::from_html(
+        "https://example.test/q/",
+        &format!(
+            "<base href='/first/'><link id=l href='https://example.test/{}'>",
+            "x".repeat(1500)
+        ),
+    );
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+      const l=document.getElementById('l');let len=0;
+      for(let i=0;i<1000;i++)len+=l.href.length;
+      l.setAttribute('href','https://example.test/new');
+      let updated=l.href;
+      l.href='page.css';let first=l.href;
+      document.querySelector('base').setAttribute('href','/second/');
+      [len,updated,first,l.href].join('|')
+    "#).unwrap(),"1521000|https://example.test/new|https://example.test/first/page.css|https://example.test/second/page.css".into());
+}

@@ -24,12 +24,35 @@ pub(super) fn install(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(
         let host = state.clone();
         let get = vm.new_native_function(property, move |vm, this, _| {
             let id = receiver(&host, &this)?;
-            let state = host.borrow();
+            let mut state = host.borrow_mut();
+            if property == "href"
+                && let Some(cached) = state.absolute_link_hrefs.get(&id)
+            {
+                return Ok(cached.clone().into());
+            }
             let Some(raw) = state.document.attr(id, property) else {
                 return Ok("".into());
             };
             vm.charge_work(raw.len())?;
             if property == "href" {
+                // Absolute authority URLs are independent of the document's base.
+                // Retain bounded serializations and discard them on href edits.
+                const MAX_CACHED_LINKS: usize = 256;
+                const MAX_CACHED_URL_BYTES: usize = 4096;
+                if raw.len() <= MAX_CACHED_URL_BYTES
+                    && let Some((scheme, _)) = raw.split_once("://")
+                    && let Ok(url) = url::Url::parse(raw)
+                    && url.has_host()
+                    && url.scheme().eq_ignore_ascii_case(scheme)
+                    && url.as_str().len() <= MAX_CACHED_URL_BYTES
+                {
+                    let value = rust_browser_javascript::JsString::from(url.as_str());
+                    if state.absolute_link_hrefs.len() == MAX_CACHED_LINKS {
+                        state.absolute_link_hrefs.clear();
+                    }
+                    state.absolute_link_hrefs.insert(id, value.clone());
+                    return Ok(value.into());
+                }
                 return Ok(document_base(&state)
                     .join(raw)
                     .map_or_else(|_| raw.to_owned(), |url| url.to_string())

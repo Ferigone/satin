@@ -109,6 +109,7 @@ struct State {
     input_prototype: Value,
     image_prototype: Value,
     link_prototype: Value,
+    absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
     image_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
@@ -511,6 +512,9 @@ fn set_attribute(
         if changes_canvas_attribute {
             canvas::attribute_changed(vm, &mut state, id, &key)?;
         }
+        if key == "href" {
+            state.absolute_link_hrefs.remove(&id);
+        }
         image_element::attribute_changed(&mut state, id, &key);
         drop(state);
         frames::attribute_changed(vm, host, id, &key);
@@ -763,6 +767,7 @@ impl ScriptRuntime {
             input_prototype: input_prototype.clone(),
             image_prototype: image_prototype.clone(),
             link_prototype: link_prototype.clone(),
+            absolute_link_hrefs: HashMap::new(),
             image_updates: Default::default(),
             invalid_images: Default::default(),
             character_data_prototype: character_data_prototype.clone(),

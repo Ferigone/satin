@@ -215,6 +215,7 @@ impl ParserHost {
                 .extend(std::mem::take(&mut self.script_flags));
             state.parser_connect_policy = self.connect_policy.clone();
             if self.stream.report() != before || matches!(result, Ok(Step::Truncated)) {
+                state.absolute_link_hrefs.clear();
                 mark_dirty(state);
             }
             self.revision = Some(state.revision);
