@@ -2,6 +2,16 @@
 
 The alpha.35–alpha.36 audit ran on Linux x86_64 on 2026-11-25, against Satin `57e1dbd` (alpha.35) and [the CSS implementation released in alpha.36](https://github.com/Ferigone/satin/commit/8f8882f3d68d8eaaf8112194dac75f7ca61658c6). Both runs used Rust 1.99.1, the same system fonts and the same source pages. The candidate workspace test suite on Linux recorded 1,403 passes, zero failures and three pre-existing opt-in checks. The upstream [WPT revision is pinned to `9b8b1be`](https://github.com/web-platform-tests/wpt/tree/9b8b1beec730060783726b7c538b21e25e63b1f4/css).
 
+## Column subgrid development
+
+On the Tailwind documentation page, the table, its section and each row are nested grids. At 390 × 800, alpha.42 stacked the two header cells and measured the row at 96 px tall. Sharing the parent columns puts the cells on one 48 px row, as in Chromium. The example paragraph farther down starts at y = 1,243.20 px, compared with 1,451.20 px in alpha.42 and 1,230.88 px in Chromium. At 1280 × 800 these y coordinates are 1,139.05, 1,347.05 and 1,126.88 respectively. All three preserve the paragraph’s height of 72 px at both widths. The narrow header columns measure 232.0 and 361.6 px in this build, compared with 241.19 and 334.81 px in Chromium. [Measured column implementation](https://github.com/Ferigone/satin/commit/8d33753) · [Screenshots, rectangles and WPT reference checks](css-subgrid-native.zip)
+
+![The two table headings stack in alpha.42. The column subgrid places them side by side as in Chromium.](css-subgrid-tailwind.png)
+
+The regression changes the parent track definition, changes the viewport width without reloading, and checks both pixels and calculated rectangles. It reads the resolved subgrid line list and exercises a gutter larger than its tracks. [Regression tests](../../crates/engine/tests/css_column_subgrid.rs)
+
+Three static comparisons expose missing features on the **test** side. The reference rectangles on all three now agree with Chromium for the measured elements. On the two grid-lanes cases Chromium 156 also reports no support for `display: grid-lanes` and its test and reference screenshots differ. The remaining `grid-gap-larger-001.html` uses a row and column subgrid simultaneously. Chromium matches its reference there. Alpha.42 obtained identical pixels on these three pairs while laying out the references differently from Chromium. [Oversized gutter fix](https://github.com/Ferigone/satin/commit/3f93a62)
+
 ## Author cascade layers on Tailwind CSS
 
 The Tailwind CSS documentation applies its component utilities inside five `@layer` blocks. Alpha.41 fetched the stylesheet but discarded those blocks. The example paragraph used the default font, wrapped to 14 lines at 390 × 800 and occupied 268.8 px. The cascade-layer implementation applies the three-line limit, the Inter font stack and the requested 24 px line height. The paragraph measures 72 px at both viewport sizes. [Original Tailwind example](https://tailwindcss.com/docs/line-clamp) · [Measured implementation](https://github.com/Ferigone/satin/commit/f1ff062)
