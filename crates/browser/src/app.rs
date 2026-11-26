@@ -43,6 +43,7 @@ mod address_popup;
 mod bookmark_menu;
 mod bookmarks;
 mod chrome_menu;
+mod chrome_motion;
 mod downloads_ui;
 mod history_ui;
 mod icons;
@@ -60,6 +61,7 @@ use crate::testing::{
     Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, CheckpointSample,
     SmokeAction,
 };
+use chrome_motion::{Button as MotionButton, ChromeMotion, TabInk};
 use navigation_error::Recovery;
 use tab_strip::TabStrip;
 
@@ -493,6 +495,8 @@ pub(crate) fn run(
     }
     let next_id = tabs.len() as u64 + 1;
     let smoke_requested = smoke_output.is_some();
+    let chrome_motion_forced_off =
+        smoke_requested || std::env::var("SATIN_REDUCED_MOTION").is_ok_and(|value| value == "1");
     let mut app = App {
         window: None,
         graphics: None,
@@ -529,6 +533,11 @@ pub(crate) fn run(
         tab_hits_current: false,
         tab_scroll: 0.,
         chrome_hover: None,
+        chrome_motion: ChromeMotion::new(
+            Instant::now(),
+            !chrome_motion_forced_off && scroll::animations_enabled(),
+        ),
+        chrome_motion_forced_off,
         chrome_menu: None,
         history_menu: None,
         caption_pressed: None,
@@ -637,6 +646,8 @@ struct App {
     tab_hits_current: bool,
     tab_scroll: f32,
     chrome_hover: Option<Action>,
+    chrome_motion: ChromeMotion<MAX_TABS>,
+    chrome_motion_forced_off: bool,
     chrome_menu: Option<Menu>,
     history_menu: Option<history_ui::HistoryMenu>,
     caption_pressed: Option<Action>,
@@ -2243,6 +2254,7 @@ impl App {
             width: w * u,
             height: h * u,
         };
+        self.chrome_motion.begin_frame(Instant::now());
         self.draw_chrome(
             &mut canvas,
             width,
@@ -2354,6 +2366,7 @@ impl App {
             buffer.copy_from_slice(&canvas.pixels);
             buffer.present().map_err(|e| e.to_string())
         })();
+        self.chrome_motion.finish_frame(presented.is_ok());
         match presented {
             Ok(()) => {
                 self.downloads_frame = downloads_frame;
@@ -2431,15 +2444,24 @@ impl App {
         let strip = self.tab_strip(width);
         self.tab_scroll = strip.scroll();
         let pointer = self.chrome_hover;
+        let over_tabs = matches!(pointer, Some(Action::Select(_) | Action::Close(_)));
         canvas.clip(physical_rect(u, strip.list));
         for slot in strip.visible_tabs() {
             let index = slot.index;
             let tab = &self.tabs[index];
             let close = Action::Close(index);
             let active = index == self.active;
-            let hovered =
-                matches!(pointer, Some(Action::Select(i) | Action::Close(i)) if i == index);
-            draw_tab_face(canvas, slot.face, u, active, hovered);
+            // A stored action can still name a prior index after closing or
+            // scrolling a tab. Painting uses the new rect, not the old index.
+            let hovered = over_tabs && self.pointer_in(slot.visible_face);
+            let close_hovered = slot
+                .close
+                .as_ref()
+                .map(|button| hovered && self.pointer_in(button.hit));
+            let ink = self
+                .chrome_motion
+                .tab(tab.id, active, hovered, close_hovered);
+            draw_tab_face(canvas, slot.face, u, active, &ink);
             if let Some(icon) = built_in_site_icon(&tab.url) {
                 canvas.image(physical_rect(u, slot.favicon), icon);
             } else {
@@ -2476,32 +2498,38 @@ impl App {
                     slot.title.x * u,
                     (slot.title.y + 20.) * u,
                     &run,
-                    if active || hovered {
-                        CHROME_TEXT
-                    } else {
-                        CHROME_MUTED
-                    },
+                    chrome_mix(CHROME_MUTED, CHROME_TEXT, ink.text),
                     &mut self.fonts,
                 );
             }
             self.hits.push((slot.visible_face, Action::Select(index)));
             if let Some(button) = slot.close {
-                if pointer == Some(close) {
+                if ink.close_hover > 0. && ink.close > 0. {
                     rounded_chrome_rect(
                         canvas,
                         physical_rect(u, button.hover_circle),
                         8. * u,
-                        Color(CHROME_TEXT.0, CHROME_TEXT.1, CHROME_TEXT.2, 38),
+                        chrome_alpha(
+                            Color(CHROME_TEXT.0, CHROME_TEXT.1, CHROME_TEXT.2, 38),
+                            ink.close_hover * ink.close,
+                        ),
                     );
                 }
-                if active || hovered {
+                if ink.close > 0. {
                     paint_centered_glyph(
                         canvas,
                         button.glyph,
                         10.,
                         u,
                         icons::Glyph::X,
-                        CHROME_MUTED,
+                        chrome_alpha(
+                            if close_hovered == Some(true) {
+                                CHROME_TEXT
+                            } else {
+                                CHROME_MUTED
+                            },
+                            ink.close,
+                        ),
                     );
                 }
                 self.hits.push((button.hit, close));
@@ -2514,22 +2542,40 @@ impl App {
             canvas.width as f32,
             canvas.height as f32,
         ));
-        for (button, action, glyph) in [
-            (strip.new_tab, Action::NewTab, icons::Glyph::Plus),
-            (strip.tab_list, Action::TabList, icons::Glyph::ChevronDown),
+        for (button, action, motion, glyph) in [
+            (
+                strip.new_tab,
+                Action::NewTab,
+                MotionButton::NewTab,
+                icons::Glyph::Plus,
+            ),
+            (
+                strip.tab_list,
+                Action::TabList,
+                MotionButton::TabList,
+                icons::Glyph::ChevronDown,
+            ),
         ] {
             let Some(button) = button else { continue };
-            if pointer == Some(action)
-                || action == Action::TabList && matches!(self.chrome_menu, Some(Menu::Tabs(_)))
-            {
+            let on = pointer == Some(action)
+                || action == Action::TabList && matches!(self.chrome_menu, Some(Menu::Tabs(_)));
+            let hot = self.chrome_motion.button(motion, on);
+            if hot > 0. {
                 rounded_chrome_rect(
                     canvas,
                     physical_rect(u, button.bounds),
                     tab_strip::CONTROL_RADIUS * u,
-                    CHROME_HOVER,
+                    chrome_alpha(CHROME_HOVER, hot),
                 );
             }
-            paint_centered_glyph(canvas, button.glyph, 17., u, glyph, CHROME_ICON);
+            paint_centered_glyph(
+                canvas,
+                button.glyph,
+                17.,
+                u,
+                glyph,
+                chrome_mix(CHROME_ICON, CHROME_TEXT, hot),
+            );
             self.hits.push((button.bounds, action));
         }
     }
@@ -2543,13 +2589,18 @@ impl App {
             let bounds = chrome_box(quiet_cinder::caption(width, index));
             let hovered = self.chrome_hover == Some(action);
             let pressed = self.caption_pressed == Some(action);
-            if hovered || pressed {
-                let color = match (action, pressed) {
-                    (Action::CloseWindow, true) => Color(0xa9, 0x14, 0x25, 255),
-                    (Action::CloseWindow, false) => Color(0xc9, 0x38, 0x46, 255),
-                    _ => CHROME_HOVER,
+            let (hot, press) = self.chrome_motion.caption(index, hovered, pressed);
+            if hot > 0. {
+                let color = if action == Action::CloseWindow {
+                    chrome_mix(
+                        Color(0xc9, 0x38, 0x46, 255),
+                        Color(0xa9, 0x14, 0x25, 255),
+                        press,
+                    )
+                } else {
+                    CHROME_HOVER
                 };
-                canvas.fill_rect(physical_rect(u, bounds), color);
+                canvas.fill_rect(physical_rect(u, bounds), chrome_alpha(color, hot));
             }
             centered_chrome_icon(
                 canvas,
@@ -2558,8 +2609,8 @@ impl App {
                 u,
                 action,
                 maximized,
-                if action == Action::CloseWindow && (hovered || pressed) {
-                    Color(255, 255, 255, 255)
+                if action == Action::CloseWindow {
+                    chrome_mix(CHROME_ICON, Color::WHITE, hot)
                 } else {
                     CHROME_ICON
                 },
@@ -2574,21 +2625,33 @@ impl App {
         let mut layout = quiet_cinder::Toolbar::new(width);
         let downloads_button = reserve_downloads_button(&mut layout);
         let pointer = self.chrome_hover;
-        for (bounds, action, enabled) in [
+        for (bounds, action, motion, enabled) in [
             (
                 Some(layout.back),
                 Action::Back,
+                MotionButton::Back,
                 tab.history.can_traverse(-1),
             ),
             (
                 Some(layout.forward),
                 Action::Forward,
+                MotionButton::Forward,
                 tab.history.can_traverse(1),
             ),
-            (Some(layout.reload), Action::Reload, true),
-            (layout.home, Action::Home, true),
-            (Some(downloads_button), Action::Downloads, true),
-            (Some(layout.menu), Action::Menu, true),
+            (
+                Some(layout.reload),
+                Action::Reload,
+                MotionButton::Reload,
+                true,
+            ),
+            (layout.home, Action::Home, MotionButton::Home, true),
+            (
+                Some(downloads_button),
+                Action::Downloads,
+                MotionButton::Downloads,
+                true,
+            ),
+            (Some(layout.menu), Action::Menu, MotionButton::Menu, true),
         ] {
             let Some(bounds) = bounds.map(chrome_box) else {
                 continue;
@@ -2597,8 +2660,14 @@ impl App {
                 && (pointer == Some(action)
                     || action == Action::Downloads && self.downloads_panel.is_some()
                     || action == Action::Menu && self.chrome_menu.is_some());
-            if on {
-                rounded_chrome_rect(canvas, physical_rect(u, bounds), 6. * u, CHROME_HOVER);
+            let hot = self.chrome_motion.button(motion, on);
+            if hot > 0. {
+                rounded_chrome_rect(
+                    canvas,
+                    physical_rect(u, bounds),
+                    6. * u,
+                    chrome_alpha(CHROME_HOVER, hot),
+                );
             }
             centered_chrome_icon(
                 canvas,
@@ -2607,10 +2676,8 @@ impl App {
                 u,
                 action,
                 tab.loading,
-                if on {
-                    CHROME_TEXT
-                } else if enabled {
-                    CHROME_ICON
+                if enabled {
+                    chrome_mix(CHROME_ICON, CHROME_TEXT, hot)
                 } else {
                     Color(CHROME_ICON.0, CHROME_ICON.1, CHROME_ICON.2, 84)
                 },
@@ -2655,8 +2722,17 @@ impl App {
                 && tab.document_session.is_some()
                 && tab.document_navigation == tab.navigation;
         let star_rect = chrome_box(layout.bookmark);
-        if pointer == Some(Action::ToggleBookmark) && can_bookmark {
-            rounded_chrome_rect(canvas, physical_rect(u, star_rect), 6. * u, CHROME_HOVER);
+        let star_hot = self.chrome_motion.button(
+            MotionButton::Bookmark,
+            pointer == Some(Action::ToggleBookmark) && can_bookmark,
+        );
+        if star_hot > 0. {
+            rounded_chrome_rect(
+                canvas,
+                physical_rect(u, star_rect),
+                6. * u,
+                chrome_alpha(CHROME_HOVER, star_hot),
+            );
         }
         if marked {
             paint_bookmarked_star(canvas, star_rect, u);
@@ -2668,7 +2744,7 @@ impl App {
                 u,
                 icons::Glyph::Star,
                 if can_bookmark {
-                    CHROME_ICON
+                    chrome_mix(CHROME_ICON, CHROME_TEXT, star_hot)
                 } else {
                     Color(CHROME_ICON.0, CHROME_ICON.1, CHROME_ICON.2, 84)
                 },
@@ -4265,6 +4341,10 @@ impl ApplicationHandler<()> for App {
                     Some(deadline.map_or(next, |current: std::time::Instant| current.min(next)));
             }
         }
+        let motion_redraw = self.chrome_motion.take_due(Instant::now());
+        if let Some(next) = self.chrome_motion.deadline() {
+            deadline = Some(deadline.map_or(next, |current| current.min(next)));
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if let Err(error) = self.profile.save_storage() {
             self.status = format!("Site data could not be saved. {error}");
@@ -4272,6 +4352,8 @@ impl ApplicationHandler<()> for App {
         if redraw {
             self.ensure_layout();
             self.set_title();
+            self.redraw();
+        } else if motion_redraw {
             self.redraw();
         }
         self.finish_smoke(event_loop);
@@ -4482,8 +4564,16 @@ impl ApplicationHandler<()> for App {
                 self.window_geometry_changed();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Focused(true) => {
+                if self
+                    .chrome_motion
+                    .set_enabled(!self.chrome_motion_forced_off && scroll::animations_enabled())
+                {
+                    self.redraw();
+                }
+            }
             WindowEvent::Focused(false) => {
-                self.caption_pressed = None;
+                let caption_changed = self.caption_pressed.take().is_some();
                 self.settings_cancel_pointer();
                 self.dismiss_address_suggestions();
                 self.wheel = None;
@@ -4491,6 +4581,9 @@ impl ApplicationHandler<()> for App {
                 self.preedit = false;
                 self.dismiss_history_menu();
                 self.dismiss_downloads();
+                if caption_changed {
+                    self.redraw();
+                }
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -4810,7 +4903,19 @@ fn paint_bookmarked_star(canvas: &mut Canvas, bounds: Rect, scale: f32) {
     );
 }
 
-fn draw_tab_face(canvas: &mut Canvas, bounds: Rect, u: f32, active: bool, hovered: bool) {
+fn chrome_mix(Color(r, g, b, a): Color, Color(r2, g2, b2, a2): Color, amount: f32) -> Color {
+    let mix = |from: u8, to: u8| {
+        let from = f32::from(from);
+        (from + (f32::from(to) - from) * amount).round() as u8
+    };
+    Color(mix(r, r2), mix(g, g2), mix(b, b2), mix(a, a2))
+}
+
+fn chrome_alpha(Color(r, g, b, a): Color, amount: f32) -> Color {
+    Color(r, g, b, (f32::from(a) * amount).round() as u8)
+}
+
+fn draw_tab_face(canvas: &mut Canvas, bounds: Rect, u: f32, active: bool, ink: &TabInk) {
     let radii = [tab_strip::TAB_RADIUS * u; 4];
     let bounds = physical_rect(u, bounds);
     if active {
@@ -4824,10 +4929,24 @@ fn draw_tab_face(canvas: &mut Canvas, bounds: Rect, u: f32, active: bool, hovere
                 (1., Color(0x48, 0x3c, 0x51, 255)),
             ],
         );
-        canvas.outline_rounded_rect(bounds, radii, -2. * u, u, CHROME_ACCENT_SOFT);
-        canvas.outline_rounded_rect(bounds, radii, -u, u, Color(125, 107, 150, 255));
-    } else if hovered {
-        canvas.fill_rounded_rect(bounds, radii, CHROME_HOVER);
+    } else if ink.hover > 0. {
+        canvas.fill_rounded_rect(bounds, radii, chrome_alpha(CHROME_HOVER, ink.hover));
+    }
+    if ink.border > 0. {
+        canvas.outline_rounded_rect(
+            bounds,
+            radii,
+            -2. * u,
+            u,
+            chrome_alpha(CHROME_ACCENT_SOFT, ink.border),
+        );
+        canvas.outline_rounded_rect(
+            bounds,
+            radii,
+            -u,
+            u,
+            chrome_alpha(Color(125, 107, 150, 255), ink.border),
+        );
     }
 }
 
