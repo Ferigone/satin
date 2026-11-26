@@ -1,4 +1,4 @@
-//! Background updates for the per-user Windows installation.
+//! Interactive updates for the per-user Windows installation.
 #![cfg(all(windows, target_arch = "x86_64"))]
 
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header};
@@ -10,17 +10,25 @@ use std::{
     cmp::Ordering,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::windows::fs::OpenOptionsExt,
+    os::windows::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::Relaxed},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
+    thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::oneshot;
+use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ};
 
 const RELEASES: &str = "https://api.github.com/repos/Ferigone/satin/releases";
 const ASSET_NAME: &str = "satin-windows-x64.exe";
 const BINARY_NAME: &str = "rust-browser.exe";
+const LAUNCHER_NAME: &str = "RustBrowser.exe";
 const INSTALL_PRODUCT: &str = "RustBrowser";
-const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const RELEASE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(8)];
 const RELEASES_PER_PAGE: usize = 50;
 const RELEASE_PAGE_LIMIT: usize = 10;
@@ -62,43 +70,388 @@ struct Candidate {
     url: Url,
 }
 
-pub(crate) fn start_for_installed_launch() {
-    let Some(root) = std::env::var_os("LOCALAPPDATA") else {
-        return;
-    };
-    let root = PathBuf::from(root).join(INSTALL_PRODUCT);
-    let Ok(running) = std::env::current_exe().and_then(|path| path.canonicalize()) else {
-        return;
-    };
-    if active_manifest(&root, &running).is_none() {
-        return;
-    }
-    let _ = std::thread::Builder::new()
-        .name("satin-updater".into())
-        .spawn(move || {
-            if let Err(error) = run_worker(&root, &running) {
-                eprintln!("Satin updater: {error}");
-            }
-        });
+#[derive(Clone)]
+struct Installation {
+    root: PathBuf,
+    running: PathBuf,
+    profile: PathBuf,
 }
 
-fn run_worker(root: &Path, running: &Path) -> Result<(), String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateAction {
+    Check,
+    Download,
+    Restart,
+}
+
+enum Phase {
+    Current,
+    Checking,
+    Available(Arc<Candidate>),
+    Downloading(Arc<Candidate>),
+    Ready(Arc<Candidate>),
+    Applying(Arc<Candidate>),
+    Failed {
+        retry: UpdateAction,
+        candidate: Option<Arc<Candidate>>,
+    },
+    Restarting,
+}
+
+enum Outcome {
+    Discovered(Option<Candidate>),
+    Staged,
+    Applied(Restart),
+}
+
+struct Job {
+    result: Receiver<Result<Outcome, String>>,
+    bytes: Arc<AtomicU64>,
+    shown: u64,
+    cancel: Option<oneshot::Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        // On ordinary window close, unwind a waiting transfer so its pending
+        // file is removed before the process exits. Completed jobs join quickly.
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct Reply {
+    send: Option<Sender<Result<Outcome, String>>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        // Disconnect first, then wake (also on worker panic).
+        drop(self.send.take());
+        (self.wake)();
+    }
+}
+
+pub(crate) struct Updates {
+    install: Installation,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    phase: Phase,
+    job: Option<Job>,
+}
+
+pub(crate) struct View {
+    pub(crate) title: &'static str,
+    pub(crate) detail: String,
+    pub(crate) button: Option<(UpdateAction, &'static str)>,
+    pub(crate) progress: Option<f32>,
+}
+
+pub(crate) struct Restart {
+    _lock: File,
+    _verified: File,
+    launcher: PathBuf,
+    install: Installation,
+}
+
+impl Restart {
+    /// The caller must have dropped the App (including its Profile) before this call.
+    pub(crate) fn launch(self) -> Result<(), String> {
+        // An existing installed launcher works unchanged. Wait for it to spawn the
+        // browser before releasing update.lock so installer/rollback cannot change
+        // current.json between publication and the launcher's manifest read.
+        let status = Command::new(&self.launcher)
+            .current_dir(&self.install.root)
+            .arg("--profile")
+            .arg(&self.install.profile)
+            .status()
+            .map_err(|error| format!("Could not reopen Satin: {error}"))?;
+        if !status.success() {
+            return Err(format!("Could not reopen Satin: {status}"));
+        }
+        Ok(())
+    }
+}
+
+impl Updates {
+    pub(crate) fn start(profile: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
+        let root = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join(INSTALL_PRODUCT);
+        let running = std::env::current_exe().ok()?.canonicalize().ok()?;
+        let root = plain_directory(&root)?;
+        active_manifest(&root, &running)?;
+        launcher(&root)?;
+        let profile = profile.canonicalize().ok()?;
+        let mut updates = Self {
+            install: Installation {
+                root,
+                running,
+                profile,
+            },
+            wake,
+            phase: Phase::Current,
+            job: None,
+        };
+        updates.start_job(UpdateAction::Check);
+        Some(updates)
+    }
+
+    pub(crate) fn view(&self, panel_open: bool) -> Option<View> {
+        let mut view = View {
+            title: "",
+            detail: String::new(),
+            button: None,
+            progress: None,
+        };
+        match &self.phase {
+            Phase::Current if !panel_open => return None,
+            Phase::Current => view.title = "Satin is up to date",
+            Phase::Checking if !panel_open => return None,
+            Phase::Checking => view.title = "Checking for updates…",
+            Phase::Available(candidate) => {
+                view.title = "Satin update available";
+                view.detail = format!("Version {}", candidate.version);
+                view.button = Some((UpdateAction::Download, "Download update"));
+            }
+            Phase::Downloading(candidate) => {
+                let bytes = self.job.as_ref().map_or(0, |job| job.bytes.load(Relaxed));
+                let percent = bytes * 100 / candidate.size;
+                if bytes == candidate.size {
+                    view.title = "Verifying update…";
+                } else {
+                    view.title = "Downloading update…";
+                }
+                view.detail = format!("{} / {} MiB · {percent}%", mib(bytes), mib(candidate.size));
+                view.progress = Some(percent as f32 / 100.);
+            }
+            Phase::Ready(candidate) => {
+                view.title = "Update ready to install";
+                view.detail = format!("Restart Satin to use version {}.", candidate.version);
+                view.button = Some((UpdateAction::Restart, "Restart and update"));
+            }
+            Phase::Applying(_) | Phase::Restarting => {
+                view.title = "Preparing to restart…";
+                view.detail = "Keep this window open.".into();
+            }
+            Phase::Failed { retry, .. } => {
+                (view.title, view.detail, view.button) = match retry {
+                    UpdateAction::Check => (
+                        "Could not check for updates",
+                        "Satin can still be used.".into(),
+                        Some((UpdateAction::Check, "Retry check")),
+                    ),
+                    UpdateAction::Download => (
+                        "Could not prepare the update",
+                        "The running version was not changed.".into(),
+                        Some((UpdateAction::Download, "Retry download")),
+                    ),
+                    UpdateAction::Restart => (
+                        "Could not install the update",
+                        "You can keep browsing and try again.".into(),
+                        Some((UpdateAction::Restart, "Retry restart")),
+                    ),
+                };
+            }
+        }
+        Some(view)
+    }
+
+    pub(crate) fn applying(&self) -> bool {
+        matches!(self.phase, Phase::Applying(_) | Phase::Restarting)
+    }
+
+    pub(crate) fn can_start(&self, action: UpdateAction) -> bool {
+        self.job.is_none()
+            && match &self.phase {
+                Phase::Current => action == UpdateAction::Check,
+                Phase::Available(_) => action == UpdateAction::Download,
+                Phase::Ready(_) => action == UpdateAction::Restart,
+                Phase::Failed { retry, .. } => action == *retry,
+                _ => false,
+            }
+    }
+
+    fn offered(&self) -> Option<Arc<Candidate>> {
+        match &self.phase {
+            Phase::Available(candidate)
+            | Phase::Downloading(candidate)
+            | Phase::Ready(candidate)
+            | Phase::Applying(candidate) => Some(candidate.clone()),
+            Phase::Failed { candidate, .. } => candidate.clone(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn report_failure(&mut self, retry: UpdateAction, error: &str) {
+        eprintln!("Satin updater: {error}");
+        self.phase = Phase::Failed {
+            retry,
+            candidate: self.offered(),
+        };
+    }
+
+    pub(crate) fn start_job(&mut self, action: UpdateAction) {
+        if !self.can_start(action) {
+            return;
+        }
+        let candidate = self.offered();
+        let install = self.install.clone();
+        let wake = self.wake.clone();
+        let bytes = Arc::new(AtomicU64::new(0));
+        let worker_bytes = bytes.clone();
+        let (send, result) = mpsc::channel();
+        let (cancel, cancelled) = oneshot::channel();
+        let worker = std::thread::Builder::new()
+            .name("satin-updater".into())
+            .spawn(move || {
+                let reply = Reply {
+                    send: Some(send),
+                    wake: wake.clone(),
+                };
+                let result = run_worker(
+                    install,
+                    action,
+                    candidate.as_deref(),
+                    &wake,
+                    &worker_bytes,
+                    cancelled,
+                );
+                let _ = reply
+                    .send
+                    .as_ref()
+                    .expect("worker reply sender")
+                    .send(result);
+            });
+        let worker = match worker {
+            Ok(worker) => worker,
+            Err(error) => {
+                self.report_failure(action, &error.to_string());
+                return;
+            }
+        };
+        // Each operation owns a distinct result channel. Progress and completion
+        // from a previous operation cannot change any later operation's state.
+        self.job = Some(Job {
+            result,
+            bytes,
+            shown: 0,
+            cancel: Some(cancel),
+            worker: Some(worker),
+        });
+        self.phase = match action {
+            UpdateAction::Check => Phase::Checking,
+            UpdateAction::Download => Phase::Downloading(self.offered().expect("offered update")),
+            UpdateAction::Restart => Phase::Applying(self.offered().expect("staged update")),
+        };
+    }
+
+    pub(crate) fn poll(&mut self) -> (bool, Option<Restart>) {
+        let Some(job) = self.job.as_mut() else {
+            return (false, None);
+        };
+        let result = match job.result.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                if let Phase::Downloading(candidate) = &self.phase {
+                    let percent = job.bytes.load(Relaxed) * 100 / candidate.size;
+                    if percent != job.shown {
+                        job.shown = percent;
+                        return (true, None);
+                    }
+                }
+                return (false, None);
+            }
+            Err(TryRecvError::Disconnected) => Err("Update worker closed unexpectedly".into()),
+        };
+        self.job = None;
+        match (&self.phase, result) {
+            (Phase::Checking, Ok(Outcome::Discovered(candidate))) => {
+                self.phase = candidate.map_or(Phase::Current, |candidate| {
+                    Phase::Available(Arc::new(candidate))
+                });
+            }
+            (Phase::Downloading(candidate), Ok(Outcome::Staged)) => {
+                self.phase = Phase::Ready(candidate.clone());
+            }
+            (Phase::Applying(_), Ok(Outcome::Applied(restart))) => {
+                self.phase = Phase::Restarting;
+                return (true, Some(restart));
+            }
+            (phase, result) => {
+                let retry = match phase {
+                    Phase::Checking => UpdateAction::Check,
+                    // Recheck/redownload the staged file if it disappeared or changed.
+                    Phase::Downloading(_) | Phase::Applying(_) => UpdateAction::Download,
+                    _ => unreachable!("only busy states have a worker"),
+                };
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| "Unexpected updater result".into());
+                self.report_failure(retry, &error);
+            }
+        }
+        (true, None)
+    }
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.1}", bytes as f64 / 1_048_576.)
+}
+
+fn run_worker(
+    install: Installation,
+    action: UpdateAction,
+    candidate: Option<&Candidate>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+    bytes: &AtomicU64,
+    cancelled: oneshot::Receiver<()>,
+) -> Result<Outcome, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    runtime.block_on(async {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let client = client()?;
-        while let Some((current, _)) = active_manifest(root, running) {
-            match check(&client, root, running, &current.version).await {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(error) => eprintln!("Satin updater: {error}"),
+    let operation = async {
+        match action {
+            UpdateAction::Check => {
+                let (current, _) = active_manifest(&install.root, &install.running)
+                    .ok_or("The active installation changed")?;
+                discover(&client()?, &install.root, &current.version)
+                    .await
+                    .map(Outcome::Discovered)
             }
-            tokio::time::sleep(CHECK_INTERVAL).await;
+            UpdateAction::Download => {
+                let candidate = candidate.expect("offered update");
+                let mut shown = 0;
+                stage(
+                    &client()?,
+                    &install.root,
+                    &install.running,
+                    candidate,
+                    |received| {
+                        bytes.store(received, Relaxed);
+                        let percent = received * 100 / candidate.size;
+                        if percent > shown {
+                            shown = percent;
+                            wake();
+                        }
+                    },
+                )
+                .await?;
+                Ok(Outcome::Staged)
+            }
+            UpdateAction::Restart => apply(install, candidate.expect("staged update")).await,
         }
-        Ok(())
+    };
+    runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = cancelled => Err("Updater cancelled".into()),
+            result = operation => result,
+        }
     })
 }
 
@@ -134,12 +487,7 @@ fn active_manifest(root: &Path, running: &Path) -> Option<(Manifest, Vec<u8>)> {
 }
 
 fn read_manifest(path: &Path) -> Option<(Manifest, Vec<u8>)> {
-    let file = File::open(path).ok()?;
-    let mut bytes = Vec::new();
-    file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MANIFEST_LIMIT {
-        return None;
-    }
+    let bytes = read_manifest_bytes(path).ok()??;
     let manifest: Manifest = serde_json::from_slice(&bytes).ok()?;
     if manifest.product != INSTALL_PRODUCT
         || manifest.profile_schema != 1
@@ -152,12 +500,75 @@ fn read_manifest(path: &Path) -> Option<(Manifest, Vec<u8>)> {
     Some((manifest, bytes))
 }
 
+fn plain_directory(path: &Path) -> Option<PathBuf> {
+    let meta = path.symlink_metadata().ok()?;
+    (meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then(|| path.canonicalize().ok())
+        .flatten()
+}
+
+fn read_manifest_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match path.symlink_metadata() {
+        Ok(meta)
+            if meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 => {}
+        Ok(_) => return Err("The installation manifest is not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    }
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(MANIFEST_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MANIFEST_LIMIT {
+        return Err("The installation manifest exceeds its size limit".into());
+    }
+    Ok(Some(bytes))
+}
+
+fn plain_file(path: &Path) -> Option<PathBuf> {
+    let meta = path.symlink_metadata().ok()?;
+    (meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then(|| path.canonicalize().ok())
+        .flatten()
+}
+
+fn child_of(path: PathBuf, parent: &Path, name: &str) -> Option<PathBuf> {
+    (path.parent() == Some(parent)
+        && path
+            .file_name()
+            .is_some_and(|file| file.eq_ignore_ascii_case(std::ffi::OsStr::new(name))))
+    .then_some(path)
+}
+
+fn versions(root: &Path) -> Option<PathBuf> {
+    let root = plain_directory(root)?;
+    child_of(plain_directory(&root.join("versions"))?, &root, "versions")
+}
+
+fn version_directory(versions: &Path, build_id: &str) -> Option<PathBuf> {
+    if !valid_build_id(build_id) {
+        return None;
+    }
+    child_of(
+        plain_directory(&versions.join(build_id))?,
+        versions,
+        build_id,
+    )
+}
+
 fn installed_target(root: &Path, manifest: &Manifest) -> Option<PathBuf> {
-    let root = root.canonicalize().ok()?;
-    let versions = root.join("versions").canonicalize().ok()?;
-    let target = root.join(&manifest.executable).canonicalize().ok()?;
-    (target.is_file() && target.starts_with(&versions) && versions.starts_with(&root))
-        .then_some(target)
+    let directory = version_directory(&versions(root)?, &manifest.build_id)?;
+    child_of(
+        plain_file(&directory.join(BINARY_NAME))?,
+        &directory,
+        BINARY_NAME,
+    )
+}
+
+fn launcher(root: &Path) -> Option<PathBuf> {
+    let root = plain_directory(root)?;
+    child_of(plain_file(&root.join(LAUNCHER_NAME))?, &root, LAUNCHER_NAME)
 }
 
 fn update_floor(root: &Path, current: Version) -> Version {
@@ -192,73 +603,133 @@ fn executable_path(build_id: &str) -> String {
     format!("versions/{build_id}/{BINARY_NAME}")
 }
 
-async fn check(
+async fn discover(
     client: &Client,
     root: &Path,
-    running: &Path,
     current: &str,
-) -> Result<bool, String> {
+) -> Result<Option<Candidate>, String> {
     let current = Version::parse(current).map_err(|error| error.to_string())?;
-    let floor = update_floor(root, current.clone());
-    let Some(candidate) = newest(client, &floor).await? else {
-        return Ok(false);
-    };
+    newest(client, &update_floor(root, current)).await
+}
+
+fn stage_manifest(candidate: &Candidate) -> Result<Manifest, String> {
     let build_id = format!("{}-{}", candidate.version, hex(&candidate.hash[..8]));
     if !valid_build_id(&build_id) {
         return Err("Invalid update build identifier".into());
     }
-    let executable = executable_path(&build_id);
-    let path = root.join(&executable);
-    let directory = path.parent().expect("version directory");
-    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let allowed_parent = root
-        .join("versions")
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    if !directory
-        .canonicalize()
-        .map_err(|error| error.to_string())?
-        .starts_with(allowed_parent)
-    {
-        return Err("Update path is outside the versions directory".into());
+    Ok(Manifest {
+        product: INSTALL_PRODUCT.into(),
+        version: candidate.version.to_string(),
+        executable: executable_path(&build_id),
+        build_id,
+        sha256: hex(&candidate.hash),
+        profile_schema: 1,
+    })
+}
+
+async fn stage(
+    client: &Client,
+    root: &Path,
+    running: &Path,
+    candidate: &Candidate,
+    mut progress: impl FnMut(u64),
+) -> Result<(), String> {
+    stage_with(root, running, candidate, async move |path| {
+        let response = asset_response(client, candidate).await?;
+        download(response, candidate, path, &mut progress).await
+    })
+    .await
+}
+
+async fn stage_with(
+    root: &Path,
+    running: &Path,
+    candidate: &Candidate,
+    transfer: impl AsyncFnOnce(PathBuf) -> Result<PendingFile, String>,
+) -> Result<(), String> {
+    eligible_update(root, running, candidate)?;
+    let manifest = stage_manifest(candidate)?;
+    let allowed_parent = versions(root).ok_or("Invalid installed versions directory")?;
+    let directory = allowed_parent.join(&manifest.build_id);
+    match fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
     }
-    let pending = if path.exists() {
-        None
-    } else {
-        Some(download(client, &candidate, &path).await?)
+    let directory = version_directory(&allowed_parent, &manifest.build_id)
+        .ok_or("Update path is outside the versions directory")?;
+    let path = directory.join(BINARY_NAME);
+    let pending = match staged_file(root, &manifest, &path)? {
+        Some(target) if verify_existing(&target, candidate).is_ok() => None,
+        _ => Some(transfer(path.clone()).await?),
     };
     let _lock = publication_lock(root).await?;
-    let Some((_, prior)) = active_manifest(root, running) else {
-        return Ok(false);
-    };
+    eligible_update(root, running, candidate)?;
+    if version_directory(&allowed_parent, &manifest.build_id).as_ref() != Some(&directory) {
+        return Err("Staging directory changed during download".into());
+    }
+    if let Some(target) = staged_file(root, &manifest, &path)?
+        && verify_existing(&target, candidate).is_ok()
+    {
+        return Ok(());
+    }
+    let pending = pending.ok_or("A staged update was changed during verification")?;
+    if read_manifest(&root.join("previous.json"))
+        .and_then(|(previous, _)| installed_target(root, &previous))
+        .as_ref()
+        == Some(&path)
+    {
+        return Err("Cannot replace the installed rollback build".into());
+    }
+    fs::rename(&pending.0, &path).map_err(|error| error.to_string())
+}
+
+fn staged_file(root: &Path, manifest: &Manifest, path: &Path) -> Result<Option<PathBuf>, String> {
+    match path.symlink_metadata() {
+        Ok(_) => installed_target(root, manifest)
+            .map(Some)
+            .ok_or_else(|| "Staged update is outside the installation".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn eligible_update(root: &Path, running: &Path, candidate: &Candidate) -> Result<Vec<u8>, String> {
+    let (current, prior) =
+        active_manifest(root, running).ok_or("The active installation changed")?;
+    let current = Version::parse(&current.version).map_err(|error| error.to_string())?;
     if candidate
         .version
         .cmp_precedence(&update_floor(root, current))
         != Ordering::Greater
     {
-        return Ok(false);
+        return Err("This version is no longer newer than the installed update floor".into());
     }
-    if path.exists() {
-        verify_existing(&path, &candidate)?;
-    } else if let Some(pending) = &pending {
-        fs::rename(&pending.0, &path).map_err(|error| error.to_string())?;
-    } else {
-        return Err("A staged update was removed before publication".into());
-    }
-    let manifest = Manifest {
-        product: INSTALL_PRODUCT.into(),
-        version: candidate.version.to_string(),
-        build_id,
-        executable,
-        sha256: hex(&candidate.hash),
-        profile_schema: 1,
-    };
+    Ok(prior)
+}
+
+async fn apply(install: Installation, candidate: &Candidate) -> Result<Outcome, String> {
+    let root = &install.root;
+    let lock = publication_lock(root).await?;
+    let prior = eligible_update(root, &install.running, candidate)?;
+    let launcher = launcher(root).ok_or("The installed launcher is missing")?;
+    let manifest = stage_manifest(candidate)?;
+    let target = installed_target(root, &manifest).ok_or("Staged update is missing or invalid")?;
+    let verified = verify_existing(&target, candidate)?;
     publish(root, &prior, &manifest)?;
-    Ok(true)
+    Ok(Outcome::Applied(Restart {
+        _lock: lock,
+        _verified: verified,
+        launcher,
+        install,
+    }))
 }
 
 async fn publication_lock(root: &Path) -> Result<File, String> {
-    let path = root.join("update.lock");
+    let path = plain_directory(root)
+        .ok_or("Invalid installation directory")?
+        .join("update.lock");
+    let reparse_flag = windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
     let mut options = OpenOptions::new();
     // Use the same Windows sharing lock as the PowerShell installer and rollback.
     options
@@ -266,10 +737,18 @@ async fn publication_lock(root: &Path) -> Result<File, String> {
         .write(true)
         .create(true)
         .truncate(false)
+        .custom_flags(reparse_flag)
         .share_mode(0);
     for _ in 0..20 {
         match options.open(&path) {
-            Ok(lock) => return Ok(lock),
+            Ok(lock)
+                if lock.metadata().is_ok_and(|meta| {
+                    meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                }) =>
+            {
+                return Ok(lock);
+            }
+            Ok(_) => return Err("Invalid installation publication lock".into()),
             Err(error) if matches!(error.raw_os_error(), Some(32 | 33)) => {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -281,8 +760,38 @@ async fn publication_lock(root: &Path) -> Result<File, String> {
 
 fn publish(root: &Path, prior: &[u8], manifest: &Manifest) -> Result<(), String> {
     let update = serde_json::to_vec_pretty(manifest).map_err(|error| error.to_string())?;
-    crate::profile::atomic_write(&root.join("previous.json"), prior)?;
-    crate::profile::atomic_write(&root.join("current.json"), &update)
+    let current = root.join("current.json");
+    let previous = root.join("previous.json");
+    let pending_current = prepared_manifest(&current, &update)?;
+    let pending_previous = prepared_manifest(&previous, prior)?;
+    let old_previous = read_manifest_bytes(&previous)?
+        .map(|bytes| prepared_manifest(&previous, &bytes))
+        .transpose()?;
+    // All manifest writes are prepared first. The last rename is the only
+    // activation point; failing it leaves the existing current.json in place.
+    fs::rename(&pending_previous.0, &previous).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::rename(&pending_current.0, &current) {
+        // Do not lose a rollback floor after an ordinary publication error.
+        let restore = match &old_previous {
+            Some(saved) => fs::rename(&saved.0, &previous),
+            None => fs::remove_file(&previous),
+        };
+        if let Err(restore_error) = restore {
+            return Err(format!(
+                "Cannot activate update: {error}; cannot restore rollback manifest: {restore_error}"
+            ));
+        }
+        return Err(format!("Cannot activate update: {error}"));
+    }
+    Ok(())
+}
+
+fn prepared_manifest(path: &Path, bytes: &[u8]) -> Result<PendingFile, String> {
+    let (pending, mut file) = PendingFile::create(path)?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| error.to_string())?;
+    Ok(pending)
 }
 
 async fn newest(client: &Client, current: &Version) -> Result<Option<Candidate>, String> {
@@ -479,6 +988,25 @@ async fn asset_response(client: &Client, candidate: &Candidate) -> Result<Respon
 
 struct PendingFile(PathBuf);
 
+impl PendingFile {
+    fn create(path: &Path) -> Result<(Self, File), String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        static SERIAL: AtomicU64 = AtomicU64::new(0);
+        let serial = SERIAL.fetch_add(1, Relaxed);
+        let path = path.with_extension(format!("pending-{}-{stamp}-{serial}", std::process::id()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        Ok((Self(path), file))
+    }
+}
+
 impl Drop for PendingFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -486,24 +1014,12 @@ impl Drop for PendingFile {
 }
 
 async fn download(
-    client: &Client,
+    mut response: Response,
     candidate: &Candidate,
-    path: &Path,
+    path: PathBuf,
+    mut progress: impl FnMut(u64),
 ) -> Result<PendingFile, String> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())?
-        .as_nanos();
-    let pending = path.with_extension(format!("pending-{}-{stamp}", std::process::id()));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&pending)
-        .map_err(|error| error.to_string())?;
-    let pending = PendingFile(pending);
-    let mut file = file;
-    let mut response = asset_response(client, candidate).await?;
+    let (pending, mut file) = PendingFile::create(&path)?;
     let mut hash = Context::new(&SHA256);
     let mut remaining = candidate.size;
     while let Some(chunk) = response.chunk().await.map_err(http_error)? {
@@ -512,6 +1028,7 @@ async fn download(
             .ok_or("Release download exceeded the GitHub asset size")?;
         hash.update(&chunk);
         file.write_all(&chunk).map_err(|error| error.to_string())?;
+        progress(candidate.size - remaining);
     }
     if remaining != 0 || hash.finish().as_ref() != candidate.hash {
         return Err("Release download did not match the GitHub SHA-256 digest and size".into());
@@ -522,8 +1039,12 @@ async fn download(
     Ok(pending)
 }
 
-fn verify_existing(path: &Path, candidate: &Candidate) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
+fn verify_existing(path: &Path, candidate: &Candidate) -> Result<File, String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .map_err(|error| error.to_string())?;
     if file.metadata().map_err(|error| error.to_string())?.len() != candidate.size {
         return Err("An existing update file has the wrong size".into());
     }
@@ -539,7 +1060,8 @@ fn verify_existing(path: &Path, candidate: &Candidate) -> Result<(), String> {
     if reader.limit() != 1 || hash.finish().as_ref() != candidate.hash {
         return Err("An existing update file has the wrong SHA-256 digest".into());
     }
-    check_x64(&mut file)
+    check_x64(&mut file)?;
+    Ok(file)
 }
 
 fn check_x64(file: &mut File) -> Result<(), String> {
@@ -584,6 +1106,384 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "satin-interactive-update-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root.canonicalize().unwrap())
+        }
+
+        fn setup(&self) -> (Installation, Vec<u8>) {
+            let build_id = "fixture-installed";
+            let executable = executable_path(build_id);
+            let running = self.0.join(&executable);
+            fs::create_dir_all(running.parent().unwrap()).unwrap();
+            fs::write(&running, b"running fixture").unwrap();
+            fs::write(self.0.join(LAUNCHER_NAME), b"launcher fixture").unwrap();
+            let profile = self.0.join("Separate test profile");
+            fs::create_dir(&profile).unwrap();
+            let current = Manifest {
+                product: INSTALL_PRODUCT.into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                build_id: build_id.into(),
+                executable,
+                sha256: "A".repeat(64),
+                profile_schema: 1,
+            };
+            let prior = serde_json::to_vec(&current).unwrap();
+            fs::write(self.0.join("current.json"), &prior).unwrap();
+            (
+                Installation {
+                    root: self.0.clone(),
+                    profile,
+                    running: running.canonicalize().unwrap(),
+                },
+                prior,
+            )
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sample_payload() -> Vec<u8> {
+        let mut payload = vec![0_u8; 512];
+        payload[..2].copy_from_slice(b"MZ");
+        payload[60] = 64;
+        payload[64..70].copy_from_slice(b"PE\0\0\x64\x86");
+        payload
+    }
+
+    fn sample_candidate(payload: &[u8]) -> Candidate {
+        let current = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        Candidate {
+            version: Version::new(current.major + 1, 0, 0),
+            size: payload.len() as u64,
+            hash: ring::digest::digest(&SHA256, payload)
+                .as_ref()
+                .try_into()
+                .unwrap(),
+            url: Url::parse(RELEASES).unwrap(),
+        }
+    }
+
+    fn attach_test_job(updates: &mut Updates) -> Sender<Result<Outcome, String>> {
+        let (send, result) = mpsc::channel();
+        updates.job = Some(Job {
+            result,
+            bytes: Arc::new(AtomicU64::new(0)),
+            shown: 0,
+            cancel: None,
+            worker: None,
+        });
+        send
+    }
+
+    #[test]
+    fn discovery_only_offers_download_and_late_commands_cannot_restart() {
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let mut updates = Updates {
+            install,
+            wake: Arc::new(|| {}),
+            phase: Phase::Checking,
+            job: None,
+        };
+        let check = attach_test_job(&mut updates);
+        assert!(updates.view(false).is_none());
+        assert!(!updates.can_start(UpdateAction::Download));
+        assert!(!updates.can_start(UpdateAction::Restart));
+        check
+            .send(Ok(Outcome::Discovered(Some(sample_candidate(
+                &sample_payload(),
+            )))))
+            .unwrap();
+        assert!(updates.poll().0);
+        assert!(
+            updates.job.is_none(),
+            "discovery must not enqueue a download"
+        );
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert_eq!(fs::read_dir(fixture.0.join("versions")).unwrap().count(), 1);
+        assert!(updates.can_start(UpdateAction::Download));
+        assert!(!updates.can_start(UpdateAction::Restart));
+        // Model the accepted Download action without starting the production network.
+        updates.phase = Phase::Downloading(updates.offered().unwrap());
+        let download = attach_test_job(&mut updates);
+        assert!(!updates.can_start(UpdateAction::Download));
+        assert!(!updates.can_start(UpdateAction::Restart));
+        updates.job.as_ref().unwrap().bytes.store(256, Relaxed);
+        assert!(updates.poll().0, "intermediate progress needs a redraw");
+        assert_eq!(updates.view(true).unwrap().progress, Some(0.5));
+        download.send(Ok(Outcome::Staged)).unwrap();
+        assert!(updates.poll().0);
+        assert!(updates.can_start(UpdateAction::Restart));
+        assert!(
+            !updates.can_start(UpdateAction::Download),
+            "stale download click"
+        );
+        assert!(check.send(Ok(Outcome::Discovered(None))).is_err());
+        assert!(!updates.poll().0);
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+    }
+
+    #[test]
+    fn startup_or_download_failure_allows_retry_without_a_restart() {
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let mut updates = Updates {
+            install,
+            wake: Arc::new(|| {}),
+            phase: Phase::Checking,
+            job: None,
+        };
+        drop(attach_test_job(&mut updates));
+        assert!(updates.poll().0);
+        assert!(updates.can_start(UpdateAction::Check));
+        assert!(
+            updates.view(false).is_some(),
+            "retry is visible but opens no panel"
+        );
+        updates.phase = Phase::Downloading(Arc::new(sample_candidate(&sample_payload())));
+        attach_test_job(&mut updates)
+            .send(Err("offline fixture".into()))
+            .unwrap();
+        assert!(updates.poll().0);
+        assert!(updates.can_start(UpdateAction::Download));
+        assert!(!updates.can_start(UpdateAction::Restart));
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+    }
+
+    // Use a real streamed response, but never change the production endpoint.
+    // The server releases the second half only after the first progress report.
+    async fn stream_fixture(
+        path: PathBuf,
+        candidate: &Candidate,
+        payload: &[u8],
+        reports: &mut Vec<u64>,
+    ) -> Result<PendingFile, String> {
+        use std::{io::BufRead, net::TcpListener};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/asset", listener.local_addr().unwrap());
+        let payload = payload.to_owned();
+        let (observed, release) = mpsc::channel();
+        let first = payload.len() / 2;
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            for line in std::io::BufReader::new(&mut connection).lines() {
+                if line.unwrap().is_empty() {
+                    break;
+                }
+            }
+            write!(
+                connection,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            )
+            .unwrap();
+            connection.write_all(&payload[..first]).unwrap();
+            release
+                .recv_timeout(Duration::from_secs(5))
+                .expect("no progress before EOF");
+            connection.write_all(&payload[first..]).unwrap();
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(6))
+            .build()
+            .unwrap();
+        let response = client.get(url).send().await.unwrap();
+        let mut observed = Some(observed);
+        let result = download(response, candidate, path, |bytes| {
+            reports.push(bytes);
+            if bytes == first as u64 {
+                observed.take().unwrap().send(()).unwrap();
+            }
+        })
+        .await;
+        server.join().unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn corrupted_stream_does_not_stage_and_good_stream_waits_for_apply() {
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let payload = sample_payload();
+        let candidate = sample_candidate(&payload);
+        let manifest = stage_manifest(&candidate).unwrap();
+        let target = fixture.0.join(&manifest.executable);
+        let mut corrupted = payload.clone();
+        corrupted[71] ^= 1;
+        let mut reports = Vec::new();
+        let error = stage_with(&install.root, &install.running, &candidate, async |path| {
+            stream_fixture(path, &candidate, &corrupted, &mut reports).await
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("SHA-256"));
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 0);
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert!(!fixture.0.join("previous.json").exists());
+
+        reports.clear();
+        stage_with(&install.root, &install.running, &candidate, async |path| {
+            stream_fixture(path, &candidate, &payload, &mut reports).await
+        })
+        .await
+        .unwrap();
+        assert!(reports.contains(&256));
+        assert_eq!(reports.last(), Some(&candidate.size));
+        assert_eq!(fs::read(&target).unwrap(), payload);
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert!(!fixture.0.join("previous.json").exists());
+        assert!(active_manifest(&install.root, &install.running).is_some());
+
+        fs::write(&target, &corrupted).unwrap();
+        assert!(
+            apply(install.clone(), &candidate)
+                .await
+                .err()
+                .unwrap()
+                .contains("SHA-256")
+        );
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert!(!fixture.0.join("previous.json").exists());
+        stage_with(&install.root, &install.running, &candidate, async |path| {
+            stream_fixture(path, &candidate, &payload, &mut reports).await
+        })
+        .await
+        .unwrap();
+        let Outcome::Applied(restart) = apply(install, &candidate).await.unwrap() else {
+            panic!("successful explicit apply should request relaunch");
+        };
+        assert_eq!(fs::read(fixture.0.join("previous.json")).unwrap(), prior);
+        let (current, _) = read_manifest(&fixture.0.join("current.json")).unwrap();
+        assert_eq!(current.version, candidate.version.to_string());
+        assert_eq!(current.executable, manifest.executable);
+        // The PE fixture isn't a runnable executable. A separate real-launcher
+        // smoke covers the handoff without pointing production at a fixture.
+        drop(restart);
+    }
+
+    #[tokio::test]
+    async fn failed_publication_keeps_current_and_restores_existing_rollback() {
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let payload = sample_payload();
+        let candidate = sample_candidate(&payload);
+        let target = fixture
+            .0
+            .join(stage_manifest(&candidate).unwrap().executable);
+        fs::create_dir(target.parent().unwrap()).unwrap();
+        fs::write(target, payload).unwrap();
+        let previous = b"previous manifest bytes";
+        fs::write(fixture.0.join("previous.json"), previous).unwrap();
+        let block_replace = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(fixture.0.join("current.json"))
+            .unwrap();
+        let error = apply(install.clone(), &candidate).await.err().unwrap();
+        assert!(error.contains("Cannot activate update"), "{error}");
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert_eq!(fs::read(fixture.0.join("previous.json")).unwrap(), previous);
+        drop(block_replace);
+        assert!(matches!(
+            apply(install, &candidate).await,
+            Ok(Outcome::Applied(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_rechecks_the_active_build_and_rollback_floor() {
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let payload = sample_payload();
+        let candidate = sample_candidate(&payload);
+        let manifest = stage_manifest(&candidate).unwrap();
+        let target = fixture.0.join(&manifest.executable);
+        fs::create_dir(target.parent().unwrap()).unwrap();
+        fs::write(&target, payload).unwrap();
+        let newer = serde_json::to_vec(&manifest).unwrap();
+        fs::write(fixture.0.join("previous.json"), &newer).unwrap();
+        let error = apply(install.clone(), &candidate).await.err().unwrap();
+        assert!(error.contains("update floor"), "{error}");
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        assert_eq!(fs::read(fixture.0.join("previous.json")).unwrap(), newer);
+
+        fs::write(fixture.0.join("current.json"), &newer).unwrap();
+        let error = apply(install, &candidate).await.err().unwrap();
+        assert!(error.contains("active installation changed"), "{error}");
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), newer);
+    }
+
+    #[tokio::test]
+    #[ignore = "run with the workspace launcher and compiled offline updater probe"]
+    async fn restart_through_installed_launcher_reopens_exact_profile() {
+        use crate::profile::{Profile, Session};
+
+        let fixture = Fixture::new();
+        let (install, prior) = fixture.setup();
+        let launcher_source = std::env::var_os("SATIN_TEST_LAUNCHER").expect("workspace launcher");
+        let probe_source = std::env::var_os("SATIN_TEST_UPDATER_PROBE").expect("updater probe");
+        fs::copy(launcher_source, fixture.0.join(LAUNCHER_NAME)).unwrap();
+        let payload = fs::read(probe_source).unwrap();
+        let candidate = sample_candidate(&payload);
+        let target = fixture
+            .0
+            .join(stage_manifest(&candidate).unwrap().executable);
+        fs::create_dir(target.parent().unwrap()).unwrap();
+        fs::write(&target, payload).unwrap();
+        let (profile, _) = Profile::open(install.profile.clone()).unwrap();
+        profile
+            .save(&Session {
+                schema: 1,
+                tabs: vec!["about:home".into(), "about:demo".into()],
+                active: 1,
+            })
+            .unwrap();
+        assert_eq!(fs::read(fixture.0.join("current.json")).unwrap(), prior);
+        let opened = install.profile.join("updater-probe-receipt.json");
+        assert!(!opened.exists());
+        let Outcome::Applied(restart) = apply(install.clone(), &candidate).await.unwrap() else {
+            panic!("explicit apply did not request a relaunch");
+        };
+        assert!(
+            !opened.exists(),
+            "publishing must not launch while the profile is locked"
+        );
+        assert!(Profile::open(install.profile.clone()).is_err());
+        drop(profile);
+        restart.launch().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !opened.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let restored: Session = serde_json::from_slice(&fs::read(&opened).unwrap()).unwrap();
+        assert_eq!(restored.tabs, ["about:home", "about:demo"]);
+        assert_eq!(restored.active, 1);
+        assert_eq!(fs::read(fixture.0.join("previous.json")).unwrap(), prior);
+        assert!(!fixture.0.join("User Data").exists());
+    }
 
     fn release(current_tag: &str, asset_tag: &str, digest: Option<String>) -> Release {
         Release {

@@ -48,6 +48,8 @@ mod navigation_error;
 mod scroll;
 mod settings;
 mod tab_strip;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod update_ui;
 use self::address_bar::{AddressBar, Movement};
 use self::bookmark_menu::Menu;
 use crate::testing::{
@@ -187,6 +189,12 @@ enum Action {
     Minimize,
     Maximize,
     CloseWindow,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdatePanel,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdatePrimary(crate::updater::UpdateAction),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    UpdateSurface,
 }
 
 impl Action {
@@ -353,6 +361,7 @@ pub(crate) fn run(
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
     devtools: Option<crate::devtools::DevTools>,
+    #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
     let (profile, session) = Profile::open(path.clone())?;
     let settings = settings::Store::open(&path);
@@ -455,6 +464,24 @@ pub(crate) fn run(
         smoke_result: None,
         presented_frames: 0,
         last_present_error: None,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        updater: enable_updates
+            .then(|| {
+                crate::updater::Updates::start(
+                    &path,
+                    Arc::new({
+                        let proxy = events.create_proxy();
+                        move || {
+                            let _ = proxy.send_event(());
+                        }
+                    }),
+                )
+            })
+            .flatten(),
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_panel: false,
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        update_restart: None,
     };
     events.run_app(&mut app).map_err(|e| e.to_string())?;
     if smoke_requested {
@@ -481,6 +508,15 @@ pub(crate) fn run(
         println!("{summary}");
         app.smoke_checkpoint_outputs.commit();
     }
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    let restart = app.update_restart.take();
+    drop(app);
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    if let Some(restart) = restart {
+        // Profile::drop flushes data and drops its exclusive lock. Starting the
+        // launcher any earlier would race the child for the same profile.
+        restart.launch()?;
+    }
     Ok(())
 }
 
@@ -502,7 +538,6 @@ struct App {
     graphics: Option<Graphics>,
     canvas: Option<Canvas>,
     fonts: Fonts,
-    profile: Profile,
     bookmarks: Result<bookmarks::Bookmarks, String>,
     settings: settings::Store,
     settings_panel: Option<settings::Panel>,
@@ -539,6 +574,14 @@ struct App {
     download_id: u64,
     scale: f32,
     clipboard: Option<arboard::Clipboard>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    updater: Option<crate::updater::Updates>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_panel: bool,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    update_restart: Option<crate::updater::Restart>,
+    // Keep the profile lock held until the page and background workers drop.
+    profile: Profile,
 }
 impl App {
     fn window_regions(&self, index: usize) -> WindowRegions {
@@ -1039,12 +1082,15 @@ impl App {
         }
     }
     fn save(&self) {
+        let _ = self.save_session();
+    }
+    fn save_session(&self) -> Result<(), String> {
         let session = Session {
             schema: 1,
             tabs: self.tabs.iter().map(|t| t.url.clone()).collect(),
             active: self.active,
         };
-        let _ = self.profile.save(&session);
+        self.profile.save(&session)
     }
     fn sync_address(&mut self) {
         let tab = &self.tabs[self.active];
@@ -1364,6 +1410,12 @@ impl App {
             self.chrome_menu = None;
         }
         match action {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdatePanel => self.toggle_update_panel(),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdatePrimary(command) => self.update_command(command),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::UpdateSurface => {}
             Action::Address => {
                 self.set_dock_focus(false);
                 if let Some(runtime) = &mut self.tabs[self.active].runtime
@@ -1465,6 +1517,10 @@ impl App {
                 if i >= self.tabs.len() {
                     return;
                 }
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if self.tabs.len() == 1 && self.update_applying() {
+                    return;
+                }
                 let tab = &self.tabs[i];
                 self.media.close_page(tab.id, tab.document_navigation);
                 tab.cancel.cancel();
@@ -1490,10 +1546,22 @@ impl App {
     }
 
     fn close_window(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_applying() {
+            return;
+        }
+        self.finish_close(event_loop);
+    }
+
+    fn finish_close(&mut self, event_loop: &ActiveEventLoop) {
         self.save();
         for tab in &self.tabs {
             tab.cancel.cancel();
+            if let Some(download) = &tab.download {
+                download.cancel.cancel();
+            }
         }
+        event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.exit();
     }
     fn insert(&mut self, text: &str) {
@@ -1509,6 +1577,10 @@ impl App {
             || self.history_menu.is_some()
             || matches!(self.chrome_menu, Some(Menu::Bookmarks(_)))
         {
+            return;
+        }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_panel {
             return;
         }
         if !self.address_focus {
@@ -1571,6 +1643,10 @@ impl App {
 
     fn key(&mut self, key: Key, text: Option<&str>, repeat: bool, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_key(&key, repeat) {
+            return;
+        }
         if key == Key::Named(NamedKey::Escape)
             && let Some(d) = &self.tabs[self.active].download
         {
@@ -2107,6 +2183,8 @@ impl App {
         }
         self.draw_toolbar(canvas, width);
         self.draw_footer(canvas, width, height, dock_visible);
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.draw_update_panel(canvas, width);
         self.draw_chrome_menu(canvas, width);
         self.draw_history_menu(canvas, width);
     }
@@ -2362,7 +2440,11 @@ impl App {
         }
 
         let address_x = 185.;
-        let address_width = (width - 176. - address_x).max(80.);
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        let update_room = self.draw_update_button(canvas, width, row_y, row_height);
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        let update_room = 0.;
+        let address_width = (width - 176. - update_room - address_x).max(80.);
         let address_rect = Rect {
             x: address_x,
             y: row_y,
@@ -2899,6 +2981,12 @@ impl App {
             let current = match action {
                 Action::MenuItem(_) => matches!(self.chrome_menu, Some(Menu::Main(_))),
                 Action::BookmarkItem(_) => matches!(self.chrome_menu, Some(Menu::Bookmarks(_))),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdatePanel => self.update_view().is_some(),
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdatePrimary(_) => self.update_panel && self.tab_hits_current,
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                Action::UpdateSurface => self.update_panel,
                 _ => true,
             };
             (current && self.pointer_in(*rect)).then_some(*action)
@@ -2961,6 +3049,10 @@ impl App {
             return;
         }
         let action = self.chrome_action_at_pointer();
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.handle_update_click(action, event_loop) {
+            return;
+        }
         // A keyboard tab switch/close or resize can precede the next frame.
         // Don't apply an old tab hit to the new layout or tab indices.
         if self.mouse.1 < TAB_H && !self.tab_hits_current && !action.is_some_and(Action::caption) {
@@ -3060,6 +3152,10 @@ impl App {
     }
 
     fn pointer_link(&self) -> Option<String> {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.update_panel {
+            return None;
+        }
         if self.settings_panel.is_some()
             || self.history_menu.is_some()
             || !self.pointer_in(self.window_regions(self.active).page)
@@ -3084,10 +3180,13 @@ impl App {
             return;
         }
         let regions = self.window_regions(self.active);
-        let divider = regions
-            .dock
-            .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
-        let inspecting = regions.dock.is_some()
+        let chrome = self.chrome_action_at_pointer();
+        let divider = chrome.is_none()
+            && regions
+                .dock
+                .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
+        let inspecting = chrome.is_none()
+            && regions.dock.is_some()
             && self.devtools.as_ref().is_some_and(|d| d.picking)
             && self.pointer_in(regions.page);
         if self.resizing_dock || divider || inspecting {
@@ -3103,7 +3202,6 @@ impl App {
             self.redraw();
             return;
         }
-        let chrome = self.chrome_action_at_pointer();
         let link = if chrome.is_none() {
             self.pointer_link()
         } else {
@@ -3121,6 +3219,8 @@ impl App {
                     Some(Action::Address) => CursorIcon::Text,
                     Some(Action::Back) if !history.can_traverse(-1) => CursorIcon::Default,
                     Some(Action::Forward) if !history.can_traverse(1) => CursorIcon::Default,
+                    #[cfg(all(windows, target_arch = "x86_64"))]
+                    Some(Action::UpdateSurface) => CursorIcon::Default,
                     Some(action) if action.caption() => CursorIcon::Default,
                     Some(_) => CursorIcon::Pointer,
                     None if self.hover.is_some() => CursorIcon::Pointer,
@@ -3770,6 +3870,10 @@ impl ApplicationHandler<()> for App {
         self.finish_smoke(event_loop);
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if self.poll_updates(event_loop) {
+            return;
+        }
         if self.drain_network_observations() {
             self.redraw();
         }
@@ -3932,6 +4036,8 @@ impl ApplicationHandler<()> for App {
                 self.resizing_dock = false;
                 self.preedit = false;
                 self.dismiss_history_menu();
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                self.dismiss_update_panel();
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -3939,6 +4045,10 @@ impl ApplicationHandler<()> for App {
                 ..
             } if event.state == ElementState::Pressed => {
                 if is_synthetic && event.logical_key == Key::Named(NamedKey::F12) {
+                    return;
+                }
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if is_synthetic && self.update_panel {
                     return;
                 }
                 let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
@@ -4027,6 +4137,10 @@ impl ApplicationHandler<()> for App {
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.settings_panel.is_some() || self.history_menu.is_some() {
+                    return;
+                }
+                #[cfg(all(windows, target_arch = "x86_64"))]
+                if self.update_panel {
                     return;
                 }
                 let (delta, detent) = scroll::wheel_delta(delta, self.scale);
@@ -4233,6 +4347,17 @@ fn chrome_icon(
         )
     };
     match action {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Action::UpdatePanel => {
+            line(10., 3., 10., 13.);
+            line(6., 9., 10., 13.);
+            line(10., 13., 14., 9.);
+            line(3., 13., 3., 17.);
+            line(3., 17., 17., 17.);
+            line(17., 17., 17., 13.);
+        }
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        Action::UpdatePrimary(_) | Action::UpdateSurface => {}
         Action::Back => paint_glyph(canvas, x, y, scale, icons::Glyph::Back, color),
         Action::Forward => paint_glyph(canvas, x, y, scale, icons::Glyph::Forward, color),
         Action::Address => paint_glyph(canvas, x, y, scale, icons::Glyph::Search, color),

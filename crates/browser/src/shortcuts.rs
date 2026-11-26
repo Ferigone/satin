@@ -223,6 +223,10 @@ kbd { font-family: monospace; }
 <p>Browser commands in Satin for Windows. In the Satin menu, use the arrow keys to
 choose an item, Enter to open it, or Esc to dismiss the menu.</p><dl>"#,
     );
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    source.push_str(
+        "<dt>Open or dismiss the installed update panel when its icon is visible</dt><dd><kbd>Alt+U</kbd></dd>",
+    );
     for binding in BINDINGS {
         // Both strings are developer-authored literals, never URL or page input.
         let _ = write!(

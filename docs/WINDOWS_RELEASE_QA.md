@@ -77,7 +77,7 @@ speedup or a meaningful memory change beyond this fixture.
   should report the same version. The launcher requires a staged
   `current.json` and browser under `versions/` to forward `--version`.
 - `scripts/PackageRelease.ps1` emits `satin-windows-x64.exe` (browser only for
-  automatic updates), `Satin-windows-x64.zip` (browser, launcher and installer
+  in-app updates), `Satin-windows-x64.zip` (browser, launcher and installer
   scripts) and `SHA256SUMS.txt`. Check that the ZIP's browser entry and
   standalone executable are byte-identical, the ZIP has both Windows x64
   executables, and both hashes match `SHA256SUMS.txt`.
@@ -110,21 +110,70 @@ speedup or a meaningful memory change beyond this fixture.
   `-NoLaunch`. Creating or retargeting the desktop Preview shortcut is a
   separate action.
 - Only a normal Windows x64 run of the current installed build qualifies for
-  automatic updates (`current.json` version and absolute executable must
+  in-app updates (`current.json` version and absolute executable must
   match). Headless, smoke-window and unmanaged executable launches do not
   qualify. Updater selection requires a newer SemVer and a non-draft GitHub
   release; alpha prereleases are intentionally admitted. The standalone
   asset must pass official HTTPS URL, size, SHA-256, and PE machine checks. The
-  browser swaps manifests for the next launch, not the running executable,
-  profile or launcher.
+  startup check fetches only release metadata. **Download update** stages the
+  verified binary without changing either manifest. **Restart and update**
+  re-verifies the stage, activates it under the publication lock, closes the
+  browser and releases the profile, and then runs the installed launcher with
+  the same profile. See [interactive updater QA](#interactive-updater-qa).
 - `Rollback.ps1` verifies the previous target's SHA-256, then swaps the
   manifests under the same lock. Relaunch to use it. When a newer installed
   version is now in `previous.json`, that version is the updater's floor, so
   it won't immediately undo the rollback. A simulated manifest swap is not
   proof of an actual release download.
-- For a public alpha.17 → alpha.18 test, prime a disposable install and
-  profile with the authentic alpha.17 assets before promotion. Observe the
-  updater only after publication. Verify both manifests, the running
-  launcher-reported version, byte identity with the public executable, and
-  preservation of the old binary and profile sentinel. Allow enough time
-  for startup delay, retry budgets and the asset download.
+
+### Interactive updater QA
+
+Run the offline regression tests on Windows x64:
+
+```powershell
+cargo test --locked -p rust-browser updater::tests
+```
+
+These tests use disposable manifests and a loopback stream. They check passive
+discovery, duplicate/stale commands, intermediate progress, corrupt bytes,
+unchanged manifests after staging, active-version/rollback-floor checks at
+apply, and failing publication with a live `current.json` file lock.
+
+For the additional offline **process** smoke, use a previously built workspace
+launcher and compile the stand-alone probe. The test copies both into a
+temporary install; it never uses the actual user's install, shortcut or profile.
+Use an absolute path to each binary and a disposable output folder:
+
+```powershell
+rustc --edition 2024 crates/browser/tests/fixtures/updater_probe.rs -o "$scratch\updater-probe.exe"
+$env:SATIN_TEST_LAUNCHER = 'C:\path\to\target\debug\rust-browser-launcher.exe'
+$env:SATIN_TEST_UPDATER_PROBE = "$scratch\updater-probe.exe"
+cargo test --locked -p rust-browser restart_through_installed_launcher_reopens_exact_profile -- --ignored
+```
+
+The probe must receive only the original effective profile (no startup URL),
+take its exclusive lock, and read the saved two-tab session with the correct
+active tab. It makes no network requests.
+
+For manual UI QA when two authentic releases already exist, stage the older
+interactive browser, its original launcher (`RustBrowser.exe`), and a matching
+`current.json` under a disposable process-local `LOCALAPPDATA\RustBrowser`.
+Launch the versioned executable directly, with a relative, nondefault
+`--profile` and a working directory different from that of the launcher.
+Do **not** run the installer or publish a release for this check.
+
+1. Open two tabs. Wait for the update icon; check the hover label and **Alt+U**.
+   Verify that neither manifest changed and there is no new version directory
+   before selecting **Download update**.
+2. Select **Download update**. Verify that progress is visible, the panel can be
+   dismissed with **Esc** and reopened, and repeated clicks don't start another
+   job. When the panel says the update is ready, verify `current.json` and
+   `previous.json` are unchanged and the staged hash matches the release.
+3. To test failure, hold `current.json` open without delete sharing before
+   selecting **Restart and update**. Verify no manifest switch or window exit,
+   and that the panel offers retry after dismissing and reopening it. Remove the
+   lock, then retry; a verified stage can be reused.
+4. Select **Restart and update**. Verify `previous.json` is the original current,
+   the launcher starts the new build, and the same profile and active tab reopen
+   with no profile-lock error. Repeat the launch in headless/smoke-window mode
+   or from an unmanaged copy and verify no updater check or icon.
