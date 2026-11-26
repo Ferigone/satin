@@ -1894,7 +1894,11 @@ fn compile_selector_in(
                         let supported_name = legacy_pseudo
                             || matches!(
                                 name.as_str(),
-                                "marker" | "placeholder" | "selection" | "file-selector-button"
+                                "marker"
+                                    | "placeholder"
+                                    | "selection"
+                                    | "file-selector-button"
+                                    | "backdrop"
                             );
                         if !supported_name
                             || argument.is_some()

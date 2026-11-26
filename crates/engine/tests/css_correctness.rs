@@ -121,7 +121,7 @@ fn css_block_recovery_preserves_declarations_and_the_next_rule() {
 fn pseudo_elements_preserve_element_branches_in_selector_lists() {
     let (doc, computed) = styles(
         "<section id='section'><div id='item'></div></section>",
-        ":root {box-sizing:border-box} *,:after,::before {box-sizing:inherit}
+        ":root {box-sizing:border-box} *,:after,::before,::backdrop {box-sizing:inherit}
          #item::before {width:75px} #item,::unknown-pseudo {width:99px}",
     );
     let item = by_id(&doc, "item");
@@ -129,6 +129,7 @@ fn pseudo_elements_preserve_element_branches_in_selector_lists() {
     assert_eq!(computed[item.0].width, Length::Auto);
     assert!(css::matches_selector(&doc, item, "#item, ::after"));
     assert!(!css::matches_selector(&doc, item, "#item::before"));
+    assert!(!css::matches_selector(&doc, item, "#item::backdrop"));
     assert!(!css::matches_selector(&doc, item, "#item:not(::after)"));
 }
 
