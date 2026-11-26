@@ -187,7 +187,7 @@ const BINDINGS: &[Binding] = &[
         "Ctrl+J",
         "Toggle the Downloads panel",
     ),
-    (
+    binding(
         Command::VisitHistory,
         &[Chord::CtrlPlainChar("h")],
         "Ctrl+H",
