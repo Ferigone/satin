@@ -19,6 +19,10 @@ The same native window was resized without navigation. Scrolling brought the par
 
 On the pinned WPT revision, `css/css-cascade/layer-basic.html` improved from 5/34 to 34/34, and `layer-important.html` from 1/9 to 9/9. Both original harnesses completed. Across the original 6,536 eligible static comparisons all 1,981 passes, 4,418 failures, 136 inconclusive results and the one work-limit error remained the same. The 19,782 other screen entries remained outside that cohort. The regression checks named layers across stylesheets, conditional declarations, a custom property, inline importance, class changes, viewport resize and painted pixels. [Layer regression tests](../../crates/engine/tests/css_layers.rs)
 
+The final selector change preserved every status in both pixel cohorts, including all 315 passes among the 1,388 supplemental Ahem comparisons. All 87 relational selector assertions and 1,466 Linux workspace tests passed, with three existing opt-in tests ignored. On Brave Search the one-line title retained its alpha.41 geometry and scroll behavior at both widths.
+
+One remaining Tailwind difference is visible above the example. At 390 px, its table header uses a nested column subgrid. Chromium places the two cells side by side in one 48 px row. Satin stacks them in a 96 px row. Layered imports, layered font-face precedence, `revert-layer` and the specialized CSSOM layer interfaces also remain open.
+
 ## Alpha.41 line clamping
 
 At 390 × 800 CSS px, Satin wrapped the first Brave Search result title onto a second line. The page requested a one-line preview. Alpha.41 measures the line, reserves space for the ellipsis, and stops emitting text and inline hit regions beyond it. The description moves up by 26 px. At 1280 × 800 the title already fit, and all three browsers measured it at 648 × 26 px. The screenshots below show the same result in alpha.40, alpha.41 and Chromium, left to right.
