@@ -6,12 +6,16 @@ The alpha.35–alpha.36 audit ran on Linux x86_64 on 2026-11-25, against Satin `
 
 The Tailwind CSS documentation applies its component utilities inside five `@layer` blocks. Alpha.41 fetched the stylesheet but discarded those blocks. The example paragraph used the default font, wrapped to 14 lines at 390 × 800 and occupied 268.8 px. The cascade-layer implementation applies the three-line limit, the Inter font stack and the requested 24 px line height. The paragraph measures 72 px at both viewport sizes. [Original Tailwind example](https://tailwindcss.com/docs/line-clamp) · [Measured implementation](https://github.com/Ferigone/satin/commit/f1ff062)
 
-| Viewport, 1× scale | Alpha.41 paragraph (width × height) | With layers | Chromium |
-| --- | ---: | ---: | ---: |
-| 390 × 800 | 294 × 268.8 | 158 × 72 | 254 × 72 |
-| 1280 × 800 | 1,184 × 76.8 | 384 × 72 | 320 × 72 |
+| Viewport, 1× scale | Alpha.41 paragraph (width × height) | With layers | With layers and reset | Chromium |
+| --- | ---: | ---: | ---: | ---: |
+| 390 × 800 | 294 × 268.8 | 158 × 72 | 254 × 72 | 254 × 72 |
+| 1280 × 800 | 1,184 × 76.8 | 384 × 72 | 320 × 72 | 320 × 72 |
 
-The same native window was resized without navigation. Scrolling brought the paragraph into view and returning to the top restored its original geometry. The ancestor measurements show a separate reset selector list failing in Satin. At 390 px the body retained its 8 px margin, the figure retained its 40 px margins and the article used content-box sizing. Chromium applied the page’s zero margins and border-box sizing. The archive includes the computed styles, full native captures and source hashes. [Download measurements and screenshots](css-layers-native.zip)
+![Tailwind paragraph in alpha.41, the updated engine and Chromium at 390 CSS pixels.](css-layers-tailwind.png)
+
+The reset groups the universal selector with `::backdrop`. Satin previously rejected this selector list, which kept the figure’s 40 px default margins, the body’s 8 px margins and content-box sizing. Accepting the valid pseudo-element restores the reset on ordinary elements. The paragraph now has exactly the Chromium x coordinate and width at both sizes. Its initial y coordinate still differs by 220.33 px on the narrow page and 220.17 px on desktop. [Selector fix and regression](https://github.com/Ferigone/satin/commit/b8fb946)
+
+The same native window was resized without navigation. Scrolling brought the paragraph into view and returning to the top restored its original geometry. The archive includes the computed styles, full native captures and source hashes. [Download measurements and screenshots](css-layers-native.zip)
 
 On the pinned WPT revision, `css/css-cascade/layer-basic.html` improved from 5/34 to 34/34, and `layer-important.html` from 1/9 to 9/9. Both original harnesses completed. Across the original 6,536 eligible static comparisons all 1,981 passes, 4,418 failures, 136 inconclusive results and the one work-limit error remained the same. The 19,782 other screen entries remained outside that cohort. The regression checks named layers across stylesheets, conditional declarations, a custom property, inline importance, class changes, viewport resize and painted pixels. [Layer regression tests](../../crates/engine/tests/css_layers.rs)
 
