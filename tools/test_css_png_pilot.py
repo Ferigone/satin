@@ -1,10 +1,23 @@
 import unittest
 
-from css_png_pilot import SRC, check_page
+from css_png_pilot import REF, SRC, TEST, check_page, verdict
 
 
 class PngPilotTests(unittest.TestCase):
     image = f'<img src="{SRC}" height="50">'
+
+    def test_mismatch_requires_two_nonuniform_canvases_for_pass(self):
+        row = {"test": TEST, "refs": [(REF, "!=")]}
+        for a, b, different, expected in (
+                (False, False, True, "PASS"), (False, False, False, "FAIL"),
+                (True, False, True, "INCONCLUSIVE"), (False, True, True, "INCONCLUSIVE"),
+                (True, True, True, "INCONCLUSIVE"), (True, True, False, "FAIL")):
+            results = {TEST: {"sha256": "a" * 64, "uniform": a},
+                       REF: {"sha256": ("b" if different else "a") * 64, "uniform": b}}
+            with self.subTest(a=a, b=b, different=different):
+                self.assertEqual(verdict(row, results)["status"], expected)
+        results[REF] = {"error": "decode failed"}
+        self.assertEqual(verdict(row, results)["status"], "ERROR")
 
     def test_direct_image(self):
         check_page('<!doctype html><title>image</title>' + self.image)

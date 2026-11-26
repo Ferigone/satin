@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import runpy
 import stat
 import subprocess
@@ -116,19 +117,44 @@ def run(args):
             (root / page).write_bytes(files[page])
         (root / CONTROL).write_text(CONTROL_HTML, encoding="utf-8")
         (root / "binding.png").write_bytes(files[ASSET])
-        keys = [CONTROL, TEST, REF]
-        proc = subprocess.run([args.renderer.resolve(), root, "--local-png",
-                               "https://web-platform.test/" + ASSET],
-                              input="\n".join(keys) + "\n", check=True, text=True,
-                              capture_output=True, timeout=args.timeout)
-        results = dict(zip(keys, map(json.loads, proc.stdout.splitlines()), strict=True))
-        if results[CONTROL] != {"sha256": CONTROL_HASH, "uniform": False}:
+        command = [args.renderer.resolve(), root, "--local-png", "https://web-platform.test/" + ASSET]
+
+        def render(keys):
+            proc = subprocess.run(command, input="\n".join(keys) + "\n", check=True, text=True,
+                                  capture_output=True, timeout=args.timeout)
+            return dict(zip(keys, map(json.loads, proc.stdout.splitlines()), strict=True))
+
+        control = render([CONTROL])[CONTROL]
+        if control != {"sha256": CONTROL_HASH, "uniform": False} or control["uniform"] is not False:
             raise ValueError("local PNG pixel control failed")
         row = {"test": TEST, "refs": [(REF, "!=")]}
-        row.update(baseline["compare"](row, results))
+        results = {}
+        try:
+            results = render([TEST, REF])
+            row.update(verdict(row, results))
+        except subprocess.TimeoutExpired:
+            row.update(status="TIMEOUT", reason="pinned pair exceeded worker timeout")
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            row.update(status="ERROR", reason=str(exc))
+        counts = {s: int(row["status"] == s)
+                  for s in ("PASS", "FAIL", "ERROR", "TIMEOUT", "SKIP", "INCONCLUSIVE")}
         return {"cohort": "pinned local replaced PNG", "manifestSha256": MANIFEST,
-                "viewport": [800, 600], "resources": {ASSET: PIN}, "control": results[CONTROL],
-                "fingerprints": {p: results[p] for p in (TEST, REF)}, "results": [row]}
+                "viewport": [800, 600], "resources": {ASSET: PIN}, "control": control,
+                "screenEntries": 26318, "outsidePilot": 26317, "counts": counts,
+                "fingerprints": results, "results": [row]}
+
+
+def verdict(row, results):
+    for page in (TEST, REF):
+        r = results[page]
+        if not isinstance(r, dict) or ("error" not in r and (
+                type(r.get("uniform")) is not bool or not isinstance(r.get("sha256"), str)
+                or not re.fullmatch("[0-9a-f]{64}", r["sha256"]))):
+            return {"status": "ERROR", "reason": f"invalid worker fingerprint: {page}"}
+    outcome = baseline["compare"](row, results)
+    if outcome["status"] == "PASS" and any(results[p]["uniform"] for p in (TEST, REF)):
+        return {"status": "INCONCLUSIVE", "reason": "mismatch includes a single-color canvas"}
+    return outcome
 
 
 if __name__ == "__main__":
