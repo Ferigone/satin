@@ -376,6 +376,8 @@ pub enum FlexWrap {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
+    FirstBaseline,
+    LastBaseline,
     Left,
     Right,
     FlexStart,
@@ -4436,7 +4438,7 @@ fn implicit_grid(value: &str) -> Option<[Value; 6]> {
         };
         let mut values = std::array::from_fn(|_| Value::Initial);
         if axis == GridAutoFlow::Row {
-            values[1] = Value::GridTemplate(grid::parse_columns(explicit)?);
+            values[1] = Value::GridTemplate(grid::parse_tracks(explicit)?);
             values[3] = auto_tracks;
         } else {
             values[0] = Value::GridTemplate(grid::parse_tracks(explicit)?);
@@ -5178,6 +5180,10 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
                 "flex-start" => Align::FlexStart,
                 "flex-end" => Align::FlexEnd,
                 "center" => Align::Center,
+                "baseline" | "first baseline" if matches!(p, AlignItems | AlignSelf) => {
+                    Align::FirstBaseline
+                }
+                "last baseline" if matches!(p, AlignItems | AlignSelf) => Align::LastBaseline,
                 "auto" if matches!(p, AlignSelf | JustifySelf) => Align::Auto,
                 "space-between" if matches!(p, JustifyContent | AlignContent) => {
                     Align::SpaceBetween
@@ -5200,7 +5206,7 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "break-word" | "anywhere" | "break-all" => true,
             _ => return None,
         })),
-        GridTemplateColumns => grid::parse_columns(value).map(Value::GridTemplate),
+        GridTemplateColumns => grid::parse_tracks(value).map(Value::GridTemplate),
         GridTemplateRows => grid::parse_tracks(value).map(Value::GridTemplate),
         GridTemplateAreas => grid::parse_areas(value).map(Arc::new).map(Value::GridAreas),
         GridAutoColumns | GridAutoRows => grid::parse_auto_tracks(value).map(Value::Tracks),
