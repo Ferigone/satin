@@ -1,7 +1,7 @@
 use super::*;
 
 fn reference(width: f32, count: usize) -> TabStrip {
-    TabStrip::new(width, 3. * caption_button_width(width), count)
+    TabStrip::new(width, 3. * caption_button_width(width), count, 0)
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn restore_offsets_clamp_and_active_reveal_only_moves_as_far_as_needed() {
 
 #[test]
 fn reserve_wide_caption_controls_and_fail_safely_below_the_window_minimum() {
-    let strip = TabStrip::new(900., 200., 24);
+    let strip = TabStrip::new(900., 200., 24, 0);
     assert_eq!(strip.list.width, 509.);
     assert_eq!(right(strip.tab_list.unwrap().bounds), 686.);
 
@@ -156,4 +156,24 @@ fn revealing_a_tab_wider_than_the_clip_keeps_the_nearest_edge() {
     assert_eq!(strip.scroll_to(10.).reveal(0).scroll(), 10.);
     assert_eq!(reference(260., 3).scroll_to(110.).reveal(0).scroll(), 79.);
     assert_eq!(reference(260., 3).reveal(2).scroll(), 218.);
+}
+
+#[test]
+fn pins_use_icon_only_capsules_in_the_same_scroll_geometry() {
+    let strip = TabStrip::new(640., 105., 3, 2);
+    let pin = strip.tab(0).unwrap();
+    assert_eq!(pin.face, rect(48., 6., 43., 31.));
+    assert_eq!(pin.favicon, rect(60., 12., 19., 19.));
+    assert_eq!(pin.title.width, 0.);
+    assert!(pin.close.is_none());
+    assert_eq!(strip.tab(1).unwrap().face.x, 94.);
+    assert_eq!(strip.tab(2).unwrap().face, rect(140., 6., 106., 31.));
+    assert_eq!(strip.new_tab.unwrap().bounds.x, 250.);
+
+    let clipped = TabStrip::new(390., 105., 12, 8).reveal(7);
+    assert_eq!(
+        clipped.tab(7).unwrap().face,
+        clipped.tab(7).unwrap().visible_face
+    );
+    assert_eq!(right(clipped.face(7)), right(clipped.list));
 }

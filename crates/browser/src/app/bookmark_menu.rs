@@ -48,6 +48,7 @@ pub(super) enum Menu {
     Main(usize),
     Bookmarks(BookmarkPanel),
     Tabs(usize),
+    TabContext(super::tab_context::TabContext),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

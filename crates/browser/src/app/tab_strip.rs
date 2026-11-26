@@ -22,6 +22,7 @@ pub(super) const NARROW_WIDTH: f32 = 660.;
 const ROW_BORDER: f32 = 1.;
 const FACE_Y: f32 = (TAB_ROW_HEIGHT - ROW_BORDER - FACE_HEIGHT) / 2.;
 const TAB_GAP: f32 = 3.;
+const PINNED_WIDTH: f32 = 43.;
 const CONTROL_GAP: f32 = 4.;
 const CONTROL_SIZE: f32 = 31.;
 // CSS .tab-list max-width: calc(100% - 76px); this leaves another six
@@ -44,6 +45,7 @@ pub(super) struct TabStrip {
     pub(super) new_tab: Option<StripButton>,
     pub(super) tab_list: Option<StripButton>,
     count: usize,
+    pinned: usize,
     tab_width: f32,
     tabs_width: f32,
     scroll: f32,
@@ -76,7 +78,8 @@ impl TabStrip {
     /// `caption_width` is the total width of the native caption controls,
     /// or zero without them. Left/right padding is part of the reference; a
     /// wider native caption reservation can only make the list shorter.
-    pub(super) fn new(width: f32, caption_width: f32, count: usize) -> Self {
+    pub(super) fn new(width: f32, caption_width: f32, count: usize, pinned: usize) -> Self {
+        debug_assert!(pinned <= count);
         let (left, right, caption_clearance): (f32, f32, f32) = if width <= NARROW_WIDTH {
             (48., 109., 4.)
         } else {
@@ -84,7 +87,9 @@ impl TabStrip {
         };
         // Quiet/Capsule has no active width bonus and no compact-variant squeeze.
         let tab_width = (width * 15. / 100.).clamp(106., 216.);
-        let tabs_width = count as f32 * tab_width + count.saturating_sub(1) as f32 * TAB_GAP;
+        let tabs_width = pinned as f32 * PINNED_WIDTH
+            + (count - pinned) as f32 * tab_width
+            + count.saturating_sub(1) as f32 * TAB_GAP;
         let content_width = (width - left - right.max(caption_width + caption_clearance)).max(0.);
         let list_width = tabs_width.min((content_width - CONTROL_RESERVE).max(0.));
         let control_x = left + list_width + CONTROL_GAP;
@@ -97,6 +102,7 @@ impl TabStrip {
             new_tab,
             tab_list,
             count,
+            pinned,
             tab_width,
             tabs_width,
             scroll: 0.,
@@ -121,12 +127,13 @@ impl TabStrip {
     pub(super) fn reveal(mut self, index: usize) -> Self {
         let list_width = self.list.width;
         if index < self.count && list_width > 0. {
-            let start = index as f32 * self.stride();
-            let end = start + self.tab_width;
+            let start = self.offset(index);
+            let width = self.width(index);
+            let end = start + width;
             let view_start = self.scroll;
             let view_end = view_start + list_width;
             if !(start < view_start && end > view_end) {
-                let fits = self.tab_width <= list_width;
+                let fits = width <= list_width;
                 let align_start = if fits {
                     start < view_start
                 } else {
@@ -148,18 +155,26 @@ impl TabStrip {
     }
 
     pub(super) fn visible_tabs(&self) -> impl Iterator<Item = TabSlot> + '_ {
-        let first = (self.scroll / self.stride()).floor() as usize;
-        let end = ((self.scroll + self.list.width) / self.stride()).ceil() as usize;
-        (first..end.min(self.count)).filter_map(|index| self.tab(index))
+        (0..self.count).filter_map(|index| self.tab(index))
     }
 
     pub(super) fn tab(&self, index: usize) -> Option<TabSlot> {
         if index >= self.count {
             return None;
         }
-        let x = self.list.x + (index as f32 * self.stride() - self.scroll);
-        let face = rect(x, FACE_Y, self.tab_width, FACE_HEIGHT);
+        let face = self.face(index);
         let visible_face = clip_to_list(face, self.list)?;
+        let (favicon, title) = self.contents(index, face);
+        if index < self.pinned {
+            return Some(TabSlot {
+                index,
+                face,
+                visible_face,
+                favicon,
+                title,
+                close: None,
+            });
+        }
         let close_bounds = centered_y(
             right(face) - END_INSET - CLOSE_WIDTH,
             CLOSE_WIDTH,
@@ -177,14 +192,6 @@ impl TabStrip {
         } else {
             None
         };
-        let favicon = centered_y(x + FAVICON_INSET, FAVICON_SIZE, FAVICON_SIZE);
-        let title_x = right(favicon) + TITLE_GAP;
-        let title = rect(
-            title_x,
-            FACE_Y,
-            close_bounds.x - TITLE_GAP - title_x,
-            FACE_HEIGHT,
-        );
         Some(TabSlot {
             index,
             face,
@@ -195,8 +202,40 @@ impl TabStrip {
         })
     }
 
-    fn stride(&self) -> f32 {
-        self.tab_width + TAB_GAP
+    pub(super) fn face(&self, index: usize) -> Rect {
+        let x = self.list.x + (self.offset(index) - self.scroll);
+        rect(x, FACE_Y, self.width(index), FACE_HEIGHT)
+    }
+
+    pub(super) fn contents(&self, index: usize, face: Rect) -> (Rect, Rect) {
+        if index < self.pinned {
+            return (centered_square(face, FAVICON_SIZE), Rect::default());
+        }
+        let favicon = centered_square(
+            rect(face.x + FAVICON_INSET, face.y, FAVICON_SIZE, face.height),
+            FAVICON_SIZE,
+        );
+        let title_x = right(favicon) + TITLE_GAP;
+        let title = rect(
+            title_x,
+            face.y,
+            right(face) - END_INSET - CLOSE_WIDTH - TITLE_GAP - title_x,
+            face.height,
+        );
+        (favicon, title)
+    }
+
+    fn offset(&self, index: usize) -> f32 {
+        index.min(self.pinned) as f32 * (PINNED_WIDTH + TAB_GAP)
+            + index.saturating_sub(self.pinned) as f32 * (self.tab_width + TAB_GAP)
+    }
+
+    fn width(&self, index: usize) -> f32 {
+        if index < self.pinned {
+            PINNED_WIDTH
+        } else {
+            self.tab_width
+        }
     }
 }
 

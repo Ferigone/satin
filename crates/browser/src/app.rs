@@ -55,6 +55,8 @@ mod scroll;
 mod settings;
 mod site_info;
 mod tab_behavior;
+mod tab_context;
+mod tab_pointer;
 mod tab_strip;
 mod visit_store;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -70,7 +72,9 @@ use crate::testing::{
 };
 use chrome_motion::{Button as MotionButton, ChromeMotion, TabInk};
 use navigation_error::Recovery;
-use tab_behavior::{ClosedTabs, FreshTab, TabId, TabMove};
+use tab_behavior::{ClosedTabs, FreshTab, TabDrag, TabId, TabMove};
+use tab_context::ContextCommand;
+use tab_pointer::TabPress;
 use tab_strip::TabStrip;
 
 const TAB_H: f32 = tab_strip::TAB_ROW_HEIGHT;
@@ -201,8 +205,11 @@ enum Action {
     ReopenTab,
     DuplicateTab(TabId),
     MoveTab(TabId, TabMove),
+    TogglePin(TabId),
     TabList,
     TabListItem(Option<TabId>),
+    TabContextSurface,
+    TabContextRow(TabId, ContextCommand),
     Select(TabId),
     Close(TabId),
     Settings,
@@ -252,6 +259,8 @@ impl Action {
                 | Self::BookmarkItem(_)
                 | Self::TabList
                 | Self::TabListItem(_)
+                | Self::TabContextSurface
+                | Self::TabContextRow(_, _)
         )
     }
 }
@@ -341,6 +350,8 @@ fn apply_download_update(
 
 struct Tab {
     id: TabId,
+    // Session-only pin: the v1 on-disk URL list keeps its existing schema.
+    pinned: bool,
     url: String,
     // Keep the initiating method's eligibility through redirects.
     get_navigation: bool,
@@ -379,6 +390,7 @@ impl Tab {
             url::Url::parse(&url).unwrap_or_else(|_| url::Url::parse("about:home").unwrap());
         Self {
             id,
+            pinned: false,
             title: "New tab".into(),
             url: address.as_str().into(),
             get_navigation: true,
@@ -606,6 +618,7 @@ pub(crate) fn run(
         hits: vec![],
         tab_hits_current: false,
         tab_scroll: 0.,
+        tab_press: None,
         favorites_scroll: favorites_strip::Scroll::default(),
         chrome_hover: None,
         chrome_motion: ChromeMotion::new(
@@ -760,6 +773,7 @@ struct App {
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
     tab_scroll: f32,
+    tab_press: Option<TabPress>,
     favorites_scroll: favorites_strip::Scroll,
     chrome_hover: Option<Action>,
     chrome_motion: ChromeMotion<MAX_TABS>,
@@ -819,7 +833,8 @@ impl App {
         } else {
             0.
         };
-        TabStrip::new(width, caption, self.tabs.len()).scroll_to(self.tab_scroll)
+        TabStrip::new(width, caption, self.tabs.len(), self.pinned_tabs())
+            .scroll_to(self.tab_scroll)
     }
 
     fn pointer_in(&self, rect: Rect) -> bool {
@@ -1080,6 +1095,8 @@ impl App {
     }
 
     fn window_geometry_changed(&mut self) {
+        self.cancel_tab_press();
+        self.dismiss_tab_context();
         self.wheel = None;
         self.hits.retain(|(_, action)| !action.address_suggestion());
         self.invalidate_favorites_hits();
@@ -1689,6 +1706,29 @@ impl App {
         self.tabs.iter().position(|tab| tab.id == id)
     }
 
+    fn pinned_tabs(&self) -> usize {
+        self.tabs.iter().take_while(|tab| tab.pinned).count()
+    }
+
+    fn tabs_reordered(&mut self, active: TabId) {
+        self.active = self.tab_index(active).expect("reorder preserves live tabs");
+        self.tab_hits_current = false;
+        self.reveal_active_tab();
+        self.save();
+        self.redraw();
+    }
+
+    fn toggle_pin(&mut self, id: TabId) {
+        let Some(from) = self.tab_index(id) else {
+            return;
+        };
+        let active = self.tabs[self.active].id;
+        let to = tab_behavior::pin_destination(from, self.pinned_tabs());
+        self.tabs[from].pinned = !self.tabs[from].pinned;
+        tab_behavior::place_tab(&mut self.tabs, from, to);
+        self.tabs_reordered(active);
+    }
+
     fn reveal_active_tab(&mut self) {
         let width = self.window_regions(self.active).page.width;
         self.tab_scroll = self.tab_strip(width).reveal(self.active).scroll();
@@ -1703,13 +1743,17 @@ impl App {
         false
     }
 
-    fn append_tab(&mut self, address: String) {
+    fn open_tab(&mut self, address: String, pinned: bool) {
         debug_assert!(self.tabs.len() < MAX_TABS);
-        let index = self.tabs.len();
+        let index = if pinned { 0 } else { self.tabs.len() };
         // A new browsing context always gets a new ID; late events from a
         // cancelled tab must not reach a reopened tab, even at the same URL.
-        self.tabs
-            .push(Tab::new(self.next_id, address, self.profile.storage()));
+        let mut tab = Tab::new(self.next_id, address, self.profile.storage());
+        tab.pinned = pinned;
+        self.tabs.insert(index, tab);
+        if index <= self.active {
+            self.active += 1;
+        }
         self.next_id += 1;
         self.activate(index);
     }
@@ -1718,19 +1762,19 @@ impl App {
         if self.tabs[self.active].id != id {
             return;
         }
-        if let Some(index) = tab_behavior::move_tab(&mut self.tabs, id, direction, |tab| tab.id) {
+        let pinned = self.pinned_tabs();
+        if tab_behavior::move_tab(&mut self.tabs, id, direction, pinned, |tab| tab.id).is_some() {
             // The selected browsing context hasn't changed. Keep its document,
             // media, download, inspector and focus rather than activating it again.
-            self.active = index;
-            self.tab_hits_current = false;
-            self.reveal_active_tab();
-            self.save();
+            self.tabs_reordered(id);
         }
         // The common action path can also dismiss a menu at the row boundary.
         self.redraw();
     }
 
     fn activate(&mut self, index: usize) {
+        self.cancel_tab_press();
+        self.dismiss_tab_context();
         if index != self.active
             && let Some(dock) = &mut self.devtools
         {
@@ -1761,6 +1805,8 @@ impl App {
         self.redraw();
     }
     fn action(&mut self, action: Action, event_loop: &ActiveEventLoop) {
+        self.cancel_tab_press();
+        self.dismiss_tab_context();
         self.wheel = None;
         if action != Action::SiteInfo {
             self.dismiss_site_info();
@@ -1792,6 +1838,8 @@ impl App {
                 }
             }
             Action::SuggestionBackground => {}
+            // Context rows are dispatched by the matching release, not by press.
+            Action::TabContextSurface | Action::TabContextRow(_, _) => {}
             Action::Back => self.traverse_history(self.active, -1),
             Action::Forward => self.traverse_history(self.active, 1),
             Action::Reload => {
@@ -1912,14 +1960,15 @@ impl App {
             Action::CloseWindow => self.close_window(event_loop),
             Action::NewTab => {
                 if self.can_add_tab() {
-                    self.append_tab("about:home".into());
+                    self.open_tab("about:home".into(), false);
                     self.action(Action::Address, event_loop);
                 }
             }
             Action::ReopenTab => {
                 if self.can_add_tab() {
                     if let Some(tab) = self.closed_tabs.reopen() {
-                        self.append_tab(tab.into_address());
+                        let pinned = tab.pinned;
+                        self.open_tab(tab.into_address(), pinned);
                     } else {
                         self.status = "No recently closed eligible tab.".into();
                         self.redraw();
@@ -1931,7 +1980,7 @@ impl App {
                     && let Some(index) = self.tab_index(id)
                 {
                     if let Some(tab) = self.tabs[index].fresh_address() {
-                        self.append_tab(tab.into_address());
+                        self.open_tab(tab.into_address(), false);
                     } else {
                         self.status = "This address cannot be duplicated.".into();
                         self.redraw();
@@ -1939,6 +1988,7 @@ impl App {
                 }
             }
             Action::MoveTab(id, direction) => self.move_active_tab(id, direction),
+            Action::TogglePin(id) => self.toggle_pin(id),
             Action::Select(id) => {
                 if let Some(index) = self.tab_index(id) {
                     self.activate(index);
@@ -1954,7 +2004,10 @@ impl App {
                 }
                 let tab = &self.tabs[i];
                 let reopen = if self.tabs.len() > 1 {
-                    tab.fresh_address()
+                    tab.fresh_address().map(|mut saved| {
+                        saved.pinned = tab.pinned;
+                        saved
+                    })
                 } else {
                     None
                 };
@@ -2002,7 +2055,12 @@ impl App {
         event_loop.exit();
     }
     fn insert(&mut self, text: &str) {
-        if self.downloads_panel.is_some() || self.site_info.is_some() || self.update_panel_open() {
+        if self.downloads_panel.is_some()
+            || self.site_info.is_some()
+            || self.update_panel_open()
+            || self.tab_press.is_some()
+            || matches!(self.chrome_menu, Some(Menu::TabContext(_)))
+        {
             return;
         }
         if self.devtools_focused
@@ -2101,12 +2159,15 @@ impl App {
         self.wheel = None;
         #[cfg(all(windows, target_arch = "x86_64"))]
         if self.update_key(&key, repeat) {
+            self.cancel_tab_press();
             return;
         }
         if WINDOW_FRAME
             && self.modifiers == ModifiersState::ALT
             && key == Key::Named(NamedKey::Space)
         {
+            self.cancel_tab_press();
+            self.dismiss_tab_context();
             if !repeat && let Some(window) = &self.window {
                 window.show_window_menu(LogicalPosition::new(0., TAB_H));
             }
@@ -2116,10 +2177,19 @@ impl App {
         // can remain modal above the dock when it opens or closes underneath.
         if let Some(toggle) = shortcuts::devtools_toggle(&key, self.modifiers, repeat) {
             if toggle {
+                self.cancel_tab_press();
+                self.dismiss_tab_context();
                 self.run_shortcut(Command::ToggleDevtools, event_loop);
             }
             return;
         }
+        if matches!(&self.tab_press, Some(TabPress::Select(drag)) if drag.started) {
+            if key == Key::Named(NamedKey::Escape) {
+                self.cancel_tab_press();
+            }
+            return;
+        }
+        self.cancel_tab_press();
         if self.settings_panel.is_some() {
             self.settings_key(key);
             return;
@@ -2158,6 +2228,7 @@ impl App {
         }
         if command == Some(Command::Downloads) {
             if !repeat {
+                self.dismiss_tab_context();
                 self.run_shortcut(Command::Downloads, event_loop);
             }
             return;
@@ -2175,6 +2246,9 @@ impl App {
         }
         if self.bookmark_panel_key(&key) {
             self.invalidate_favorites_hits();
+            return;
+        }
+        if self.tab_context_key(&key, command, repeat, event_loop) {
             return;
         }
         if let Some(Menu::Main(selected)) = self.chrome_menu {
@@ -2799,64 +2873,56 @@ impl App {
         self.tab_scroll = strip.scroll();
         let pointer = self.chrome_hover;
         let over_tabs = matches!(pointer, Some(Action::Select(_) | Action::Close(_)));
+        let drag = match &self.tab_press {
+            Some(TabPress::Select(drag)) if drag.started => Some(drag),
+            _ => None,
+        };
+        let preview = drag.and_then(|drag| {
+            Some((
+                self.tab_index(drag.id)?,
+                drag.destination?,
+                drag.left(self.mouse.0),
+            ))
+        });
+        let dragging = drag.is_some();
         canvas.clip(physical_rect(u, strip.list));
         for slot in strip.visible_tabs() {
-            let index = slot.index;
-            let tab = &self.tabs[index];
-            let close = Action::Close(tab.id);
+            let index = if let Some((from, to, _)) = preview {
+                let Some(index) = tab_behavior::preview_at(slot.index, from, to) else {
+                    let rect = physical_rect(u, slot.face);
+                    let radius = [tab_strip::TAB_RADIUS * u; 4];
+                    canvas.fill_rounded_rect(rect, radius, CHROME_ACCENT_SOFT);
+                    canvas.outline_rounded_rect(rect, radius, -u, u, CHROME_ACCENT);
+                    continue;
+                };
+                index
+            } else {
+                slot.index
+            };
+            let id = self.tabs[index].id;
+            let close = Action::Close(id);
             let active = index == self.active;
             // An old hit can be under a different tab after a reorder or
             // scroll. Painting takes hover from the new geometry.
-            let hovered = over_tabs && self.pointer_in(slot.visible_face);
+            let hovered = !dragging && over_tabs && self.pointer_in(slot.visible_face);
             let close_hovered = slot
                 .close
                 .as_ref()
                 .map(|button| hovered && self.pointer_in(button.hit));
-            let ink = self
-                .chrome_motion
-                .tab(tab.id, active, hovered, close_hovered);
+            let ink = self.chrome_motion.tab(id, active, hovered, close_hovered);
             draw_tab_face(canvas, slot.face, u, active, &ink);
-            if let Some(icon) = built_in_site_icon(&tab.url) {
-                canvas.image(physical_rect(u, slot.favicon), icon);
-            } else {
-                rounded_chrome_rect(
-                    canvas,
-                    physical_rect(u, slot.favicon),
-                    5. * u,
-                    CHROME_ACCENT_SOFT,
-                );
-                paint_centered_glyph(
-                    canvas,
-                    slot.favicon,
-                    13.,
-                    u,
-                    if tab.is_home() {
-                        icons::Glyph::Compass
-                    } else {
-                        icons::Glyph::Globe
-                    },
-                    CHROME_ACCENT,
-                );
+            draw_tab_contents(
+                canvas,
+                &mut self.fonts,
+                &self.tabs[index],
+                (slot.favicon, slot.title),
+                u,
+                if active { 620 } else { 400 },
+                chrome_mix(CHROME_MUTED, CHROME_TEXT, ink.text),
+            );
+            if !dragging {
+                self.hits.push((slot.visible_face, Action::Select(id)));
             }
-            let title = if tab.is_home() {
-                "Nowa karta"
-            } else {
-                &tab.title
-            };
-            let weight = if active { 620 } else { 400 };
-            let size = tab_strip::TAB_FONT_SIZE * u;
-            let title = chrome_elide(&self.fonts, title, slot.title.width * u, size, weight);
-            let run = chrome_shape(&self.fonts, &title, size, weight);
-            if run.advance <= slot.title.width * u {
-                canvas.text(
-                    slot.title.x * u,
-                    (slot.title.y + 20.) * u,
-                    &run,
-                    chrome_mix(CHROME_MUTED, CHROME_TEXT, ink.text),
-                    &mut self.fonts,
-                );
-            }
-            self.hits.push((slot.visible_face, Action::Select(tab.id)));
             if let Some(button) = slot.close {
                 if ink.close_hover > 0. && ink.close > 0. {
                     rounded_chrome_rect(
@@ -2886,8 +2952,29 @@ impl App {
                         ),
                     );
                 }
-                self.hits.push((button.hit, close));
+                if !dragging {
+                    self.hits.push((button.hit, close));
+                }
             }
+        }
+        if let Some((from, _, left)) = preview {
+            let face = Rect {
+                x: left,
+                ..strip.face(from)
+            };
+            let radius = [tab_strip::TAB_RADIUS * u; 4];
+            let rect = physical_rect(u, face);
+            canvas.fill_rounded_rect(rect, radius, CHROME_PANEL);
+            canvas.outline_rounded_rect(rect, radius, -u, u, CHROME_ACCENT);
+            draw_tab_contents(
+                canvas,
+                &mut self.fonts,
+                &self.tabs[from],
+                strip.contents(from, face),
+                u,
+                620,
+                CHROME_TEXT,
+            );
         }
         canvas.clip(scaled_rect(
             1.,
@@ -3405,6 +3492,7 @@ impl App {
             Some(Menu::Main(selected)) => self.draw_main_menu(canvas, selected),
             Some(Menu::Bookmarks(_)) => self.draw_bookmarks(canvas, width),
             Some(Menu::Tabs(selected)) => self.draw_tab_list(canvas, width, selected),
+            Some(Menu::TabContext(menu)) => self.draw_tab_context(canvas, width, menu),
             None => {}
         }
     }
@@ -3791,6 +3879,12 @@ impl App {
                 Action::SiteInfoClose | Action::SiteInfoSurface => {
                     self.site_info.is_some() && self.tab_hits_current
                 }
+                Action::TabContextSurface => matches!(self.chrome_menu, Some(Menu::TabContext(_))),
+                Action::TabContextRow(id, row) => {
+                    self.tab_hits_current
+                        && matches!(self.chrome_menu, Some(Menu::TabContext(menu)) if menu.target == *id)
+                        && self.tab_context_enabled(*id, *row)
+                }
                 action if action.address_suggestion() => self.suggestions_visible(),
                 #[cfg(all(windows, target_arch = "x86_64"))]
                 Action::UpdatePanel => self.update_view().is_some(),
@@ -3902,6 +3996,9 @@ impl App {
             }
         }
         let action = self.chrome_action_at_pointer();
+        if self.tab_context_press(action) {
+            return;
+        }
         // Geometry can change before its presentation (including an updater
         // offer resizing the omnibox). Don't fall through from a stale chrome
         // hit or an old suggestion row to the page.
@@ -3947,7 +4044,7 @@ impl App {
             if action.caption() {
                 self.caption_pressed = Some(action);
                 self.redraw();
-            } else {
+            } else if !self.start_tab_press(action) {
                 self.action(action, event_loop);
             }
         } else if WINDOW_FRAME && self.mouse.1 < TAB_H {
@@ -3991,6 +4088,9 @@ impl App {
     }
 
     fn left_release(&mut self, event_loop: &ActiveEventLoop) {
+        if self.finish_tab_press(event_loop) {
+            return;
+        }
         if self.resizing_dock {
             self.resizing_dock = false;
             self.update_pointer(true);
@@ -3998,6 +4098,9 @@ impl App {
         }
         if self.settings_panel.is_some() {
             self.settings_release();
+            return;
+        }
+        if self.tab_context_release(event_loop) {
             return;
         }
         if let Some(action) = self.caption_pressed.take() {
@@ -4014,6 +4117,7 @@ impl App {
             || self.downloads_panel.is_some()
             || self.site_info.is_some()
             || self.update_panel_open()
+            || matches!(self.chrome_menu, Some(Menu::TabContext(_)))
             || !self.pointer_in(self.window_regions(self.active).page)
         {
             return None;
@@ -4096,12 +4200,13 @@ impl App {
         }
         let regions = self.window_regions(self.active);
         let chrome = self.chrome_action_at_pointer();
-        let over_suggestions = chrome.is_some_and(Action::address_suggestion);
-        let divider = !over_suggestions
+        let over_popup = chrome.is_some_and(Action::address_suggestion)
+            || matches!(self.chrome_menu, Some(Menu::TabContext(_)));
+        let divider = !over_popup
             && regions
                 .dock
                 .is_some_and(|r| self.pointer_in(r) && self.mouse.1 - r.y < 5.);
-        let inspecting = !over_suggestions
+        let inspecting = !over_popup
             && regions.dock.is_some()
             && self.devtools.as_ref().is_some_and(|d| d.picking)
             && self.pointer_in(regions.page);
@@ -4135,7 +4240,9 @@ impl App {
                     Some(Action::Address) => CursorIcon::Text,
                     Some(Action::Back) if !history.can_traverse(-1) => CursorIcon::Default,
                     Some(Action::Forward) if !history.can_traverse(1) => CursorIcon::Default,
-                    Some(Action::SuggestionBackground) => CursorIcon::Default,
+                    Some(Action::SuggestionBackground | Action::TabContextSurface) => {
+                        CursorIcon::Default
+                    }
                     Some(action) if action.caption() => CursorIcon::Default,
                     Some(_) => CursorIcon::Pointer,
                     None if self.hover.is_some() => CursorIcon::Pointer,
@@ -4819,6 +4926,9 @@ impl ApplicationHandler<()> for App {
         }
         let mut redraw = self.apply_media_updates() | self.drain_network_observations();
         let mut deadline = self.tick_wheel(Instant::now());
+        if let Some(next) = self.tick_tab_drag(Instant::now()) {
+            deadline = Some(deadline.map_or(next, |current| current.min(next)));
+        }
         for index in 0..self.tabs.len() {
             let changed = self.advance_page(index) | self.sync_runtime(index);
             redraw |= changed && index == self.active;
@@ -5127,6 +5237,8 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.cancel_tab_press();
+                self.dismiss_tab_context();
                 let caption_changed = self.caption_pressed.take().is_some();
                 self.settings_cancel_pointer();
                 self.dismiss_address_suggestions();
@@ -5162,7 +5274,11 @@ impl ApplicationHandler<()> for App {
                 if event.state != ElementState::Pressed {
                     return;
                 }
-                if is_synthetic && event.logical_key == Key::Named(NamedKey::F12) {
+                if is_synthetic
+                    && (event.logical_key == Key::Named(NamedKey::F12)
+                        || matches!(self.chrome_menu, Some(Menu::TabContext(_)))
+                        || self.tab_press.is_some())
+                {
                     return;
                 }
                 let bookmarks_open = matches!(self.chrome_menu, Some(Menu::Bookmarks(_)));
@@ -5231,6 +5347,9 @@ impl ApplicationHandler<()> for App {
                     position.y as f32 / self.scale,
                 );
                 self.pointer_inside = true;
+                if self.track_tab_press() {
+                    return;
+                }
                 if self.resizing_dock
                     && let Some(rect) = dock
                 {
@@ -5242,6 +5361,8 @@ impl ApplicationHandler<()> for App {
                 self.update_pointer(was_in_dock || in_dock);
             }
             WindowEvent::CursorLeft { .. } => {
+                self.cancel_tab_press();
+                self.cancel_tab_context_press();
                 self.pointer_inside = false;
                 self.mouse = (f32::NEG_INFINITY, f32::NEG_INFINITY);
                 self.settings_cancel_pointer();
@@ -5257,23 +5378,16 @@ impl ApplicationHandler<()> for App {
                 button,
                 ..
             } => {
+                if self.tab_press.is_some() {
+                    self.cancel_tab_press();
+                    return;
+                }
                 if button == MouseButton::Left {
                     self.left_press(event_loop);
                 } else if self.site_info.is_some() {
                     self.site_info_press(false);
-                } else if button == MouseButton::Right
-                    && self.pointer_inside
-                    && self.history_menu.is_none()
-                    && self.downloads_panel.is_none()
-                    && !self.update_panel_open()
-                    && WINDOW_FRAME
-                    && self.settings_panel.is_none()
-                    && self.tab_hits_current
-                    && self.mouse.1 < TAB_H
-                    && self.chrome_action_at_pointer().is_none()
-                    && let Some(window) = &self.window
-                {
-                    window.show_window_menu(LogicalPosition::new(self.mouse.0, self.mouse.1));
+                } else if button == MouseButton::Right {
+                    self.right_tab_or_frame_press();
                 } else if button == MouseButton::Middle
                     && self.settings_panel.is_none()
                     && self.history_menu.is_none()
@@ -5301,7 +5415,9 @@ impl ApplicationHandler<()> for App {
                 ..
             } => self.left_release(event_loop),
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.settings_panel.is_some()
+                if self.tab_press.is_some()
+                    || matches!(self.chrome_menu, Some(Menu::TabContext(_)))
+                    || self.settings_panel.is_some()
                     || self.history_menu.is_some()
                     || self.site_info.is_some()
                     || self.update_panel_open()
@@ -5373,6 +5489,8 @@ impl ApplicationHandler<()> for App {
             WindowEvent::DroppedFile(path)
                 if self.settings_panel.is_none()
                     && !self.update_panel_open()
+                    && self.tab_press.is_none()
+                    && !matches!(self.chrome_menu, Some(Menu::TabContext(_)))
                     && self.tab_hits_current =>
             {
                 self.dismiss_history_menu();
@@ -5623,6 +5741,53 @@ fn rounded_chrome_rect(canvas: &mut Canvas, rect: Rect, radius: f32, color: Colo
     canvas.fill_rounded_rect(rect, [radius; 4], color);
 }
 
+fn draw_tab_contents(
+    canvas: &mut Canvas,
+    fonts: &mut Fonts,
+    tab: &Tab,
+    (favicon, label): (Rect, Rect),
+    scale: f32,
+    weight: u16,
+    color: Color,
+) {
+    if let Some(icon) = built_in_site_icon(&tab.url) {
+        canvas.image(physical_rect(scale, favicon), icon);
+    } else {
+        rounded_chrome_rect(
+            canvas,
+            physical_rect(scale, favicon),
+            5. * scale,
+            CHROME_ACCENT_SOFT,
+        );
+        paint_centered_glyph(
+            canvas,
+            favicon,
+            13.,
+            scale,
+            if tab.is_home() {
+                icons::Glyph::Compass
+            } else {
+                icons::Glyph::Globe
+            },
+            CHROME_ACCENT,
+        );
+    }
+    if label.width <= 0. {
+        return;
+    }
+    let title = if tab.is_home() {
+        "Nowa karta"
+    } else {
+        &tab.title
+    };
+    let size = tab_strip::TAB_FONT_SIZE * scale;
+    let title = chrome_elide(fonts, title, label.width * scale, size, weight);
+    let run = chrome_shape(fonts, &title, size, weight);
+    if run.advance <= label.width * scale {
+        canvas.text(label.x * scale, (label.y + 20.) * scale, &run, color, fonts);
+    }
+}
+
 fn paint_glyph(canvas: &mut Canvas, x: f32, y: f32, scale: f32, glyph: icons::Glyph, color: Color) {
     glyph.rasterize(
         x * scale,
@@ -5764,7 +5929,7 @@ mod download_wiring_tests {
             source,
         ];
 
-        let active = tab_behavior::move_tab(&mut tabs, 9, TabMove::Left, |tab| tab.id).unwrap();
+        let active = tab_behavior::move_tab(&mut tabs, 9, TabMove::Left, 0, |tab| tab.id).unwrap();
         assert_eq!(active, 0);
         assert_eq!(tabs[active].navigation, 7);
         assert!(apply_download_update(
