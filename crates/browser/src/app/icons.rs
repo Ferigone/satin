@@ -1,126 +1,428 @@
-//! Navigation glyphs on a 20-DIP grid. Sample the union of all strokes before
-//! compositing, so joins do not darken or thicken when partially covered.
+//! Native rasterization of the Quiet · Cinder icon artwork. All geometry stays
+//! on the source 24-unit viewBox until sampling at the requested device size.
 
-const SIZE: f32 = 20.;
-const HALF_STROKE: f32 = 0.75;
+// Explicit paths also support the standalone rustc harness in CHROME_GLYPHS.md.
+#[path = "icons/paths.rs"]
+mod paths;
+
+pub(super) use paths::Glyph;
+
+const VIEWBOX: usize = 24;
+const HALF_STROKE: f32 = 1.65 / 2.;
 const OFFSETS: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
-const SAMPLES: u16 = (OFFSETS.len() * OFFSETS.len()) as u16;
+const SAMPLES: u32 = (OFFSETS.len() * OFFSETS.len()) as u32;
 
-const RELOAD_X: f32 = 6.25;
-const RELOAD_Y: f32 = 2.55;
-const RELOAD_RADIUS: f32 = 6.75;
-const RELOAD_TIP: (f32, f32) = (10. + RELOAD_X, 10. - RELOAD_Y);
-const RELOAD_TAIL: (f32, f32) = (10. + RELOAD_X, 10. + RELOAD_Y);
+#[derive(Clone, Copy)]
+struct Point(f32, f32);
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum Glyph {
-    Back,
-    Forward,
-    Reload,
-    Search,
+impl Point {
+    fn dot(self, other: Self) -> f32 {
+        self.0 * other.0 + self.1 * other.1
+    }
+
+    fn cross(self, other: Self) -> f32 {
+        self.0 * other.1 - self.1 * other.0
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0, self.1 - other.1)
+    }
+
+    fn midpoint(self, other: Self) -> Self {
+        Self((self.0 + other.0) * 0.5, (self.1 + other.1) * 0.5)
+    }
 }
 
+#[derive(Clone, Copy)]
+struct Bounds {
+    min: Point,
+    max: Point,
+}
+
+impl Bounds {
+    fn union(self, other: Self) -> Self {
+        Self {
+            min: Point(self.min.0.min(other.min.0), self.min.1.min(other.min.1)),
+            max: Point(self.max.0.max(other.max.0), self.max.1.max(other.max.1)),
+        }
+    }
+
+    fn outset(self, distance: f32) -> Self {
+        Self {
+            min: Point(self.min.0 - distance, self.min.1 - distance),
+            max: Point(self.max.0 + distance, self.max.1 + distance),
+        }
+    }
+
+    fn at(point: Point) -> Self {
+        Self {
+            min: point,
+            max: point,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Segment {
-    start: (f32, f32),
-    delta: (f32, f32),
+    from: Point,
+    to: Point,
+    delta: Point,
     inverse_length_sq: f32,
 }
 
 impl Segment {
-    fn new(start: (f32, f32), end: (f32, f32)) -> Self {
-        let delta = (end.0 - start.0, end.1 - start.1);
+    fn new(from: Point, to: Point) -> Self {
+        let delta = to.sub(from);
+        let length_sq = delta.dot(delta);
         Self {
-            start,
+            from,
+            to,
             delta,
-            inverse_length_sq: length_sq(delta.0, delta.1).recip(),
+            inverse_length_sq: if length_sq > 0. {
+                length_sq.recip()
+            } else {
+                0.
+            },
         }
     }
 
-    fn contains(&self, x: f32, y: f32) -> bool {
-        let (x, y) = (x - self.start.0, y - self.start.1);
-        let (dx, dy) = self.delta;
-        let t = ((x * dx + y * dy) * self.inverse_length_sq).clamp(0., 1.);
-        length_sq(x - t * dx, y - t * dy) <= HALF_STROKE * HALF_STROKE
+    fn distance_sq(self, point: Point) -> f32 {
+        let p = point.sub(self.from);
+        let t = (p.dot(self.delta) * self.inverse_length_sq).clamp(0., 1.);
+        let d = Point(p.0 - t * self.delta.0, p.1 - t * self.delta.1);
+        d.dot(d)
     }
 }
 
-fn length_sq(x: f32, y: f32) -> f32 {
-    x * x + y * y
+#[derive(Clone, Copy)]
+enum Stroke {
+    Segment(Segment),
+    Circle {
+        center: Point,
+        radius: f32,
+    },
+    Arc {
+        center: Point,
+        radius: f32,
+        // Radial vectors in SVG's positive sweep direction.
+        start: Point,
+        end: Point,
+        large: bool,
+    },
 }
 
 fn in_ring(distance_sq: f32, radius: f32) -> bool {
-    let inner = radius - HALF_STROKE;
+    let inner = (radius - HALF_STROKE).max(0.);
     let outer = radius + HALF_STROKE;
-    distance_sq >= inner * inner && distance_sq <= outer * outer
+    (inner * inner..=outer * outer).contains(&distance_sq)
 }
 
-enum Shape {
-    Arrow {
-        shaft: Segment,
-        upper: Segment,
-        lower: Segment,
-        flip: bool,
-    },
-    Reload {
-        up: Segment,
-        left: Segment,
-    },
-    Search {
-        handle: Segment,
-    },
+impl Stroke {
+    fn bounds(self) -> Bounds {
+        match self {
+            Self::Segment(line) => Bounds::at(line.from).union(Bounds::at(line.to)),
+            Self::Circle { center, radius } | Self::Arc { center, radius, .. } => {
+                Bounds::at(center).outset(radius)
+            }
+        }
+        .outset(HALF_STROKE)
+    }
+
+    fn contains(self, point: Point) -> bool {
+        match self {
+            Self::Segment(line) => line.distance_sq(point) <= HALF_STROKE * HALF_STROKE,
+            Self::Circle { center, radius } => {
+                let p = point.sub(center);
+                in_ring(p.dot(p), radius)
+            }
+            Self::Arc {
+                center,
+                radius,
+                start,
+                end,
+                large,
+            } => {
+                let p = point.sub(center);
+                let a = start.cross(p) >= 0.;
+                let b = p.cross(end) >= 0.;
+                (if large { a || b } else { a && b }) && in_ring(p.dot(p), radius)
+            }
+        }
+    }
+}
+
+// A typed, absolute-coordinate transcription of the SVG subset in the reference.
+enum Command {
+    M(f32, f32),
+    L(f32, f32),
+    A(f32, bool, bool, f32, f32),
+    C(f32, f32, f32, f32, f32, f32),
+    Z,
+}
+
+#[derive(Clone, Copy)]
+enum Paint {
+    Foreground(u32), // SVG opacity as an integer percent (100 or 49).
+    AccentFill,      // Only painted when the toolbar bookmark star is active.
+}
+
+enum Element {
+    Path(&'static [Command]),
+    Circle(f32, f32, f32),
+    Ellipse(f32, f32, f32, f32),
+    Rect(f32, f32, f32, f32, f32),
+    Polygon(&'static [Point], Paint),
+}
+
+struct Shape {
+    // Index by viewBox row so a sample only tests strokes that can reach it.
+    rows: [Vec<(Bounds, Stroke)>; VIEWBOX],
+    fills: Vec<(&'static [Point], Paint)>,
+    bounds: Bounds,
 }
 
 impl Shape {
-    fn contains(&self, x: f32, y: f32) -> bool {
-        match self {
-            Self::Arrow {
-                shaft,
-                upper,
-                lower,
-                flip,
-            } => {
-                let x = if *flip { SIZE - x } else { x };
-                shaft.contains(x, y) || upper.contains(x, y) || lower.contains(x, y)
+    fn new(elements: &[Element]) -> Self {
+        let mut shape = Self {
+            rows: std::array::from_fn(|_| Vec::new()),
+            fills: Vec::new(),
+            bounds: Bounds {
+                min: Point(f32::INFINITY, f32::INFINITY),
+                max: Point(f32::NEG_INFINITY, f32::NEG_INFINITY),
+            },
+        };
+        for element in elements {
+            match *element {
+                Element::Path(commands) => shape.path(commands),
+                Element::Circle(x, y, radius) => shape.push(Stroke::Circle {
+                    center: Point(x, y),
+                    radius,
+                }),
+                Element::Ellipse(x, y, rx, ry) => {
+                    // The source ellipse has radii 4 and 9. At 128 segments its
+                    // chord error is below 0.003 viewBox units.
+                    let mut from = Point(x + rx, y);
+                    for step in 1..=128 {
+                        let (sin, cos) = (std::f32::consts::TAU * step as f32 / 128.).sin_cos();
+                        let to = Point(x + rx * cos, y + ry * sin);
+                        shape.line(from, to);
+                        from = to;
+                    }
+                }
+                Element::Rect(x, y, width, height, r) => {
+                    let (right, bottom) = (x + width, y + height);
+                    let mut from = Point(x + r, y);
+                    for (line, arc) in [
+                        (Point(right - r, y), Point(right, y + r)),
+                        (Point(right, bottom - r), Point(right - r, bottom)),
+                        (Point(x + r, bottom), Point(x, bottom - r)),
+                        (Point(x, y + r), Point(x + r, y)),
+                    ] {
+                        shape.line(from, line);
+                        shape.arc(line, arc, r, false, true);
+                        from = arc;
+                    }
+                }
+                Element::Polygon(points, paint) => {
+                    shape.fills.push((points, paint));
+                    for (&from, &to) in points.iter().zip(points.iter().cycle().skip(1)) {
+                        shape.bounds = shape.bounds.union(Bounds::at(from));
+                        if matches!(paint, Paint::AccentFill) {
+                            shape.line(from, to);
+                        }
+                    }
+                }
             }
-            Self::Reload { up, left } => {
-                let (dx, dy) = (x - 10., y - 10.);
-                // Omit the wedge to the right; the head and tail cover both round caps.
-                let outside_gap = dx * RELOAD_Y <= dy.abs() * RELOAD_X;
-                (outside_gap && in_ring(length_sq(dx, dy), RELOAD_RADIUS))
-                    || length_sq(x - RELOAD_TAIL.0, y - RELOAD_TAIL.1) <= HALF_STROKE * HALF_STROKE
-                    || up.contains(x, y)
-                    || left.contains(x, y)
+        }
+        shape
+    }
+
+    fn push(&mut self, stroke: Stroke) {
+        let bounds = stroke.bounds();
+        self.bounds = self.bounds.union(bounds);
+        let first = (bounds.min.1.floor() as usize).min(VIEWBOX);
+        let last = (bounds.max.1.floor() as usize + 1).min(VIEWBOX);
+        for row in &mut self.rows[first..last] {
+            row.push((bounds, stroke));
+        }
+    }
+
+    fn line(&mut self, from: Point, to: Point) {
+        self.push(Stroke::Segment(Segment::new(from, to)));
+    }
+
+    fn path(&mut self, commands: &[Command]) {
+        let mut pen = Point(0., 0.);
+        let mut start = pen;
+        for command in commands {
+            match *command {
+                Command::M(x, y) => {
+                    start = Point(x, y);
+                    pen = start;
+                }
+                Command::L(x, y) => {
+                    self.line(pen, Point(x, y));
+                    pen = Point(x, y);
+                }
+                Command::A(radius, large, sweep, x, y) => {
+                    self.arc(pen, Point(x, y), radius, large, sweep);
+                    pen = Point(x, y);
+                }
+                Command::C(x1, y1, x2, y2, x, y) => {
+                    self.cubic(pen, Point(x1, y1), Point(x2, y2), Point(x, y));
+                    pen = Point(x, y);
+                }
+                Command::Z => {
+                    self.line(pen, start);
+                    pen = start;
+                }
             }
-            Self::Search { handle } => {
-                in_ring(length_sq(x - 8.75, y - 8.75), 5.65) || handle.contains(x, y)
+        }
+    }
+
+    fn arc(&mut self, from: Point, to: Point, radius: f32, large: bool, sweep: bool) {
+        // SVG endpoint-to-center conversion for an unrotated circular arc.
+        // Enlarge a radius that cannot span the chord, as SVG does.
+        let half = from.midpoint(to).sub(from);
+        let length_sq = half.dot(half);
+        if length_sq == 0. {
+            return;
+        }
+        let radius = radius.max(length_sq.sqrt());
+        let sign = if large == sweep { -1. } else { 1. };
+        let offset = (radius * radius / length_sq - 1.).max(0.).sqrt() * sign;
+        let middle = from.midpoint(to);
+        let center = Point(middle.0 - half.1 * offset, middle.1 + half.0 * offset);
+        let (first, last) = if sweep { (from, to) } else { (to, from) };
+        self.push(Stroke::Arc {
+            center,
+            radius,
+            start: first.sub(center),
+            end: last.sub(center),
+            large,
+        });
+        // Disks at arc ends give the same round caps/joins as line capsules.
+        self.line(from, from);
+        self.line(to, to);
+    }
+
+    fn cubic(&mut self, from: Point, a: Point, b: Point, to: Point) {
+        // A cubic stays in the convex hull of its control points. Subdivide
+        // until that hull is within 0.003 viewBox units of the chord.
+        let line = Segment::new(from, to);
+        if line.distance_sq(a).max(line.distance_sq(b)) <= 0.003 * 0.003 {
+            self.push(Stroke::Segment(line));
+        } else {
+            let left = from.midpoint(a);
+            let right = b.midpoint(to);
+            let middle = a.midpoint(b);
+            let l2 = left.midpoint(middle);
+            let r2 = middle.midpoint(right);
+            let split = l2.midpoint(r2);
+            self.cubic(from, left, l2, split);
+            self.cubic(split, r2, right, to);
+        }
+    }
+
+    fn sample(&self, p: Point, accent_fill: bool) -> (u32, u32) {
+        if !(0. ..VIEWBOX as f32).contains(&p.1) || !(0. ..VIEWBOX as f32).contains(&p.0) {
+            return (0, 0);
+        }
+        if self.rows[p.1 as usize].iter().any(|&(bounds, stroke)| {
+            (bounds.min.0..=bounds.max.0).contains(&p.0) && stroke.contains(p)
+        }) {
+            return (100, 0);
+        }
+        for &(polygon, paint) in self.fills.iter().rev() {
+            if matches!(paint, Paint::AccentFill) && !accent_fill {
+                continue;
+            }
+            if point_in_polygon(p, polygon) {
+                return match paint {
+                    Paint::Foreground(opacity) => (opacity, 0),
+                    Paint::AccentFill => (0, 100),
+                };
+            }
+        }
+        (0, 0)
+    }
+
+    fn rasterize(
+        &self,
+        origin: Point,
+        size: f32,
+        width: u32,
+        height: u32,
+        accent_fill: bool,
+        mut pixel: impl FnMut(u32, u32, u8, u8),
+    ) {
+        if !size.is_finite() || size <= 0. || !origin.0.is_finite() || !origin.1.is_finite() {
+            return;
+        }
+        let scale = size / VIEWBOX as f32;
+        let left = (origin.0 + self.bounds.min.0.max(0.) * scale).floor() as u32;
+        let top = (origin.1 + self.bounds.min.1.max(0.) * scale).floor() as u32;
+        let right =
+            ((origin.0 + self.bounds.max.0.min(VIEWBOX as f32) * scale).ceil() as u32).min(width);
+        let bottom =
+            ((origin.1 + self.bounds.max.1.min(VIEWBOX as f32) * scale).ceil() as u32).min(height);
+        let units_per_pixel = scale.recip();
+        let alpha = |pct| ((pct * 255 + SAMPLES * 50) / (SAMPLES * 100)) as u8;
+        for row in top..bottom {
+            for column in left..right {
+                let mut foreground = 0;
+                let mut fill = 0;
+                for sy in OFFSETS {
+                    for sx in OFFSETS {
+                        let (fg, bg) = self.sample(
+                            Point(
+                                (column as f32 - origin.0 + sx) * units_per_pixel,
+                                (row as f32 - origin.1 + sy) * units_per_pixel,
+                            ),
+                            accent_fill,
+                        );
+                        foreground += fg;
+                        fill += bg;
+                    }
+                }
+                if foreground != 0 || fill != 0 {
+                    let foreground = alpha(foreground);
+                    pixel(column, row, foreground, alpha(fill).min(255 - foreground));
+                }
             }
         }
     }
 }
 
-impl Glyph {
-    fn shape(self) -> Shape {
-        match self {
-            Self::Back | Self::Forward => {
-                let tip = (3.25, 10.);
-                Shape::Arrow {
-                    shaft: Segment::new(tip, (16.75, 10.)),
-                    upper: Segment::new(tip, (8.75, 4.5)),
-                    lower: Segment::new(tip, (8.75, 15.5)),
-                    flip: matches!(self, Self::Forward),
-                }
-            }
-            Self::Reload => Shape::Reload {
-                up: Segment::new(RELOAD_TIP, (RELOAD_TIP.0, 3.15)),
-                left: Segment::new(RELOAD_TIP, (11.95, RELOAD_TIP.1)),
-            },
-            Self::Search => Shape::Search {
-                handle: Segment::new((12.75, 12.75), (17., 17.)),
-            },
-        }
-    }
+fn point_in_polygon(p: Point, polygon: &[Point]) -> bool {
+    // The source mark and star are simple polygons, so parity and SVG's
+    // default nonzero fill rule agree.
+    polygon
+        .iter()
+        .zip(polygon.iter().cycle().skip(1))
+        .filter(|&(&a, &b)| {
+            (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) * (b.0 - a.0) / (b.1 - a.1)
+        })
+        .count()
+        % 2
+        != 0
+}
 
-    /// Visit covered device pixels at the given physical origin and DPI scale.
+impl Glyph {
+    // Keep the existing native chrome call sites source-compatible.
+    #[allow(non_upper_case_globals)]
+    pub(super) const Back: Self = Self::ArrowLeft;
+    #[allow(non_upper_case_globals)]
+    pub(super) const Forward: Self = Self::ArrowRight;
+    #[allow(non_upper_case_globals)]
+    pub(super) const Reload: Self = Self::RotateCw;
+    #[allow(dead_code, non_upper_case_globals)]
+    pub(super) const Minimize: Self = Self::Minus;
+    #[allow(dead_code, non_upper_case_globals)]
+    pub(super) const Restore: Self = Self::Copy;
+
+    /// Visit covered device pixels at the given physical origin and DPI scale
+    /// using the existing 20-DIP chrome tile.
     pub(super) fn rasterize(
         self,
         x: f32,
@@ -128,114 +430,46 @@ impl Glyph {
         scale: f32,
         width: u32,
         height: u32,
+        pixel: impl FnMut(u32, u32, u8),
+    ) {
+        self.rasterize_sized(x, y, 20. * scale, width, height, pixel);
+    }
+
+    /// Visit each covered device pixel once. All coordinates and `size` are in
+    /// physical pixels. Coverage includes the Satin mark's path opacity.
+    pub(super) fn rasterize_sized(
+        self,
+        x: f32,
+        y: f32,
+        size: f32,
+        width: u32,
+        height: u32,
         mut pixel: impl FnMut(u32, u32, u8),
     ) {
-        let shape = self.shape();
-        let right = ((x + SIZE * scale).ceil() as u32).min(width);
-        let bottom = ((y + SIZE * scale).ceil() as u32).min(height);
-        let dips_per_pixel = scale.recip();
-        for row in (y.floor() as u32)..bottom {
-            for column in (x.floor() as u32)..right {
-                let mut covered = 0;
-                for sy in OFFSETS {
-                    for sx in OFFSETS {
-                        covered += u16::from(shape.contains(
-                            (column as f32 - x + sx) * dips_per_pixel,
-                            (row as f32 - y + sy) * dips_per_pixel,
-                        ));
-                    }
-                }
-                if covered != 0 {
-                    pixel(column, row, ((covered * 255 + SAMPLES / 2) / SAMPLES) as u8);
-                }
-            }
-        }
+        self.shape()
+            .rasterize(Point(x, y), size, width, height, false, |x, y, fg, _| {
+                pixel(x, y, fg);
+            });
+    }
+
+    /// The active bookmark star: stroke coverage uses the accent foreground
+    /// and the disjoint interior coverage uses the accent-soft fill. Combine
+    /// those color contributions against the background, not as nested alpha.
+    #[allow(dead_code)] // For the toolbar's active bookmark state.
+    pub(super) fn rasterize_bookmarked_star(
+        x: f32,
+        y: f32,
+        size: f32,
+        width: u32,
+        height: u32,
+        pixel: impl FnMut(u32, u32, u8, u8),
+    ) {
+        Self::Star
+            .shape()
+            .rasterize(Point(x, y), size, width, height, true, pixel);
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SCALES: [f32; 4] = [1., 1.25, 1.5, 2.];
-    const NAVIGATION: [(Glyph, f32); 4] = [
-        (Glyph::Back, 31.),
-        (Glyph::Forward, 83.),
-        (Glyph::Reload, 137.),
-        (Glyph::Search, 208.),
-    ];
-
-    fn raster(glyph: Glyph, scale: f32, x: f32, y: f32, side: usize) -> Vec<u8> {
-        let mut mask = vec![0; side * side];
-        glyph.rasterize(x, y, scale, side as u32, side as u32, |col, row, a| {
-            let slot = &mut mask[row as usize * side + col as usize];
-            assert_eq!(*slot, 0, "each output pixel must be blended only once");
-            *slot = a;
-        });
-        mask
-    }
-
-    #[test]
-    fn history_arrows_are_mirrors() {
-        for scale in SCALES {
-            let side = (SIZE * scale) as usize;
-            let back = raster(Glyph::Back, scale, 0., 0., side);
-            let forward = raster(Glyph::Forward, scale, 0., 0., side);
-            for (a, b) in back.chunks_exact(side).zip(forward.chunks_exact(side)) {
-                assert!(a.iter().eq(b.iter().rev()), "at {scale}x DPI");
-            }
-        }
-    }
-
-    #[test]
-    fn navigation_glyphs_keep_scale_and_a_connected_core() {
-        const SIDE: usize = 44;
-        for (glyph, chrome_x) in NAVIGATION {
-            let area = |mask: &[u8]| mask.iter().map(|a| f32::from(*a) / 255.).sum::<f32>();
-            let nominal = area(&raster(glyph, 1., 0., 0., SIDE));
-            for scale in SCALES {
-                // Keep the subpixel phase of the live toolbar coordinates.
-                let x = (chrome_x * scale).fract();
-                let y = (80. * scale).fract();
-                let mask = raster(glyph, scale, x, y, SIDE);
-                let ratio = area(&mask) / (nominal * scale * scale);
-                assert!(
-                    (0.94..=1.06).contains(&ratio),
-                    "{glyph:?} at {scale}x: {ratio}"
-                );
-
-                let mut core = mask.into_iter().map(|a| a >= 128).collect::<Vec<_>>();
-                let mut pending = vec![core.iter().position(|&p| p).unwrap()];
-                while let Some(index) = pending.pop() {
-                    if !std::mem::take(&mut core[index]) {
-                        continue;
-                    }
-                    let (col, row) = (index % SIDE, index / SIDE);
-                    // Leave a guard pixel around the 20-DIP tile.
-                    assert!(col > 0 && row > 0 && col + 1 < SIDE && row + 1 < SIDE);
-                    for next in [index - 1, index + 1, index - SIDE, index + SIDE] {
-                        if core[next] {
-                            pending.push(next);
-                        }
-                    }
-                }
-                assert!(!core.contains(&true), "broken {glyph:?} at {scale}x");
-            }
-        }
-    }
-
-    #[test]
-    fn reload_gap_and_search_aperture_stay_open() {
-        const SIDE: usize = 44;
-        for scale in SCALES {
-            let at = |x: f32, y: f32| (y * scale) as usize * SIDE + (x * scale) as usize;
-            let reload = raster(Glyph::Reload, scale, 0., 0., SIDE);
-            assert!(reload[at(3.25, 10.)] >= 128, "missing arc at {scale}x");
-            assert_eq!(reload[at(16.75, 10.)], 0, "closed reload gap at {scale}x");
-
-            let search = raster(Glyph::Search, scale, 0., 0., SIDE);
-            assert!(search[at(3.1, 8.75)] >= 128, "missing rim at {scale}x");
-            assert_eq!(search[at(8.75, 8.75)], 0, "filled lens at {scale}x");
-        }
-    }
-}
+#[path = "icons/tests.rs"]
+mod tests;
