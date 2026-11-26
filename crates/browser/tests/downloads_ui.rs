@@ -1,6 +1,6 @@
 //! Offline fixture and state tests; no browser process, network, or download files.
 
-#[path = "../src/app/downloads_ui/mod.rs"]
+#[path = "../src/app/downloads_ui/row.rs"]
 mod downloads_ui;
 
 use downloads_ui::{Action, Event, Failure, Intent, Progress, Row, SavedFileActions};
@@ -16,7 +16,7 @@ fn offline_fixture_presents_the_four_primary_states() {
     let mut canceled = row(3, "agenda.txt", None);
     let mut failed = row(4, "reading-list.txt", None);
 
-    ready.apply(1, Event::Saved(SavedFileActions::OpenAndReveal));
+    ready.apply(1, Event::Saved(18, SavedFileActions::OpenAndReveal));
     downloading.apply(2, Event::BytesWritten(50));
     assert!(canceled.activate(Action::Cancel).is_some());
     canceled.apply(3, Event::Canceled);
@@ -74,9 +74,10 @@ fn bytes_are_monotonic_and_only_save_acknowledgment_makes_the_row_ready() {
     assert_eq!(item.activate(Action::Open), None);
     assert_eq!(item.activate(Action::ShowInFolder), None);
 
-    item.apply(1, Event::Saved(SavedFileActions::RevealOnly));
+    item.apply(1, Event::Saved(u64::MAX, SavedFileActions::RevealOnly));
     assert_eq!(item.view().status, "Ready");
     assert_eq!(item.view().progress, None);
+    assert_eq!(item.view().saved_bytes, Some(u64::MAX));
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn cancel_waits_for_worker_acknowledgment_and_terminal_rows_ignore_late_events()
     assert_eq!(item.activate(Action::Cancel), None);
 
     item.apply(8, Event::Canceled);
-    item.apply(8, Event::Saved(SavedFileActions::OpenAndReveal));
+    item.apply(8, Event::Saved(100, SavedFileActions::OpenAndReveal));
     item.apply(8, Event::Failed(Failure::Save));
     item.apply(8, Event::BytesWritten(100));
     assert_eq!(item.view().status, "Canceled");
@@ -126,7 +127,7 @@ fn cancel_waits_for_worker_acknowledgment_and_terminal_rows_ignore_late_events()
 fn worker_may_report_a_save_that_won_the_cancel_race() {
     let mut item = row(9, "notes.txt", None);
     assert!(item.activate(Action::Cancel).is_some());
-    item.apply(9, Event::Saved(SavedFileActions::OpenAndReveal));
+    item.apply(9, Event::Saved(25, SavedFileActions::OpenAndReveal));
     item.apply(9, Event::Canceled);
     assert_eq!(item.view().status, "Ready");
     assert_eq!(item.activate(Action::Cancel), None);
@@ -142,10 +143,10 @@ fn worker_may_report_a_save_that_won_the_cancel_race() {
 #[test]
 fn reveal_only_policy_and_unavailable_files_disable_stale_actions() {
     let mut item = row(9, "notes.txt", None);
-    item.apply(1, Event::Saved(SavedFileActions::OpenAndReveal));
+    item.apply(1, Event::Saved(25, SavedFileActions::OpenAndReveal));
     assert_eq!(item.view().status, "Downloading…");
 
-    item.apply(9, Event::Saved(SavedFileActions::RevealOnly));
+    item.apply(9, Event::Saved(25, SavedFileActions::RevealOnly));
     assert_eq!(item.view().actions, &[Action::ShowInFolder]);
     assert_eq!(item.activate(Action::Open), None);
     assert_eq!(
@@ -156,7 +157,7 @@ fn reveal_only_policy_and_unavailable_files_disable_stale_actions() {
         })
     );
     item.apply(9, Event::FileUnavailable);
-    item.apply(9, Event::Saved(SavedFileActions::OpenAndReveal));
+    item.apply(9, Event::Saved(25, SavedFileActions::OpenAndReveal));
     assert_eq!(item.view().status, "File unavailable");
     assert_eq!(item.view().actions, &[]);
     assert_eq!(item.activate(Action::Open), None);
@@ -177,11 +178,24 @@ fn failure_reports_safe_copy_and_never_offers_file_actions() {
         assert!(item.activate(Action::Cancel).is_some());
         item.apply(1, Event::Failed(failure));
         item.apply(1, Event::Canceled);
-        item.apply(1, Event::Saved(SavedFileActions::OpenAndReveal));
+        item.apply(1, Event::Saved(25, SavedFileActions::OpenAndReveal));
         assert_eq!(item.view().status, "Failed");
         assert_eq!(item.view().detail, Some(message));
         assert_eq!(item.view().actions, &[]);
         assert_eq!(item.activate(Action::Open), None);
         assert_eq!(item.activate(Action::ShowInFolder), None);
     }
+}
+
+#[test]
+fn saving_without_a_verified_file_adapter_exposes_no_file_actions() {
+    let mut item = row(19, "notes.txt", None);
+    assert_eq!(item.id(), 19);
+    assert!(item.is_active());
+    item.apply(19, Event::Saved(2048, SavedFileActions::None));
+    assert!(!item.is_active());
+    assert_eq!(item.view().saved_bytes, Some(2048));
+    assert_eq!(item.view().actions, &[]);
+    assert_eq!(item.activate(Action::Open), None);
+    assert_eq!(item.activate(Action::ShowInFolder), None);
 }
