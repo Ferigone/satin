@@ -15,7 +15,7 @@ pub(super) fn evaluate(
     static REPORTS: AtomicUsize = AtomicUsize::new(0);
     if let (Err(error), Some(m)) = (&result, measurement)
         && REPORTS
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 (n < 128).then_some(n + 1)
             })
             .is_ok()

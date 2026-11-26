@@ -77,6 +77,9 @@ pub struct LoadedPage {
     pub url: String,
     pub base: Url,
     pub document: Arc<Document>,
+    // The streaming loader publishes headers before it can sniff the first
+    // bytes. It sets this once, before handing text to the parser.
+    document_encoding: Arc<std::sync::OnceLock<&'static encoding_rs::Encoding>>,
     pub(crate) raw_json: Option<crate::raw_json::SharedSource>,
     pub stylesheets: Arc<Vec<Arc<str>>>,
     pub linked_stylesheets: HashMap<NodeId, Arc<str>>,
@@ -117,11 +120,16 @@ impl ImageAvailability {
 }
 
 impl LoadedPage {
+    pub(crate) fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.document_encoding.get().copied().unwrap_or(encoding_rs::UTF_8)
+    }
+
     pub(crate) fn empty(url: Url, cookies: CookieStore, navigation_context: CookieContext) -> Self {
         Self {
             url: url.to_string(),
             base: url,
             document: Arc::new(Document::default()),
+            document_encoding: Arc::default(),
             raw_json: None,
             stylesheets: Arc::default(),
             linked_stylesheets: HashMap::new(),
@@ -234,6 +242,7 @@ impl LoadedPage {
             url: url.into(),
             base,
             document,
+            document_encoding: Arc::default(),
             raw_json: None,
             stylesheets: Arc::default(),
             linked_stylesheets: HashMap::new(),
@@ -595,7 +604,8 @@ impl Loader {
                 "<!doctype html><title>{title}</title><img src='about:document-image'>"
             ))
         } else {
-            let text = decode_text(&main.bytes, &main.content_type);
+            let (text, encoding) = decode_document_text(&main.bytes, &main.content_type);
+            let _ = page.document_encoding.set(encoding);
             DocumentInput::Html(if mime.is_some_and(|mime| mime.essence == "text/html") {
                 text
             } else {
@@ -796,6 +806,7 @@ impl Loader {
         page.document_policy = document_policy;
         page.fetch_loader = Some(self.clone());
         page.connect_policy = connect_policy;
+        let document_encoding = page.document_encoding.clone();
         let input = if raw_json {
             page.raw_json = Some(crate::raw_json::RawJson::shared());
             DocumentInput::StreamingJson
@@ -856,6 +867,7 @@ impl Loader {
         } else {
             text_encoding(&prefix, &content_type)
         };
+        let _ = document_encoding.set(encoding);
         let mut decoder = if raw_json {
             // A BOM may be split by more than one transport read and arrive
             // after the encoding-sniff deadline. JSON is always UTF-8.
@@ -995,10 +1007,10 @@ impl Loader {
             preview(page.clone());
             return Ok(page);
         }
-        let source = if svg_mime(&main.content_type) {
-            decode_text(&main.bytes, "image/svg+xml; charset=utf-8")
+        let (source, encoding) = if svg_mime(&main.content_type) {
+            decode_document_text(&main.bytes, "image/svg+xml; charset=utf-8")
         } else {
-            decode_text(&main.bytes, &main.content_type)
+            decode_document_text(&main.bytes, &main.content_type)
         };
         let source = if main.content_type.starts_with("text/plain") {
             format!(
@@ -1014,6 +1026,7 @@ impl Loader {
         } else {
             LoadedPage::from_html(&main.url, &source)
         };
+        let _ = page.document_encoding.set(encoding);
         page.cookies = self.cookies.clone();
         page.fetch_loader = Some(self.clone());
         page.connect_policy = main.connect_policy;
@@ -1097,7 +1110,11 @@ impl Loader {
                             page.stats.bytes += data.bytes.len();
                             page.stats.resources += 1;
                             script.name = data.url;
-                            script.source = Some(decode_text(&data.bytes, &data.content_type));
+                            let fallback = script_charset(&page.document, script.node)
+                                .unwrap_or_else(|| page.encoding());
+                            script.source = Some(decode_classic_script(
+                                &data.bytes, &data.content_type, fallback,
+                            ));
                         }
                         Err(error) => {
                             script.unsupported = Some(error);
@@ -1680,11 +1697,22 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     Ok(uri.into())
 }
 pub fn decode_text(bytes: &[u8], content_type: &str) -> String {
+    decode_document_text(bytes, content_type).0
+}
+
+fn decode_document_text(bytes: &[u8], content_type: &str) -> (String, &'static encoding_rs::Encoding) {
     let (encoding, bom) = text_encoding(bytes, content_type);
-    encoding
-        .decode_without_bom_handling(&bytes[bom..])
-        .0
-        .into_owned()
+    (encoding.decode_without_bom_handling(&bytes[bom..]).0.into_owned(), encoding)
+}
+
+pub(crate) fn script_charset(doc: &Document, node: NodeId) -> Option<&'static encoding_rs::Encoding> {
+    encoding_rs::Encoding::for_label(doc.attr(node, "charset")?.as_bytes())
+}
+
+fn decode_classic_script(bytes: &[u8], content_type: &str, fallback: &'static encoding_rs::Encoding) -> String {
+    // WHATWG fetch a classic script: BOM overrides transport charset, which
+    // in turn overrides the prepared element/document fallback.
+    declared_encoding(content_type).unwrap_or(fallback).decode(bytes).0.into_owned()
 }
 
 fn declared_encoding(content_type: &str) -> Option<&'static encoding_rs::Encoding> {
@@ -2039,6 +2067,21 @@ mod tests {
         assert!(
             decode_text("<meta charset='utf-8'>zażółć".as_bytes(), "text/html").ends_with("zażółć")
         );
+    }
+    #[test]
+    fn classic_script_selects_bom_then_transport_then_prepared_encoding() {
+        let js = "text/javascript";
+        assert_eq!(decode_classic_script("π".as_bytes(), js, encoding_rs::UTF_8), "π");
+        assert_eq!(decode_classic_script(&[0x80], js, encoding_rs::WINDOWS_1252), "€");
+        assert_eq!(decode_classic_script(
+            &[0x80], "text/javascript;charset=windows-1252", encoding_rs::UTF_8,
+        ), "€");
+        assert_eq!(decode_classic_script(
+            &[0xff, 0xfe, 0xc0, 0x03], "text/javascript;charset=windows-1252", encoding_rs::UTF_8,
+        ), "π");
+        assert_eq!(decode_classic_script(
+            "π".as_bytes(), "text/javascript;charset=invalid-encoding", encoding_rs::UTF_8,
+        ), "π");
     }
     #[test]
     fn urls_and_resource_boundary() {

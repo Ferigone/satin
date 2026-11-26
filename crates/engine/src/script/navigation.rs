@@ -1007,7 +1007,7 @@ impl DocumentSession {
                 }
                 Source::External(url) => {
                     let result = url.and_then(|url| {
-                        let request = resource_request(
+                        let mut request = resource_request(
                             url,
                             &self.client,
                             ResourceKind::ClassicScript,
@@ -1015,6 +1015,7 @@ impl DocumentSession {
                             tag.integrity,
                             ResourceQueue::queue_deadline(),
                         );
+                        request.script_encoding = Some(tag.charset.unwrap_or_else(|| page.encoding()));
                         self.resources.queue(request, Consumer::Classic(node))
                     });
                     match result {

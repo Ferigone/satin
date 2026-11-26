@@ -300,6 +300,7 @@ fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
                 source,
                 cors: cors_attr(doc, id),
                 integrity: integrity_attr(doc, id),
+                charset: crate::loader::script_charset(doc, id),
             };
             state.dynamic_scripts.pending.push(tag);
             None

@@ -43,6 +43,7 @@ pub(super) struct ScriptTag {
     pub source: Source,
     pub cors: Option<CredentialsMode>,
     pub integrity: Option<Arc<str>>,
+    pub charset: Option<&'static encoding_rs::Encoding>,
 }
 impl ScriptTag {
     pub fn external(&self) -> bool {
@@ -325,6 +326,7 @@ impl ParserHost {
             source,
             cors,
             integrity: integrity_attr(doc, node),
+            charset: crate::loader::script_charset(doc, node),
         })
     }
 
@@ -885,6 +887,7 @@ pub(super) fn resource_request(
         url,
         client: client.clone(),
         kind,
+        script_encoding: None,
         cors,
         integrity,
         deadline,

@@ -27,6 +27,7 @@ pub struct ResourceRequest {
     pub(crate) url: Url,
     pub(crate) client: Arc<Url>,
     pub(crate) kind: ResourceKind,
+    pub(crate) script_encoding: Option<&'static encoding_rs::Encoding>,
     pub(crate) cors: Option<CredentialsMode>,
     pub(crate) integrity: Option<Arc<str>>,
     pub(crate) deadline: Instant,
@@ -263,16 +264,17 @@ impl Loader {
         control.check().map_err(interrupted_resource)?;
         let transferred = bytes.len();
         let kind = request.kind.clone();
+        let script_encoding = request.script_encoding;
         let body = if matches!(kind, Image | Font) {
             // A decoder can be CPU-intensive. Keep the bounded resource slot
             // until its work returns so canceling tabs cannot pile up decoders.
             tokio::task::spawn_blocking(move || {
-                decode_resource(kind, &content_type, &bytes, nosniff)
+                decode_resource(kind, &content_type, &bytes, nosniff, script_encoding)
             })
             .await
             .map_err(|error| error.to_string())??
         } else {
-            decode_resource(kind, &content_type, &bytes, nosniff)?
+            decode_resource(kind, &content_type, &bytes, nosniff, script_encoding)?
         };
         control.check().map_err(interrupted_resource)?;
         let mut url = Url::parse(&final_url).map_err(|error| error.to_string())?;
@@ -316,6 +318,7 @@ fn decode_resource(
     content_type: &str,
     bytes: &[u8],
     nosniff: bool,
+    script_encoding: Option<&'static encoding_rs::Encoding>,
 ) -> Result<ResourceBody, String> {
     use ResourceKind::*;
     let mime = MimeType::parse(content_type);
@@ -347,7 +350,9 @@ fn decode_resource(
                     "Classic script blocked by MIME policy: {essence:?}"
                 ));
             }
-            ResourceBody::Text(decode_text(bytes, content_type))
+            ResourceBody::Text(decode_classic_script(
+                bytes, content_type, script_encoding.unwrap_or(encoding_rs::UTF_8),
+            ))
         }
         Stylesheet => {
             if essence != "text/css" {

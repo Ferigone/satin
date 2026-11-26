@@ -447,6 +447,7 @@ fn load(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<bool, JsError> {
             url,
             client,
             kind: ResourceKind::Media,
+            script_encoding: None,
             cors,
             integrity: None,
             deadline: Instant::now() + std::time::Duration::from_secs(18),

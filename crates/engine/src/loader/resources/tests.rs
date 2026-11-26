@@ -104,6 +104,7 @@ fn stylesheet(url: &str, cors: Option<CredentialsMode>) -> ResourceRequest {
         client: Arc::new(url.join("/index").unwrap()),
         url,
         kind: ResourceKind::Stylesheet,
+        script_encoding: None,
         cors,
         integrity: None,
         deadline: Instant::now() + Duration::from_secs(3),

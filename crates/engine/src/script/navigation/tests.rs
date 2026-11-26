@@ -285,6 +285,24 @@ fn evaluate(runtime: &mut Option<ScriptRuntime>, expression: &str) -> Value {
 }
 
 #[test]
+fn parser_and_dynamic_classic_requests_snapshot_element_or_document_encoding() {
+    let (mut page, mut session, mut runtime) = start(r#"
+        <script src='first.js' charset='bogus'></script>
+        <script>
+          var child = document.createElement('script');
+          child.setAttribute('charset', 'windows-1252');
+          child.src = 'second.js';
+          document.head.appendChild(child);
+          child.setAttribute('charset', 'utf-8');
+        </script>"#);
+    let first = session.next_resource().unwrap();
+    assert_eq!(first.request.script_encoding, Some(encoding_rs::UTF_8));
+    complete(&mut page, &mut session, &mut runtime, first.id, Some(("first.js", "")));
+    let second = session.next_resource().unwrap();
+    assert_eq!(second.request.script_encoding, Some(encoding_rs::WINDOWS_1252));
+}
+
+#[test]
 fn external_classic_bundle_runs_within_the_remaining_document_budget() {
     let (mut page, mut session, mut runtime) = start(
         "<script src='large.js'></script><script src='overflow.js'></script>",
