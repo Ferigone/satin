@@ -241,7 +241,7 @@ async function chromeCase(exe, chromium, { site, url }) {
     }, player[site].shell, { timeout, polling: 200 }).then(() => true, () => false);
     const playing = await waitForPlaying(18000);
     let start = await record('progress-start');
-    if (!playing && site === 'youtube' && start?.video?.paused && !start.youtubeAccessWall && !start.consentVisible) {
+    if (!playing && start?.video?.paused && !start.youtubeAccessWall && !start.consentVisible && !start.twitchGate && !start.adMarker) {
       outcome.controls.playRetry = await click(play) ? 'clicked' : 'play control unavailable';
       await waitForPlaying(8000);
       start = await record('after-play-retry');
