@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 pub(super) mod chrome;
+pub(super) mod suggestions;
 
 const MAX_ADDRESS_BYTES: usize = 16_384;
 
