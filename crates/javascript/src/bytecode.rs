@@ -292,9 +292,25 @@ pub(crate) fn compile_eval(
     inherited_strict: bool,
     context: parser::EvalContext,
 ) -> Result<Rc<Chunk>, JsError> {
+    compile_with_phases(lexer, source_bytes, inherited_strict, context, |_| {})
+}
+
+pub(crate) fn compile_with_phases(
+    lexer: crate::lexer::Lexer,
+    source_bytes: usize,
+    inherited_strict: bool,
+    context: parser::EvalContext,
+    mut phase: impl FnMut(&'static str),
+) -> Result<Rc<Chunk>, JsError> {
+    phase("source");
     let body = parser::parse_script(lexer, source_bytes, context, inherited_strict)?;
+    phase("parsed");
     let strict = inherited_strict || parser::has_strict_directive(&body);
-    block(&body, true, strict)
+    let result = block(&body, true, strict);
+    phase("emitted");
+    drop(body);
+    phase("retained");
+    result
 }
 pub(crate) fn compile_dynamic_function(
     parameters: &str,

@@ -11,6 +11,11 @@ path = "src/lib.rs"
 [features]
 twitch-bootstrap-profile = []
 media-startup-diagnostics = []
+compiler-qa = []
+
+[[example]]
+name = "profile_compiler"
+required-features = ["compiler-qa"]
 
 [dependencies]
 icu_normalizer = "=2.4.0"

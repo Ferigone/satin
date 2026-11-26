@@ -374,6 +374,26 @@ impl Vm {
         let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
         self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
+
+    #[cfg(feature = "compiler-qa")]
+    #[doc(hidden)]
+    pub fn qa_profile_compilation(
+        &mut self,
+        source: &str,
+        phase: impl FnMut(&'static str),
+    ) -> Result<usize, JsError> {
+        let budget = self.compilation_budget(source)?;
+        let chunk = bytecode::compile_with_phases(
+            crate::lexer::Lexer::new(source, budget, true),
+            source.len(),
+            false,
+            crate::parser::EvalContext::default(),
+            phase,
+        )?;
+        let retained = bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]);
+        self.ensure_allocation(retained)?;
+        Ok(retained)
+    }
     pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
         // The ASCII lexer backs its spans with one byte instead of four
         // per source character. Keep the same decoded-literal scratch allowance.

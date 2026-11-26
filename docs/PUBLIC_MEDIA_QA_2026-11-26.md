@@ -91,6 +91,18 @@ decoded audio bytes and both pause/resume checks. YouTube also sought.
 Twitch did not expose a seek range or render chat lines in this particular
 reference sample. None of these observations establish audible output.
 
+`405d69c` passed 172 focused Rust tests, four sanitizer tests and all four
+native progressive/MSE controls (`target/native-media-BAclQg/`). On the
+live repeat (`target/public-media/satin-eTZLp7/`), YouTube ran 51 scripts
+with no compiler-budget failure reported, but still exhausted execution
+fuel in inline script #293 and produced zero decoded frames. Twitch still
+exhausted native work in its CDN core, with no player. The live inputs were
+not frozen byte for byte, so the change in error class is an observation,
+not a fixed-input causal comparison.
+
+See the [comparative engine research](PUBLIC_MEDIA_ENGINE_RESEARCH_2026-11-26.md)
+for primary sources, what transfers to Satin, and measurement gates.
+
 ## Compiler memory policy
 
 There is no universal compiler-memory quota in ECMAScript. Its
