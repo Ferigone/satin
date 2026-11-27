@@ -333,10 +333,8 @@ impl Player {
                 self.paused_for_seek = true;
                 self.seeking = true;
                 self.playing = false;
+                output.publish(key, EventKind::Waiting);
                 output.publish(key, EventKind::Seeking);
-                if self.play_requested {
-                    output.publish(key, EventKind::Waiting);
-                }
             }
             return Ok(());
         }

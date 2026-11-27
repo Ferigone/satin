@@ -1287,7 +1287,12 @@ impl super::ScriptRuntime {
                 }
             }
             MediaUpdate::Waiting => {
-                if !track.paused {
+                if track.seeking {
+                    track.ready = track.ready.min(1);
+                    if !track.paused {
+                        events = &["waiting"];
+                    }
+                } else if !track.paused {
                     // The current frame may still be displayed, but there isn't
                     // enough data to continue. Don't leave readyState at 4.
                     track.ready = track.ready.min(2);

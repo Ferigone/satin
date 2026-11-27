@@ -41,6 +41,30 @@ fn played_reports_snapshots_of_playback_without_covering_seek_gaps() {
 }
 
 #[test]
+fn seeking_listener_observes_missing_target_data_even_when_paused() {
+    use rust_browser_engine::script::MediaUpdate;
+    use rust_browser_javascript::Value;
+
+    let page = LoadedPage::from_html("https://example.test/", "<video id='clip'></video>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval(r#"
+        const clip = document.getElementById('clip');
+        let observed;
+        clip.src = URL.createObjectURL(new Blob(['sample'], {type: 'video/mp4'}));
+        clip.onseeking = () => { observed = [clip.currentTime, clip.readyState, clip.paused].join('/'); };
+    "#).unwrap();
+    let commands = runtime.take_media_commands();
+    let [MediaCommand::Open { key, .. }, ..] = commands.as_slice() else {
+        panic!("expected a media source");
+    };
+    runtime.update_media(*key, MediaUpdate::Ready);
+    runtime.eval("clip.currentTime = 30").unwrap();
+    runtime.update_media(*key, MediaUpdate::Waiting);
+    runtime.update_media(*key, MediaUpdate::Seeking);
+    assert_eq!(runtime.eval("observed").unwrap(), Value::from("30/1/true"));
+}
+
+#[test]
 fn only_actual_volume_and_mute_changes_dispatch_volumechange() {
     let page = LoadedPage::from_html(
         "https://example.test/",
