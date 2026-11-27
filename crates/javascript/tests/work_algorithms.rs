@@ -117,3 +117,25 @@ fn compound_updates_hold_the_canonical_reference_across_rhs_and_yield() {
     "#).unwrap();
     assert_eq!(result, Value::Bool(true));
 }
+
+#[test]
+fn fixed_calls_capture_getters_receivers_and_arguments_in_source_order() {
+    let mut vm = Vm::new();
+    let value = vm.eval(r#"
+        let log="", n=0;
+        const target={v:3,get f(){log+="f";return function(a,b,c){return this.v+a+b+c}}};
+        const args={get x(){log+="x";return ++n}};
+        const value=target.f(args.x,args.x,args.x);
+        const direct=function(){let local=7;return eval("local")};
+        const skipped=null?.f(args.x); const plain=(a,b)=>a+b;
+        const spread=plain(...[1,2]); const optional=target.f?.(1,2,3);
+        log==="fxxxf" && value===9 && direct()===7 && skipped===undefined &&
+        spread===3 && optional===9
+    "#).unwrap();
+    assert_eq!(value, Value::Bool(true));
+
+    let mut vm = Vm::with_limits(VmLimits { max_array_length: 1, ..VmLimits::default() });
+    assert_eq!(vm.eval("var log='';function f(){};f(log+='a',log+='b',log+='c')").unwrap_err().kind,
+        ErrorKind::ExecutionLimit);
+    assert_eq!(vm.eval("log").unwrap(), Value::from("ab"));
+}

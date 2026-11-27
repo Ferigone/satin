@@ -3395,13 +3395,17 @@ impl Vm {
         }
         Ok(())
     }
-    fn append_argument(&mut self, args: &mut Vec<Value>, value: Value) -> Result<(), JsError> {
-        if args.len() >= self.limits.max_array_length as usize {
+    fn check_argument_slot(&self, index: usize) -> Result<(), JsError> {
+        if index >= self.limits.max_array_length as usize {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Argument list budget exhausted",
             ));
         }
+        Ok(())
+    }
+    fn append_argument(&mut self, args: &mut Vec<Value>, value: Value) -> Result<(), JsError> {
+        self.check_argument_slot(args.len())?;
         self.reserve_allocation(std::mem::size_of::<Value>() * 2)?;
         self.account_value(value.clone())?;
         self.tick()?;
@@ -3710,7 +3714,7 @@ impl Vm {
             | Op::ObjectProperty { .. }
             | Op::Function(..)
             | Op::InferName(..)) => self.run_literal_op(op, stack, env, strict)?,
-            op @ (Op::PrepareCall(..)
+            op @ (Op::PrepareCall(..) | Op::PrepareMethod(..) | Op::FixedCall(..) | Op::FixedArgument(..)
             | Op::Arguments
             | Op::Argument(..)
             | Op::Call
@@ -4088,6 +4092,18 @@ impl Vm {
                 });
             }
             Op::Arguments => stack.push(Item::Arguments(Vec::new())),
+            Op::PrepareMethod(name) => {
+                self.check_string_length(name.len())?;
+                self.account_string(name)?;
+                let this = self.pop_value(stack)?;
+                let function = self.read_named_property(this.clone(), name)?;
+                stack.push(Item::CallTarget { function, this, direct_eval: false });
+            }
+            Op::FixedArgument(index) => {
+                let value = self.pop_value(stack)?;
+                self.check_argument_slot(usize::from(*index))?;
+                stack.push(Item::Value(self.account_value(value)?));
+            }
             Op::Argument(spread) => {
                 let value = self.pop_value(stack)?;
                 let Some(Item::Arguments(args)) = stack.last_mut() else {
@@ -4102,9 +4118,22 @@ impl Vm {
                     self.append_argument(args, value)?;
                 }
             }
-            Op::Call => {
-                let Some(Item::Arguments(args)) = stack.pop() else {
-                    unreachable!()
+            Op::Call | Op::FixedCall(_) => {
+                let dynamic;
+                let mut fixed = [const { Value::Undefined }; crate::bytecode::INLINE_ARGUMENTS];
+                let args: &[Value] = if let Op::FixedCall(count) = *op {
+                    let n = usize::from(count);
+                    if n > 0 {
+                        let last = self.pop_value(stack)?;
+                        self.check_argument_slot(n - 1)?;
+                        fixed[n - 1] = self.account_value(last)?;
+                        for item in fixed[..n-1].iter_mut().rev() { *item = self.pop_value(stack)?; }
+                    }
+                    &fixed[..n]
+                } else {
+                    let Some(Item::Arguments(values)) = stack.pop() else { unreachable!() };
+                    dynamic = values;
+                    &dynamic
                 };
                 let Some(Item::CallTarget {
                     function,
@@ -4117,7 +4146,7 @@ impl Vm {
                 let value = if direct_eval && function.as_object() == self.realm.intrinsic_eval {
                     self.direct_eval(args.first().cloned().unwrap_or_default(), env, strict)?
                 } else {
-                    self.invoke(function, this, &args)?
+                    self.invoke(function, this, args)?
                 };
                 stack.push(Item::Value(value));
             }

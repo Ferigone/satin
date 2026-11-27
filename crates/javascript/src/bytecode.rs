@@ -124,6 +124,7 @@ pub(crate) struct ForCode {
     pub lexical: Vec<(JsString, bool)>,
     pub label: Option<LabelId>,
 }
+pub(crate) const INLINE_ARGUMENTS: usize = 3;
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
     Push(Value),
@@ -189,8 +190,11 @@ pub(crate) enum Op {
     Function(Rc<Code>),
     InferName(JsString),
     PrepareCall(bool),
+    PrepareMethod(JsString),
     Arguments,
     Argument(bool),
+    FixedArgument(u8),
+    FixedCall(u8),
     Call,
     Construct,
     /// Store the expression's GetValue as the statement-list completion.
@@ -423,6 +427,7 @@ pub(crate) fn retained_size(
                 | Op::LoadName(s)
                 | Op::NamedProperty(s)
                 | Op::LoadProperty(s)
+                | Op::PrepareMethod(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
                 | Op::InferName(s)
@@ -1404,6 +1409,31 @@ enum Emit<'a> {
 }
 /// Explicit traversal keeps compiler frames independent of expression depth.
 /// Function bodies retain the independent parser/AST nesting guards.
+fn queue_arguments<'a>(args: &'a [Expr], action: Op, pending: &mut Vec<Emit<'a>>) {
+    use Emit::{Expression as E, Instruction as I};
+    if matches!(action, Op::Call) && args.len() <= INLINE_ARGUMENTS
+        && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
+    {
+        pending.push(I(Op::FixedCall(args.len() as u8)));
+        for (i, arg) in args.iter().enumerate().rev() {
+            // FixedCall checks its last argument. Earlier arguments must be
+            // resolved and checked before evaluating the next expression.
+            if i + 1 < args.len() { pending.push(I(Op::FixedArgument(i as u8))); }
+            pending.push(E(arg));
+        }
+    } else {
+        pending.push(I(action));
+        for arg in args.iter().rev() {
+            if let Expr::Spread(value) = arg {
+                pending.extend([I(Op::Argument(true)), E(value)]);
+            } else {
+                pending.extend([I(Op::Argument(false)), E(arg)]);
+            }
+        }
+        pending.push(I(Op::Arguments));
+    }
+}
+
 fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
     use Emit::{Expression as E, Instruction as I, Reference as R};
     let mut pending = vec![E(e)];
@@ -1530,15 +1560,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                                 pending.push(I(Op::Get));
                             }
                             ChainLink::Call(args, optional) => {
-                                pending.push(I(Op::Call));
-                                for arg in args.iter().rev() {
-                                    if let Expr::Spread(value) = arg {
-                                        pending.extend([I(Op::Argument(true)), E(value)]);
-                                    } else {
-                                        pending.extend([I(Op::Argument(false)), E(arg)]);
-                                    }
-                                }
-                                pending.push(I(Op::Arguments));
+                                queue_arguments(args, Op::Call, &mut pending);
                                 if *optional {
                                     pending.push(Emit::Optional(branches.clone(), true));
                                 }
@@ -1744,29 +1766,21 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.push(E(base));
                 }
                 Expr::Call(target, args) if matches!(target.as_ref(), Expr::Super) => {
-                    pending.push(I(Op::SuperConstruct));
-                    for arg in args.iter().rev() {
-                        if let Expr::Spread(value) = arg {
-                            pending.extend([I(Op::Argument(true)), E(value)]);
-                        } else {
-                            pending.extend([I(Op::Argument(false)), E(arg)]);
-                        }
-                    }
-                    pending.extend([I(Op::Arguments), I(Op::SuperConstructor)]);
+                    queue_arguments(args, Op::SuperConstruct, &mut pending);
+                    pending.push(I(Op::SuperConstructor));
                 }
                 Expr::Call(target, args) | Expr::New(target, args) => {
                     let call = matches!(e, Expr::Call(..));
-                    pending.push(I(if call { Op::Call } else { Op::Construct }));
-                    for arg in args.iter().rev() {
-                        if let Expr::Spread(value) = arg {
-                            pending.extend([I(Op::Argument(true)), E(value)]);
-                        } else {
-                            pending.extend([I(Op::Argument(false)), E(arg)]);
-                        }
-                    }
-                    pending.push(I(Op::Arguments));
+                    queue_arguments(args, if call { Op::Call } else { Op::Construct }, &mut pending);
                     if call {
-                        pending.extend([I(Op::PrepareCall(true)), R(target, false)]);
+                        if let Expr::Member(object, key) = ungroup(target)
+                            && !matches!(object.as_ref(), Expr::Super)
+                            && let Expr::Literal(Value::String(name)) = key.as_ref()
+                        {
+                            pending.extend([I(Op::PrepareMethod(name.clone())), E(object)]);
+                        } else {
+                            pending.extend([I(Op::PrepareCall(true)), R(target, false)]);
+                        }
                     } else {
                         pending.push(E(target));
                     }
