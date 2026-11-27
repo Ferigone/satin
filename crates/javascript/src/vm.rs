@@ -2542,6 +2542,25 @@ impl Vm {
             let receiver = if object == Value::Null { "null" } else { "undefined" };
             let units = name.as_utf16();
             let clipped_name = String::from_utf16_lossy(&units[..units.len().min(128)]);
+            // Temporary QA instrumentation for the public map retest; never merge.
+            if matches!(clipped_name.as_str(), "length" | "value") {
+                static QA_NAMED_NULL: std::sync::atomic::AtomicUsize =
+                    std::sync::atomic::AtomicUsize::new(0);
+                if QA_NAMED_NULL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                    let frames = self.legacy_calls.iter().rev().take(4).filter_map(|frame| {
+                        let object = self.heap.object(frame.function).ok()?;
+                        if let ObjectKind::Function { code, .. } = &object.kind {
+                            let prefix: String = code.source.iter().take(240)
+                                .map(|&point| char::from_u32(point).unwrap_or(char::REPLACEMENT_CHARACTER))
+                                .collect();
+                            Some(prefix)
+                        } else {
+                            None
+                        }
+                    }).collect::<Vec<_>>();
+                    eprintln!("QA_NAMED_NULL property={clipped_name:?} base={receiver} frames={frames:?}");
+                }
+            }
             return Err(JsError::type_error(format!(
                 "Cannot read properties of {receiver} (reading {clipped_name:?})"
             )));
