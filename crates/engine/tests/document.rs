@@ -120,3 +120,38 @@ fn dom_implementation_creates_independent_html_documents() {
         "#,
     );
 }
+
+#[test]
+fn dom_parser_creates_inert_independent_html_documents() {
+    check(
+        r#"
+        (() => {
+            const assert = (ok, label) => { if (!ok) throw Error(label); };
+            const parser = new DOMParser();
+            const d = parser.parseFromString('<!doctype html><title>Parsed</title><main id="local"><svg><circle/></svg><template><b>nested</b></template></main><script>globalThis.parserRan = true</script>', 'text/html');
+            assert(parser instanceof DOMParser && window.DOMParser === DOMParser, 'constructor');
+            assert(d instanceof Document && d !== document && d.defaultView === null &&
+                   d.contentType === 'text/html' && d.title === 'Parsed' && d.doctype.name === 'html', 'document');
+            const main = d.getElementById('local');
+            assert(main === d.body.querySelector('main') && main.ownerDocument === d &&
+                   main.querySelector('circle').namespaceURI === 'http://www.w3.org/2000/svg' &&
+                   main.querySelector('template').content.firstChild.textContent === 'nested', 'tree and namespaces');
+            assert(document.getElementById('local') === null && document.title === 'Live' &&
+                   globalThis.parserRan === undefined, 'inert and isolated');
+            assert(parser.parseFromString('<p>another</p>', 'text/html') !== d, 'fresh documents');
+            for (const call of [() => DOMParser(), () => parser.parseFromString('x'),
+                () => parser.parseFromString('x', 'text/plain'),
+                () => parser.parseFromString.call({}, 'x', 'text/html')]) {
+                let name;
+                try { call(); } catch (error) { name = error.name; }
+                assert(name === 'TypeError', 'Web IDL receiver and arguments');
+            }
+            document.body.appendChild(main);
+            assert(main.ownerDocument === document && d.getElementById('local') === null, 'adoption');
+            document.body.appendChild(d.querySelector('script'));
+            assert(globalThis.parserRan === undefined, 'adopted parsed scripts stay inert');
+            return 'ok';
+        })()
+        "#,
+    );
+}

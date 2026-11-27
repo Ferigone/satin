@@ -947,7 +947,70 @@ pub(super) fn install(
     install_mutations(vm, state, prototype.clone(), &errors)?;
     install_html(vm, state, prototype.clone(), &errors)?;
     install_cloning(vm, state, prototype, document, &errors)?;
+    install_dom_parser(vm, state, &errors)?;
     Ok(errors)
+}
+
+// A parser owns no DOM tree itself. Each invocation imports a new inert
+// HTML document through the same bounded staging path as DOM mutations.
+struct DomParser;
+
+fn install_dom_parser(vm: &mut Vm, state: &Shared, errors: &Errors) -> Result<(), JsError> {
+    let prototype = vm.new_object();
+    vm.root(prototype.clone());
+    let intrinsic = prototype.clone();
+    webidl::interface(vm, prototype.clone(), "DOMParser", 0, move |vm, _, _, target| {
+        let target = target.ok_or_else(|| JsError::type_error("DOMParser requires new"))?;
+        let object = webidl::instance(vm, target, &intrinsic)?;
+        vm.set_host_data(object.clone(), Rc::new(DomParser))?;
+        Ok(object)
+    })?;
+    let host = state.clone();
+    let errors = errors.clone();
+    webidl::operation(vm, prototype, "parseFromString", 2, move |vm, this, args| {
+        if vm.host_data::<DomParser>(&this).is_none() {
+            return Err(JsError::type_error("Expected a DOMParser receiver"));
+        }
+        webidl::required(args, 2, "DOMParser.parseFromString")?;
+        let source = text(vm, arg(args, 0))?;
+        let mime = text(vm, arg(args, 1))?;
+        match mime.as_str() {
+            "text/html" => {}
+            "text/xml" | "application/xml" | "application/xhtml+xml" | "image/svg+xml" => {
+                return Err(unsupported("DOMParser XML parsing is not implemented"));
+            }
+            _ => return Err(JsError::type_error("Invalid DOMParser MIME type")),
+        }
+        vm.charge_work(source.len().saturating_mul(4))?;
+        let parsed = html::parse_with_scripting(&source, false);
+        if parsed.truncated {
+            return Err(errors.convert(vm, budget("HTML document exceeded the parser resource budget")));
+        }
+        let root = {
+            let mut state = host.borrow_mut();
+            let mut staged = stage_clone(&parsed, parsed.root, true, &state)
+                .map_err(|failure| errors.convert(vm, failure))?;
+            staged.inert_scripts = staged
+                .source_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &source)| {
+                    dynamic_scripts::is_script(&parsed, source).then_some(NodeId(index))
+                })
+                .collect();
+            let root = staged.commit(&mut state)[0];
+            state.document.other_documents.insert(root, crate::dom::DocumentKind::Html);
+            // Register the document first, then adopt each child; adopting
+            // the root itself would short-circuit on its document identity.
+            let children = state.document.nodes[root.0].children.clone();
+            for child in children {
+                state.document.adopt(child, root);
+            }
+            root
+        };
+        wrap(vm, &host, Some(root))
+    })?;
+    Ok(())
 }
 
 fn install_mutations(
