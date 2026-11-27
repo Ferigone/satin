@@ -993,11 +993,13 @@ fn install_with_receiver(
         },
     )?;
     if let Some(dom) = &events.dom {
-        let (ui_proto, mouse_proto) =
+        let (ui_proto, mouse_proto, keyboard_proto) =
             super::ui_events::install(vm, &dom.state, proto, constructor, set_prototype)?;
         vm.root(ui_proto.clone());
         vm.root(mouse_proto.clone());
+        vm.root(keyboard_proto.clone());
         dom.state.borrow_mut().mouse_event_prototype = mouse_proto.clone();
+        dom.state.borrow_mut().keyboard_event_prototype = keyboard_proto.clone();
         let root = dom.state.borrow().document.root;
         let document = super::wrap(vm, &dom.state, Some(root))?;
         let state = dom.state.clone();
@@ -1009,8 +1011,8 @@ fn install_with_receiver(
             }
             webidl::required(args, 1, "createEvent")?;
             let interface = vm.to_string(&args[0])?;
-            // The supported names are all ASCII and at most eleven code units.
-            let name = if interface.len() <= 11 {
+            // The supported names are short ASCII identifiers.
+            let name = if interface.len() <= 13 {
                 interface.to_string_lossy().to_ascii_lowercase()
             } else {
                 String::new()
@@ -1024,6 +1026,11 @@ fn install_with_receiver(
                     let proto = if mouse { &mouse_proto } else { &ui_proto };
                     let object = vm.new_object_with_prototype(proto.clone())?;
                     super::ui_events::initialize_empty(vm, &object, mouse)?;
+                    object
+                }
+                "keyboardevent" => {
+                    let object = vm.new_object_with_prototype(keyboard_proto.clone())?;
+                    super::ui_events::initialize_keyboard(vm, &object)?;
                     object
                 }
                 "customevent" => {

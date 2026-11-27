@@ -341,7 +341,7 @@ fn native_click_and_form_input_allow_bounded_work_and_flush_microtasks() {
         runtime
             .last_diagnostic()
             .unwrap()
-            .contains("budget exhausted")
+            .contains("exceeded")
     );
     runtime
         .eval("button.removeEventListener('click', tooMuch); button.addEventListener('click', work); completed = ''")
@@ -351,7 +351,7 @@ fn native_click_and_form_input_allow_bounded_work_and_flush_microtasks() {
 }
 
 #[test]
-fn reentrant_synthetic_click_and_microtasks_spend_the_callers_remaining_fuel() {
+fn reentrant_synthetic_click_completes_under_native_input_but_inherits_host_eval_limit() {
     let page = LoadedPage::from_html(
         "https://events.test/reentrant",
         "<button id='outer'></button><button id='inner'></button>",
@@ -367,22 +367,15 @@ fn reentrant_synthetic_click_and_microtasks_spend_the_callers_remaining_fuel() {
         inner.addEventListener('click', function() {
             spend();
             marker = 'inner';
-            queueMicrotask(function() { spend(); marker = 'unexpectedly finished'; });
+            queueMicrotask(function() { spend(); marker = 'finished'; });
         });
         outer.addEventListener('click', function() { spend(); inner.click(); });
     "#,
         )
         .unwrap();
-    // Each part uses roughly twelve million units. Only a fresh native input
-    // task can finish either synchronous part; all three exceed its allowance.
-    assert!(!runtime.click(outer));
-    assert_eq!(runtime.eval("marker").unwrap(), Value::from("inner"));
-    assert!(
-        runtime
-            .last_diagnostic()
-            .unwrap()
-            .contains("budget exhausted")
-    );
+    assert!(runtime.click(outer));
+    assert_eq!(runtime.eval("marker").unwrap(), Value::from("finished"));
+    assert!(runtime.diagnostics().is_empty());
     assert_eq!(
         runtime
             .eval("marker = ''; inner.click();")
@@ -391,6 +384,33 @@ fn reentrant_synthetic_click_and_microtasks_spend_the_callers_remaining_fuel() {
         rust_browser_javascript::ErrorKind::ExecutionLimit,
     );
     assert_eq!(runtime.eval("marker").unwrap(), Value::from(""));
+}
+
+#[test]
+fn keyboard_event_construction_and_native_keydown_share_the_ui_event_interface() {
+    let page = LoadedPage::from_html("https://events.test/", "<input id='target'>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+        var captured = "";
+        const target = document.getElementById("target");
+        target.addEventListener("keydown", event => {
+            if (event instanceof KeyboardEvent && event instanceof UIEvent &&
+                event.ctrlKey && event.getModifierState("Control")) {
+                captured = event.key + "/" + event.code + "/" + event.isTrusted;
+            }
+        });
+        const keyboard = new KeyboardEvent("keydown", {
+            key: "c", code: "KeyC", ctrlKey: true, repeat: true, location: 3
+        });
+        target.dispatchEvent(keyboard);
+        captured === "c/KeyC/false" && keyboard.repeat &&
+            keyboard.location === KeyboardEvent.DOM_KEY_LOCATION_NUMPAD &&
+            new KeyboardEvent("keydown").key === "" &&
+            document.createEvent("KeyboardEvent") instanceof KeyboardEvent
+    "#).unwrap(), Value::Bool(true));
+    runtime.focus_control(page.document.elements("input").next()).unwrap();
+    runtime.form_keydown(rust_browser_engine::script::FormKey::ArrowLeft, false, true).unwrap();
+    assert_eq!(runtime.eval("captured").unwrap(), Value::from("ArrowLeft/ArrowLeft/true"));
 }
 
 #[test]

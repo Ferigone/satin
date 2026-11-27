@@ -123,6 +123,7 @@ struct State {
     window: Value,
     event_prototype: Value,
     mouse_event_prototype: Value,
+    keyboard_event_prototype: Value,
     error_event_prototype: Value,
     reporting_error: bool,
     handlers: HashMap<(Option<NodeId>, String), (Value, RootId)>,
@@ -196,8 +197,8 @@ fn web_vm_limits() -> VmLimits {
         shared_array_buffer: false,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
         max_call_depth: 160,
-        max_heap_objects: 512 * 1024,
-        max_heap_bytes: 512 * 1024 * 1024,
+        max_heap_objects: 1024 * 1024,
+        max_heap_bytes: 2 * 1024 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
         ..VmLimits::default()
     }
@@ -785,6 +786,7 @@ impl ScriptRuntime {
             window: window.clone(),
             event_prototype: Value::Undefined,
             mouse_event_prototype: Value::Undefined,
+            keyboard_event_prototype: Value::Undefined,
             error_event_prototype: Value::Undefined,
             text_prototype,
             comment_prototype,
@@ -2696,16 +2698,23 @@ fn dispatch_checked_with_mode(
     properties: &[(&str, Value)],
     mode: DispatchMode,
 ) -> Result<bool, JsError> {
+    let keyboard = matches!(kind, "keydown" | "keyup" | "keypress");
     let object = if kind == "click" {
         let prototype = state.borrow().mouse_event_prototype.clone();
         let object = vm.new_object_with_prototype(prototype)?;
         ui_events::initialize_click(vm, &object)?;
         object
+    } else if keyboard {
+        let prototype = state.borrow().keyboard_event_prototype.clone();
+        let object = vm.new_object_with_prototype(prototype)?;
+        ui_events::initialize_key_input(vm, &object, properties)?;
+        object
     } else {
         vm.new_object_with_prototype(state.borrow().event_prototype.clone())?
     };
     let event =
-        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, false], true)?;
+        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, keyboard], true)?;
+    let properties = if keyboard { &[] } else { properties };
     dispatch_prepared_with_mode(vm, state, target, event, properties, mode)
 }
 

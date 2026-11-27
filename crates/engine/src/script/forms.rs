@@ -2205,19 +2205,19 @@ impl FormHost {
             };
         };
         self.charge(vm, 0)?;
-        let key_name = match key {
-            FormKey::ArrowLeft => "ArrowLeft",
-            FormKey::ArrowRight => "ArrowRight",
-            FormKey::ArrowUp => "ArrowUp",
-            FormKey::ArrowDown => "ArrowDown",
-            FormKey::Home => "Home",
-            FormKey::End => "End",
-            FormKey::Backspace => "Backspace",
-            FormKey::Delete => "Delete",
-            FormKey::Enter => "Enter",
-            FormKey::Tab => "Tab",
-            FormKey::Space => " ",
-            FormKey::SelectAll => "a",
+        let (key_name, code, legacy_code) = match key {
+            FormKey::ArrowLeft => ("ArrowLeft", "ArrowLeft", 37),
+            FormKey::ArrowRight => ("ArrowRight", "ArrowRight", 39),
+            FormKey::ArrowUp => ("ArrowUp", "ArrowUp", 38),
+            FormKey::ArrowDown => ("ArrowDown", "ArrowDown", 40),
+            FormKey::Home => ("Home", "Home", 36),
+            FormKey::End => ("End", "End", 35),
+            FormKey::Backspace => ("Backspace", "Backspace", 8),
+            FormKey::Delete => ("Delete", "Delete", 46),
+            FormKey::Enter => ("Enter", "Enter", 13),
+            FormKey::Tab => ("Tab", "Tab", 9),
+            FormKey::Space => (" ", "Space", 32),
+            FormKey::SelectAll => (if shift { "A" } else { "a" }, "KeyA", 65),
         };
         if !dispatch_checked(
             vm,
@@ -2228,6 +2228,9 @@ impl FormHost {
             true,
             &[
                 ("key", key_name.into()),
+                ("code", code.into()),
+                ("keyCode", legacy_code.into()),
+                ("which", legacy_code.into()),
                 ("shiftKey", shift.into()),
                 ("ctrlKey", control.into()),
             ],

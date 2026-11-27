@@ -2528,7 +2528,12 @@ impl Vm {
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
         let _scope = startup_profile::enter(startup_profile::Area::Property);
         if object.is_nullish() {
-            return Err(JsError::type_error("Cannot access a property of null or undefined"));
+            let receiver = if object == Value::Null { "null" } else { "undefined" };
+            let units = name.as_utf16();
+            let clipped_name = String::from_utf16_lossy(&units[..units.len().min(128)]);
+            return Err(JsError::type_error(format!(
+                "Cannot read properties of {receiver} (reading {clipped_name:?})"
+            )));
         }
         if let Some(id) = self.property_start(&object)
             && let Some(value) = self.heap.cached_own_data(id, name)

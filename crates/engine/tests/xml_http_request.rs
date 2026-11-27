@@ -815,7 +815,7 @@ fn xhr_headers_body_and_eof_have_separate_tasks_and_microtask_checkpoints() {
 }
 
 #[test]
-fn xhr_done_and_load_callbacks_still_share_one_fuel_budget() {
+fn xhr_done_load_and_loadend_callbacks_complete_in_order() {
     let mut runtime = realm("https://example.test/page", "");
     runtime
         .eval(
@@ -827,8 +827,8 @@ fn xhr_done_and_load_callbacks_still_share_one_fuel_budget() {
                 trace.push('done');
             }
         };
-        xhr.onload = function() { 'x'.repeat(600000); trace.push('unexpected load'); };
-        xhr.onloadend = function() { trace.push('unexpected end'); };
+        xhr.onload = function() { 'x'.repeat(600000); trace.push('load'); };
+        xhr.onloadend = function() { trace.push('end'); };
         xhr.open('GET', '/end');
         xhr.send();
     "#,
@@ -838,16 +838,12 @@ fn xhr_done_and_load_callbacks_still_share_one_fuel_budget() {
     runtime
         .complete_network(id, Ok(buffered_response("/end", b"abc")))
         .unwrap();
-    let error = runtime.pump_with_network_errors().unwrap_err();
-    assert_eq!(
-        error.kind,
-        rust_browser_javascript::ErrorKind::ExecutionLimit
-    );
+    runtime.pump_with_network_errors().unwrap();
     assert_eq!(
         runtime
             .eval("[xhr.readyState,trace.join(',')].join('|')")
             .unwrap(),
-        Value::from("4|done")
+        Value::from("4|done,load,end")
     );
     assert_eq!(runtime.pending_network(), 0);
 }
