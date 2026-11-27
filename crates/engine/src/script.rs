@@ -96,6 +96,7 @@ struct State {
     prototype: Value,
     element_prototype: Value,
     html_element_prototype: Value,
+    div_prototype: Value,
     template_prototype: Value,
     document_prototype: Value,
     html_document_prototype: Value,
@@ -194,6 +195,7 @@ fn web_vm_limits() -> VmLimits {
         // Document and worker hosts do not yet provide cross-origin isolation.
         shared_array_buffer: false,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
+        max_call_depth: 160,
         max_heap_objects: 512 * 1024,
         max_heap_bytes: 512 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
@@ -324,6 +326,7 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.comment_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
             match state.document.namespace(id) {
+                crate::dom::Namespace::Html if state.document.tag(id) == "div" => state.div_prototype.clone(),
                 crate::dom::Namespace::Html if state.document.tag(id) == "template" => state.template_prototype.clone(),
                 crate::dom::Namespace::Html => state.html_element_prototype.clone(),
                 crate::dom::Namespace::Svg => state.svg_element_prototype.clone(),
@@ -709,6 +712,8 @@ impl ScriptRuntime {
         vm.root(html_element_prototype.clone());
         let template_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(template_prototype.clone());
+        let div_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(div_prototype.clone());
         let iframe_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(iframe_prototype.clone());
         let script_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
@@ -757,6 +762,7 @@ impl ScriptRuntime {
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
+            div_prototype,
             template_prototype,
             document_prototype: document_prototype.clone(),
             html_document_prototype,

@@ -266,11 +266,14 @@ fn install_character_interfaces(
 }
 
 pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
-    let template_prototype = state.borrow().template_prototype.clone();
-    let state = state.clone();
+    let (template_prototype, div_prototype) = {
+        let state = state.borrow();
+        (state.template_prototype.clone(), state.div_prototype.clone())
+    };
+    let custom_state = state.clone();
     let constructor =
         webidl::interface(vm, prototype, "HTMLElement", 0, move |vm, _, _, target| {
-            super::custom_elements::html_constructor(vm, &state, target)
+            super::custom_elements::html_constructor(vm, &custom_state, target)
         })?;
     let element = vm.get_global("Element")?;
     let object = vm.get_global("Object")?;
@@ -281,6 +284,35 @@ pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Res
     let template = webidl::interface(vm, template_prototype, "HTMLTemplateElement", 0, |_, _, _, _| {
         Err(JsError::type_error("Illegal HTMLTemplateElement constructor"))
     })?;
-    vm.call(set_prototype, Value::Undefined, &[template, constructor])?;
+    vm.call(set_prototype.clone(), Value::Undefined, &[template, constructor.clone()])?;
+    let div = webidl::interface(vm, div_prototype.clone(), "HTMLDivElement", 0, |_, _, _, _| {
+        Err(JsError::type_error("Illegal HTMLDivElement constructor"))
+    })?;
+    vm.call(set_prototype, Value::Undefined, &[div, constructor])?;
+    let read_state = state.clone();
+    let get = vm.new_native_function("get align", move |vm, this, _| {
+        let id = div_receiver(&read_state, &this)?;
+        let state = read_state.borrow();
+        let raw = state.document.attr(id, "align").unwrap_or("");
+        vm.charge_buffer_work(raw.len())?;
+        Ok(raw.into())
+    });
+    let write_state = state.clone();
+    let set = vm.new_native_function("set align", move |vm, this, args| {
+        let id = div_receiver(&write_state, &this)?;
+        let value = super::text(vm, super::arg(args, 0))?;
+        super::set_attribute(vm, &write_state, id, "align", Some(value))?;
+        Ok(Value::Undefined)
+    });
+    vm.define_accessor(div_prototype, "align", Some(get), Some(set))?;
     Ok(())
+}
+
+fn div_receiver(state: &Shared, this: &Value) -> Result<crate::dom::NodeId, JsError> {
+    let id = super::element(state, this)?;
+    let state = state.borrow();
+    if state.document.namespace(id) == crate::dom::Namespace::Html && state.document.tag(id) == "div" {
+        return Ok(id);
+    }
+    Err(JsError::type_error("Expected an HTMLDivElement"))
 }

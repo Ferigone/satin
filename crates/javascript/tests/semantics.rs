@@ -640,6 +640,20 @@ fn aggregate_retained_strings_stop_at_a_small_byte_budget() {
     assert!(vm.estimated_heap_bytes() < before);
     assert_eq!(vm.eval("2+3").unwrap(), Value::from(5));
 }
+
+#[test]
+fn error_stack_contains_the_message_without_calling_an_installed_getter() {
+    let mut vm = Vm::new();
+    assert_eq!(vm.eval(r#"
+        function cause() { return new TypeError("invalid \uD800"); }
+        const error = cause();
+        const initial = error.stack;
+        let gets = 0;
+        Object.defineProperty(error, "message", {get(){ gets++; return "changed"; }});
+        initial.startsWith("TypeError: invalid \uD800\n") &&
+            initial.includes("at cause") && error.stack.startsWith("TypeError\n") && gets === 0
+    "#).unwrap(), Value::Bool(true));
+}
 #[test]
 fn one_object_cannot_bypass_the_aggregate_property_budget() {
     let mut vm = Vm::with_limits(VmLimits {

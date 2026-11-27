@@ -10,6 +10,23 @@ fn realm(source: &str) -> (LoadedPage, ScriptRuntime) {
     let runtime = ScriptRuntime::new(&page).unwrap();
     (page, runtime)
 }
+
+#[test]
+fn html_div_elements_use_the_div_prototype_and_reflect_align() {
+    let (_, mut runtime) = realm("<div id='parsed' align='left'></div><span id='other'></span>");
+    js(&mut runtime, r#"
+        const parsed = document.getElementById("parsed");
+        const dynamic = document.createElement("div");
+        const other = document.getElementById("other");
+        dynamic.align = "right";
+        parsed instanceof HTMLDivElement &&
+            dynamic instanceof HTMLDivElement &&
+            !(other instanceof HTMLDivElement) &&
+            Object.getPrototypeOf(HTMLDivElement) === HTMLElement &&
+            parsed.align === "left" && dynamic.getAttribute("align") === "right" &&
+            Object.prototype.toString.call(parsed) === "[object HTMLDivElement]"
+    "#, true);
+}
 fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
     assert_eq!(
         runtime

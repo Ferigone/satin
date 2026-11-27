@@ -2622,10 +2622,31 @@ fn install_errors(vm: &mut Vm) {
     .unwrap();
     let get_stack = vm.native("get stack", 0, false, Rc::new(|vm, this, _| {
         let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
-        if let ObjectKind::Error(_, trace) = &vm.heap.object(id)?.kind {
+        let object = vm.heap.object(id)?;
+        let ObjectKind::Error(kind, trace) = &object.kind else {
+            return Ok(Value::Undefined);
+        };
+        // Read only an own data message. Inspecting a stack should not invoke
+        // a getter that page code may have installed on the Error object.
+        let Some(Property {
+            kind: PropertyKind::Data { value: Value::String(message), .. }, ..
+        }) = object.properties.get(&JsString::from("message")) else {
+            return Ok(Value::String(trace.clone()));
+        };
+        if message.is_empty() {
             return Ok(Value::String(trace.clone()));
         }
-        Ok(Value::Undefined)
+        let boundary = kind.name().len();
+        let (trace, message) = (trace.clone(), message.clone());
+        let length = trace.len().saturating_add(message.len()).saturating_add(2);
+        vm.ensure_string_allocation(length)?;
+        vm.charge_buffer_work(length)?;
+        let mut stack = Vec::with_capacity(length);
+        stack.extend_from_slice(&trace.as_utf16()[..boundary]);
+        stack.extend([u16::from(b':'), u16::from(b' ')]);
+        stack.extend_from_slice(message.as_utf16());
+        stack.extend_from_slice(&trace.as_utf16()[boundary..]);
+        vm.finish_string(stack)
     }));
     let set_stack = vm.native("set stack", 1, false, Rc::new(|vm, this, args| {
         let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;

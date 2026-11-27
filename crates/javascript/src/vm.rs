@@ -39,6 +39,11 @@ const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
 const MAX_BYTECODE_DEPTH: usize = 192;
+const MAX_HOST_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
+    160
+} else {
+    DEFAULT_CALL_DEPTH
+};
 const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
@@ -277,7 +282,7 @@ impl Vm {
         limits.buffer_units_per_instruction = limits.buffer_units_per_instruction.clamp(1, 1024);
         // This first interpreter still uses bounded Rust calls for nested chunks.
         // Keep the host stack safe even when an embedder requests a larger limit.
-        limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
+        limits.max_call_depth = limits.max_call_depth.min(MAX_HOST_CALL_DEPTH);
         limits.max_bytecode_depth = limits.max_bytecode_depth.min(MAX_BYTECODE_DEPTH);
         let mut heap = Heap::default();
         let global_env = realm::allocate_primary_core(&mut heap);
