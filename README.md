@@ -28,6 +28,12 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.47
+
+- The Windows browser menu always offers an update check. Browsers launched
+  directly from an extracted executable can see new versions and open their
+  release page to download the installer.
+
 ## Changes in alpha.46
 
 - Web script tasks use CPU and elapsed time to stop runaway execution. Large
