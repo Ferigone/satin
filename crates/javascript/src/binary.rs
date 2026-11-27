@@ -1,6 +1,7 @@
 //! Native backing stores and typed views for ECMAScript and browser host APIs.
 mod array_buffer;
 mod data_view;
+mod counted_fill;
 mod element;
 mod host_views;
 mod shared;

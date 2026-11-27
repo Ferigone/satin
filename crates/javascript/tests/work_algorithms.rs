@@ -1,6 +1,29 @@
 use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
 
 #[test]
+fn descending_typed_stores_check_the_evaluated_range_and_preserve_observable_setters() {
+    let mut vm = Vm::new();
+    let result=vm.eval(r#"
+        function set(a,n){for(var i=n;--i>=0;)a[i]=257;return i}
+        function fromLength(a){for(var i=a.length;--i>=0;)a[i]=3;return i}
+        const big=new Uint16Array(65536);
+        let log="";
+        const source=new Uint8Array([1,2,3,4,5,6]),view=source.subarray(1,5);
+        Object.defineProperty(view,"length",{get(){log+="L";return 2}});
+        const ordinary={get length(){log+="O";return 2},set 0(v){log+=v+"a"},set 1(v){log+=v+"b"}};
+        const bigDone=set(big,65536)===-1 && big[0]===257 && big[32768]===257 && big[65535]===257;
+        const viewDone=fromLength(view)===-1 && source.join(",")==="1,3,3,4,5,6";
+        const plainDone=fromLength(ordinary)===-1 && log==="LO3b3a";
+        let bigIntFailed=false;try{set(new BigUint64Array(1),1)}catch(e){bigIntFailed=e instanceof TypeError}
+        function* later(a){yield 1; for(var i=a.length;--i>=0;)a[i]=23; return i}
+        const iter=later(big);iter.next();const last=iter.next();
+        bigDone && viewDone && plainDone && bigIntFailed && last.done && last.value===-1 &&
+        big[0]===23 && big[65535]===23 && set(big,0)===-1 && set(big,-2)===-3
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
 fn string_search_respects_overlapping_candidates_and_utf16_boundaries() {
     assert_eq!(
         Vm::new()

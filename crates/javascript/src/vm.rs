@@ -4361,6 +4361,9 @@ impl Vm {
                     self.run_chunk(init, iteration)?;
                 }
                 iteration = self.next_for_iteration(env, iteration, lexical)?;
+                if let Some(value) = self.try_counted_fill(code, iteration)? {
+                    return Ok(Completion::Normal(Some(value)));
+                }
                 loop {
                     self.tick()?;
                     if let Some(test) = test

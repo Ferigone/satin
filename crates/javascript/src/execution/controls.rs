@@ -166,6 +166,8 @@ pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError
             let state = LoopState::new(scope);
             if let Some(initial) = &code.initial {
                 Advance::child(initial, scope, Resume::Loop(state))
+            } else if let Some(value) = vm.try_counted_fill(code, scope)? {
+                Advance::Finish(Completion::Normal(Some(value)))
             } else {
                 state.test(vm, op)?
             }
@@ -412,6 +414,9 @@ impl LoopState {
                     unreachable!()
                 };
                 self.scope = vm.next_for_iteration(env, self.scope, &code.lexical)?;
+                if let Some(value) = vm.try_counted_fill(code, self.scope)? {
+                    return Ok(Advance::Finish(Completion::Normal(Some(value))));
+                }
                 self.test(vm, op)
             }
             Phase::Update => {
