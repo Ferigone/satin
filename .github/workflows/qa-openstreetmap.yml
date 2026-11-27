@@ -1,4 +1,4 @@
-name: OpenStreetMap public QA baseline
+name: OpenStreetMap public QA retest
 on:
   push:
     branches: [qa/openstreetmap-alpha45-baseline]
@@ -22,7 +22,7 @@ jobs:
         run: cargo build --release --locked -p rust-browser
       - name: Install pinned reference driver
         run: npm install --prefix "$env:RUNNER_TEMP/osm-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1 acorn@8.15.0
-      - name: Capture public map baseline
+      - name: Capture public map retest
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target/osm-evidence | Out-Null
@@ -46,7 +46,7 @@ jobs:
           const viewport = {width:1280,height:800};
           const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
           const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
-          const report = {commit:process.env.GITHUB_SHA,sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const report = {commit:process.env.GITHUB_SHA,sourceCommit:'ca7d404557152723e50fe06944b29c632286460c',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
           async function satinCase(url,index,phase,actions){
@@ -123,6 +123,12 @@ jobs:
               item.satin.push(await satinCase(url,index,'native-initial',[]));await save();
               if(index===0){
                 item.satin.push(await satinCase(url,index,'native-search',[{action:'click_at',x:70,y:203},{action:'text',value:'Warszawa'},key('Enter')]));await save();
+              }else if(item.chrome.zoomPoint){
+                const {x,y,width,height}=item.chrome.zoomPoint;
+                // Previous native screenshot has a 121 px top chrome and 23 px footer.
+                // This is an exploratory click; verify the target in Satin's screenshot.
+                item.satinZoomAttempt={x:x+width/2,y:y+height/2+121};
+                item.satin.push(await satinCase(url,index,'native-zoom',[{action:'click_at',...item.satinZoomAttempt}]));await save();
               }
             }
             if(report.bundle){
@@ -158,6 +164,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: openstreetmap-parser-repro-alpha45
+          name: openstreetmap-grouped-assignment-retest
           path: target/osm-evidence/
           if-no-files-found: warn
