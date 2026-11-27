@@ -280,14 +280,14 @@ impl CallbackCollection {
             // A large live set is expensive to trace repeatedly. Allow
             // temporary allocations to grow with it, leaving half the
             // remaining budget available before the next collection.
-            let growth = (used / 2).clamp(step / 8, step);
+            let growth = (used / 2).clamp(step / 16, step);
             used.saturating_add(growth.min((cap.saturating_sub(used) / 2).max(1)))
         };
         Self {
             bytes_at: allowance(
-                vm.estimated_heap_bytes(), vm.limits().max_heap_bytes, 192 * 1024 * 1024,
+                vm.estimated_heap_bytes(), vm.limits().max_heap_bytes, 384 * 1024 * 1024,
             ),
-            cells_at: allowance(vm.heap_cell_count(), vm.limits().max_heap_objects, 192 * 1024),
+            cells_at: allowance(vm.heap_cell_count(), vm.limits().max_heap_objects, 384 * 1024),
             until_probe: 256,
         }
     }
