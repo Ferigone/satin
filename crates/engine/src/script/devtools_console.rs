@@ -320,17 +320,19 @@ fn install_utilities(vm: &mut Vm, state: &Shared, console: &Value) -> Result<(),
     Ok(())
 }
 
+const LOG_METHODS: [(&str, ConsoleLevel); 6] = [
+    ("log", ConsoleLevel::Log),
+    ("info", ConsoleLevel::Info),
+    ("warn", ConsoleLevel::Warn),
+    ("error", ConsoleLevel::Error),
+    ("debug", ConsoleLevel::Debug),
+    ("trace", ConsoleLevel::Debug),
+];
+
 pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
     vm.enable_inspection();
     let console = vm.new_object();
-    for (name, level) in [
-        ("log", ConsoleLevel::Log),
-        ("info", ConsoleLevel::Info),
-        ("warn", ConsoleLevel::Warn),
-        ("error", ConsoleLevel::Error),
-        ("debug", ConsoleLevel::Debug),
-        ("trace", ConsoleLevel::Debug),
-    ] {
+    for (name, level) in LOG_METHODS {
         let origin = if name == "error" {
             // EventTarget bootstrap roots this callback as its legacy reporter.
             ConsoleOrigin::BrowserReported(ConsolePhase::EventTargetListener)
@@ -342,6 +344,36 @@ pub(super) fn install(vm: &mut Vm, state: &Shared) -> Result<Value, JsError> {
     install_utilities(vm, state, &console)?;
     vm.set_global("console", console.clone())?;
     Ok(console)
+}
+
+pub(super) fn install_worker(
+    vm: &mut Vm,
+    send: impl Fn(ConsoleLevel, String, bool) + 'static,
+) -> Result<(), JsError> {
+    let console = vm.new_object();
+    let send = std::rc::Rc::new(send);
+    for (name, level) in LOG_METHODS {
+        let send = send.clone();
+        method(vm, console.clone(), name, move |vm, _, args| {
+            let (text, truncated) = preview_args(args, Some(vm));
+            send(level, text, truncated);
+            Ok(Value::Undefined)
+        })?;
+    }
+    vm.set_global("console", console)
+}
+
+pub(super) fn record_worker(state: &Shared, level: ConsoleLevel, text: &str, truncated: bool) {
+    let mut state = state.borrow_mut();
+    if state.diagnostics.len() < DIAGNOSTIC_LIMIT {
+        state.diagnostics.push(text.chars().take(DIAGNOSTIC_CHAR_LIMIT).collect());
+    }
+    state.devtools_console.push(|| {
+        let mut record = ConsoleRecord::new(level, ConsoleOrigin::ConsoleApi, text);
+        record.source = Some("Worker".into());
+        record.truncated |= truncated;
+        record
+    });
 }
 
 /// Called after the host has rooted the internal EventTarget reporter, before

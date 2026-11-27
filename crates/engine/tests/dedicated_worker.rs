@@ -1,4 +1,7 @@
-use rust_browser_engine::{LoadedPage, script::ScriptRuntime};
+use rust_browser_engine::{
+    LoadedPage,
+    script::{ConsoleLevel, ConsoleOrigin, ScriptRuntime},
+};
 use rust_browser_javascript::Value;
 use std::{
     sync::{
@@ -143,6 +146,42 @@ fn a_revoked_blob_worker_transfers_shared_views_and_closes_after_its_active_task
         runtime.diagnostics()
     );
     assert!(runtime.diagnostics().is_empty());
+}
+
+#[test]
+fn dedicated_worker_exposes_its_navigator_and_forwards_console_output() {
+    let (mut runtime, wakes) = runtime();
+    runtime.eval(r#"
+        var result, workerErrors = [];
+        const address = URL.createObjectURL(new Blob([`
+            const get = Object.getOwnPropertyDescriptor(WorkerGlobalScope.prototype, 'navigator').get;
+            let branded = false;
+            try { get.call({}); } catch (error) { branded = error instanceof TypeError; }
+            console.warn('worker output', {toString() { throw 'unexpected coercion'; }});
+            postMessage([
+                navigator === self.navigator, navigator instanceof WorkerNavigator, branded,
+                navigator.userAgent, navigator.language, navigator.onLine,
+                Object.isFrozen(navigator.languages), navigator.hardwareConcurrency
+            ]);
+            close();
+        `]));
+        const worker = new Worker(address);
+        worker.onmessage = event => { result = event.data; };
+        worker.onerror = event => workerErrors.push(event.message);
+    "#).unwrap();
+    wait_for_worker_close(&mut runtime, &wakes);
+    assert_eq!(runtime.eval(r#"
+        workerErrors.length === 0 && result.slice(0, 3).every(Boolean) &&
+        result[3] === navigator.userAgent && result[4] === navigator.language &&
+        result[5] && result[6] && result[7] === navigator.hardwareConcurrency
+    "#).unwrap(), Value::Bool(true));
+    let console = runtime.console_snapshot();
+    assert_eq!(console.records.len(), 1);
+    let record = &console.records[0];
+    assert_eq!(record.level, ConsoleLevel::Warn);
+    assert_eq!(record.origin, ConsoleOrigin::ConsoleApi);
+    assert_eq!(record.source.as_deref(), Some("Worker"));
+    assert_eq!(record.text, "worker output [object]");
 }
 
 #[test]

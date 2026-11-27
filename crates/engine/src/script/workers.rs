@@ -4,7 +4,7 @@ mod mailbox;
 mod realm;
 
 use super::{
-    Shared, State, abort::dom_exception_error, arg, diagnostic, document_base, event_target, fatal,
+    Shared, State, abort::dom_exception_error, arg, devtools_console, diagnostic, document_base, event_target, fatal,
     message_ports::MessagePorts, structured_clone, webidl,
 };
 use crate::{
@@ -40,6 +40,11 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 enum Notice {
     Message(StructuredClonePacket),
     Error(String),
+    Console {
+        level: devtools_console::ConsoleLevel,
+        text: String,
+        truncated: bool,
+    },
 }
 
 type HostTask = Box<dyn FnOnce(&mut Vm) -> Result<(), JsError> + Send>;
@@ -97,6 +102,14 @@ impl Connection {
         let message: String = message.chars().take(512).collect();
         if let Ok(charge) = self.budget.reserve(message.capacity() + 128)
             && self.to_window.send(Envelope(Notice::Error(message), charge))
+        {
+            self.wake_window();
+        }
+    }
+
+    fn report_console(&self, level: devtools_console::ConsoleLevel, text: String, truncated: bool) {
+        if let Ok(charge) = self.budget.reserve(text.capacity() + 128)
+            && self.to_window.send(Envelope(Notice::Console { level, text, truncated }, charge))
         {
             self.wake_window();
         }
@@ -295,6 +308,7 @@ fn run_worker(
     vm.set_interrupt_flag(connection.cancelled.clone());
     let parent = connection.clone();
     let ingress = connection.clone();
+    let console = connection.clone();
     let network = network.map(|network| {
         let connection_ref = Arc::downgrade(connection);
         let wake: Wake = Arc::new(move || {
@@ -331,6 +345,7 @@ fn run_worker(
             // checkpoint. Drop all future worker tasks and abort host I/O.
             ingress.close_ingress();
         },
+        move |level, text, truncated| console.report_console(level, text, truncated),
         network,
         source.policy,
     )?;
@@ -600,6 +615,11 @@ impl Workers {
                         && let Some(document) = self.document.upgrade()
                     {
                         diagnostic(&document, format!("Worker: {message}"));
+                    }
+                }
+                Notice::Console { level, text, truncated } => {
+                    if let Some(document) = self.document.upgrade() {
+                        devtools_console::record_worker(&document, level, &text, truncated);
                     }
                 }
             }

@@ -8,8 +8,8 @@ use super::{
 };
 use crate::{loader::DocumentPolicy, network::CancelSignal};
 use crate::script::{
-    abort::AbortHost, arg, crypto, dom_api, event_target, fatal, getter, message_ports::message_event,
-    scheduler, webidl,
+    abort::AbortHost, arg, crypto, devtools_console, dom_api, event_target, fatal, getter,
+    message_ports::message_event, navigator, scheduler, webidl,
 };
 use rust_browser_javascript::{ErrorKind, JsError, JsString, StructuredClonePacket, Value, Vm};
 use std::{rc::Rc, time::Instant};
@@ -34,11 +34,13 @@ impl WorkerRealm {
         url: &Url,
         post: impl Fn(&mut Vm, &[Value]) -> Result<(), JsError> + 'static,
         close: impl Fn() + 'static,
+        console: impl Fn(devtools_console::ConsoleLevel, String, bool) + 'static,
         network: Option<(Network, CancelSignal, Wake)>,
         policy: DocumentPolicy,
     ) -> Result<Self, JsError> {
         let dom_errors = dom_api::install_errors(&mut vm)?;
         crate::script::base64_api::install(&mut vm)?;
+        devtools_console::install_worker(&mut vm, console)?;
         let abort = AbortHost::install_worker(&mut vm)?;
         let events = abort.events().clone();
         let global = vm.global();
@@ -95,6 +97,7 @@ impl WorkerRealm {
             scope(vm, &this)?;
             Ok(vm.host_slot(&vm.global(), LOCATION_SLOT).unwrap())
         })?;
+        navigator::install_worker(&mut vm, &worker_proto)?;
         let import_network = network.as_ref().map(|(network, signal, _)| {
             (network.clone(), signal.clone())
         });
@@ -353,6 +356,7 @@ mod tests {
                 Ok(())
             },
             move || closed.set(true),
+            |_, _, _| {},
             None,
             DocumentPolicy::default(),
         )
