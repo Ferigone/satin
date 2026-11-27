@@ -2,6 +2,7 @@
 //! A tab shares one VM between its document and accessible child realms.
 //! Native callbacks never borrow the DOM across VM calls.
 mod abort;
+mod attributes;
 mod blobs;
 mod canvas;
 mod class_list;
@@ -93,6 +94,7 @@ struct State {
     document: Document,
     custom_elements: Rc<RefCell<custom_elements::Registry>>,
     wrappers: HashMap<NodeId, Value>,
+    attribute_nodes: attributes::Cache,
     styles: HashMap<NodeId, Value>,
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
@@ -500,6 +502,9 @@ fn set_attribute(
             },
         );
     }
+    if !present && state.document.attr(id, &key).is_some() {
+        attributes::detach(vm, &mut state, id, &key)?;
+    }
     if let NodeKind::Element { attrs, .. } = &mut state.document.nodes[id.0].kind {
         if let Some(value) = value {
             attrs.insert(key.clone(), value);
@@ -776,6 +781,7 @@ impl ScriptRuntime {
         let state = Rc::new(RefCell::new(State {
             document,
             wrappers: HashMap::new(),
+            attribute_nodes: attributes::Cache::default(),
             styles: HashMap::new(),
             nodes: HashMap::new(),
             prototype: prototype.clone(),
@@ -995,6 +1001,7 @@ impl ScriptRuntime {
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         dataset::install(&mut vm, &state, &dom_errors)?;
+        attributes::install(&mut vm, &state)?;
         range::install(&mut vm, &state, &dom_errors)?;
         forms.install_typed_controls(&mut vm)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
