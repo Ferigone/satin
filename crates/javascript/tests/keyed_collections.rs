@@ -87,6 +87,22 @@ fn for_each_observes_reinsertion_clearing_and_receiver_arguments() {
 }
 
 #[test]
+fn shared_prefix_registration_fits_the_unchanged_default_budget() {
+    yes(include_str!("fixtures/media_bootstrap_collections.js"));
+}
+
+#[test]
+fn hashing_a_large_key_is_still_metered() {
+    let mut vm = Vm::new();
+    vm.eval("var map = new Map(); var key = 'property-name-'.repeat(4000);")
+        .unwrap();
+    let error = vm.with_task_limits(4_000, None, |vm| vm.eval("map.set(key, 1)")).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+    assert_eq!(error.message, "Native work budget exhausted");
+    assert_eq!(vm.eval("map.size").unwrap(), Value::Number(0.0));
+}
+
+#[test]
 fn iterable_construction_caches_adder_and_respects_prototypes() {
     yes(r#"
         var steps = [];

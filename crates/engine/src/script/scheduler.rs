@@ -14,16 +14,31 @@ use std::{
 };
 
 const MAX_TIMERS: usize = 1024;
-const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
-const INPUT_TASK_INSTRUCTIONS: u64 = 32_000_000;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
+const SCRIPT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(20);
+const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
 enum Handler {
     Callable(Value),
     Source(JsString),
+}
+
+/// Web script tasks may legitimately need many cheap VM operations.
+/// Leave the instruction counter for accounting and bound the task by elapsed
+/// CPU and wall time. Re-entrant scripts still share the outer task deadline.
+pub(super) fn run_script_task<T>(
+    vm: &mut Vm,
+    run: impl FnOnce(&mut Vm) -> Result<T, JsError>,
+) -> Result<T, JsError> {
+    vm.with_task_cpu_budget(
+        u64::MAX,
+        SCRIPT_TASK_CPU_TIMEOUT,
+        Instant::now() + SCRIPT_TASK_WALL_TIMEOUT,
+        run,
+    )
 }
 
 struct Timer {
@@ -597,11 +612,10 @@ fn report_callback(
 /// and the subsequent microtask checkpoint.
 fn run_window_task<T>(
     vm: &mut Vm,
-    instructions: u64,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
     vm.with_task_cpu_budget(
-        instructions,
+        u64::MAX,
         WINDOW_TASK_CPU_BUDGET,
         Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
         callback,
@@ -612,7 +626,7 @@ pub(super) fn run_input_task<T>(
     vm: &mut Vm,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
-    run_window_task(vm, INPUT_TASK_INSTRUCTIONS, callback)
+    run_window_task(vm, callback)
 }
 
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
@@ -626,7 +640,7 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
         };
         // Exception reporting and the microtask checkpoint use the same fuel
         // and deadline as the callback. Return to input/rendering after a long turn.
-        let result = run_window_task(vm, TIMER_TASK_INSTRUCTIONS, |vm| {
+        let result = run_script_task(vm, |vm| {
             if let Some(owner) = &timer.owner {
                 vm.with_realm(owner.realm, |vm| {
                     let result = run_timer(vm, &timer, vm.global(), "about:blank");
@@ -668,7 +682,7 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
         let frame = state.borrow_mut().scheduler.rendering.pop_front();
         let Some(frame) = frame else { break };
         let callback = vm.unroot(frame.callback).unwrap();
-        let result = vm.with_task(|vm| {
+        let result = run_window_task(vm, |vm| {
             let result = vm.call(callback, Value::Undefined, &[timestamp.into()]);
             report_callback(vm, state, result)?;
             drain_microtask_queue(vm, state)
@@ -684,6 +698,21 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
 mod task_limit_tests {
     use crate::{LoadedPage, script::ScriptRuntime};
     use rust_browser_javascript::Value;
+
+    #[test]
+    fn classic_script_can_exceed_the_default_instruction_allowance() {
+        let source = "<script>window.completed = false; work(); window.completed = true</script>";
+        let page = LoadedPage::from_html("https://example.test/", source);
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let work = runtime.vm.new_native_function("work", |vm, _, _| {
+            vm.charge_work(1_100_000)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("work", work).unwrap();
+        runtime.run_initial(&page);
+        assert_eq!(runtime.eval("completed").unwrap(), Value::Bool(true));
+        assert!(runtime.diagnostics().is_empty());
+    }
 
     #[cfg(any(target_os = "linux", windows))]
     #[test]
@@ -710,7 +739,7 @@ mod task_limit_tests {
     }
 
     #[test]
-    fn only_a_scheduled_timer_gets_the_extended_task_allowance() {
+    fn a_scheduled_timer_gets_more_work_than_direct_host_eval() {
         let page = LoadedPage::from_html("about:test", "<!doctype html>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
         let work = runtime.vm.new_native_function("work", |vm, _, _| {

@@ -10,6 +10,103 @@ fn realm(source: &str) -> (LoadedPage, ScriptRuntime) {
     let runtime = ScriptRuntime::new(&page).unwrap();
     (page, runtime)
 }
+
+#[test]
+fn div_and_iframe_elements_use_distinct_html_interfaces() {
+    let (_, mut runtime) = realm("<div id='parsed' align='left'></div><span id='other'></span><iframe id='frame'></iframe>");
+    js(&mut runtime, r#"
+        const parsed = document.getElementById("parsed");
+        const dynamic = document.createElement("div");
+        const other = document.getElementById("other");
+        const iframe = document.getElementById("frame");
+        dynamic.align = "right";
+        parsed instanceof HTMLDivElement &&
+            dynamic instanceof HTMLDivElement &&
+            !(other instanceof HTMLDivElement) &&
+            Object.getPrototypeOf(HTMLDivElement) === HTMLElement &&
+            iframe instanceof HTMLIFrameElement && !(other instanceof HTMLIFrameElement) &&
+            Object.getPrototypeOf(HTMLIFrameElement) === HTMLElement &&
+            iframe.contentDocument !== null &&
+            parsed.align === "left" && dynamic.getAttribute("align") === "right" &&
+            Object.prototype.toString.call(parsed) === "[object HTMLDivElement]"
+    "#, true);
+}
+
+#[test]
+fn anchors_resolve_their_href_and_buttons_keep_their_native_brand() {
+    let (_, mut runtime) = realm("<base href='/path/'><a id='link' href='clip'>Link</a><button id='btn' value='go'></button>");
+    js(&mut runtime, r##"
+        const link = document.getElementById("link"), btn = document.getElementById("btn");
+        const initial = link.href === "https://example.test/path/clip" && String(link) === link.href;
+        link.href = "#time";
+        link.download = "clip.mp4";
+        initial && link instanceof HTMLAnchorElement && btn instanceof HTMLButtonElement &&
+            link.getAttribute("href") === "#time" && link.href === "https://example.test/path/#time" &&
+            link.getAttribute("download") === "clip.mp4" && btn.value === "go"
+    "##, true);
+}
+
+#[test]
+fn typed_form_controls_expose_prototype_accessors_used_by_web_frameworks() {
+    let (_, mut runtime) = realm("<input id='input'><textarea id='area'>first</textarea><select id='select'><option>one</option><option>two</option></select>");
+    js(&mut runtime, r#"
+        const accessor = (type, name) => Object.getOwnPropertyDescriptor(type.prototype, name);
+        const area = document.getElementById("area");
+        const select = document.getElementById("select");
+        const option = select.options[1];
+        const input = document.getElementById("input");
+        accessor(HTMLTextAreaElement, "value").set.call(area, "next");
+        accessor(HTMLOptionElement, "selected").set.call(option, true);
+        accessor(HTMLInputElement, "checked").set.call(input, true);
+        let receiverRejected = false;
+        try { accessor(HTMLSelectElement, "value").get.call(area); }
+        catch (error) { receiverRejected = error instanceof TypeError; }
+        area instanceof HTMLTextAreaElement && select instanceof HTMLSelectElement &&
+            option instanceof HTMLOptionElement && area.value === "next" &&
+            select.selectedIndex === 1 && select.value === "two" && input.checked && receiverRejected
+    "#, true);
+}
+
+#[test]
+fn dataset_reflects_attributes_and_keeps_name_order_and_wrapper_identity() {
+    let (_, mut runtime) = realm("<div id='target' data-foo-bar='one' data-order='two'></div>");
+    js(&mut runtime, r#"
+        const target = document.getElementById("target");
+        const data = target.dataset;
+        const initial = Object.keys(data).join(",") === "fooBar,order" && data.fooBar === "one";
+        data.version = 123;
+        data.toString = "custom";
+        target.setAttribute("data-order", "updated");
+        delete data.fooBar;
+        let invalid = false;
+        try { data["bad-key"] = "no"; } catch (error) { invalid = error.name === "SyntaxError"; }
+        initial && data === target.dataset && data instanceof DOMStringMap &&
+            target.getAttribute("data-version") === "123" && data.order === "updated" &&
+            data.toString === "custom" && !target.hasAttribute("data-foo-bar") &&
+            Object.keys(data).join(",") === "order,version,toString" && invalid
+    "#, true);
+}
+
+#[test]
+fn range_tracks_valid_boundaries_and_parses_contextual_fragments() {
+    let (_, mut runtime) = realm("<main><p id='p'>Hi 😀</p><p>there</p></main>");
+    js(&mut runtime, r#"
+        const p = document.getElementById("p"), r = document.createRange();
+        const initiallyCollapsed = r instanceof Range && r.collapsed && r.startContainer === document;
+        r.selectNode(p);
+        const parsed = r.createContextualFragment("<em>part</em>");
+        const copy = r.cloneRange();
+        copy.selectNodeContents(p.firstChild);
+        let invalid = false;
+        try { copy.setEnd(p.firstChild, 6); } catch(error) { invalid = error.name === "IndexSizeError"; }
+        const compared = r.compareBoundaryPoints(Range.START_TO_START, copy) === -1;
+        copy.collapse(false);
+        initiallyCollapsed && compared && invalid && parsed.firstChild.tagName === "EM" &&
+            parsed.firstChild.textContent === "part" && r.commonAncestorContainer === p.parentNode &&
+            copy.collapsed && copy.startContainer === p.firstChild && copy.startOffset === 5 &&
+            new Range().endContainer === document
+    "#, true);
+}
 fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
     assert_eq!(
         runtime
@@ -271,6 +368,18 @@ fn detached_templates_import_and_clone_inert_contents() {
         "<!doctype html><main id=host></main><template id=parsed><b id=inside>hidden</b><template><i>nested</i></template></template>",
     );
     runtime.eval("var host=document.getElementById('host');var t=document.createElement('template');t.innerHTML='<tr><td>X</td></tr><script>throw new Error(\"must stay inert\")</script>';var content=t.content;var deep=t.cloneNode(true);var shallow=t.cloneNode(false);host.appendChild(t);host.appendChild(deep);var parsed=document.getElementById('parsed');var pc=parsed.cloneNode(true);host.appendChild(pc);").unwrap();
+    js(&mut runtime, r#"
+        var proto=HTMLTemplateElement.prototype, descriptor=Object.getOwnPropertyDescriptor(proto,'content');
+        var brand=false, illegal=false, wrong=document.createElement('div');
+        try { descriptor.get.call(wrong); } catch(e) { brand=e instanceof TypeError; }
+        try { new HTMLTemplateElement(); } catch(e) { illegal=e instanceof TypeError; }
+        Object.getPrototypeOf(HTMLTemplateElement)===HTMLElement &&
+        Object.getPrototypeOf(proto)===HTMLElement.prototype &&
+        [parsed,t,deep,shallow,pc].every(n=>Object.getPrototypeOf(n)===proto) &&
+        descriptor.get.call(t)===t.content && t.content instanceof DocumentFragment &&
+        Object.prototype.toString.call(t)==='[object HTMLTemplateElement]' &&
+        !('content' in wrong) && brand && illegal;
+    "#, true);
     js(
         &mut runtime,
         "content===t.content && content.nodeType===11 && content.parentNode===null && t.firstChild===null",

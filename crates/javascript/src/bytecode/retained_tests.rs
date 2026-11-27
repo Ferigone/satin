@@ -35,14 +35,14 @@ fn retained_bytecode_counts_nested_opcode_and_scope_storage() {
         };
         scope.vars.push("case".into());
         let ops = vec![
-            Op::For {
+            Op::For(Box::new(ForCode {
                 initial: None,
                 test: None,
                 update: None,
                 body: child.clone(),
                 lexical,
                 label: None,
-            },
+            })),
             Op::Switch(child.clone(), cases, Box::new(scope)),
             Op::Branch(vec![(child.clone(), child.clone()); extra + 1].into(), None),
         ];
@@ -57,6 +57,20 @@ fn retained_bytecode_counts_nested_opcode_and_scope_storage() {
         + std::mem::size_of::<JsString>()
         + std::mem::size_of::<(Rc<Chunk>, Rc<Chunk>)>();
     assert_eq!(size(extra) - size(0), extra * bytes_per_entry);
+}
+
+#[test]
+fn a_large_loop_header_is_charged_only_to_the_loop_that_owns_it() {
+    let empty = retained(Rc::default());
+    let child = Rc::<Chunk>::default();
+    let root = Rc::new(Chunk {
+        ops: vec![Op::For(Box::new(ForCode {
+            initial: None, test: None, update: None, body: child, lexical: vec![], label: None,
+        }))],
+        ..Default::default()
+    });
+    assert!(size_of::<Op>() < size_of::<ForCode>());
+    assert_eq!(retained(root), 2 * empty + size_of::<Op>() + size_of::<ForCode>());
 }
 
 #[test]

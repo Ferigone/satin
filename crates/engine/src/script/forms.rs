@@ -17,6 +17,13 @@ const VALUE_UNITS: usize = 1024 * 1024;
 const LIVE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const QUEUED_SUBMISSIONS: usize = 8;
 const SNAPSHOT_UNITS: usize = 8192;
+pub(super) const TYPED_CONTROLS: &[(&str, &str, &[&str])] = &[
+    ("button", "HTMLButtonElement", &["name", "value", "type", "disabled", "form"]),
+    ("form", "HTMLFormElement", &["action", "method", "enctype", "target", "name", "noValidate", "elements", "length"]),
+    ("option", "HTMLOptionElement", &["selected", "defaultSelected", "value"]),
+    ("select", "HTMLSelectElement", &["value", "selectedIndex"]),
+    ("textarea", "HTMLTextAreaElement", &["value", "defaultValue"]),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormSubmission {
@@ -1403,6 +1410,57 @@ pub(crate) fn initial_snapshots(document: &Document) -> HashMap<NodeId, ControlS
 }
 
 impl FormHost {
+    pub(super) fn install_typed_controls(&self, vm: &mut Vm) -> Result<(), JsError> {
+        let html = vm.get_global("HTMLElement")?;
+        let object = vm.get_global("Object")?;
+        let set_prototype = vm.get_property(object, "setPrototypeOf")?;
+        let input = vm.get_global("HTMLInputElement")?;
+        vm.call(set_prototype.clone(), Value::Undefined, &[input, html.clone()])?;
+        let input_prototype = self.dom.borrow().input_prototype.clone();
+        self.typed_accessors(vm, input_prototype, "input", &["value", "checked"])?;
+        for &(tag, name, properties) in TYPED_CONTROLS {
+            let prototype = self.dom.borrow().form_control_prototypes[tag].clone();
+            let constructor = super::webidl::interface(vm, prototype.clone(), name, 0, move |_, _, _, _| {
+                Err(JsError::type_error(format!("Illegal {name} constructor")))
+            })?;
+            vm.call(set_prototype.clone(), Value::Undefined, &[constructor, html.clone()])?;
+            self.typed_accessors(vm, prototype, tag, properties)?;
+        }
+        Ok(())
+    }
+
+    fn typed_accessors(
+        &self,
+        vm: &mut Vm,
+        prototype: Value,
+        tag: &'static str,
+        properties: &[&'static str],
+    ) -> Result<(), JsError> {
+        for &property in properties {
+            let host = self.clone();
+            let get = vm.new_native_function(&format!("get {property}"), move |vm, this, _| {
+                host.ensure_control_type(&this, tag)?;
+                host.get_property(vm, this, property)
+            });
+            let host = self.clone();
+            let set = vm.new_native_function(&format!("set {property}"), move |vm, this, args| {
+                host.ensure_control_type(&this, tag)?;
+                host.set_property(vm, this, property, arg(args, 0))
+            });
+            let writable = !matches!(property, "elements" | "length" | "form");
+            vm.define_accessor(prototype.clone(), property, Some(get), writable.then_some(set))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_control_type(&self, receiver: &Value, tag: &str) -> Result<(), JsError> {
+        let id = node(&self.dom, receiver)?;
+        if html(&self.dom.borrow().document, id, tag) {
+            return Ok(());
+        }
+        Err(JsError::type_error("Wrong form control for this accessor"))
+    }
+
     fn install_accessors(&self, vm: &mut Vm, prototype: Value) -> Result<(), JsError> {
         for property in [
             "value",
@@ -2014,8 +2072,9 @@ impl FormHost {
             if changed {
                 dispatch_checked(vm, &self.dom, Some(old), "change", true, false, &[])?;
             }
-            dispatch_checked(vm, &self.dom, Some(old), "blur", false, false, &[])?;
-            dispatch_checked(vm, &self.dom, Some(old), "focusout", true, false, &[])?;
+            let related = [("relatedTarget", wrap(vm, &self.dom, target)?)];
+            dispatch_checked(vm, &self.dom, Some(old), "blur", false, false, &related)?;
+            dispatch_checked(vm, &self.dom, Some(old), "focusout", true, false, &related)?;
         }
         // A blur handler may have synchronously focused another element.
         if self.data.borrow().focused.is_some() {
@@ -2041,8 +2100,9 @@ impl FormHost {
                 data.focus_value = value;
             }
             self.mark();
-            dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &[])?;
-            dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &[])?;
+            let related = [("relatedTarget", wrap(vm, &self.dom, old)?)];
+            dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &related)?;
+            dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &related)?;
         }
         Ok(target.is_some())
     }
@@ -2205,19 +2265,19 @@ impl FormHost {
             };
         };
         self.charge(vm, 0)?;
-        let key_name = match key {
-            FormKey::ArrowLeft => "ArrowLeft",
-            FormKey::ArrowRight => "ArrowRight",
-            FormKey::ArrowUp => "ArrowUp",
-            FormKey::ArrowDown => "ArrowDown",
-            FormKey::Home => "Home",
-            FormKey::End => "End",
-            FormKey::Backspace => "Backspace",
-            FormKey::Delete => "Delete",
-            FormKey::Enter => "Enter",
-            FormKey::Tab => "Tab",
-            FormKey::Space => " ",
-            FormKey::SelectAll => "a",
+        let (key_name, code, legacy_code) = match key {
+            FormKey::ArrowLeft => ("ArrowLeft", "ArrowLeft", 37),
+            FormKey::ArrowRight => ("ArrowRight", "ArrowRight", 39),
+            FormKey::ArrowUp => ("ArrowUp", "ArrowUp", 38),
+            FormKey::ArrowDown => ("ArrowDown", "ArrowDown", 40),
+            FormKey::Home => ("Home", "Home", 36),
+            FormKey::End => ("End", "End", 35),
+            FormKey::Backspace => ("Backspace", "Backspace", 8),
+            FormKey::Delete => ("Delete", "Delete", 46),
+            FormKey::Enter => ("Enter", "Enter", 13),
+            FormKey::Tab => ("Tab", "Tab", 9),
+            FormKey::Space => (" ", "Space", 32),
+            FormKey::SelectAll => (if shift { "A" } else { "a" }, "KeyA", 65),
         };
         if !dispatch_checked(
             vm,
@@ -2228,6 +2288,9 @@ impl FormHost {
             true,
             &[
                 ("key", key_name.into()),
+                ("code", code.into()),
+                ("keyCode", legacy_code.into()),
+                ("which", legacy_code.into()),
                 ("shiftKey", shift.into()),
                 ("ctrlKey", control.into()),
             ],

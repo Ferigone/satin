@@ -124,14 +124,15 @@ pub(crate) fn force_named(
     key: &crate::JsString,
     value: &Value,
 ) -> Result<(), JsError> {
-    const NAME: [u16; 8] = [84, 101, 109, 112, 111, 114, 97, 108];
-    if key.len() == NAME.len()
-        && key.as_utf16() == NAME
-        && let Some(id) = value.as_object()
-    {
+    if is_lazy_property_name(key) && let Some(id) = value.as_object() {
         materialize(vm, id)?;
     }
     Ok(())
+}
+
+pub(crate) fn is_lazy_property_name(key: &crate::JsString) -> bool {
+    const NAME: [u16; 8] = [84, 101, 109, 112, 111, 114, 97, 108];
+    key.len() == NAME.len() && key.as_utf16() == NAME
 }
 
 fn materialize(vm: &mut Vm, id: ObjectId) -> Result<(), JsError> {

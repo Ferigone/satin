@@ -1,12 +1,29 @@
 use std::rc::Rc;
 use crate::{ErrorKind, JsBigInt, JsError, JsString};
 
+mod source;
+mod comment_scan;
+#[cfg(test)]
+mod comment_span_tests;
+use source::push_source_point;
+pub(crate) use source::SourceSpan;
+
 const BIGINT_SOURCE_WORK: usize = 8_388_608;
 // The parser retains three lookahead tokens, independently of source length.
 // Charge structural work for the AST and bytecode that coexist during compilation.
 // A closing delimiter finishes an already charged node. It has no node of its own.
 const STRUCTURAL_TOKEN_BYTES: usize = 384;
 const CLOSING_DELIMITER_BYTES: usize = 32;
+// The VM reserves this scratch per input byte before constructing a classic
+// script lexer. UTF-8 uses at least one byte per source code point.
+pub(crate) const LITERAL_SCRATCH_PER_BYTE: usize = 12;
+
+fn structural_charge(point: Option<char>) -> usize {
+    match point {
+        Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
+        _ => STRUCTURAL_TOKEN_BYTES,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TokenKind {
@@ -45,54 +62,6 @@ struct SlashPosition {
     templates: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SourceSpan {
-    // ECMAScript source characters can be isolated UTF-16 surrogates.
-    buffer: Rc<[u32]>,
-    range: std::ops::Range<usize>,
-}
-impl SourceSpan {
-    fn new(points: impl Iterator<Item = u32>) -> Self {
-        let buffer: Rc<[u32]> = points.collect();
-        let range = 0..buffer.len();
-        Self { buffer, range }
-    }
-    pub fn storage(&self) -> (usize, usize) {
-        (self.buffer.as_ptr() as usize, std::mem::size_of_val(&*self.buffer))
-    }
-    pub fn generated(text: &str) -> Rc<Self> {
-        Rc::new(Self::new(text.chars().map(u32::from)))
-    }
-    pub fn utf16_len(&self, range: std::ops::Range<usize>) -> usize {
-        self[range].iter().map(|&p| if p > 0xffff { 2 } else { 1 }).sum()
-    }
-    pub fn utf16_range(&self, range: std::ops::Range<usize>) -> Vec<u16> {
-        let mut units = Vec::with_capacity(self.utf16_len(range.clone()));
-        for &point in &self[range] {
-            push_source_point(&mut units, point);
-        }
-        units
-    }
-}
-
-fn push_source_point(units: &mut Vec<u16>, point: u32) {
-    if point <= 0xffff {
-        units.push(point as u16);
-    } else {
-        let n = point - 0x10000;
-        units.push((0xd800 + (n >> 10)) as u16);
-        units.push((0xdc00 + (n & 1023)) as u16);
-    }
-}
-
-impl std::ops::Deref for SourceSpan {
-    type Target = [u32];
-
-    fn deref(&self) -> &[u32] {
-        &self.buffer[self.range.clone()]
-    }
-}
-
 pub(crate) struct Lexer {
     chars: SourceSpan,
     script_goal: bool,
@@ -106,10 +75,27 @@ pub(crate) struct Lexer {
     templates: Vec<usize>,
     bigint_work: usize,
     compilation_bytes: usize,
+    // Only a VM-admitted UTF-8 script has a separate prepaid literal reserve.
+    // Source positions are monotone even when finishing an enclosing function.
+    last_released_source_end: Option<usize>,
+    #[cfg(feature = "media-startup-diagnostics")]
+    initial_compilation_bytes: usize,
+    #[cfg(feature = "media-startup-diagnostics")]
+    compacted_bodies: usize,
 }
 impl Lexer {
     pub(crate) fn new(source: &str, compilation_bytes: usize, script_goal: bool) -> Self {
-        Self::from_span(SourceSpan::new(source.chars().map(u32::from)), compilation_bytes, script_goal)
+        Self::from_span(SourceSpan::from_text(source), compilation_bytes, script_goal)
+    }
+
+    pub(crate) fn budgeted_script(source: &str, budget: usize, source_reservation: usize) -> Self {
+        let chars = SourceSpan::from_text(source);
+        // The VM already admitted the worst-case source and decoded-literal
+        // scratch. Construction has finished; only the actual backing remains.
+        let unused = source_reservation.saturating_sub(chars.storage().1);
+        let mut lexer = Self::from_span(chars, budget.saturating_add(unused), true);
+        lexer.last_released_source_end = Some(0);
+        lexer
     }
 
     pub(crate) fn from_utf16(source: &[u16], compilation_bytes: usize) -> Self {
@@ -117,7 +103,7 @@ impl Lexer {
             Ok(ch) => u32::from(ch),
             Err(error) => u32::from(error.unpaired_surrogate()),
         });
-        Self::from_span(SourceSpan::new(points), compilation_bytes, true)
+        Self::from_span(SourceSpan::from_points(points), compilation_bytes, true)
     }
 
     pub(crate) fn from_span(chars: SourceSpan, compilation_bytes: usize, script_goal: bool) -> Self {
@@ -134,20 +120,24 @@ impl Lexer {
             templates: Vec::new(),
             bigint_work: BIGINT_SOURCE_WORK,
             compilation_bytes,
+            last_released_source_end: None,
+            #[cfg(feature = "media-startup-diagnostics")]
+            initial_compilation_bytes: compilation_bytes,
+            #[cfg(feature = "media-startup-diagnostics")]
+            compacted_bodies: 0,
         }
     }
 
     pub fn span(&self, start: usize, end: usize) -> Rc<SourceSpan> {
-        let base = self.chars.range.start;
-        Rc::new(SourceSpan { buffer: self.chars.buffer.clone(), range: base + start..base + end })
+        self.chars.span(start..end)
     }
     pub fn position(&self) -> usize { self.pos }
 
     fn peek(&self, n: usize) -> Option<char> {
         // Lone surrogates share the lexical classification of U+FFFD. Literal
         // values and source reflection read the untouched code point instead.
-        self.chars.get(self.pos + n)
-            .map(|&p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER))
+        self.chars.point(self.pos + n)
+            .map(|p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER))
     }
     fn bump(&mut self) -> Option<char> {
         let c = self.peek(0)?;
@@ -180,25 +170,60 @@ impl Lexer {
         self.compilation_bytes
     }
 
-    pub(crate) fn finish_deferred_function(&mut self, before: usize, retained: usize) -> Result<(), JsError> {
-        // Up to three already-lexed tokens following the closing brace survive this body.
-        self.compilation_bytes = before;
-        self.reserve_compilation_bytes(retained.saturating_add(3 * STRUCTURAL_TOKEN_BYTES))
+    pub(crate) fn lookahead_charge(&self, token: &Token) -> usize {
+        structural_charge(self.chars.point(token.start).map(|p| char::from_u32(p).unwrap_or(char::REPLACEMENT_CHARACTER)))
     }
 
+    pub(crate) fn finish_deferred_function(
+        &mut self,
+        before: usize,
+        retained: usize,
+        source: &SourceSpan,
+    ) -> Result<(), JsError> {
+        // The AST, decoded literal temporaries and validation bytecode are
+        // gone. The surviving callable graph (including names/parameters) is
+        // debited below. Materialization pays for its own scratch on invocation.
+        // Use code points as a conservative lower bound on released UTF-8 bytes.
+        let mut credit = 0;
+        if let Some(last) = &mut self.last_released_source_end {
+            let range = source.range();
+            credit = range.end.saturating_sub(range.start.max(*last)).saturating_mul(LITERAL_SCRATCH_PER_BYTE);
+            *last = (*last).max(range.end);
+        }
+        self.compilation_bytes = before.saturating_add(credit);
+        self.reserve_compilation_bytes(retained)?;
+        #[cfg(feature = "media-startup-diagnostics")]
+        {
+            self.compacted_bodies = self.compacted_bodies.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     fn reserve_compilation_bytes(&mut self, bytes: usize) -> Result<(), JsError> {
-        self.compilation_bytes = self.compilation_bytes.checked_sub(bytes).ok_or_else(|| {
-            JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted")
-        })?;
+        let Some(remaining) = self.compilation_bytes.checked_sub(bytes) else {
+            #[cfg(feature = "media-startup-diagnostics")]
+            crate::vm::qa_compiler_limit(
+                std::panic::Location::caller(),
+                bytes,
+                self.compilation_bytes,
+                [
+                    self.initial_compilation_bytes,
+                    self.chars.len(),
+                    self.chars.storage().1,
+                    self.pos,
+                    self.compacted_bodies,
+                ],
+            );
+            return Err(JsError::new(ErrorKind::HeapLimit, "Script compilation memory budget exhausted"));
+        };
+        self.compilation_bytes = remaining;
         Ok(())
     }
 
     pub(crate) fn next(&mut self) -> Token {
         let trivia = self.skip_trivia().and_then(|()| {
-            let bytes = match self.peek(0) {
-                Some(')' | ']' | '}' | ':') | None => CLOSING_DELIMITER_BYTES,
-                _ => STRUCTURAL_TOKEN_BYTES,
-            };
+            let bytes = structural_charge(self.peek(0));
             self.reserve_compilation_bytes(bytes)
         });
         self.before_first_token = false;
@@ -237,17 +262,18 @@ impl Lexer {
                 self.bump();
                 continue;
             }
-            let prefix = |bytes: &[u8]| self.chars[self.pos..].iter().copied()
+            let prefix = |bytes: &[u8]| self.chars.points(self.pos..self.chars.len())
                 .take(bytes.len()).eq(bytes.iter().copied().map(u32::from));
-            let html_comment = self.script_goal && (prefix(b"<!--") ||
-                ((self.before_first_token || self.line != initial_line) && prefix(b"-->")));
+            let html_comment = self.script_goal && ((c == '<' && prefix(b"<!--")) ||
+                (c == '-' && (self.before_first_token || self.line != initial_line) && prefix(b"-->")));
             if (c == '/' && self.peek(1) == Some('/'))
                 || (self.pos == 0 && prefix(b"#!")) || html_comment {
 
-                while self
-                    .peek(0)
-                    .is_some_and(|x| !matches!(x, '\r' | '\n' | '\u{2028}' | '\u{2029}'))
-                {
+                loop {
+                    self.advance_comment_run::<false>();
+                    if !self.peek(0).is_some_and(|x| !matches!(x, '\r' | '\n' | '\u{2028}' | '\u{2029}')) {
+                        break;
+                    }
                     self.bump();
                 }
                 continue;
@@ -256,6 +282,7 @@ impl Lexer {
                 self.bump();
                 self.bump();
                 loop {
+                    self.advance_comment_run::<true>();
                     match (self.peek(0), self.peek(1)) {
                         (Some('*'), Some('/')) => {
                             self.bump();
@@ -273,6 +300,12 @@ impl Lexer {
             break;
         }
         Ok(())
+    }
+
+    fn advance_comment_run<const BLOCK: bool>(&mut self) {
+        let count = self.chars.comment_prefix::<BLOCK>(self.pos);
+        self.pos += count;
+        self.column += count;
     }
 
     fn kind(&mut self) -> Result<TokenKind, JsError> {
@@ -473,7 +506,7 @@ impl Lexer {
                     if c == '\r' {
                         raw.push(10);
                     } else {
-                        push_source_point(&mut raw, self.chars[self.pos - 1]);
+                        push_source_point(&mut raw, self.chars.point(self.pos - 1).unwrap());
                     }
                 }
                 Some(_) => {
@@ -481,7 +514,7 @@ impl Lexer {
                     if c == '\r' {
                         raw.push(10);
                     } else {
-                        push_source_point(&mut raw, self.chars[self.pos - 1]);
+                        push_source_point(&mut raw, self.chars.point(self.pos - 1).unwrap());
                     }
                 }
             }
@@ -525,7 +558,7 @@ impl Lexer {
                 return Err(self.error("Line terminator in string literal"));
             }
             if c != '\\' {
-                push_source_point(&mut units, self.chars[self.pos - 1]);
+                push_source_point(&mut units, self.chars.point(self.pos - 1).unwrap());
                 continue;
             }
             self.escaped_string = true;
@@ -590,7 +623,7 @@ impl Lexer {
                     }
                 }
                 '\n' | '\r' | '\u{2028}' | '\u{2029}' => {}
-                _ => push_source_point(&mut units, self.chars[self.pos - 1]),
+                _ => push_source_point(&mut units, self.chars.point(self.pos - 1).unwrap()),
             }
         }
     }
@@ -614,16 +647,15 @@ impl Lexer {
                 return self.bigint(digits, radix);
             }
             self.number_suffix()?;
-            let value = self.chars[digits..self.pos]
-                .iter()
-                .filter_map(|&p| char::from_u32(p)?.to_digit(radix))
+            let value = self.chars.points(digits..self.pos)
+                .filter_map(|p| char::from_u32(p)?.to_digit(radix))
                 .fold(0f64, |value, digit| {
                     value * f64::from(radix) + f64::from(digit)
                 });
             return Ok(TokenKind::Number(value));
         }
         let integers = self.digits(10)?;
-        let leading_zero = integers > 1 && self.chars[start] == u32::from('0');
+        let leading_zero = integers > 1 && self.chars.point(start) == Some(u32::from('0'));
         if self.peek(0) == Some('n') && integers != 0 {
             if leading_zero {
                 return Err(self.error("Decimal BigInt literals cannot have leading zeroes"));
@@ -632,13 +664,14 @@ impl Lexer {
         }
         if leading_zero {
             self.legacy_literal = true;
-            let digits = &self.chars[start..self.pos];
-            if digits.contains(&u32::from('_')) {
+            let end = self.pos;
+            let digits = || self.chars.points(start..end);
+            if digits().any(|p| p == u32::from('_')) {
                 return Err(self.error("Numeric separator after a leading zero"));
             }
-            if digits.iter().all(|&p| (u32::from('0')..=u32::from('7')).contains(&p)) {
+            if digits().all(|p| (u32::from('0')..=u32::from('7')).contains(&p)) {
                 self.number_suffix()?;
-                let value = digits.iter().fold(0.0, |n, c| {
+                let value = digits().fold(0.0, |n, c| {
                     n * 8.0 + f64::from(c - u32::from('0'))
                 });
                 return Ok(TokenKind::Number(value));
@@ -658,11 +691,11 @@ impl Lexer {
             }
         }
         self.number_suffix()?;
-        let raw = &self.chars[start..self.pos];
-        if leading_zero && raw.contains(&u32::from('_')) {
+        let raw = || self.chars.points(start..self.pos);
+        if leading_zero && raw().any(|p| p == u32::from('_')) {
             return Err(self.error("Numeric separator after a leading zero"));
         }
-        let text: String = raw.iter().copied()
+        let text: String = raw()
             .filter(|&p| p != u32::from('_'))
             .filter_map(char::from_u32)
             .collect();
@@ -702,10 +735,9 @@ impl Lexer {
         let end = self.pos;
         self.bump();
         self.number_suffix()?;
-        let digits: Vec<_> = self.chars[digits..end]
-            .iter()
-            .filter(|c| **c != u32::from('_'))
-            .map(|c| *c as u8)
+        let digits: Vec<_> = self.chars.points(digits..end)
+            .filter(|&c| c != u32::from('_'))
+            .map(|c| c as u8)
             .collect();
         self.charge_bigint_source(crate::bigint::literal_work(&digits, radix))?;
         crate::bigint::literal(&digits, radix).map(TokenKind::BigInt)

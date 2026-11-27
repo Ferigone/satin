@@ -849,9 +849,13 @@ fn install_function(vm: &mut Vm) {
         let name = match &vm.heap.object(id)?.kind {
             ObjectKind::Function { code, .. } => {
                 let source = code.source.clone();
-                vm.consume_work(source.len())?;
+                // SourceSpan already bounds the source retained by compilation.
+                // Charge its three linear scans (length, capacity, conversion)
+                // as native buffer work, then account for the output separately.
+                // Keep the string/heap checks before allocating the UTF-16 Vec.
+                vm.charge_buffer_work(source.len().saturating_mul(3))?;
                 vm.ensure_string_allocation(source.utf16_len(0..source.len()))?;
-                return vm.finish_string(source.utf16_range(0..source.len()));
+                return vm.finish_buffer_string(source.utf16_range(0..source.len()));
             }
             ObjectKind::Native { initial_name, .. } => initial_name.clone(),
             _ => JsString::default(),
@@ -988,6 +992,63 @@ fn integer(vm: &mut Vm, value: Value) -> Result<f64, JsError> {
     let n = vm.to_number(&value)?;
     Ok(if n.is_nan() { 0.0 } else { n.trunc() })
 }
+
+fn search_array(
+    vm: &mut Vm,
+    receiver: Value,
+    args: &[Value],
+    backwards: bool,
+) -> Result<Value, JsError> {
+    let object = vm.coerce_object(receiver)?;
+    let length = vm.get_property(object.clone(), "length")?;
+    // A generic receiver may have a large length but need only a few visits.
+    let length = integer(vm, length)?.clamp(0.0, 9_007_199_254_740_991.0) as u64;
+    if length == 0 {
+        return Ok(Value::from(-1));
+    }
+    let from = if backwards && args.len() < 2 {
+        f64::INFINITY
+    } else {
+        integer(vm, arg(args, 1))?
+    };
+    let start = if from < 0.0 {
+        length as f64 + from
+    } else {
+        from
+    };
+    let (mut index, end) = if backwards {
+        if start < 0.0 {
+            return Ok(Value::from(-1));
+        }
+        (start.min((length - 1) as f64) as u64, 0)
+    } else {
+        if start >= length as f64 {
+            return Ok(Value::from(-1));
+        }
+        (start.max(0.0) as u64, length - 1)
+    };
+    let needle = arg(args, 0);
+    loop {
+        vm.tick()?;
+        let key = JsString::from(index.to_string());
+        if vm.has(&object, &key)? {
+            let element = vm.get(object.clone(), &key)?;
+            vm.charge_bigint_comparison(&element, &needle)?;
+            if element == needle {
+                return Ok(Value::from(index as f64));
+            }
+        }
+        if index == end {
+            return Ok(Value::from(-1));
+        }
+        if backwards {
+            index -= 1;
+        } else {
+            index += 1;
+        }
+    }
+}
+
 fn relative(n: f64, len: usize) -> usize {
     if n < 0.0 {
         (len as f64 + n).max(0.0) as usize
@@ -1094,12 +1155,12 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
     Ok(removed)
 }
 
-fn reserve_sort_items(
+fn reserve_sort_items<T>(
     vm: &mut Vm,
-    items: &mut Vec<Value>,
+    items: &mut Vec<T>,
     additional: usize,
 ) -> Result<(), JsError> {
-    vm.reserve_allocation(additional.saturating_mul(size_of::<Value>()))?;
+    vm.reserve_allocation(additional.saturating_mul(size_of::<T>()))?;
     items
         .try_reserve_exact(additional)
         .map_err(|_| JsError::new(ErrorKind::HeapLimit, "Array sort allocation failed"))
@@ -1186,31 +1247,94 @@ pub(crate) fn stable_merge_sort<T: Clone>(
     // Comparisons can run JavaScript and throw. Sort the snapshot before any
     // writes, and take the left item first when two items compare equal.
     let length = items.len();
-    let mut width = 1;
-    while width < length {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let mut end = start + 1;
+        if end < length {
+            let descending = compare(vm, &items[end], &items[start])? == Ordering::Less;
+            end += 1;
+            while end < length
+                && (compare(vm, &items[end], &items[end - 1])? == Ordering::Less) == descending
+            {
+                end += 1;
+            }
+            if descending {
+                // Equality terminates descending runs, preserving stability.
+                vm.consume_work(end - start)?;
+                items[start..end].reverse();
+            }
+        }
+        if runs.len() == runs.capacity() {
+            let extra = runs.capacity().max(4).min(length - runs.len());
+            reserve_sort_items(vm, &mut runs, extra)?;
+        }
+        runs.push(end);
+        start = end;
+    }
+    while runs.len() > 1 {
         scratch.clear();
-        for start in (0..length).step_by(width * 2) {
-            let end = (start + width * 2).min(length);
-            let middle = (start + width).min(end);
+        let mut start = 0;
+        for pair in (0..runs.len()).step_by(2) {
+            let middle = runs[pair];
+            let end = runs.get(pair + 1).copied().unwrap_or(middle);
             let mut left = start;
             let mut right = middle;
+            let mut streak: i8 = 0;
             while left < middle && right < end {
                 if compare(vm, &items[left], &items[right])? != Ordering::Greater {
                     scratch.push(items[left].clone());
                     left += 1;
+                    streak = streak.max(0) + 1;
+                    if streak == 7 {
+                        let n = ordered_prefix(&items[left..middle], |item|
+                            Ok(compare(vm, item, &items[right])? != Ordering::Greater))?;
+                        vm.consume_work(n)?;
+                        scratch.extend_from_slice(&items[left..left+n]);
+                        left += n;
+                        streak = 0;
+                    }
                 } else {
                     scratch.push(items[right].clone());
                     right += 1;
+                    streak = streak.min(0) - 1;
+                    if streak == -7 {
+                        let n = ordered_prefix(&items[right..end], |item|
+                            Ok(compare(vm, &items[left], item)? == Ordering::Greater))?;
+                        vm.consume_work(n)?;
+                        scratch.extend_from_slice(&items[right..right+n]);
+                        right += n;
+                        streak = 0;
+                    }
                 }
             }
             vm.consume_work(middle - left + end - right)?;
             scratch.extend_from_slice(&items[left..middle]);
             scratch.extend_from_slice(&items[right..end]);
+            runs[pair/2] = end;
+            start = end;
         }
+        runs.truncate(runs.len().div_ceil(2));
         std::mem::swap(&mut items, &mut scratch);
-        width *= 2;
     }
     Ok(items)
+}
+
+/// Exponential search skips a long winning prefix without comparing every
+/// pair through JavaScript. Equal elements always prefer the left run.
+fn ordered_prefix<T>(items: &[T], mut precedes: impl FnMut(&T) -> Result<bool, JsError>) -> Result<usize, JsError> {
+    let mut lo = 0;
+    let mut probe = 0;
+    while probe < items.len() && precedes(&items[probe])? {
+        lo = probe + 1;
+        probe = probe.saturating_mul(2).saturating_add(1);
+    }
+    let mut hi = probe.min(items.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if precedes(&items[mid])? { lo = mid + 1; } else { hi = mid; }
+    }
+    Ok(lo)
 }
 
 fn install_array(vm: &mut Vm) {
@@ -1434,44 +1558,31 @@ fn install_array(vm: &mut Vm) {
         vm.set_property(array.clone(), "length", Value::from(offset))?;
         Ok(array)
     });
-    for (name, includes) in [("indexOf", false), ("includes", true)] {
+    for (name, backwards) in [("indexOf", false), ("lastIndexOf", true)] {
         method(vm, proto.clone(), name, 1, move |vm, this, a| {
-            let object = vm.coerce_object(this)?;
-            let len = array_like_length(vm, object.clone())?;
-            if len == 0 {
-                return Ok(if includes {
-                    Value::Bool(false)
-                } else {
-                    Value::from(-1)
-                });
-            }
-            let start = relative_index(integer(vm, arg(a, 1))?, len);
-            let needle = arg(a, 0);
-            for i in start..len {
-                vm.tick()?;
-                let key = JsString::from(i.to_string());
-                if includes || vm.has(&object, &key)? {
-                    let v = vm.get(object.clone(), &key)?;
-                    vm.charge_bigint_comparison(&v, &needle)?;
-                    if v == needle
-                        || (includes
-                            && matches!((&v,&needle),(Value::Number(a),Value::Number(b))if a.is_nan()&&b.is_nan()))
-                    {
-                        return Ok(if includes {
-                            Value::Bool(true)
-                        } else {
-                            Value::from(i as f64)
-                        });
-                    }
-                }
-            }
-            Ok(if includes {
-                Value::Bool(false)
-            } else {
-                Value::from(-1)
-            })
+            search_array(vm, this, a, backwards)
         });
     }
+    method(vm, proto.clone(), "includes", 1, |vm, this, args| {
+        let object = vm.coerce_object(this)?;
+        let length = array_like_length(vm, object.clone())?;
+        if length == 0 {
+            return Ok(Value::Bool(false));
+        }
+        let start = relative_index(integer(vm, arg(args, 1))?, length);
+        let needle = arg(args, 0);
+        for index in start..length {
+            vm.tick()?;
+            let value = vm.get(object.clone(), &JsString::from(index.to_string()))?;
+            vm.charge_bigint_comparison(&value, &needle)?;
+            if value == needle
+                || matches!((&value, &needle), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+            {
+                return Ok(Value::Bool(true));
+            }
+        }
+        Ok(Value::Bool(false))
+    });
     array_iteration::install(vm, &proto);
     array_methods::install(vm, &proto);
     method(vm, proto, "reverse", 0, |vm, this, _| {
@@ -1550,21 +1661,22 @@ pub(crate) fn find_units(
     if needle.len() > haystack.len() - start {
         return Ok(None);
     }
-    if let [unit] = needle {
-        const CHUNK: usize = 256;
-        for (block, units) in haystack[start..].chunks(CHUNK).enumerate() {
-            let found = units.iter().position(|candidate| candidate == unit);
-            vm.charge_buffer_work(found.map_or(units.len(), |index| index + 1))?;
-            if let Some(index) = found {
-                return Ok(Some(start + block * CHUNK + index));
+    // Only positions with the right first code unit need full comparisons.
+    // The bounded native scan is the same one used for one-unit separators.
+    let mut pos = start;
+    let stop = haystack.len() - needle.len() + 1;
+    while pos < stop {
+        let end = stop.min(pos + 256);
+        let found = haystack[pos..end].iter().position(|&unit| unit == needle[0]);
+        vm.charge_buffer_work(found.map_or(end - pos, |offset| offset + 1))?;
+        if let Some(offset) = found {
+            let i = pos + offset;
+            if equal_units(vm, &haystack[i+1..i+needle.len()], &needle[1..])? {
+                return Ok(Some(i));
             }
-        }
-        return Ok(None);
-    }
-    for i in start..=haystack.len() - needle.len() {
-        vm.tick()?;
-        if equal_units(vm, &haystack[i..i + needle.len()], needle)? {
-            return Ok(Some(i));
+            pos = i + 1;
+        } else {
+            pos = end;
         }
     }
     Ok(None)
@@ -1591,6 +1703,9 @@ pub(crate) fn join_indexed_properties(
             value = vm.invoke(formatter, value, args)?;
         }
         let string = vm.to_string(&value)?;
+        if length == 1 {
+            return vm.checked_string(string);
+        }
         append_units(vm, &mut units, string.as_utf16())?;
     }
     vm.finish_string(units)
@@ -1875,7 +1990,7 @@ fn install_string(vm: &mut Vm) {
                 std::mem::swap(&mut start, &mut end);
             }
             end = end.max(start);
-            vm.copy_string(&s.as_utf16()[start..end])
+            vm.string_range(&s, start, end)
         });
     }
     for name in [
@@ -1996,7 +2111,7 @@ fn install_string(vm: &mut Vm) {
             for _ in 0..limit {
                 vm.tick()?;
                 let end = find_units(vm, s.as_utf16(), delimiter.as_utf16(), start)?;
-                let piece = vm.copy_string(&s.as_utf16()[start..end.unwrap_or(s.len())])?;
+                let piece = vm.string_range(&s, start, end.unwrap_or(s.len()))?;
                 vm.append_array_literal(result.clone(), Some(piece))?;
                 if let Some(end) = end {
                     start = end + delimiter.len();
@@ -2511,10 +2626,31 @@ fn install_errors(vm: &mut Vm) {
     .unwrap();
     let get_stack = vm.native("get stack", 0, false, Rc::new(|vm, this, _| {
         let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
-        if let ObjectKind::Error(_, trace) = &vm.heap.object(id)?.kind {
+        let object = vm.heap.object(id)?;
+        let ObjectKind::Error(kind, trace) = &object.kind else {
+            return Ok(Value::Undefined);
+        };
+        // Read only an own data message. Inspecting a stack should not invoke
+        // a getter that page code may have installed on the Error object.
+        let Some(Property {
+            kind: PropertyKind::Data { value: Value::String(message), .. }, ..
+        }) = object.properties.get(&JsString::from("message")) else {
+            return Ok(Value::String(trace.clone()));
+        };
+        if message.is_empty() {
             return Ok(Value::String(trace.clone()));
         }
-        Ok(Value::Undefined)
+        let boundary = kind.name().len();
+        let (trace, message) = (trace.clone(), message.clone());
+        let length = trace.len().saturating_add(message.len()).saturating_add(2);
+        vm.ensure_string_allocation(length)?;
+        vm.charge_buffer_work(length)?;
+        let mut stack = Vec::with_capacity(length);
+        stack.extend_from_slice(&trace.as_utf16()[..boundary]);
+        stack.extend([u16::from(b':'), u16::from(b' ')]);
+        stack.extend_from_slice(message.as_utf16());
+        stack.extend_from_slice(&trace.as_utf16()[boundary..]);
+        vm.finish_string(stack)
     }));
     let set_stack = vm.native("set stack", 1, false, Rc::new(|vm, this, args| {
         let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
@@ -2642,4 +2778,36 @@ pub(crate) fn create_error(
         vm.define_data_property(error.clone(), "cause", cause, true, false, true)?;
     }
     Ok(error)
+}
+
+#[cfg(test)]
+mod function_source_budget_tests {
+    use super::*;
+    use crate::VmLimits;
+
+    #[test]
+    fn large_function_source_uses_bounded_buffer_work() {
+        let source = format!("function large() {{ /*{}🦀*/ }}", "x".repeat(64 * 1024));
+        let mut vm = Vm::with_limits(VmLimits {
+            max_instructions: 10_000,
+            buffer_units_per_instruction: 1024,
+            ..VmLimits::default()
+        });
+        vm.eval(&source).unwrap();
+        assert_eq!(vm.eval("large.toString()").unwrap(), Value::from(source.as_str()));
+    }
+
+    #[test]
+    fn large_function_source_still_obeys_native_work_limit() {
+        let source = format!("function large() {{ /*{}*/ }}", "x".repeat(64 * 1024));
+        let mut vm = Vm::with_limits(VmLimits {
+            max_instructions: 10_000,
+            ..VmLimits::default()
+        });
+        vm.eval(&source).unwrap();
+        assert_eq!(
+            vm.eval("large.toString()").unwrap_err().kind,
+            ErrorKind::ExecutionLimit
+        );
+    }
 }

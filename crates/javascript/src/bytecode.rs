@@ -2,6 +2,7 @@
 //! chunks; expressions use a conventional operand/reference stack and jumps.
 mod classes;
 mod assignment_patterns;
+mod leaf;
 pub(crate) use assignment_patterns::PatternStep;
 use crate::{
     ErrorKind, JsError, JsString, Value,
@@ -79,6 +80,7 @@ pub(crate) struct Chunk {
 }
 impl Chunk {
     fn finish(mut self) -> Rc<Self> {
+        self.ops.shrink_to_fit();
         self.can_suspend = self.ops.iter().any(Op::can_suspend);
         Rc::new(self)
     }
@@ -86,6 +88,7 @@ impl Chunk {
 #[derive(Clone, Debug)]
 pub(crate) struct Code {
     pub source: Rc<crate::lexer::SourceSpan>,
+    pub leaf: Option<Box<leaf::LeafReturn>>,
     pub name: Option<JsString>,
     pub params: Vec<ParameterCode>,
     pub param_names: Vec<JsString>,
@@ -111,6 +114,17 @@ pub(crate) enum ClassName {
     Binding(JsString),
     Property,
 }
+/// The full C-style loop header is cold data for every other stack opcode.
+#[derive(Clone, Debug)]
+pub(crate) struct ForCode {
+    pub initial: Option<Rc<Chunk>>,
+    pub test: Option<Rc<Chunk>>,
+    pub update: Option<Rc<Chunk>>,
+    pub body: Rc<Chunk>,
+    pub lexical: Vec<(JsString, bool)>,
+    pub label: Option<LabelId>,
+}
+pub(crate) const INLINE_ARGUMENTS: usize = 3;
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
     Push(Value),
@@ -132,10 +146,14 @@ pub(crate) enum Op {
     SuperConstruct,
     Class(Rc<ClassCode>, ClassName),
     Property,
+    NamedProperty(JsString),
+    LoadProperty(JsString),
+    LoadComputed,
     PrivateProperty(JsString),
     PrivateIn(JsString),
     Get,
-    NormalizeReference,
+    ReadForUpdate,
+    ApplyUpdate(&'static str),
     InvalidCallAssignment,
     Set,
     Delete,
@@ -145,6 +163,7 @@ pub(crate) enum Op {
     },
     Unary(&'static str),
     Binary(&'static str),
+    BinaryNumber(&'static str, f64),
     TypeofReference,
     Pop,
     Dup,
@@ -157,6 +176,7 @@ pub(crate) enum Op {
     ArrayElement(bool),
     ArrayHole,
     Object,
+    ConstantRecord(Rc<[(JsString, Value)]>),
     ObjectSpread,
     Destructure(Rc<PatternCode>),
     Pattern(PatternStep),
@@ -172,11 +192,15 @@ pub(crate) enum Op {
     Function(Rc<Code>),
     InferName(JsString),
     PrepareCall(bool),
+    PrepareMethod(JsString),
     Arguments,
     Argument(bool),
+    FixedArgument(u8),
+    FixedCall(u8),
     Call,
     Construct,
-    Evaluate(Rc<Chunk>),
+    /// Store the expression's GetValue as the statement-list completion.
+    StatementValue,
     Initialize(VarKind, Rc<PatternCode>, Option<Rc<Chunk>>),
     Block(Rc<Chunk>),
     Label(LabelId, Rc<Chunk>),
@@ -184,14 +208,7 @@ pub(crate) enum Op {
     Branch(Rc<[(Rc<Chunk>, Rc<Chunk>)]>, Option<Rc<Chunk>>),
     While(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
     DoWhile(Rc<Chunk>, Rc<Chunk>, Option<LabelId>),
-    For {
-        initial: Option<Rc<Chunk>>,
-        test: Option<Rc<Chunk>>,
-        update: Option<Rc<Chunk>>,
-        body: Rc<Chunk>,
-        lexical: Vec<(JsString, bool)>,
-        label: Option<LabelId>,
-    },
+    For(Box<ForCode>),
     ForIn(
         Option<VarKind>,
         Rc<PatternCode>,
@@ -223,9 +240,9 @@ impl Op {
         match self {
             Self::While(_, _, label)
             | Self::DoWhile(_, _, label)
-            | Self::For { label, .. }
             | Self::ForIn(_, _, _, _, label)
             | Self::ForOf(_, _, _, _, _, label) => *label,
+            Self::For(code) => code.label,
             _ => unreachable!("loop opcode expected"),
         }
     }
@@ -233,8 +250,7 @@ impl Op {
     pub(crate) fn can_suspend(&self) -> bool {
         match self {
             Self::Await | Self::Yield { .. } | Self::ForOf(_, _, _, _, true, _) => true,
-            Self::Evaluate(chunk)
-            | Self::Throw(chunk)
+            Self::Throw(chunk)
             | Self::Block(chunk)
             | Self::Label(_, chunk) => chunk.can_suspend,
             Self::Initialize(_, _, chunk) | Self::Return(chunk) => {
@@ -249,15 +265,9 @@ impl Op {
             | Self::DoWhile(body, test, _)
             | Self::ForOf(_, _, test, body, false, _)
             | Self::ForIn(_, _, test, body, _) => test.can_suspend || body.can_suspend,
-            Self::For {
-                initial,
-                test,
-                update,
-                body,
-                ..
-            } => {
-                body.can_suspend
-                    || [initial, test, update]
+            Self::For(code) => {
+                code.body.can_suspend
+                    || [&code.initial, &code.test, &code.update]
                         .into_iter()
                         .flatten()
                         .any(|chunk| chunk.can_suspend)
@@ -290,9 +300,25 @@ pub(crate) fn compile_eval(
     inherited_strict: bool,
     context: parser::EvalContext,
 ) -> Result<Rc<Chunk>, JsError> {
+    compile_with_phases(lexer, source_bytes, inherited_strict, context, |_| {})
+}
+
+pub(crate) fn compile_with_phases(
+    lexer: crate::lexer::Lexer,
+    source_bytes: usize,
+    inherited_strict: bool,
+    context: parser::EvalContext,
+    mut phase: impl FnMut(&'static str),
+) -> Result<Rc<Chunk>, JsError> {
+    phase("source");
     let body = parser::parse_script(lexer, source_bytes, context, inherited_strict)?;
+    phase("parsed");
     let strict = inherited_strict || parser::has_strict_directive(&body);
-    block(&body, true, strict)
+    let result = block(&body, true, strict);
+    phase("emitted");
+    drop(body);
+    phase("retained");
+    result
 }
 pub(crate) fn compile_dynamic_function(
     parameters: &str,
@@ -373,6 +399,7 @@ pub(crate) fn retained_size(
                     + vector_storage(&code.params)
                     + vector_storage(&code.param_names)
                     + vector_storage(&code.mapped_indices)
+                    + code.leaf.as_deref().map_or(0, std::mem::size_of_val)
                     + code.param_names.iter().map(JsString::allocation_bytes).sum::<usize>()
                     + code.name.as_ref().map_or(0, JsString::allocation_bytes),
             );
@@ -400,6 +427,9 @@ pub(crate) fn retained_size(
                 | Op::CopyAnnexFunction(s)
                 | Op::Name(s)
                 | Op::LoadName(s)
+                | Op::NamedProperty(s)
+                | Op::LoadProperty(s)
+                | Op::PrepareMethod(s)
                 | Op::PrivateProperty(s)
                 | Op::PrivateIn(s)
                 | Op::InferName(s)
@@ -408,6 +438,13 @@ pub(crate) fn retained_size(
                     bytes = bytes.saturating_add(integer.retained_bytes())
                 }
                 Op::RegExp(program) => bytes = bytes.saturating_add(program.retained_bytes()),
+                Op::ConstantRecord(fields) => {
+                    bytes = bytes.saturating_add(RC_COUNTS + std::mem::size_of_val(fields.as_ref()));
+                    for (key, value) in fields.iter() {
+                        bytes = bytes.saturating_add(key.allocation_bytes());
+                        if let Value::String(s) = value { bytes = bytes.saturating_add(s.allocation_bytes()); }
+                    }
+                }
                 Op::TemplateObject(site) => {
                     bytes = bytes.saturating_add(
                         std::mem::size_of::<TemplateSite>() + RC_COUNTS + vector_storage(&site.parts)
@@ -430,7 +467,7 @@ pub(crate) fn retained_size(
                         &mut chunks,
                     ))
                 }
-                Op::Evaluate(c) | Op::Block(c) | Op::Label(_, c) | Op::Throw(c) => {
+                Op::Block(c) | Op::Label(_, c) | Op::Throw(c) => {
                     chunks.push(c.clone())
                 }
                 Op::Initialize(_, pattern, c) => {
@@ -449,15 +486,9 @@ pub(crate) fn retained_size(
                     chunks.push(a.clone());
                     chunks.push(b.clone());
                 }
-                Op::For {
-                    initial,
-                    test,
-                    update,
-                    body,
-                    lexical,
-                    ..
-                } => {
-                    bytes = bytes.saturating_add(vector_storage(lexical)
+                Op::For(code) => {
+                    let ForCode { initial, test, update, body, lexical, .. } = code.as_ref();
+                    bytes = bytes.saturating_add(size_of::<ForCode>() + vector_storage(lexical)
                         + lexical.iter().map(|(name, _)| name.allocation_bytes()).sum::<usize>());
                     chunks.extend(initial.iter().cloned());
                     chunks.extend(test.iter().cloned());
@@ -834,8 +865,11 @@ fn parameter_expressions(pattern: &Pattern) -> bool {
     }
     false
 }
-pub(crate) fn validate_deferred_function(f: &Function) -> Result<(Rc<Code>, usize), JsError> {
-    let mut code = compile_function(f, true)?;
+pub(crate) fn validate_deferred_function(
+    f: &Function,
+    inherited_strict: bool,
+) -> Result<(Rc<Code>, usize), JsError> {
+    let mut code = compile_function(f, inherited_strict)?;
     // Lower the entire body now for early errors. Until its first invocation,
     // only callable metadata and the original shared source slice are needed.
     Rc::get_mut(&mut code).unwrap().body.take();
@@ -889,6 +923,7 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
         }
     }
     Ok(Rc::new(Code {
+        leaf: leaf::LeafReturn::compile(f, &names, simple),
         mapped_indices,
         source: f.source.clone(),
         name: f.name.clone(),
@@ -1039,11 +1074,13 @@ fn compile_statement(
             out.push(Op::CopyAnnexFunction(f.name.clone().unwrap()));
         }
         Stmt::Empty | Stmt::Function(_) | Stmt::DefaultFunction(_) => {}
-        Stmt::EscapedStringStatement(value) => out.push(Op::Evaluate(expression(
-            &Expr::Literal(Value::String(value.clone())),
-            strict,
-        )?)),
-        Stmt::Expression(e) => out.push(Op::Evaluate(expression(e, strict)?)),
+        Stmt::EscapedStringStatement(value) => {
+            out.extend([Op::Push(Value::String(value.clone())), Op::StatementValue]);
+        }
+        Stmt::Expression(e) => {
+            expr(e, out, strict)?;
+            out.push(Op::StatementValue);
+        }
         Stmt::Class(name, class) => {
             let chunk = Chunk {
                 ops: vec![Op::Class(classes::compile(class)?, ClassName::Intrinsic)],
@@ -1248,14 +1285,14 @@ fn compile_for(
         _ => Vec::new(),
     };
     check_loop_lexical(lexical.iter().map(|(name, _)| name.clone()).collect(), body)?;
-    out.push(Op::For {
+    out.push(Op::For(Box::new(ForCode {
         initial: initial.map(|s| stmt_chunk(s, strict)).transpose()?,
         test: test.map(|e| expression(e, strict)).transpose()?,
         update: update.map(|e| expression(e, strict)).transpose()?,
         body: stmt_chunk(body, strict)?,
         lexical,
         label,
-    });
+    })));
     Ok(())
 }
 
@@ -1381,6 +1418,48 @@ enum Emit<'a> {
 }
 /// Explicit traversal keeps compiler frames independent of expression depth.
 /// Function bodies retain the independent parser/AST nesting guards.
+fn queue_arguments<'a>(args: &'a [Expr], action: Op, pending: &mut Vec<Emit<'a>>) {
+    use Emit::{Expression as E, Instruction as I};
+    if matches!(action, Op::Call) && args.len() <= INLINE_ARGUMENTS
+        && !args.iter().any(|a| matches!(a, Expr::Spread(_)))
+    {
+        pending.push(I(Op::FixedCall(args.len() as u8)));
+        for (i, arg) in args.iter().enumerate().rev() {
+            // FixedCall checks its last argument. Earlier arguments must be
+            // resolved and checked before evaluating the next expression.
+            if i + 1 < args.len() { pending.push(I(Op::FixedArgument(i as u8))); }
+            pending.push(E(arg));
+        }
+    } else {
+        pending.push(I(action));
+        for arg in args.iter().rev() {
+            if let Expr::Spread(value) = arg {
+                pending.extend([I(Op::Argument(true)), E(value)]);
+            } else {
+                pending.extend([I(Op::Argument(false)), E(arg)]);
+            }
+        }
+        pending.push(I(Op::Arguments));
+    }
+}
+
+fn constant_fields(entries: &[ObjectEntry]) -> Option<Rc<[(JsString,Value)]>> {
+    if entries.len() < 2 { return None; }
+    entries.iter().map(|entry| {
+        let ObjectEntry::Property { key, value, prototype:false, method:None, cover:false, .. } = entry else { return None };
+        let Expr::Literal(Value::String(key)) = ungroup(key) else { return None };
+        let value = match ungroup(value) {
+            Expr::Literal(v @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_))) => v.clone(),
+            Expr::Unary(op @ ("-" | "!"), inner) => {
+                let Expr::Literal(Value::Number(n)) = ungroup(inner) else { return None };
+                if *op == "-" { Value::Number(-n) } else { Value::Bool(*n == 0.0 || n.is_nan()) }
+            }
+            _ => return None,
+        };
+        Some((key.clone(),value))
+    }).collect()
+}
+
 fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
     use Emit::{Expression as E, Instruction as I, Reference as R};
     let mut pending = vec![E(e)];
@@ -1403,7 +1482,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 }
             }
             Emit::Logical(op, right, name) => {
-                out.extend([Op::NormalizeReference, Op::Dup, Op::Get, Op::Dup]);
+                out.extend([Op::ReadForUpdate, Op::Dup]);
                 let branch = out.len();
                 out.push(Op::Jump(0));
                 out.push(Op::Pop);
@@ -1489,7 +1568,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     for link in links.iter().rev() {
                         match link {
                             ChainLink::Member(key, optional) => {
-                                pending.extend([I(Op::Property), E(key)]);
+                                if let Expr::Literal(Value::String(name)) = key {
+                                    pending.push(I(Op::NamedProperty(name.clone())));
+                                } else {
+                                    pending.extend([I(Op::Property), E(key)]);
+                                }
                                 if *optional {
                                     pending.push(Emit::Optional(branches.clone(), false));
                                 }
@@ -1503,15 +1586,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                                 pending.push(I(Op::Get));
                             }
                             ChainLink::Call(args, optional) => {
-                                pending.push(I(Op::Call));
-                                for arg in args.iter().rev() {
-                                    if let Expr::Spread(value) = arg {
-                                        pending.extend([I(Op::Argument(true)), E(value)]);
-                                    } else {
-                                        pending.extend([I(Op::Argument(false)), E(arg)]);
-                                    }
-                                }
-                                pending.push(I(Op::Arguments));
+                                queue_arguments(args, Op::Call, &mut pending);
                                 if *optional {
                                     pending.push(Emit::Optional(branches.clone(), true));
                                 }
@@ -1535,8 +1610,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([I(Op::SuperProperty), E(key), I(Op::This)])
                 }
                 Expr::Member(object, key) => {
-                    pending.push(I(Op::Property));
-                    pending.push(E(key));
+                    if let Expr::Literal(Value::String(name)) = key.as_ref() {
+                        pending.push(I(Op::NamedProperty(name.clone())));
+                    } else {
+                        pending.extend([I(Op::Property), E(key)]);
+                    }
                     pending.push(E(object));
                 }
                 Expr::PrivateMember(object, name) => {
@@ -1594,7 +1672,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([I(Op::Get), I(Op::SuperProperty), E(key), I(Op::This)])
                 }
                 Expr::Member(object, key) => {
-                    pending.extend([I(Op::Get), I(Op::Property), E(key), E(object)]);
+                    if let Expr::Literal(Value::String(name)) = key.as_ref() {
+                        pending.extend([I(Op::LoadProperty(name.clone())), E(object)]);
+                    } else {
+                        pending.extend([I(Op::LoadComputed), E(key), E(object)]);
+                    }
                 }
                 Expr::PrivateMember(..) => pending.extend([I(Op::Get), R(e, false)]),
                 Expr::PrivateIn(name, object) => {
@@ -1628,6 +1710,10 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                         > 1
                     {
                         return Err(syntax("Duplicate __proto__ property"));
+                    }
+                    if let Some(fields) = constant_fields(pairs) {
+                        out.push(Op::ConstantRecord(fields));
+                        continue;
                     }
                     out.push(Op::Object);
                     for entry in pairs.iter().rev() {
@@ -1688,6 +1774,37 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Function(function) => {
                     out.push(Op::Function(compile_function(function, strict)?))
                 }
+                Expr::AssignedMethodCalls(base, levels) => {
+                    // Resolve assignment references outside-in, before the
+                    // innermost RHS. Set and call each receiver inside-out.
+                    for (name, key, args) in levels.iter().rev() {
+                        check_identifier(name, strict)?;
+                        if strict && matches!(name.to_string_lossy().as_str(), "eval" | "arguments") {
+                            return Err(syntax("Invalid strict-mode assignment"));
+                        }
+                        out.push(Op::Name(name.clone()));
+                        pending.push(I(Op::Call));
+                        for arg in args.iter().rev() {
+                            if let Expr::Spread(value) = arg {
+                                pending.extend([I(Op::Argument(true)), E(value)]);
+                            } else {
+                                pending.extend([I(Op::Argument(false)), E(arg)]);
+                            }
+                        }
+                        pending.extend([
+                            I(Op::Arguments),
+                            I(Op::PrepareCall(true)),
+                            I(Op::Property),
+                            E(key),
+                            I(Op::Set),
+                        ]);
+                    }
+                    pending.push(if anonymous(base) {
+                        Emit::Named(base, &levels[0].0)
+                    } else {
+                        E(base)
+                    });
+                }
                 Expr::NestedCalls(base, levels) => {
                     // Capture each callee's reference, receiver and function
                     // before evaluating its first argument, from outside in.
@@ -1710,29 +1827,21 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.push(E(base));
                 }
                 Expr::Call(target, args) if matches!(target.as_ref(), Expr::Super) => {
-                    pending.push(I(Op::SuperConstruct));
-                    for arg in args.iter().rev() {
-                        if let Expr::Spread(value) = arg {
-                            pending.extend([I(Op::Argument(true)), E(value)]);
-                        } else {
-                            pending.extend([I(Op::Argument(false)), E(arg)]);
-                        }
-                    }
-                    pending.extend([I(Op::Arguments), I(Op::SuperConstructor)]);
+                    queue_arguments(args, Op::SuperConstruct, &mut pending);
+                    pending.push(I(Op::SuperConstructor));
                 }
                 Expr::Call(target, args) | Expr::New(target, args) => {
                     let call = matches!(e, Expr::Call(..));
-                    pending.push(I(if call { Op::Call } else { Op::Construct }));
-                    for arg in args.iter().rev() {
-                        if let Expr::Spread(value) = arg {
-                            pending.extend([I(Op::Argument(true)), E(value)]);
-                        } else {
-                            pending.extend([I(Op::Argument(false)), E(arg)]);
-                        }
-                    }
-                    pending.push(I(Op::Arguments));
+                    queue_arguments(args, if call { Op::Call } else { Op::Construct }, &mut pending);
                     if call {
-                        pending.extend([I(Op::PrepareCall(true)), R(target, false)]);
+                        if let Expr::Member(object, key) = ungroup(target)
+                            && !matches!(object.as_ref(), Expr::Super)
+                            && let Expr::Literal(Value::String(name)) = key.as_ref()
+                        {
+                            pending.extend([I(Op::PrepareMethod(name.clone())), E(object)]);
+                        } else {
+                            pending.extend([I(Op::PrepareCall(true)), R(target, false)]);
+                        }
                     } else {
                         pending.push(E(target));
                     }
@@ -1783,7 +1892,22 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([Emit::ShortCircuit(op, right), E(left)])
                 }
                 Expr::Binary(op, left, right) => {
-                    pending.extend([I(Op::Binary(op)), E(right), E(left)])
+                    if let Expr::Literal(Value::Number(n)) = ungroup(right) {
+                        pending.extend([I(Op::BinaryNumber(op, *n)), E(left)]);
+                    } else {
+                        pending.extend([I(Op::Binary(op)), E(right), E(left)]);
+                    }
+                }
+                Expr::AddChain(terms) => {
+                    let (first, rest) = terms.split_first().expect("add chain has operands");
+                    for term in rest.iter().rev() {
+                        if let Expr::Literal(Value::Number(n)) = ungroup(term) {
+                            pending.push(I(Op::BinaryNumber("+", *n)));
+                        } else {
+                            pending.extend([I(Op::Binary("+")), E(term)]);
+                        }
+                    }
+                    pending.push(E(first));
                 }
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
@@ -1802,7 +1926,6 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                         pending.extend([Emit::Logical(op, right, name), R(left, true)]);
                         continue;
                     }
-                    pending.push(I(Op::Set));
                     let right_evaluation = if *op == "="
                         && anonymous(right)
                         && let Expr::Identifier(name) = left.as_ref()
@@ -1827,11 +1950,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                             "^=" => "^",
                             _ => unreachable!(),
                         };
-                        pending.push(I(Op::Binary(binary)));
-                    }
-                    pending.push(right_evaluation);
-                    if *op != "=" {
-                        pending.extend([I(Op::Get), I(Op::Dup), I(Op::NormalizeReference)]);
+                        pending.extend([I(Op::ApplyUpdate(binary)), right_evaluation, I(Op::ReadForUpdate)]);
+                    } else {
+                        pending.extend([I(Op::Set), right_evaluation]);
                     }
                     pending.push(R(left, true));
                 }

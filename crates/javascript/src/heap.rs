@@ -8,6 +8,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+mod property_cache;
+use property_cache::PropertyCache;
+
 pub(crate) type NativeCallback = Rc<dyn Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError>>;
 pub(crate) type NativeConstruct =
     Rc<dyn Fn(&mut Vm, Value, &[Value], Value) -> Result<Value, JsError>>;
@@ -155,10 +158,14 @@ impl Object {
         }
     }
     pub fn insert(&mut self, key: JsString, property: Property) {
-        if !self.properties.contains_key(&key) && array_index(&key).is_none() {
-            self.order.push(key.clone());
+        use std::collections::btree_map::Entry;
+        match self.properties.entry(key) {
+            Entry::Occupied(mut entry) => { entry.insert(property); }
+            Entry::Vacant(entry) => {
+                if array_index(entry.key()).is_none() { self.order.push(entry.key().clone()); }
+                entry.insert(property);
+            }
         }
-        self.properties.insert(key, property);
     }
     pub fn keys(&self, enumerable_only: bool) -> Vec<JsString> {
         let mut indices: Vec<(u32, JsString)> = self
@@ -377,6 +384,7 @@ pub(crate) struct Heap {
     free: Vec<u32>,
     pub live: usize,
     weak_collections: usize,
+    property_cache: Option<Box<PropertyCache>>,
     /// Conservative allocation-since-collection estimate, including containers.
     pub estimated_bytes: usize,
 }
@@ -394,6 +402,7 @@ impl Default for Heap {
             free: Vec::new(),
             live: 0,
             weak_collections: 0,
+            property_cache: None,
             estimated_bytes: 0,
         }
     }
@@ -401,6 +410,27 @@ impl Default for Heap {
 impl Heap {
     pub(crate) const EMPTY_CELL_BYTES: usize = 256;
     pub(crate) const REALM_CORE_BYTES: usize = std::mem::size_of::<RealmIntrinsics>() + 128;
+    pub(crate) const PROPERTY_CACHE_BYTES: usize = std::mem::size_of::<PropertyCache>();
+
+    pub(crate) fn property_cache_bytes(&self) -> usize {
+        if self.property_cache.is_some() { Self::PROPERTY_CACHE_BYTES } else { 0 }
+    }
+
+    pub(crate) fn cached_own_data(&self, receiver: ObjectId, key: &JsString) -> Option<Value> {
+        self.property_cache.as_ref()?.get(receiver, key)
+    }
+
+    pub(crate) fn cache_own_data(&mut self, receiver: ObjectId, key: &JsString, value: &Value) {
+        self.property_cache
+            .get_or_insert_with(|| Box::new(PropertyCache::new()))
+            .insert(receiver, key, value);
+    }
+
+    fn invalidate_own_data(&mut self, receiver: ObjectId) {
+        if let Some(cache) = &mut self.property_cache {
+            cache.invalidate(receiver);
+        }
+    }
 
     #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
     pub fn allocate(&mut self, cell: Cell) -> ObjectId {
@@ -465,6 +495,7 @@ impl Heap {
         }
     }
     pub fn object_mut(&mut self, id: ObjectId) -> Result<&mut Object, JsError> {
+        self.invalidate_own_data(id);
         match self.cell_mut(id) {
             Some(Cell::Object(o)) => Ok(o),
             _ => Err(JsError::type_error(
@@ -481,6 +512,8 @@ impl Heap {
         if !first.belongs_to(self.id) || !second.belongs_to(self.id) {
             return Err(invalid());
         }
+        self.invalidate_own_data(first);
+        self.invalidate_own_data(second);
         let [a, b] = self
             .slots
             .get_disjoint_mut([first.index as usize, second.index as usize])
@@ -566,6 +599,9 @@ impl Heap {
         mut pending: TraceEdges,
         conditional_edges: impl Iterator<Item = (ObjectId, ObjectId)>,
     ) -> (usize, Vec<ObjectId>) {
+        // Cache entries are optional and must never keep values alive across
+        // collection. Return their backing allocation to the heap budget too.
+        self.property_cache = None;
         let mut symbols = BTreeSet::new();
         let mut weak_owners = Vec::new();
         let mut cleanup = Vec::new();

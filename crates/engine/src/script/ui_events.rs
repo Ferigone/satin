@@ -1,4 +1,4 @@
-//! Window UIEvent and MouseEvent interfaces, including the legacy event factories.
+//! Window UIEvent, MouseEvent and KeyboardEvent interfaces.
 use super::{Shared, arg, event_target, getter, layout_api::LayoutHost, webidl};
 use crate::layout::ScrollOffset;
 use rust_browser_javascript::{JsError, Value, Vm};
@@ -8,6 +8,8 @@ use std::{cell::Cell, rc::Rc};
 const UI_FIELDS: u32 = 201;
 const MOUSE_BRAND: u32 = 202;
 const WINDOW_VIEWPORT: u32 = 203;
+const KEYBOARD_BRAND: u32 = 204;
+const FOCUS_BRAND: u32 = 205;
 const UI: &[&str] = &["detail", "view"];
 const MODIFIERS: &[(&str, &str)] = &[
     ("Alt", "altKey"),
@@ -34,6 +36,7 @@ const MOUSE: &[&str] = &[
     "screenX",
     "screenY",
 ];
+const KEYBOARD: &[&str] = &["key", "code", "location", "repeat", "isComposing"];
 const LEGACY: &[&str] = &[
     "view",
     "detail",
@@ -52,6 +55,8 @@ const LEGACY: &[&str] = &[
 fn default_value(name: &str) -> Value {
     match name {
         "view" | "relatedTarget" => Value::Null,
+        "key" | "code" => "".into(),
+        "repeat" | "isComposing" => false.into(),
         name if name.ends_with("Key") || name.starts_with("modifier") => false.into(),
         _ => 0.into(),
     }
@@ -72,6 +77,8 @@ fn convert(vm: &mut Vm, dom: &Shared, name: &str, value: Value) -> Result<Value,
             value
         }
         "relatedTarget" => return Err(JsError::type_error("Expected an EventTarget or null")),
+        "key" | "code" => Value::String(vm.to_string(&value)?),
+        "repeat" | "isComposing" => value.is_truthy().into(),
         name if name.ends_with("Key") || name.starts_with("modifier") => value.is_truthy().into(),
         _ => {
             // Web IDL integer conversion truncates and wraps, including negative inputs.
@@ -79,6 +86,7 @@ fn convert(vm: &mut Vm, dom: &Shared, name: &str, value: Value) -> Result<Value,
             match name {
                 "button" => i32::from(unsigned as i16).into(),
                 "buttons" => u32::from(unsigned as u16).into(),
+                "location" => unsigned.into(),
                 _ => (unsigned as i32).into(),
             }
         }
@@ -172,13 +180,146 @@ pub(super) fn initialize_click(vm: &mut Vm, event: &Value) -> Result<(), JsError
     set(vm, &data, "view", vm.global())
 }
 
+pub(super) fn initialize_keyboard(vm: &mut Vm, event: &Value) -> Result<Value, JsError> {
+    initialize_empty(vm, event, false)?;
+    let data = fields(vm, event, false)?;
+    vm.set_host_slot(event.clone(), KEYBOARD_BRAND, data.clone())?;
+    Ok(data)
+}
+
+pub(super) fn initialize_key_input(
+    vm: &mut Vm,
+    event: &Value,
+    properties: &[(&str, Value)],
+) -> Result<(), JsError> {
+    let data = initialize_keyboard(vm, event)?;
+    set(vm, &data, "view", vm.global())?;
+    for (name, value) in properties {
+        set(vm, &data, name, value.clone())?;
+    }
+    Ok(())
+}
+
+fn initialize_focus(vm: &mut Vm, event: &Value) -> Result<Value, JsError> {
+    initialize_empty(vm, event, false)?;
+    let data = fields(vm, event, false)?;
+    vm.set_host_slot(event.clone(), FOCUS_BRAND, data.clone())?;
+    Ok(data)
+}
+
+pub(super) fn initialize_focus_input(vm: &mut Vm, event: &Value, related: Value) -> Result<(), JsError> {
+    let data = initialize_focus(vm, event)?;
+    set(vm, &data, "view", vm.global())?;
+    set(vm, &data, "relatedTarget", related)
+}
+
+fn install_focus(vm: &mut Vm, dom: &Shared, ui: &Value, set_proto: Value) -> Result<Value, JsError> {
+    let prototype = vm.new_object_with_prototype(ui.clone())?;
+    let intrinsic = prototype.clone();
+    let state = dom.clone();
+    let constructor = webidl::interface(vm, prototype.clone(), "FocusEvent", 1, move |vm, _, args, target| {
+        let target = target.ok_or_else(|| JsError::type_error("FocusEvent requires new"))?;
+        webidl::required(args, 1, "FocusEvent")?;
+        let kind = event_target::kind(vm, &args[0])?;
+        let options = arg(args, 1);
+        let flags = event_target::flags(vm, &options)?;
+        let event = webidl::instance(vm, target, &intrinsic)?;
+        let data = initialize_focus(vm, &event)?;
+        for &member in UI.iter().chain(&["relatedTarget"]) {
+            let value = event_target::option(vm, &options, member)?;
+            let value = convert(vm, &state, member, value)?;
+            set(vm, &data, member, value)?;
+        }
+        event_target::init_event(vm, event, kind, flags, false)
+    })?;
+    let ui_constructor = vm.get_global("UIEvent")?;
+    vm.call(set_proto, Value::Undefined, &[constructor, ui_constructor])?;
+    getter(vm, prototype.clone(), "relatedTarget", |vm, receiver, _| {
+        if vm.host_slot(&receiver, FOCUS_BRAND).is_none() {
+            return Err(JsError::type_error("Illegal FocusEvent receiver"));
+        }
+        field(vm, &receiver, "relatedTarget", false)
+    })?;
+    Ok(prototype)
+}
+
+fn key_data(vm: &Vm, event: &Value) -> Result<Value, JsError> {
+    vm.host_slot(event, KEYBOARD_BRAND)
+        .ok_or_else(|| JsError::type_error("Illegal KeyboardEvent receiver"))
+}
+
+fn modifier_value(vm: &mut Vm, data: Value, args: &[Value]) -> Result<Value, JsError> {
+    webidl::required(args, 1, "getModifierState")?;
+    let modifier = vm.to_string(&args[0])?;
+    if modifier.len() <= 10 {
+        let modifier = modifier.to_string_lossy();
+        if let Some((_, name)) = MODIFIERS.iter().find(|(key, _)| *key == modifier) {
+            return Ok(vm.get_property(data, name)?.is_truthy().into());
+        }
+    }
+    Ok(false.into())
+}
+
+fn install_keyboard(
+    vm: &mut Vm,
+    dom: &Shared,
+    ui_proto: &Value,
+    set_proto: Value,
+) -> Result<Value, JsError> {
+    let proto = vm.new_object_with_prototype(ui_proto.clone())?;
+    let intrinsic = proto.clone();
+    let state = dom.clone();
+    let constructor = webidl::interface(vm, proto.clone(), "KeyboardEvent", 1, move |vm, _, args, target| {
+        let target = target.ok_or_else(|| JsError::type_error("KeyboardEvent requires new"))?;
+        webidl::required(args, 1, "KeyboardEvent")?;
+        let kind = event_target::kind(vm, &args[0])?;
+        let options = arg(args, 1);
+        let flags = event_target::flags(vm, &options)?;
+        let event = webidl::instance(vm, target, &intrinsic)?;
+        let data = initialize_keyboard(vm, &event)?;
+        let members = UI.iter().copied()
+            .chain(MODIFIERS.iter().map(|(_, member)| *member))
+            .chain(KEYBOARD.iter().copied());
+        for member in members {
+            let value = event_target::option(vm, &options, member)?;
+            if !value.is_undefined() {
+                let value = convert(vm, &state, member, value)?;
+                set(vm, &data, member, value)?;
+            }
+        }
+        event_target::init_event(vm, event, kind, flags, false)
+    })?;
+    let ui = vm.get_global("UIEvent")?;
+    vm.call(set_proto, Value::Undefined, &[constructor.clone(), ui])?;
+    for (constant, value) in [
+        ("DOM_KEY_LOCATION_STANDARD", 0),
+        ("DOM_KEY_LOCATION_LEFT", 1),
+        ("DOM_KEY_LOCATION_RIGHT", 2),
+        ("DOM_KEY_LOCATION_NUMPAD", 3),
+    ] {
+        for target in [&constructor, &proto] {
+            vm.define_data_property(target.clone(), constant, value.into(), false, true, false)?;
+        }
+    }
+    for &name in KEYBOARD.iter().chain(&["altKey", "ctrlKey", "metaKey", "shiftKey", "charCode", "keyCode", "which"]) {
+        getter(vm, proto.clone(), name, move |vm, this, _| {
+            key_data(vm, &this)?;
+            field(vm, &this, name, false)
+        })?;
+    }
+    webidl::operation(vm, proto.clone(), "getModifierState", 1, |vm, this, args| {
+        modifier_value(vm, key_data(vm, &this)?, args)
+    })?;
+    Ok(proto)
+}
+
 pub(super) fn install(
     vm: &mut Vm,
     dom: &Shared,
     event_proto: Value,
     event_ctor: Value,
     set_proto: Value,
-) -> Result<(Value, Value), JsError> {
+) -> Result<(Value, Value, Value, Value), JsError> {
     let ui_proto = vm.new_object_with_prototype(event_proto)?;
     let mouse_proto = vm.new_object_with_prototype(ui_proto.clone())?;
     let mut parent = event_ctor;
@@ -297,18 +438,10 @@ pub(super) fn install(
         "getModifierState",
         1,
         |vm, this, args| {
-            fields(vm, &this, true)?;
-            webidl::required(args, 1, "getModifierState")?;
-            let modifier = vm.to_string(&args[0])?;
-            if modifier.len() <= 10
-                && let Some((_, name)) = MODIFIERS
-                    .iter()
-                    .find(|(key, _)| *key == modifier.to_string_lossy())
-            {
-                return field(vm, &this, name, true);
-            }
-            Ok(false.into())
+            modifier_value(vm, fields(vm, &this, true)?, args)
         },
     )?;
-    Ok((ui_proto, mouse_proto))
+    let keyboard_proto = install_keyboard(vm, dom, &ui_proto, set_proto.clone())?;
+    let focus_proto = install_focus(vm, dom, &ui_proto, set_proto)?;
+    Ok((ui_proto, mouse_proto, keyboard_proto, focus_proto))
 }

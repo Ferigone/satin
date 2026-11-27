@@ -271,7 +271,9 @@ pub(crate) fn load(
     let request = NavigationRequest::get(url)?;
     let mut network = Network::new(cookies, request.url.clone(), storage);
     network.scroll = request.url.fragment().map(|_| HistoryScroll::Fragment);
-    let hard_end = Instant::now() + Duration::from_secs(42);
+    // A parser-blocking script and the following document tasks may each use
+    // their own bounded watchdog allowance before the document is interactive.
+    let hard_end = Instant::now() + Duration::from_secs(180);
     let (page, realm, session) = load_document(&mut network, request, viewport, hard_end)?;
     network.document_session = Some(session);
     Ok((page, realm, network))

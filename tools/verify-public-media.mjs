@@ -7,6 +7,7 @@ import { arch, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { budgetTrace, executionProfiles, functionProfiles, safeDiagnostic } from './public-media-diagnostics.mjs';
 
 const cases = [
   { site: 'twitch', url: 'https://www.twitch.tv/theburntpeanut_247' },
@@ -21,15 +22,6 @@ const player = {
   },
   youtube: { shell: '#movie_player', play: '#movie_player .ytp-play-button', seek: '#movie_player .ytp-progress-bar' },
 };
-const errorKinds = /\b(?:ReferenceError|TypeError|SyntaxError|UnsupportedFeature|ExecutionLimit|HeapLimit|RangeError|TimeoutError|NetworkError|SecurityError)\b/;
-function safeDiagnostic(line) {
-  return {
-    kind: line.match(errorKinds)?.[0] ?? 'Other',
-    cause: line.match(/Expression nesting limit exceeded|Aggregate allocation byte budget exhausted|Native work budget exhausted|Microtask checkpoint budget exceeded|Value is not callable|(?:Property|Value) is not an object|source budget exceeded|is not defined|connection closed|timed out|Unhandled promise rejection|Failed to load resource|integrity mismatch/i)?.[0] ?? null,
-    inline: line.match(/\binline script #(\d+)\b/i)?.[1] ?? null,
-  };
-}
-
 async function sha256(path) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(path)) hash.update(chunk);
@@ -40,10 +32,12 @@ const capture = promisify(execFile);
 async function run(exe, args, timeout, env) {
   const options = { timeout, env, windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
   try {
-    return { stdout: (await capture(exe, args, options)).stdout, exit: 0, killed: false };
+    const { stdout, stderr } = await capture(exe, args, options);
+    return { stdout, stderr, exit: 0, killed: false };
   } catch (error) {
     return {
       stdout: error.stdout ?? '',
+      stderr: error.stderr ?? '',
       exit: Number.isInteger(error.code) ? error.code : null,
       killed: error.killed ?? false,
     };
@@ -91,6 +85,9 @@ async function satinCase(exe, { site, url }, dir) {
     diagnosticCount: diagnostics?.length ?? null,
     nestingDiagnostics: diagnostics?.filter(line => line.includes('Expression nesting limit exceeded')).length ?? null,
     firstDiagnostics: diagnostics?.slice(0, 8).map(safeDiagnostic) ?? null,
+    budgetTrace: budgetTrace(outcome.stderr),
+    executionProfiles: executionProfiles(outcome.stderr),
+    functionProfiles: functionProfiles(outcome.stderr),
     document, media,
     timeProgress: 'not sampled within one run',
     controls: 'not tried by this headless probe',
@@ -138,6 +135,26 @@ async function sample(page, site) {
       } : null,
     };
   }, { site, selector: player[site].shell });
+}
+
+async function windowCase(exe, { site, url }, dir) {
+  const started = new Date();
+  const actions = join(dir, 'actions.json');
+  const selector = '[data-a-target="chat-line-message"],[data-test-selector="chat-line-message"],.chat-line__message';
+  await writeFile(actions, JSON.stringify([8000, 5000].map(after_ms => ({
+    action: 'sample_media', after_ms,
+    ...(site === 'twitch' && process.env.SATIN_QA_COUNT_CHAT === '1' ? { count_selector: selector } : {}),
+  }))));
+  const outcome = await run(exe, ['--url', url, '--profile', join(dir, 'profile'),
+    '--smoke-window', join(dir, 'frame.png'), '--smoke-actions', actions,
+    '--width', String(viewport.width), '--height', String(viewport.height)], 120000);
+  let r;
+  try { r = JSON.parse(outcome.stdout); } catch { /* unsuccessful window run */ }
+  return { site, url, startedUtc: started.toISOString(), elapsedMs: Date.now() - started.getTime(),
+    exit: outcome.exit, killed: outcome.killed, version: r?.version ?? null,
+    finalHost: r?.url ? new URL(r.url).hostname : null,
+    samples: r?.media_samples ?? null, diagnostics: r?.javascript?.diagnostics?.map(safeDiagnostic) ?? null,
+    executionProfiles: executionProfiles(outcome.stderr), budgetTrace: budgetTrace(outcome.stderr) };
 }
 
 async function chromeCase(exe, chromium, { site, url }) {
@@ -229,7 +246,7 @@ async function chromeCase(exe, chromium, { site, url }) {
     }, player[site].shell, { timeout, polling: 200 }).then(() => true, () => false);
     const playing = await waitForPlaying(18000);
     let start = await record('progress-start');
-    if (!playing && site === 'youtube' && start?.video?.paused && !start.youtubeAccessWall && !start.consentVisible) {
+    if (!playing && start?.video?.paused && !start.youtubeAccessWall && !start.consentVisible && !start.twitchGate && !start.adMarker) {
       outcome.controls.playRetry = await click(play) ? 'clicked' : 'play control unavailable';
       await waitForPlaying(8000);
       start = await record('after-play-retry');
@@ -292,7 +309,7 @@ async function reaCase(chrome, cli, { site, url }, dir) {
   try { result = JSON.parse(runResult.stdout); } catch { /* no raw output retained */ }
   const evidence = result?.data ?? result;
   const contents = evidence?.normalized_result;
-  const { stdout: _discard, ...status } = runResult;
+  const { stdout: _stdout, stderr: _stderr, ...status } = runResult;
   return {
     site, url, startedUtc, ...status, ok: result?.ok ?? null,
     evidenceId: evidence?.evidence_id ?? null,
@@ -305,9 +322,10 @@ async function reaCase(chrome, cli, { site, url }, dir) {
 
 const [mode, executable, identifier, site] = process.argv.slice(2);
 const selected = cases.filter(test => !site || test.site === site);
-if (!['chrome', 'satin'].includes(mode) || !executable || !identifier || !selected.length) {
+if (!['chrome', 'chrome-only', 'satin', 'window'].includes(mode) || !executable || !identifier || !selected.length) {
   console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
-  console.error('   or: node tools/verify-public-media.mjs satin <rust-browser.exe> <git commit> [twitch|youtube]');
+  console.error('   or: node tools/verify-public-media.mjs chrome-only <chrome.exe> <absolute package.json> [twitch|youtube]');
+  console.error('   or: node tools/verify-public-media.mjs satin|window <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
 }
 const root = fileURLToPath(new URL('../target/public-media/', import.meta.url));
@@ -316,7 +334,7 @@ const directory = await mkdtemp(join(root, `${mode}-`));
 const temporary = join(directory, 'transient');
 await mkdir(temporary);
 const exe = resolve(executable);
-const binary = { path: exe, sha256: await sha256(exe), commit: mode === 'satin' ? identifier : null };
+const binary = { path: exe, sha256: await sha256(exe), commit: mode.startsWith('chrome') ? null : identifier };
 const report = {
   mode, binary, viewport, node: process.version, os: process.platform, osRelease: release(), arch: arch(),
   startedUtc: new Date().toISOString(), cases: [], rea: [],
@@ -327,7 +345,14 @@ const tempKeys = ['TEMP', 'TMP'];
 const previousTemp = tempKeys.map(key => process.env[key]);
 try {
   for (const key of tempKeys) process.env[key] = temporary;
-  if (mode === 'chrome') {
+  if (mode === 'chrome-only') {
+    const require = createRequire(resolve(identifier));
+    const { chromium } = require('playwright-core');
+    for (const test of selected) {
+      report.cases.push(await chromeCase(exe, chromium, test));
+      await save();
+    }
+  } else if (mode === 'chrome') {
     const cli = resolve(identifier);
     const require = createRequire(cli);
     const { chromium } = require('playwright-core');
@@ -341,7 +366,8 @@ try {
   } else {
     for (const test of selected) {
       await mkdir(join(temporary, test.site));
-      report.cases.push(await satinCase(exe, test, join(temporary, test.site)));
+      const probe = mode === 'window' ? windowCase : satinCase;
+      report.cases.push(await probe(exe, test, join(temporary, test.site)));
       await save();
     }
   }

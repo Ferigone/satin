@@ -20,6 +20,33 @@ fn arithmetic_and_precedence() {
     number("4294967295 >>> 0", 4294967295.0);
     number("-1 >> 1", -1.0);
 }
+
+#[test]
+fn expression_statements_keep_jump_targets_and_completion_values_in_their_block() {
+    number("1; false || 2; let x; { 3; var v; }", 3.0);
+    number("label: { 7; (null?.x ?? 8); break label; 9; }", 8.0);
+    string(r#"'first'; "se\x63ond"; var v;"#, "second");
+    number("var hits=0; 99; ({get p(){hits++;return 4}}).p; hits;", 1.0);
+    number("var x=0; true ? (x+=2) : (x+=32); false && (x=9); x;", 2.0);
+}
+
+#[test]
+fn expression_statement_suspension_keeps_its_operands_across_collection() {
+    let mut vm = Vm::new();
+    assert_eq!(vm.eval(r#"
+        function* g() {
+            let x = 0;
+            100; x += (yield {n: 3}).n; x += (yield x);
+            return x;
+        }
+        let it = g(), first = it.next().value;
+        first.n;
+    "#).unwrap(), Value::Number(3.0));
+    vm.collect_garbage();
+    assert_eq!(vm.eval("it.next(first).value").unwrap(), Value::Number(3.0));
+    vm.collect_garbage();
+    assert_eq!(vm.eval("it.next(7).value").unwrap(), Value::Number(10.0));
+}
 #[test]
 fn utf16_lone_surrogates_round_trip() {
     let value = run(r"'\uD800x\uDC00'");
@@ -612,6 +639,20 @@ fn aggregate_retained_strings_stop_at_a_small_byte_budget() {
     vm.collect_garbage();
     assert!(vm.estimated_heap_bytes() < before);
     assert_eq!(vm.eval("2+3").unwrap(), Value::from(5));
+}
+
+#[test]
+fn error_stack_contains_the_message_without_calling_an_installed_getter() {
+    let mut vm = Vm::new();
+    assert_eq!(vm.eval(r#"
+        function cause() { return new TypeError("invalid \uD800"); }
+        const error = cause();
+        const initial = error.stack;
+        let gets = 0;
+        Object.defineProperty(error, "message", {get(){ gets++; return "changed"; }});
+        initial.startsWith("TypeError: invalid \uD800\n") &&
+            initial.includes("at cause") && error.stack.startsWith("TypeError\n") && gets === 0
+    "#).unwrap(), Value::Bool(true));
 }
 #[test]
 fn one_object_cannot_bypass_the_aggregate_property_budget() {

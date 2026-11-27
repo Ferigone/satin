@@ -3,9 +3,9 @@ use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
 #[test]
 fn repeated_moderate_string_copies_consume_fuel_before_heap_caps() {
     for operation in [
-        "s.slice(0)",
-        "s.substring(0)",
-        "s.substr(0)",
+        "s.slice(1)",
+        "s.substring(1)",
+        "s.substr(1)",
         "s.repeat(1)",
         "s.concat('')",
         "s.trim()",
@@ -67,7 +67,7 @@ fn shared_string_reads_do_not_charge_for_nonexistent_copies() {
     });
     vm.set_global("s", Value::from("x".repeat(4096))).unwrap();
     assert_eq!(
-        vm.eval("String(s).valueOf()===s").unwrap(),
+        vm.eval("String(s).valueOf()===s && s.slice(0)===s && s.substr(0)===s && s.substring(0)===s").unwrap(),
         Value::Bool(true)
     );
 }

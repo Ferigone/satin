@@ -1,5 +1,6 @@
 //! The matcher uses an explicit backtrack stack and reversible captures.
 pub(super) mod prefix;
+mod required;
 
 use super::{
     Flags, case, limit,
@@ -16,6 +17,8 @@ pub(crate) struct Program {
     pub(super) captures: usize,
     repeats: usize,
     pub(super) first_ascii: u128,
+    start_only: bool,
+    required: Option<required::Literal>,
     bytes: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
@@ -70,6 +73,7 @@ struct Compiler<'a> {
 
 pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Program {
     let first_ascii = prefix::first_ascii(&pattern.body, flags);
+    let required = required::Literal::in_pattern(&pattern.body, flags);
     let mut compiler = Compiler {
         code: Vec::new(),
         repeats: 0,
@@ -84,6 +88,12 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         .extend((0..pattern.wrapping_captures).rev().map(Op::CloseCapture));
     compiler.code.push(Op::Match);
     specialize_disjoint_class_repeats(&mut compiler.code);
+    // Capture openings do not consume input or branch. A mandatory assertion
+    // at this position can succeed only at the start of the entire input.
+    let start_only = matches!(
+        compiler.code.iter().find(|op| !matches!(op, Op::OpenCapture(_))),
+        Some(Op::Assert(Assertion::Start, local)) if !local.has(Flags::MULTILINE)
+    );
     let mut program = Program {
         source,
         flags,
@@ -91,6 +101,8 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         captures: pattern.captures,
         repeats: compiler.repeats,
         first_ascii,
+        start_only,
+        required,
         names: pattern.names,
         bytes: 0,
     };
@@ -132,12 +144,16 @@ fn disjoint_class_repeat_at(code: &[Op], pc: usize) -> Option<Op> {
     else {
         return None;
     };
-    let Op::Character(Member::Point(delimiter), delimiter_flags) = code.get(*exit)? else {
-        return None;
-    };
+    if !captures.is_empty() { return None; }
+    let next = code.get(*exit)?;
+    // Only the absolute end can satisfy this assertion. No shorter endpoint
+    // of a greedy, capture-free consuming class can match the suffix.
+    if matches!(next, Op::Assert(Assertion::End, local) if !local.has(Flags::MULTILINE)) {
+        return Some(Op::DisjointClassRepeat { minimum: *minimum, maximum: *maximum, exit: *exit });
+    }
+    let Op::Character(Member::Point(delimiter), delimiter_flags) = next else { return None; };
     let unsupported = Flags::IGNORE_CASE | Flags::UNICODE_SETS;
-    if !captures.is_empty()
-        || members.is_empty()
+    if members.is_empty()
         || *delimiter >= 128
         || flags.has(unsupported)
         || delimiter_flags.has(unsupported)
@@ -187,7 +203,12 @@ mod tests {
             (r".*!", "", false),
             (r"[^!]*?!", "", false),
             (r"[^é]*é", "u", false),
-            (r"[^!]*$", "", false),
+            (r"[^!]*$", "", true),
+            (r"[^!]*$", "m", false),
+            (r"(?m:[^!]*$)", "", false),
+            (r"(?i:[a-z]*$)", "", true),
+            (r"(?=[ab]*$)", "", false),
+            (r"([ab])*$", "", false),
         ];
         for (pattern, flags, expected) in cases {
             let program =
@@ -408,10 +429,18 @@ impl Program {
         start: usize,
         sticky: bool,
     ) -> Result<Option<Match>, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = crate::startup_profile::enter(crate::startup_profile::Area::RegexpMatch);
         if start > input.len() {
             return Ok(None);
         }
-        let first_ascii = if sticky { u128::MAX } else { self.first_ascii };
+        let single_start = sticky || self.start_only;
+        if !single_start && let Some(literal) = &self.required
+            && !literal.possible(vm, &input[start..])?
+        {
+            return Ok(None);
+        }
+        let first_ascii = if single_start { u128::MAX } else { self.first_ascii };
         let Some(mut start) = prefix::seek(vm, input, start, first_ascii)? else {
             return Ok(None);
         };
@@ -458,7 +487,7 @@ impl Program {
                         .collect(),
                 }));
             }
-            if sticky || start == input.len() {
+            if single_start || start == input.len() {
                 return Ok(None);
             }
             let next = advance(input, start, self.flags.unicode());
@@ -559,7 +588,20 @@ impl Matcher<'_> {
                     let class = &self.program.code[self.pc + 1];
                     let mut count = 0;
                     while maximum.is_none_or(|maximum| count < maximum) {
-                        // Keep the ordinary atom-dispatch and member charges.
+                        if !self.behind && let Op::Class(_, _, _, Some(mask)) = class {
+                            let room = maximum.unwrap_or(usize::MAX) - count;
+                            let end = self.input.len().min(self.cursor.saturating_add(room.min(128)));
+                            let block = &self.input[self.cursor..end];
+                            if block.is_empty() { break; }
+                            let accepted = block.iter().position(|&unit|
+                                unit >= 128 || **mask & (1u128 << unit) == 0).unwrap_or(block.len());
+                            vm.charge_buffer_work(accepted + usize::from(accepted < block.len()))?;
+                            self.cursor += accepted;
+                            count += accepted;
+                            if accepted == block.len() { continue; }
+                            if block[accepted] < 128 { break; }
+                        }
+                        // Non-ASCII points retain the full matcher semantics.
                         vm.consume_work(1)?;
                         if !self.read_class(vm, class)? {
                             break;

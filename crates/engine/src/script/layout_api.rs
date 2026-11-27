@@ -21,6 +21,7 @@ struct Data {
     fonts: Option<Fonts>,
     layout: Option<Arc<Layout>>,
     viewport: Viewport,
+    device_pixel_ratio: f64,
     offsets: HashMap<NodeId, ScrollOffset>,
     root_request: Option<ScrollOffset>,
     events: Vec<Option<NodeId>>,
@@ -482,6 +483,7 @@ impl LayoutHost {
             fonts: None,
             layout: None,
             viewport: Viewport::default(),
+            device_pixel_ratio: 1.0,
             offsets: HashMap::new(),
             root_request: None,
             events: vec![],
@@ -743,6 +745,10 @@ impl LayoutHost {
                 }))
             })?;
         }
+        let h = host.clone();
+        getter(vm, window.clone(), "devicePixelRatio", move |_, _, _| {
+            Ok(Value::Number(h.0.borrow().device_pixel_ratio))
+        })?;
         let h = host.clone();
         let s = state.clone();
         let logical_prototype = logical_computed_style_prototype(vm, &h)?;
@@ -1647,6 +1653,12 @@ impl ScriptRuntime {
     }
     pub fn set_viewport(&self, viewport: Viewport) {
         self.layout.set_viewport(viewport);
+    }
+    /// Physical pixels per CSS pixel, including page zoom (1 in headless mode).
+    pub fn set_device_pixel_ratio(&self, ratio: f64) {
+        if ratio.is_finite() && ratio > 0.0 {
+            self.layout.0.borrow_mut().device_pixel_ratio = ratio;
+        }
     }
     pub fn viewport(&self) -> Viewport {
         self.layout.viewport()

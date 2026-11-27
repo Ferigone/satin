@@ -1,4 +1,4 @@
-//! Window XMLHttpRequest text loading over the existing Fetch transport.
+//! Window XMLHttpRequest over the existing Fetch transport.
 mod async_load;
 mod progress_event;
 #[cfg(test)]
@@ -453,26 +453,21 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         };
         let body = arg(args, 0);
         if !body.is_nullish() && !matches!(request.method.as_str(), "GET" | "HEAD") {
-            // This first stage implements text bodies, not the other XHR BodyInit types.
-            if body.as_string().is_none() {
-                return Err(unsupported(
-                    "Only XMLHttpRequest text request bodies are implemented",
-                ));
+            if vm.is_buffer_source(&body) {
+                let length = vm.fixed_buffer_source_bytes(&body)?.len();
+                if length > FETCH_BODY_LIMIT {
+                    return Err(JsError::type_error("XMLHttpRequest body exceeds byte limit"));
+                }
+                vm.charge_buffer_work(length)?;
+                request.body = Some(Arc::new(vm.fixed_buffer_source_bytes(&body)?.to_vec()));
+            } else {
+                if body.as_string().is_none() {
+                    return Err(unsupported("XMLHttpRequest request body type is not implemented"));
+                }
+                let body = usv(vm, body, FETCH_BODY_LIMIT)?;
+                super::add_content_type(&mut request.headers, Some("text/plain;charset=UTF-8"))?;
+                request.body = Some(Arc::new(body.into_bytes()));
             }
-            let body = usv(vm, body, FETCH_BODY_LIMIT)?;
-            if !request
-                .headers
-                .iter()
-                .any(|(name, _)| name == "content-type")
-            {
-                network::append_header(
-                    &mut request.headers,
-                    "content-type",
-                    "text/plain;charset=UTF-8",
-                )
-                .map_err(super::map_error)?;
-            }
-            request.body = Some(Arc::new(body.into_bytes()));
         }
         request.connect_policy = Some(context.policy());
         if !synchronous {

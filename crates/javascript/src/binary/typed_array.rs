@@ -19,6 +19,16 @@ pub(crate) enum NumericIndex {
     Invalid,
 }
 
+impl NumericIndex {
+    pub(crate) fn from_number(number: f64) -> Self {
+        if number >= 0.0 && number < usize::MAX as f64 && number.fract() == 0.0 {
+            Self::Element(number as usize)
+        } else {
+            Self::Invalid
+        }
+    }
+}
+
 pub(crate) struct TypedDescriptor {
     value: Option<Value>,
     allowed: bool,
@@ -101,11 +111,7 @@ pub(crate) fn numeric_index(key: &JsString) -> Option<NumericIndex> {
     if number_string(number) != text {
         return None;
     }
-    if number >= 0.0 && number < usize::MAX as f64 && number.fract() == 0.0 {
-        Some(NumericIndex::Element(number as usize))
-    } else {
-        Some(NumericIndex::Invalid)
-    }
+    Some(NumericIndex::from_number(number))
 }
 
 impl Vm {

@@ -21,9 +21,12 @@ use std::{
 
 use crate::dynamic_import::SourceReferrer;
 
+mod indexed_access;
 mod inspection;
 pub(crate) mod realm;
 mod task_deadline;
+#[cfg(all(windows, feature = "media-startup-diagnostics"))]
+pub mod startup_profile;
 
 use task_deadline::TaskDeadline;
 
@@ -35,7 +38,12 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
-const MAX_BYTECODE_DEPTH: usize = 96;
+const MAX_BYTECODE_DEPTH: usize = 4096;
+const MAX_HOST_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
+    1024
+} else {
+    DEFAULT_CALL_DEPTH
+};
 const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
@@ -157,6 +165,12 @@ pub struct Vm {
     pub(crate) next_private_id: u64,
     pub(crate) limits: VmLimits,
     remaining: u64,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_native_work: u64,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_last_native_site: Option<&'static std::panic::Location<'static>>,
+    #[cfg(feature = "media-startup-diagnostics")]
+    qa_work_sites: std::collections::HashMap<(&'static str, u32), u64>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -268,7 +282,7 @@ impl Vm {
         limits.buffer_units_per_instruction = limits.buffer_units_per_instruction.clamp(1, 1024);
         // This first interpreter still uses bounded Rust calls for nested chunks.
         // Keep the host stack safe even when an embedder requests a larger limit.
-        limits.max_call_depth = limits.max_call_depth.min(MAX_CALL_DEPTH);
+        limits.max_call_depth = limits.max_call_depth.min(MAX_HOST_CALL_DEPTH);
         limits.max_bytecode_depth = limits.max_bytecode_depth.min(MAX_BYTECODE_DEPTH);
         let mut heap = Heap::default();
         let global_env = realm::allocate_primary_core(&mut heap);
@@ -284,6 +298,12 @@ impl Vm {
             next_root: 1,
             next_private_id: 1,
             remaining: limits.max_instructions,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_native_work: 0,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_last_native_site: None,
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_work_sites: Default::default(),
             limits,
             interrupt: None,
             task_deadline: None,
@@ -359,23 +379,54 @@ impl Vm {
         self.realm.wasm_compilation_allowed = allowed;
     }
     pub fn check_syntax(&mut self, source: &str) -> Result<(), JsError> {
-        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
+        let chunk = self.compile_classic(source)?;
         self.ensure_allocation(bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]))
     }
-    pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
-        self.compilation_budget_for_bytes(source.len())
+
+    #[cfg(feature = "compiler-qa")]
+    #[doc(hidden)]
+    pub fn qa_profile_compilation(
+        &mut self,
+        source: &str,
+        phase: impl FnMut(&'static str),
+    ) -> Result<usize, JsError> {
+        let chunk = bytecode::compile_with_phases(
+            self.classic_lexer(source)?,
+            source.len(),
+            false,
+            crate::parser::EvalContext::default(),
+            phase,
+        )?;
+        let retained = bytecode::retained_size_with_chunks(Vec::new(), vec![chunk]);
+        self.ensure_allocation(retained)?;
+        Ok(retained)
     }
-    fn compilation_budget_for_bytes(&self, bytes: usize) -> Result<usize, JsError> {
+    fn compile_classic(&self, source: &str) -> Result<Rc<Chunk>, JsError> {
+        bytecode::compile_eval(self.classic_lexer(source)?, source.len(), false, crate::parser::EvalContext::default())
+    }
+
+    fn classic_lexer(&self, source: &str) -> Result<crate::lexer::Lexer, JsError> {
+        let width = if source.is_ascii() { 1 } else { 4 };
+        let budget = self.compilation_budget_for_bytes(source.len(), crate::lexer::LITERAL_SCRATCH_PER_BYTE + width)?;
+        Ok(crate::lexer::Lexer::budgeted_script(source, budget, source.len().saturating_mul(width)))
+    }
+
+    pub(crate) fn compilation_budget(&self, source: &str) -> Result<usize, JsError> {
+        // The ASCII lexer backs its spans with one byte instead of four
+        // per source character. Keep the same decoded-literal scratch allowance.
+        self.compilation_budget_for_bytes(source.len(), if source.is_ascii() { 13 } else { 16 })
+    }
+    fn compilation_budget_for_bytes(&self, bytes: usize, input_expansion: usize) -> Result<usize, JsError> {
         if bytes > self.limits.max_source_bytes {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Script source exceeds configured byte limit",
             ));
         }
-        // UTF-32 lexer input and decoded character data, including temporary
+        // Lexer input and decoded character data, including temporary
         // UTF-16 buffers during literal conversion. The lexer accounts for
         // per-token structural allocations as it consumes the source.
-        let input_bytes = bytes.saturating_mul(16).saturating_add(4096);
+        let input_bytes = bytes.saturating_mul(input_expansion).saturating_add(4096);
         self.ensure_allocation(input_bytes)?;
         Ok(self
             .limits
@@ -478,8 +529,13 @@ impl Vm {
         inspected_node: Option<Value>,
     ) -> Result<Value, JsError> {
         self.check_interrupt()?;
-        let chunk = bytecode::compile(source, self.compilation_budget(source)?)?;
-        self.retain_compiled_chunk(&chunk)?;
+        let chunk = {
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _scope = startup_profile::enter(startup_profile::Area::Compile);
+            let chunk = self.compile_classic(source)?;
+            self.retain_compiled_chunk(&chunk)?;
+            chunk
+        };
         if self.active == 0 {
             self.remaining = self.limits.max_instructions;
         }
@@ -565,6 +621,12 @@ impl Vm {
             self.check_interrupt()?;
             self.remaining = instructions;
             self.task_deadline = deadline;
+            #[cfg(feature = "media-startup-diagnostics")]
+            {
+                self.qa_native_work = 0;
+                self.qa_last_native_site = None;
+                self.qa_work_sites.clear();
+            }
         }
         self.active += 1;
         let result = callback(self);
@@ -758,16 +820,28 @@ impl Vm {
     pub fn estimated_heap_bytes(&self) -> usize {
         self.heap
             .estimated_bytes
+            .saturating_add(self.heap.property_cache_bytes())
             .saturating_add(self.inactive_realms.len() * std::mem::size_of::<realm::RealmState>())
             .saturating_add(self.string_bytes)
             .saturating_add(self.live_large_string_bytes.get())
             .saturating_add(self.code_bytes)
             .saturating_add(self.bigint_storage.bytes)
     }
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub(crate) fn ensure_allocation(&self, bytes: usize) -> Result<(), JsError> {
         if !self.initializing
             && self.estimated_heap_bytes().saturating_add(bytes) > self.limits.max_heap_bytes
         {
+            #[cfg(feature = "media-startup-diagnostics")]
+            qa_budget_limit(
+                "heap",
+                Some(std::panic::Location::caller()),
+                bytes as u64,
+                self.limits
+                    .max_heap_bytes
+                    .saturating_sub(self.estimated_heap_bytes()) as u64,
+                self.qa_native_work,
+            );
             Err(JsError::new(
                 ErrorKind::HeapLimit,
                 "Aggregate allocation byte budget exhausted; collect between script tasks",
@@ -776,7 +850,10 @@ impl Vm {
             Ok(())
         }
     }
-    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
+    #[cfg_attr(
+        any(feature = "twitch-bootstrap-profile", feature = "media-startup-diagnostics"),
+        track_caller
+    )]
     pub(crate) fn reserve_allocation(&mut self, bytes: usize) -> Result<(), JsError> {
         #[cfg(feature = "twitch-bootstrap-profile")]
         qa_charge("reserve_allocation", bytes);
@@ -868,6 +945,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value]| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args)
+        };
         self.native(name, 0, false, Rc::new(callback))
     }
     /// Creates a callable host exotic with the Annex B [[IsHTMLDDA]] slot.
@@ -887,6 +969,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value], bool) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value], construct| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args, construct)
+        };
         let callback = Rc::new(callback);
         let call = callback.clone();
         let function = self.native(
@@ -910,6 +997,11 @@ impl Vm {
     where
         F: Fn(&mut Vm, Value, &[Value], Option<Value>) -> Result<Value, JsError> + 'static,
     {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let callback = move |vm: &mut Vm, this, args: &[Value], target| {
+            let _scope = startup_profile::host::<F>();
+            callback(vm, this, args, target)
+        };
         let callback = Rc::new(callback);
         let call = callback.clone();
         let function = self.native(
@@ -1314,12 +1406,16 @@ impl Vm {
             self.check_interrupt()?;
         }
         if self.remaining == 0 {
+            #[cfg(feature = "media-startup-diagnostics")]
+            self.qa_report_work_limit("instruction", self.qa_last_native_site, 1);
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Instruction budget exhausted",
             ));
         }
         self.remaining -= 1;
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        startup_profile::charge(1);
         if self.heap.live > self.limits.max_heap_objects {
             return Err(JsError::new(
                 ErrorKind::HeapLimit,
@@ -1328,30 +1424,66 @@ impl Vm {
         }
         Ok(())
     }
-    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
+    #[cfg_attr(
+        any(feature = "twitch-bootstrap-profile", feature = "media-startup-diagnostics"),
+        track_caller
+    )]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
         #[cfg(feature = "twitch-bootstrap-profile")]
         qa_charge("consume_work", units);
         self.check_interrupt()?;
         let units = units as u64;
         if units > self.remaining {
+            #[cfg(feature = "media-startup-diagnostics")]
+            self.qa_report_work_limit("native", Some(std::panic::Location::caller()), units);
             self.remaining = 0;
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Native work budget exhausted",
             ));
         }
+        #[cfg(feature = "media-startup-diagnostics")]
+        if units != 0 {
+            let location = std::panic::Location::caller();
+            self.qa_native_work = self.qa_native_work.saturating_add(units);
+            self.qa_last_native_site = Some(location);
+            let site = (location.file(), location.line());
+            if let Some(total) = self.qa_work_sites.get_mut(&site) {
+                *total = total.saturating_add(units);
+            } else if self.qa_work_sites.len() < 128 {
+                self.qa_work_sites.insert(site, units);
+            }
+        }
         self.remaining -= units;
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        startup_profile::charge(units);
         Ok(())
     }
     /// Charge native DOM/host work to the current shared execution budget.
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
     /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
     /// One nonempty operation always costs at least one instruction.
+    #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
+    }
+
+    #[cfg(feature = "media-startup-diagnostics")]
+    fn qa_report_work_limit(
+        &self,
+        kind: &str,
+        site: Option<&'static std::panic::Location<'static>>,
+        requested: u64,
+    ) {
+        #[cfg(windows)]
+        startup_profile::record_denial();
+        let mut sites = self.qa_work_sites.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>();
+        sites.sort_unstable_by_key(|&(site, amount)| (std::cmp::Reverse(amount), site));
+        sites.truncate(8);
+        qa_budget_with_costs(kind, site, requested, self.remaining, self.qa_native_work, &sites, None);
     }
     fn compare_strings(&mut self, a: &JsString, b: &JsString) -> Result<(), JsError> {
         if a.storage_id() != b.storage_id() {
@@ -1402,7 +1534,24 @@ impl Vm {
         self.consume_work(units.len())?;
         self.checked_string(JsString::from_utf16_slice(units))
     }
+    pub(crate) fn string_range(&mut self, s: &JsString, start: usize, end: usize) -> Result<Value, JsError> {
+        if start == 0 && end == s.len() {
+            return self.checked_string(s.clone());
+        }
+        self.copy_string(&s.as_utf16()[start..end])
+    }
     pub(crate) fn get(&mut self, receiver: Value, key: &JsString) -> Result<Value, JsError> {
+        self.get_string_property(receiver, key, false)
+    }
+
+    fn get_string_property(
+        &mut self,
+        receiver: Value,
+        key: &JsString,
+        cache_own: bool,
+    ) -> Result<Value, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = startup_profile::enter(startup_profile::Area::Property);
         if receiver.is_nullish() {
             return Err(JsError::type_error(
                 "Cannot read a property of null or undefined",
@@ -1418,15 +1567,7 @@ impl Vm {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
         }
-        let mut current = match &receiver {
-            Value::Object(id) => Some(*id),
-            Value::String(_) => Some(self.realm.string_prototype),
-            Value::Number(_) => Some(self.realm.number_prototype),
-            Value::BigInt(_) => self.realm.bigint_prototype,
-            Value::Bool(_) => Some(self.realm.boolean_prototype),
-            Value::Symbol(_) => self.realm.symbol_prototype,
-            _ => None,
-        };
+        let mut current = self.property_start(&receiver);
         let mut depth = 0;
         while let Some(id) = current {
             depth += 1;
@@ -1472,6 +1613,12 @@ impl Vm {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
             let property = self.stored_argument_property(object, key);
+            let cacheable = cache_own && depth == 1
+                && key.len() <= 64 && !object.is_platform_object()
+                && matches!(object.kind, ObjectKind::Ordinary | ObjectKind::Array { .. }
+                    | ObjectKind::Function { .. } | ObjectKind::Native { .. } | ObjectKind::Boxed(_))
+                // This property can run the lazy builtin initializer on read.
+                && !crate::temporal::is_lazy_property_name(key);
             current = object.prototype;
             let indexed = object.indexed_properties.is_some();
             let named = object.named_properties.is_some();
@@ -1485,6 +1632,13 @@ impl Vm {
                 return match property.kind {
                     PropertyKind::Data { value, .. } => {
                         crate::temporal::force_named(self, key, &value)?;
+                        if cacheable
+                            && (self.heap.property_cache_bytes() != 0
+                                || self.estimated_heap_bytes()
+                                    .saturating_add(Heap::PROPERTY_CACHE_BYTES) <= self.limits.max_heap_bytes)
+                        {
+                            self.heap.cache_own_data(id, key, &value);
+                        }
                         Ok(value)
                     }
                     PropertyKind::Accessor {
@@ -1872,10 +2026,7 @@ impl Vm {
         }
         let previous = self.own_descriptor(id, &key)?;
         if previous.is_none() {
-            self.account_string(&key)?;
-            let bytes = 192usize.saturating_add(key.len().saturating_mul(2));
-            self.ensure_allocation(bytes)?;
-            self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
+            self.reserve_new_property(&key)?;
         }
         if let Some(old) = &previous {
             if !old.configurable {
@@ -2338,6 +2489,10 @@ impl Vm {
         }
     }
     fn normalize_reference(&mut self, reference: &mut Reference) -> Result<(), JsError> {
+        // A primitive number has a stable property key and no coercion hooks.
+        if matches!(reference, Reference::Property(_, Value::Number(_))) {
+            return Ok(());
+        }
         let (base, key) = match reference {
             Reference::Property(base, key) | Reference::Super(base, _, key) => (base, key),
             _ => return Ok(()),
@@ -2356,11 +2511,22 @@ impl Vm {
         &mut self,
         base: &Value,
         key: &Value,
+        action: &str,
     ) -> Result<PropertyKey, JsError> {
         if base.is_nullish() {
-            return Err(JsError::type_error(
-                "Cannot access a property of null or undefined",
-            ));
+            let receiver = if *base == Value::Null { "null" } else { "undefined" };
+            let key = match key {
+                Value::String(text) => {
+                    let units = text.as_utf16();
+                    format!("{:?}", String::from_utf16_lossy(&units[..units.len().min(128)]))
+                }
+                Value::Number(number) => number_string(*number),
+                Value::Object(_) => "[object key]".into(),
+                _ => self.inspect_value(key),
+            };
+            return Err(JsError::type_error(format!(
+                "Cannot {action} property {key} of {receiver}"
+            )));
         }
         let key = self.to_property_key(key)?;
         if let PropertyKey::String(name) = &key {
@@ -2368,6 +2534,34 @@ impl Vm {
         }
         Ok(key)
     }
+
+    fn read_named_property(&mut self, object: Value, name: &JsString) -> Result<Value, JsError> {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _scope = startup_profile::enter(startup_profile::Area::Property);
+        if object.is_nullish() {
+            let receiver = if object == Value::Null { "null" } else { "undefined" };
+            let units = name.as_utf16();
+            let clipped_name = String::from_utf16_lossy(&units[..units.len().min(128)]);
+            return Err(JsError::type_error(format!(
+                "Cannot read properties of {receiver} (reading {clipped_name:?})"
+            )));
+        }
+        if let Some(id) = self.property_start(&object)
+            && let Some(value) = self.heap.cached_own_data(id, name)
+            // A primitive string's own length and character indices take
+            // precedence over properties cached on String.prototype.
+            && (!matches!(object, Value::String(_))
+                || ((name.len() != 6 || !name.as_utf16().iter().copied().eq("length".encode_utf16()))
+                    && !matches!(name.as_utf16().first(), Some(48..=57))))
+        {
+            // Identity hit at the first real object. No property tree lookup.
+            self.consume_work(1)?;
+            return Ok(value);
+        }
+        self.consume_work(name.len())?;
+        self.get_string_property(object, name, true)
+    }
+
     pub(crate) fn read_reference(&mut self, reference: Reference) -> Result<Value, JsError> {
         match reference {
             Reference::Binding(env, key) => {
@@ -2395,8 +2589,14 @@ impl Vm {
                 }
             }
             Reference::Global(object, key) => self.get(Value::Object(object), &key),
+            Reference::Property(object, Value::String(name)) => self.read_named_property(object, &name),
             Reference::Property(object, key) => {
-                let key = self.property_reference_key(&object, &key)?;
+                if let Value::Number(number) = &key
+                    && let Some(value) = self.read_indexed_data(&object, *number)?
+                {
+                    return Ok(value);
+                }
+                let key = self.property_reference_key(&object, &key, "read")?;
                 self.get_property_key(object, key)
             }
             Reference::Private(object, id) => self.private_get(object, id),
@@ -2471,7 +2671,12 @@ impl Vm {
                 self.set(global, &key, value, strict)
             }
             Reference::Property(object, key) => {
-                let key = self.property_reference_key(&object, &key)?;
+                if let Value::Number(number) = &key
+                    && self.write_indexed_data(&object, *number, &value, strict)?
+                {
+                    return Ok(());
+                }
+                let key = self.property_reference_key(&object, &key, "set")?;
                 if object.as_object().is_some() {
                     return self.set_key(object, &key, value, strict);
                 }
@@ -2948,9 +3153,20 @@ impl Vm {
             callback(self, this, args)
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _function = startup_profile::function(&code.source);
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _scope = startup_profile::enter(startup_profile::Area::Other);
             self.active_calls.push(code.name.clone());
             self.enter_legacy_call(id, &code);
             let mut result = self.with_referrer(referrer, |vm| {
+                // The first invocation of a discarded body still materializes
+                // and accounts it. Primitive leaf calls need no local bindings.
+                if code.body.get().is_some() && let Some(leaf) = &code.leaf
+                    && let Some(result) = leaf.evaluate(vm, args)
+                {
+                    return result;
+                }
                 let invocation = Invocation {
                     function,
                     this,
@@ -3129,6 +3345,8 @@ impl Vm {
         };
         self.call_depth += 1;
         self.enter_legacy_call(id, &code);
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _function = startup_profile::function(&code.source);
         let result = self.with_referrer(referrer, |vm| {
             let (env, body) = vm.function_environment(
                 &code,
@@ -3184,13 +3402,19 @@ impl Vm {
             )),
         }
     }
+    fn reserve_new_property(&mut self, key: &JsString) -> Result<(), JsError> {
+        self.account_string(key)?;
+        self.reserve_allocation(192usize.saturating_add(key.len().saturating_mul(2)))
+    }
+
     pub(crate) fn append_array_literal(
         &mut self,
         array: Value,
         value: Option<Value>,
     ) -> Result<(), JsError> {
         let id = array.as_object().unwrap();
-        let ObjectKind::Array { length, .. } = self.heap.object(id)?.kind else {
+        let array_object = self.heap.object(id)?;
+        let ObjectKind::Array { length, length_writable } = array_object.kind else {
             unreachable!()
         };
         if length >= self.limits.max_array_length {
@@ -3200,23 +3424,33 @@ impl Vm {
             ));
         }
         if let Some(value) = value {
-            self.define_property(
-                array,
-                JsString::from(length.to_string()),
-                Property::data(value),
-            )?;
+            let key = JsString::from(length.to_string());
+            if !array_object.extensible || !length_writable {
+                return self.define_property(array, key, Property::data(value));
+            }
+            // An array has no own index at its current length. CreateDataProperty
+            // does not invoke an inherited setter for this new element.
+            let value = self.account_value(value)?;
+            self.reserve_new_property(&key)?;
+            let object = self.heap.object_mut(id)?;
+            object.properties.insert(key, Property::data(value));
+            if let ObjectKind::Array { length, .. } = &mut object.kind { *length += 1; }
         } else if let ObjectKind::Array { length, .. } = &mut self.heap.object_mut(id)?.kind {
             *length += 1;
         }
         Ok(())
     }
-    fn append_argument(&mut self, args: &mut Vec<Value>, value: Value) -> Result<(), JsError> {
-        if args.len() >= self.limits.max_array_length as usize {
+    fn check_argument_slot(&self, index: usize) -> Result<(), JsError> {
+        if index >= self.limits.max_array_length as usize {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
                 "Argument list budget exhausted",
             ));
         }
+        Ok(())
+    }
+    fn append_argument(&mut self, args: &mut Vec<Value>, value: Value) -> Result<(), JsError> {
+        self.check_argument_slot(args.len())?;
         self.reserve_allocation(std::mem::size_of::<Value>() * 2)?;
         self.account_value(value.clone())?;
         self.tick()?;
@@ -3257,7 +3491,7 @@ impl Vm {
         // source budget used for well-formed UTF-8 script inputs.
         let bytes = char::decode_utf16(source.as_utf16().iter().copied())
             .map(|entry| entry.map_or(3, char::len_utf8)).sum();
-        let budget = self.compilation_budget_for_bytes(bytes)?;
+        let budget = self.compilation_budget_for_bytes(bytes, 16)?;
         let lexer = crate::lexer::Lexer::from_utf16(source.as_utf16(), budget);
         bytecode::compile_eval(lexer, bytes, strict, context)
     }
@@ -3350,10 +3584,7 @@ impl Vm {
 
     pub(crate) fn run_chunk(&mut self, chunk: &Chunk, env: EnvId) -> Result<Completion, JsError> {
         if !self.permits_bytecode_depth(self.execution_depth + 1) {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Nested bytecode depth budget exhausted",
-            ));
+            return Err(self.bytecode_depth_error(self.execution_depth + 1));
         }
         self.execution_depth += 1;
         let result = self.run_chunk_inner(chunk, env, true);
@@ -3366,15 +3597,19 @@ impl Vm {
         env: EnvId,
     ) -> Result<Completion, JsError> {
         if !self.permits_bytecode_depth(self.execution_depth + 1) {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Nested bytecode depth budget exhausted",
-            ));
+            return Err(self.bytecode_depth_error(self.execution_depth + 1));
         }
         self.execution_depth += 1;
         let result = self.run_chunk_inner(chunk, env, false);
         self.execution_depth -= 1;
         result
+    }
+    pub(crate) fn bytecode_depth_error(&self, depth: usize) -> JsError {
+        if depth > self.limits.max_bytecode_depth {
+            JsError::new(ErrorKind::ExecutionLimit, "Nested bytecode depth budget exhausted")
+        } else {
+            JsError::new(ErrorKind::ExecutionLimit, "Native stack headroom exhausted during bytecode evaluation")
+        }
     }
     fn run_chunk_inner(
         &mut self,
@@ -3392,6 +3627,10 @@ impl Vm {
             self.tick()?;
             let op = &chunk.ops[pc];
             pc += 1;
+            if matches!(op, Op::StatementValue) {
+                result = Some(self.pop_value(&mut stack)?);
+                continue;
+            }
             if self.run_stack_op(op, &mut stack, env, chunk.strict, &mut pc)? {
                 continue;
             }
@@ -3452,15 +3691,19 @@ impl Vm {
             | Op::SuperConstructor
             | Op::SuperConstruct) => self.run_class_op(op, stack, env)?,
             op @ (Op::Property
+            | Op::NamedProperty(..)
+            | Op::LoadProperty(..)
+            | Op::LoadComputed
             | Op::Get
-            | Op::NormalizeReference
+            | Op::ReadForUpdate
+            | Op::ApplyUpdate(..)
             | Op::InvalidCallAssignment
             | Op::Set
             | Op::Delete
             | Op::Update { .. }
             | Op::TypeofReference
             | Op::Unary(..)
-            | Op::Binary(..)) => self.run_reference_op(op, stack, strict)?,
+            | Op::Binary(..) | Op::BinaryNumber(..)) => self.run_reference_op(op, stack, strict)?,
             Op::Dup => stack.push(stack.last().unwrap().clone()),
             Op::Swap => {
                 let len = stack.len();
@@ -3509,6 +3752,7 @@ impl Vm {
             | Op::Array
             | Op::ArrayHole
             | Op::ArrayElement(..)
+            | Op::ConstantRecord(..)
             | Op::Object
             | Op::ObjectSpread
             | Op::Destructure(..)
@@ -3518,7 +3762,7 @@ impl Vm {
             | Op::ObjectProperty { .. }
             | Op::Function(..)
             | Op::InferName(..)) => self.run_literal_op(op, stack, env, strict)?,
-            op @ (Op::PrepareCall(..)
+            op @ (Op::PrepareCall(..) | Op::PrepareMethod(..) | Op::FixedCall(..) | Op::FixedArgument(..)
             | Op::Arguments
             | Op::Argument(..)
             | Op::Call
@@ -3600,6 +3844,24 @@ impl Vm {
         strict: bool,
     ) -> Result<(), JsError> {
         match op {
+            Op::NamedProperty(name) => {
+                let key = self.account_value(Value::String(name.clone()))?;
+                let object = self.pop_value(stack)?;
+                stack.push(Item::Reference(Reference::Property(object, key)));
+            }
+            Op::LoadProperty(name) => {
+                self.check_string_length(name.len())?;
+                self.account_string(name)?;
+                let object = self.pop_value(stack)?;
+                let value = self.read_named_property(object, name)?;
+                stack.push(Item::Value(value));
+            }
+            Op::LoadComputed => {
+                let key = self.pop_value(stack)?;
+                let object = self.pop_value(stack)?;
+                let value = self.read_reference(Reference::Property(object, key))?;
+                stack.push(Item::Value(value));
+            }
             Op::Property => {
                 let key = self.pop_value(stack)?;
                 let object = self.pop_value(stack)?;
@@ -3615,14 +3877,20 @@ impl Vm {
             Op::InvalidCallAssignment => {
                 return Err(JsError::new(ErrorKind::ReferenceError, "Cannot assign to a call result"));
             }
-            Op::NormalizeReference => {
+            Op::ReadForUpdate => {
                 let Some(Item::Reference(reference)) = stack.last_mut() else {
                     unreachable!()
                 };
                 self.normalize_reference(reference)?;
+                let old = self.read_reference(reference.clone())?;
+                stack.push(Item::Value(old));
             }
-            Op::Set => {
-                let v = self.pop_value(stack)?;
+            Op::Set | Op::ApplyUpdate(_) => {
+                let mut v = self.pop_value(stack)?;
+                if let Op::ApplyUpdate(operator) = op {
+                    let left = self.pop_value(stack)?;
+                    v = self.binary(operator, left, v)?;
+                }
                 let Some(Item::Reference(reference)) = stack.pop() else {
                     return Err(JsError::new(ErrorKind::InternalError, "Expected reference"));
                 };
@@ -3633,7 +3901,7 @@ impl Vm {
                 let item = stack.pop().unwrap();
                 let deleted = match item {
                     Item::Reference(Reference::Property(object, key)) => {
-                        let key = self.property_reference_key(&object, &key)?;
+                        let key = self.property_reference_key(&object, &key, "delete")?;
                         self.delete_key(object, &key, strict)?
                     }
                     Item::Reference(
@@ -3697,10 +3965,12 @@ impl Vm {
                 let value = self.unary(op, value)?;
                 stack.push(Item::Value(value));
             }
-            Op::Binary(op) => {
-                let right = self.pop_value(stack)?;
+            Op::Binary(operator) | Op::BinaryNumber(operator, _) => {
+                let right = if let Op::BinaryNumber(_, n) = op {
+                    Value::Number(*n)
+                } else { self.pop_value(stack)? };
                 let left = self.pop_value(stack)?;
-                let value = self.binary(op, left, right)?;
+                let value = self.binary(operator, left, right)?;
                 stack.push(Item::Value(value));
             }
             _ => unreachable!(),
@@ -3739,6 +4009,22 @@ impl Vm {
                 } else {
                     self.append_array_literal(array, Some(value))?;
                 }
+            }
+            Op::ConstantRecord(fields) => {
+                self.ensure_allocation(256)?;
+                let object = self.new_object();
+                let id = object.as_object().unwrap();
+                for (name, value) in fields.iter() {
+                    self.tick()?;
+                    self.check_string_length(name.len())?;
+                    self.account_string(name)?;
+                    let value = self.account_value(value.clone())?;
+                    if !self.heap.object(id)?.properties.contains_key(name) {
+                        self.reserve_new_property(name)?;
+                    }
+                    self.heap.object_mut(id)?.insert(name.clone(), Property::data(value));
+                }
+                stack.push(Item::Value(object));
             }
             Op::Object => {
                 self.ensure_allocation(256)?;
@@ -3876,6 +4162,18 @@ impl Vm {
                 });
             }
             Op::Arguments => stack.push(Item::Arguments(Vec::new())),
+            Op::PrepareMethod(name) => {
+                self.check_string_length(name.len())?;
+                self.account_string(name)?;
+                let this = self.pop_value(stack)?;
+                let function = self.read_named_property(this.clone(), name)?;
+                stack.push(Item::CallTarget { function, this, direct_eval: false });
+            }
+            Op::FixedArgument(index) => {
+                let value = self.pop_value(stack)?;
+                self.check_argument_slot(usize::from(*index))?;
+                stack.push(Item::Value(self.account_value(value)?));
+            }
             Op::Argument(spread) => {
                 let value = self.pop_value(stack)?;
                 let Some(Item::Arguments(args)) = stack.last_mut() else {
@@ -3890,9 +4188,22 @@ impl Vm {
                     self.append_argument(args, value)?;
                 }
             }
-            Op::Call => {
-                let Some(Item::Arguments(args)) = stack.pop() else {
-                    unreachable!()
+            Op::Call | Op::FixedCall(_) => {
+                let dynamic;
+                let mut fixed = [const { Value::Undefined }; crate::bytecode::INLINE_ARGUMENTS];
+                let args: &[Value] = if let Op::FixedCall(count) = *op {
+                    let n = usize::from(count);
+                    if n > 0 {
+                        let last = self.pop_value(stack)?;
+                        self.check_argument_slot(n - 1)?;
+                        fixed[n - 1] = self.account_value(last)?;
+                        for item in fixed[..n-1].iter_mut().rev() { *item = self.pop_value(stack)?; }
+                    }
+                    &fixed[..n]
+                } else {
+                    let Some(Item::Arguments(values)) = stack.pop() else { unreachable!() };
+                    dynamic = values;
+                    &dynamic
                 };
                 let Some(Item::CallTarget {
                     function,
@@ -3905,7 +4216,7 @@ impl Vm {
                 let value = if direct_eval && function.as_object() == self.realm.intrinsic_eval {
                     self.direct_eval(args.first().cloned().unwrap_or_default(), env, strict)?
                 } else {
-                    self.invoke(function, this, &args)?
+                    self.invoke(function, this, args)?
                 };
                 stack.push(Item::Value(value));
             }
@@ -3998,7 +4309,6 @@ impl Vm {
         let mut result = None;
         match op {
             Op::CopyAnnexFunction(name) => self.copy_annex_function(env, name)?,
-            Op::Evaluate(expression) => result = Some(self.expression_value(expression, env)?),
             Op::Initialize(kind, key, expression) => {
                 let value = if let Some(e) = expression {
                     self.expression_value(e, env)?
@@ -4070,14 +4380,8 @@ impl Vm {
                     }
                 }
             }
-            Op::For {
-                initial,
-                test,
-                update,
-                body,
-                lexical,
-                label,
-            } => {
+            Op::For(code) => {
+                let bytecode::ForCode { initial, test, update, body, lexical, label } = code.as_ref();
                 result = Some(Value::Undefined);
                 let mut iteration = if lexical.is_empty() {
                     env
@@ -4105,6 +4409,9 @@ impl Vm {
                     self.run_chunk(init, iteration)?;
                 }
                 iteration = self.next_for_iteration(env, iteration, lexical)?;
+                if let Some(value) = self.try_counted_fill(code, iteration)? {
+                    return Ok(Completion::Normal(Some(value)));
+                }
                 loop {
                     self.tick()?;
                     if let Some(test) = test
@@ -4209,53 +4516,59 @@ impl Vm {
                 let value = self.expression_value(e, env)?;
                 return Err(self.thrown_error(value)?);
             }
-            Op::Try(body, catch, finally) => {
-                let mut completion = self.run_chunk(body, env);
-                if let Err(error) = &completion {
-                    if error.uncatchable() {
-                        return completion;
-                    }
-                    if let Some((name, handler)) = catch {
-                        let value = if let Some(value) = &error.thrown {
-                            value.clone()
-                        } else {
-                            self.error_value(error)?
-                        };
-                        let scope = self.heap.allocate_env(Environment::new(
-                            Some(env),
-                            if matches!(name.as_deref(), Some(bytecode::PatternCode::Name(_))) { EnvKind::SimpleCatch } else { EnvKind::Block },
-                            None,
-                        ));
-                        if let Some(name) = name {
-                            self.declare_pattern(name, scope, true, true)?;
-                        }
-                        completion = if let Some(pattern) = name {
-                            self.bind_pattern(
-                                pattern,
-                                value,
-                                scope,
-                                PatternMode::Parameter,
-                                strict,
-                                None,
-                            )
-                            .and_then(|_| self.run_chunk(handler, scope))
-                        } else {
-                            self.run_chunk(handler, scope)
-                        };
-                    }
-                }
-                if let Some(finally) = finally {
-                    match self.run_chunk(finally, env) {
-                        Ok(Completion::Normal(_)) => {}
-                        other => completion = other,
-                    }
-                }
-                return completion.map(|value| value.update_empty(Some(Value::Undefined)));
-            }
+            Op::Try(..) => return self.run_try_op(op, env, strict),
             _ => unreachable!(),
         }
         Ok(Completion::Normal(result))
     }
+
+    // Keep catch environment and completion temporaries off other recursive
+    // control-op frames, including in unoptimized builds.
+    #[inline(never)]
+    fn run_try_op(&mut self, op: &Op, env: EnvId, strict: bool) -> Result<Completion, JsError> {
+        let Op::Try(body, catch, finally) = op else {
+            unreachable!()
+        };
+        let mut completion = self.run_chunk(body, env);
+        if let Err(error) = &completion {
+            if error.uncatchable() {
+                return completion;
+            }
+            if let Some((name, handler)) = catch {
+                let value = if let Some(value) = &error.thrown {
+                    value.clone()
+                } else {
+                    self.error_value(error)?
+                };
+                let scope = self.heap.allocate_env(Environment::new(
+                    Some(env),
+                    if matches!(name.as_deref(), Some(bytecode::PatternCode::Name(_))) {
+                        EnvKind::SimpleCatch
+                    } else {
+                        EnvKind::Block
+                    },
+                    None,
+                ));
+                if let Some(name) = name {
+                    self.declare_pattern(name, scope, true, true)?;
+                }
+                completion = if let Some(pattern) = name {
+                    self.bind_pattern(pattern, value, scope, PatternMode::Parameter, strict, None)
+                        .and_then(|_| self.run_chunk(handler, scope))
+                } else {
+                    self.run_chunk(handler, scope)
+                };
+            }
+        }
+        if let Some(finally) = finally {
+            match self.run_chunk(finally, env) {
+                Ok(Completion::Normal(_)) => {}
+                other => completion = other,
+            }
+        }
+        completion.map(|value| value.update_empty(Some(Value::Undefined)))
+    }
+
     pub fn error_value(&mut self, error: &JsError) -> Result<Value, JsError> {
         let prototype = self
             .realm
@@ -4313,7 +4626,7 @@ impl Vm {
             }
         })
     }
-    fn binary(&mut self, op: &str, left: Value, right: Value) -> Result<Value, JsError> {
+    pub(crate) fn binary(&mut self, op: &str, left: Value, right: Value) -> Result<Value, JsError> {
         if matches!(op, "===" | "!==") {
             self.charge_bigint_comparison(&left, &right)?;
             if let (Value::String(a), Value::String(b)) = (&left, &right) {
@@ -4676,6 +4989,62 @@ type ProfileHistogram =
 thread_local! {
     static QA_DATA: std::cell::RefCell<Option<ProfileHistogram>> = Default::default();
     static QA_STACK: std::cell::RefCell<Vec<u64>> = Default::default();
+}
+
+// The diagnostic binary emits only Rust source locations and counters, never
+// JavaScript source, URL, or runtime values. Release builds contain no hook.
+#[cfg(feature = "media-startup-diagnostics")]
+pub(crate) fn qa_budget_limit(
+    kind: &str,
+    site: Option<&'static std::panic::Location<'static>>,
+    requested: u64,
+    remaining: u64,
+    native_work: u64,
+) {
+    qa_budget_with_costs(kind, site, requested, remaining, native_work, &[], None);
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+pub(crate) fn qa_compiler_limit(
+    site: &'static std::panic::Location<'static>,
+    requested: usize,
+    remaining: usize,
+    counts: [usize; 5],
+) {
+    qa_budget_with_costs(
+        "compiler", Some(site), requested as u64, remaining as u64, 0, &[], Some(counts),
+    );
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn qa_budget_with_costs(
+    kind: &str,
+    site: Option<&'static std::panic::Location<'static>>,
+    requested: u64,
+    remaining: u64,
+    native_work: u64,
+    costs: &[((&'static str, u32), u64)],
+    compiler: Option<[usize; 5]>,
+) {
+    use std::io::Write;
+    use std::sync::atomic::AtomicUsize;
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+    if TRACES
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < 128).then_some(count + 1)
+        })
+        .is_ok()
+    {
+        let (file, line) = site.map_or(("-", 0), |loc| (loc.file(), loc.line()));
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "SATIN_QA_BUDGET {kind} {requested} {remaining} {native_work} {line} {file}");
+        if let Some([initial, source_units, backing_bytes, offset, compacted]) = compiler {
+            let _ = writeln!(stderr, "SATIN_QA_COMPILER {initial} {source_units} {backing_bytes} {offset} {compacted}");
+        }
+        for &((file, line), units) in costs {
+            let _ = writeln!(stderr, "SATIN_QA_COST {units} {line} {file}");
+        }
+    }
 }
 
 #[cfg(feature = "twitch-bootstrap-profile")]

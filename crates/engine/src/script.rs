@@ -7,6 +7,8 @@ mod canvas;
 mod class_list;
 mod collections;
 mod custom_elements;
+mod dataset;
+mod range;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
@@ -96,6 +98,9 @@ struct State {
     prototype: Value,
     element_prototype: Value,
     html_element_prototype: Value,
+    div_prototype: Value,
+    anchor_prototype: Value,
+    template_prototype: Value,
     document_prototype: Value,
     html_document_prototype: Value,
     doctype_prototype: Value,
@@ -107,6 +112,7 @@ struct State {
     canvas_prototype: Value,
     media_prototypes: media::Prototypes,
     input_prototype: Value,
+    form_control_prototypes: HashMap<&'static str, Value>,
     image_prototype: Value,
     link_prototype: Value,
     absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
@@ -121,6 +127,8 @@ struct State {
     window: Value,
     event_prototype: Value,
     mouse_event_prototype: Value,
+    keyboard_event_prototype: Value,
+    focus_event_prototype: Value,
     error_event_prototype: Value,
     reporting_error: bool,
     handlers: HashMap<(Option<NodeId>, String), (Value, RootId)>,
@@ -193,8 +201,9 @@ fn web_vm_limits() -> VmLimits {
         // Document and worker hosts do not yet provide cross-origin isolation.
         shared_array_buffer: false,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
-        max_heap_objects: 512 * 1024,
-        max_heap_bytes: 512 * 1024 * 1024,
+        max_call_depth: 1024,
+        max_heap_objects: 1024 * 1024,
+        max_heap_bytes: 2 * 1024 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
         ..VmLimits::default()
     }
@@ -323,7 +332,14 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             state.comment_prototype.clone()
         } else if matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. }) {
             match state.document.namespace(id) {
-                crate::dom::Namespace::Html => state.html_element_prototype.clone(),
+                crate::dom::Namespace::Html if state.document.tag(id) == "a" => state.anchor_prototype.clone(),
+                crate::dom::Namespace::Html if state.document.tag(id) == "div" => state.div_prototype.clone(),
+                crate::dom::Namespace::Html if state.document.tag(id) == "template" => state.template_prototype.clone(),
+                crate::dom::Namespace::Html => state
+                    .form_control_prototypes
+                    .get(state.document.tag(id))
+                    .unwrap_or(&state.html_element_prototype)
+                    .clone(),
                 crate::dom::Namespace::Svg => state.svg_element_prototype.clone(),
                 _ => state.element_prototype.clone(),
             }
@@ -684,7 +700,7 @@ impl ScriptRuntime {
         // DOM callbacks can re-enter page code underneath several lexical blocks.
         // The VM checks native stack headroom before every deeper bytecode entry.
         let mut vm = Vm::with_limits(VmLimits {
-            max_bytecode_depth: 96,
+            max_bytecode_depth: 4096,
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
@@ -705,6 +721,12 @@ impl ScriptRuntime {
         vm.root(element_prototype.clone());
         let html_element_prototype = vm.new_object_with_prototype(element_prototype.clone())?;
         vm.root(html_element_prototype.clone());
+        let template_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(template_prototype.clone());
+        let div_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(div_prototype.clone());
+        let anchor_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(anchor_prototype.clone());
         let iframe_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(iframe_prototype.clone());
         let script_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
@@ -714,6 +736,12 @@ impl ScriptRuntime {
         let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
         let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
+        let mut form_control_prototypes = HashMap::new();
+        for (tag, _, _) in forms::TYPED_CONTROLS {
+            let control = vm.new_object_with_prototype(html_element_prototype.clone())?;
+            vm.root(control.clone());
+            form_control_prototypes.insert(*tag, control);
+        }
         let link_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(link_prototype.clone());
         let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
@@ -753,6 +781,9 @@ impl ScriptRuntime {
             prototype: prototype.clone(),
             element_prototype: element_prototype.clone(),
             html_element_prototype: html_element_prototype.clone(),
+            div_prototype,
+            anchor_prototype,
+            template_prototype,
             document_prototype: document_prototype.clone(),
             html_document_prototype,
             doctype_prototype,
@@ -765,6 +796,7 @@ impl ScriptRuntime {
             canvas_prototype: canvas_prototype.clone(),
             media_prototypes,
             input_prototype: input_prototype.clone(),
+            form_control_prototypes,
             image_prototype: image_prototype.clone(),
             link_prototype: link_prototype.clone(),
             absolute_link_hrefs: HashMap::new(),
@@ -774,6 +806,8 @@ impl ScriptRuntime {
             window: window.clone(),
             event_prototype: Value::Undefined,
             mouse_event_prototype: Value::Undefined,
+            keyboard_event_prototype: Value::Undefined,
+            focus_event_prototype: Value::Undefined,
             error_event_prototype: Value::Undefined,
             text_prototype,
             comment_prototype,
@@ -960,6 +994,9 @@ impl ScriptRuntime {
         dom_implementation::install(&mut vm, &state)?;
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
+        dataset::install(&mut vm, &state, &dom_errors)?;
+        range::install(&mut vm, &state, &dom_errors)?;
+        forms.install_typed_controls(&mut vm)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;
@@ -1102,10 +1139,10 @@ impl ScriptRuntime {
         #[cfg(feature = "twitch-bootstrap-profile")]
         let result = match self.twitch_profile {
             Some(profile) => profile.run(&mut self.vm, identifier, run),
-            None => self.vm.with_task(run),
+            None => scheduler::run_script_task(&mut self.vm, run),
         };
         #[cfg(not(feature = "twitch-bootstrap-profile"))]
-        let result = self.vm.with_task(run);
+        let result = scheduler::run_script_task(&mut self.vm, run);
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
@@ -1159,7 +1196,7 @@ impl ScriptRuntime {
         } else {
             DispatchMode::Lifecycle
         };
-        let result = self.vm.with_task(|vm| {
+        let result = scheduler::run_script_task(&mut self.vm, |vm| {
             dispatch_checked_with_mode(vm, &state, target, kind, bubbles, false, &[], mode)?;
             drain_microtask_queue(vm, &state)
         });
@@ -1376,7 +1413,7 @@ impl ScriptRuntime {
     ) -> Result<(), JsError> {
         let state = self.state.clone();
         let fetch = &self.fetch;
-        let result = self.vm.with_task(|vm| {
+        let result = scheduler::run_script_task(&mut self.vm, |vm| {
             action(fetch, vm)?;
             drain_microtask_queue(vm, &state)
         });
@@ -1421,7 +1458,7 @@ impl ScriptRuntime {
     }
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
-        if let Err(error) = self.vm.with_task(|vm| drain_microtask_queue(vm, &state)) {
+        if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| drain_microtask_queue(vm, &state)) {
             report_error(&state, ConsolePhase::Microtask, None, &error, || {
                 error.to_string()
             });
@@ -1497,7 +1534,7 @@ impl ScriptRuntime {
         if self.workers.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.workers.dispatch_next(vm)? {
                         return Ok(false);
                     }
@@ -1523,7 +1560,7 @@ impl ScriptRuntime {
         if self.messages.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.messages.dispatch_next(vm)? {
                         return Ok(false);
                     }
@@ -1549,7 +1586,7 @@ impl ScriptRuntime {
         if self.storage.has_events() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.storage.dispatch_next(vm, &state)? {
                         return Ok(false);
                     }
@@ -1574,7 +1611,7 @@ impl ScriptRuntime {
         }
         if self.state.borrow().routing.has_events() {
             let state = self.state.clone();
-            if let Err(error) = self.vm.with_task(|vm| history_api::run_events(vm, &state)) {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| history_api::run_events(vm, &state)) {
                 report_error(
                     &state,
                     ConsolePhase::HostTask,
@@ -1586,10 +1623,9 @@ impl ScriptRuntime {
         }
         if self.layout.take_resize() {
             self.lifecycle_event(None, "resize", false);
-            if let Err(error) = self
-                .vm
-                .with_task(|vm| self.media_queries.report_changes(vm))
-            {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| {
+                self.media_queries.report_changes(vm)
+            }) {
                 report_error(
                     &self.state,
                     ConsolePhase::HostTask,
@@ -1601,7 +1637,7 @@ impl ScriptRuntime {
         }
         for target in self.layout.take_events() {
             let state = self.state.clone();
-            if let Err(error) = self.vm.with_task(|vm| {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| {
                 let bubbles = target.is_none();
                 let target = target.or_else(|| Some(state.borrow().document.root));
                 dispatch_checked(vm, &state, target, "scroll", bubbles, false, &[])?;
@@ -1760,6 +1796,9 @@ fn document_base(state: &State) -> url::Url {
         .clone()
 }
 
+#[cfg(all(windows, feature = "media-startup-diagnostics"))]
+mod startup_measure;
+
 fn run_classic(
     vm: &mut Vm,
     state: &Shared,
@@ -1780,7 +1819,11 @@ fn run_classic(
         state.ignore_destructive_writes += usize::from(external);
         state.current_script.replace(node)
     };
-    let evaluated = match vm.eval_with_identifier(source, identifier) {
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    let evaluation = startup_measure::evaluate(vm, source, identifier, node, external);
+    #[cfg(not(all(windows, feature = "media-startup-diagnostics")))]
+    let evaluation = vm.eval_with_identifier(source, identifier);
+    let evaluated = match evaluation {
         Ok(_) => {
             state.borrow_mut().executed += 1;
             Ok(())
@@ -2535,6 +2578,10 @@ fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<
             "onpopstate",
             "onhashchange",
             "onstorage",
+            "onanimationstart",
+            "onanimationiteration",
+            "onanimationend",
+            "onanimationcancel",
         ],
     )
 }
@@ -2679,16 +2726,31 @@ fn dispatch_checked_with_mode(
     properties: &[(&str, Value)],
     mode: DispatchMode,
 ) -> Result<bool, JsError> {
+    let keyboard = matches!(kind, "keydown" | "keyup" | "keypress");
+    let focus = matches!(kind, "focus" | "blur" | "focusin" | "focusout");
     let object = if kind == "click" {
         let prototype = state.borrow().mouse_event_prototype.clone();
         let object = vm.new_object_with_prototype(prototype)?;
         ui_events::initialize_click(vm, &object)?;
         object
+    } else if keyboard {
+        let prototype = state.borrow().keyboard_event_prototype.clone();
+        let object = vm.new_object_with_prototype(prototype)?;
+        ui_events::initialize_key_input(vm, &object, properties)?;
+        object
+    } else if focus {
+        let prototype = state.borrow().focus_event_prototype.clone();
+        let object = vm.new_object_with_prototype(prototype)?;
+        let related = properties.iter().find(|(name, _)| *name == "relatedTarget")
+            .map_or(Value::Null, |(_, value)| value.clone());
+        ui_events::initialize_focus_input(vm, &object, related)?;
+        object
     } else {
         vm.new_object_with_prototype(state.borrow().event_prototype.clone())?
     };
     let event =
-        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, false], true)?;
+        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, keyboard || focus], true)?;
+    let properties = if keyboard || focus { &[] } else { properties };
     dispatch_prepared_with_mode(vm, state, target, event, properties, mode)
 }
 
@@ -2741,7 +2803,7 @@ fn dispatch_prepared_with_mode(
         event_target::DispatchPath::Dom(Rc::downgrade(state), path.clone()),
     )?;
     let root = vm.root(event.clone());
-    let result = vm.with_task(|vm| -> Result<(), JsError> {
+    let result = scheduler::run_script_task(vm, |vm| -> Result<(), JsError> {
         for (name, value) in properties {
             vm.define_data_property(event.clone(), name, value.clone(), false, true, true)?;
         }
@@ -3052,21 +3114,32 @@ mod tests {
             "<!doctype html><button id='button'>Go</button>",
         );
         let mut runtime = ScriptRuntime::new(&page).unwrap();
-        // Each callback copies 320,000 code units. A single callback fits both
-        // task budgets; all 128 exceed even the native input allowance.
+        // Supply a deterministic outer fuel budget to test inheritance. Real
+        // window tasks now use the duration watchdog for the same boundary.
+        let work = runtime.vm.new_native_function("chargeWork", |vm, _, _| {
+            vm.charge_work(16_000)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("chargeWork", work).unwrap();
         runtime.eval(r#"
-            var calls = 0, s = 'a'.repeat(200), b = document.getElementById('button');
-            function work() { calls++; s.repeat(1600); }
+            var calls = 0, b = document.getElementById('button');
+            function work() { calls++; chargeWork(); }
             for (var i = 0; i < 128; i++) b.addEventListener('click', function() { work(); });
         "#).unwrap();
-        runtime.click(page.document.elements("button").next().unwrap());
+        let state = runtime.state.clone();
+        let target = page.document.elements("button").next().unwrap();
+        assert!(runtime.vm.with_task_limits(1_000_000, None, |vm| {
+            dispatch_checked(vm, &state, Some(target), "click", true, true, &[])
+        }).is_err());
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(
             calls > 1. && calls < 128.,
             "separate callbacks reset the budget: {calls}"
         );
         runtime.eval("calls = 0; for (var i = 0; i < 128; i++) queueMicrotask(work);").unwrap();
-        runtime.pump();
+        assert!(runtime.vm.with_task_limits(1_000_000, None, |vm| {
+            drain_microtask_queue(vm, &state)
+        }).is_err());
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(
             calls > 1. && calls < 128.,

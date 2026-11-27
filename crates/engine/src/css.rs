@@ -1,6 +1,7 @@
 //! A bounded, independently implemented CSS subset. Selectors and declarations
 //! are compiled once per layout; matching does not tokenize or allocate strings.
 mod calc;
+mod color_mix;
 mod cssom_rules;
 pub(crate) use cssom_rules::constructed_rules;
 pub(crate) mod canvas_font;
@@ -3050,6 +3051,7 @@ enum Value {
     Inherit,
     Unset,
     Color(Option<Color>),
+    ColorMix(Arc<color_mix::Mix>),
     Length(SpecifiedLength),
     Number(f32),
     Clamp(Option<u32>),
@@ -3978,6 +3980,7 @@ fn apply_value(
                 .clamp(0., 512.)
         }
         (Color, Value::Color(color)) => s.color = color.unwrap_or(parent.color),
+        (Color, Value::ColorMix(mix)) => s.color = mix.resolve(parent.color),
         (Background, Value::Color(color)) => s.background = Some(color.unwrap_or(s.color)),
         (WebkitLineClamp, Value::Clamp(lines)) => s.webkit_line_clamp = *lines,
         (WebkitBoxOrient, Value::Bool(vertical)) => s.vertical_box = *vertical,
@@ -4932,6 +4935,9 @@ fn parse_value(p: Property, value: &str) -> Option<Value> {
             "scale-down" => self::ObjectFit::ScaleDown,
             _ => return None,
         })),
+        Color if v.starts_with("color-mix(") => {
+            color_mix::parse(v).map(|mix| Value::ColorMix(Arc::new(mix)))
+        }
         Color | Background | BorderTopColor | BorderRightColor | BorderBottomColor
         | BorderLeftColor | OutlineColor => {
             if v == "currentcolor" {

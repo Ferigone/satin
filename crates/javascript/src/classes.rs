@@ -366,6 +366,7 @@ impl Vm {
         });
         let constructor_code = explicit.clone().unwrap_or_else(|| {
             Rc::new(Code {
+                leaf: None,
                 source: code.source.clone(),
                 name: None,
                 params: Vec::new(),
@@ -735,6 +736,8 @@ impl Vm {
         } else {
             unreachable!()
         };
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _function = crate::vm::startup_profile::function(&code.source);
         let (body, chunk) = self.function_environment(
             &code,
             parent,

@@ -139,6 +139,7 @@ impl ModuleGraph {
                 ModuleType::Bytes => ResourceKind::BytesModule,
             },
             cors: Some(credentials),
+            script_encoding: None,
             integrity,
             deadline: ResourceQueue::queue_deadline(),
         };

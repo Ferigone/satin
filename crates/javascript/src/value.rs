@@ -266,6 +266,14 @@ impl PartialEq for JsString {
     }
 }
 impl Eq for JsString {}
+// The property tree can compare a temporary UTF-16 index directly with a
+// stored JavaScript string. Both keys use lexicographic UTF-16 unit order.
+impl std::borrow::Borrow<[u16]> for JsString {
+    fn borrow(&self) -> &[u16] {
+        self.as_utf16()
+    }
+}
+
 impl PartialOrd for JsString {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

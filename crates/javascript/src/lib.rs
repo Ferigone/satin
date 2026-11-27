@@ -51,4 +51,6 @@ pub use structured_clone::{
 };
 pub use value::{ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value};
 pub use vm::realm::RealmId;
+#[cfg(all(windows, feature = "media-startup-diagnostics"))]
+pub use vm::startup_profile;
 pub use vm::{GcStats, RootId, Vm, VmLimits};

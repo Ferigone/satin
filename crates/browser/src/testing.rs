@@ -45,7 +45,26 @@ pub enum SmokeAction {
         value: String,
         timeout_ms: u64,
     },
+    SampleMedia { after_ms: u64, #[serde(default)] count_selector: Option<String> },
     Checkpoint(Checkpoint),
+}
+
+pub fn count_selected(document: &Document, layout: Option<&Layout>, selector: &str) -> serde_json::Value {
+    let mut matched = 0;
+    let mut with_text = 0;
+    let mut laid_out = 0;
+    for node in document.connected_nodes().filter(|&n|
+        rust_browser_engine::css::matches_selector(document, n, selector))
+    {
+        matched += 1;
+        if !document.text(node).trim().is_empty() {
+            with_text += 1;
+            if layout.and_then(|l| l.rect_for(node)).is_some_and(|r| r.width > 0.0 && r.height > 0.0) {
+                laid_out += 1;
+            }
+        }
+    }
+    serde_json::json!({"matches": matched, "withText": with_text, "withLayoutAndText": layout.map(|_| laid_out)})
 }
 
 #[derive(Deserialize)]
@@ -607,6 +626,12 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
     let mut follows_click = false;
     let mut names = HashSet::new();
     for action in &actions {
+        if let SmokeAction::SampleMedia { after_ms, count_selector } = action {
+            if *after_ms > 60_000 { return Err("Media sample delay exceeds 60 seconds".into()); }
+            if count_selector.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256) {
+                return Err("Invalid media sample selector length".into());
+            }
+        }
         if let SmokeAction::ClickInRow(row) = action {
             row.validate()?;
         }
@@ -631,6 +656,20 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
 mod tests {
     use super::*;
     use rust_browser_engine::{Fonts, LoadedPage};
+
+    #[test]
+    fn selected_text_counts_distinguish_hidden_and_empty_rows() {
+        let page = LoadedPage::from_html(
+            "about:blank",
+            r#"<p class="row">One</p><p class="row" style="display:none">Two</p>
+               <p class="row"> </p><p>Outside</p>"#,
+        );
+        let layout = Layout::build_with_viewport(&page, &Fonts::new().unwrap(), Viewport::default());
+        assert_eq!(count_selected(&page.document, Some(&layout), ".row"),
+            serde_json::json!({"matches":3,"withText":2,"withLayoutAndText":1}));
+        assert_eq!(count_selected(&page.document, None, ".row"),
+            serde_json::json!({"matches":3,"withText":2,"withLayoutAndText":null}));
+    }
 
     #[test]
     fn row_control_selects_its_own_row_and_rejects_ambiguity() {

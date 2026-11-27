@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+media-startup-diagnostics = ["rust-browser-engine/media-startup-diagnostics"]
+
 [dependencies]
 rust-browser-engine = { path = "../engine" }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "fs", "io-util"] }

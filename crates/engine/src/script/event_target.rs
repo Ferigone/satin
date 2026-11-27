@@ -11,6 +11,9 @@ const LISTENERS_SLOT: u32 = 10;
 pub(super) const EVENT_TARGET_SLOT: u32 = 0;
 const CURRENT_TARGET_SLOT: u32 = 1;
 const CUSTOM_DETAIL_SLOT: u32 = 8;
+const ANIMATION_NAME_SLOT: u32 = 211;
+const ANIMATION_ELAPSED_SLOT: u32 = 212;
+const ANIMATION_PSEUDO_SLOT: u32 = 213;
 const MAX_LISTENERS: usize = 128;
 const DOM_TARGET_LISTENER_LIMIT: usize = 4096;
 const DOM_LISTENER_LIMIT: usize = 8192;
@@ -648,6 +651,68 @@ pub(super) fn install_handler(
     vm.define_accessor(proto, &name, Some(get), Some(set))
 }
 
+fn install_animation_event(
+    vm: &mut Vm,
+    event_prototype: &Value,
+    event_constructor: &Value,
+    set_prototype: &Value,
+) -> Result<(), JsError> {
+    const FIELDS: &[(&str, u32)] = &[
+        ("animationName", ANIMATION_NAME_SLOT),
+        ("elapsedTime", ANIMATION_ELAPSED_SLOT),
+        ("pseudoElement", ANIMATION_PSEUDO_SLOT),
+    ];
+    let prototype = vm.new_object_with_prototype(event_prototype.clone())?;
+    let intrinsic = prototype.clone();
+    let constructor = webidl::interface(
+        vm,
+        prototype.clone(),
+        "AnimationEvent",
+        1,
+        move |vm, _, args, target| {
+            let target = target.ok_or_else(|| JsError::type_error("AnimationEvent requires new"))?;
+            webidl::required(args, 1, "AnimationEvent")?;
+            let kind = kind(vm, &args[0])?;
+            let options = arg(args, 1);
+            let flags = flags(vm, &options)?;
+            let mut values = Vec::with_capacity(FIELDS.len());
+            for &(name, slot) in FIELDS {
+                let value = option(vm, &options, name)?;
+                let converted = if slot == ANIMATION_ELAPSED_SLOT {
+                    let value = if value.is_undefined() { 0.0 } else { vm.to_number(&value)? };
+                    if !value.is_finite() {
+                        return Err(JsError::type_error("elapsedTime must be finite"));
+                    }
+                    Value::Number(value)
+                } else if value.is_undefined() {
+                    "".into()
+                } else {
+                    Value::String(vm.to_string(&value)?)
+                };
+                values.push((slot, converted));
+            }
+            let object = webidl::instance(vm, target, &intrinsic)?;
+            let object = init_event(vm, object, kind, flags, false)?;
+            for (slot, value) in values {
+                vm.set_host_slot(object.clone(), slot, value)?;
+            }
+            Ok(object)
+        },
+    )?;
+    vm.call(
+        set_prototype.clone(),
+        Value::Undefined,
+        &[constructor, event_constructor.clone()],
+    )?;
+    for &(name, slot) in FIELDS {
+        getter(vm, prototype.clone(), name, move |vm, this, _| {
+            vm.host_slot(&this, slot)
+                .ok_or_else(|| JsError::type_error("Illegal AnimationEvent receiver"))
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) fn install(vm: &mut Vm, dom: Option<Shared>) -> Result<Events, JsError> {
     let implicit_receiver = dom.as_ref().map(|state| state.borrow().window.clone());
     install_with_receiver(vm, dom, implicit_receiver)
@@ -993,11 +1058,16 @@ fn install_with_receiver(
         },
     )?;
     if let Some(dom) = &events.dom {
-        let (ui_proto, mouse_proto) =
+        install_animation_event(vm, &proto, &constructor, &set_prototype)?;
+        let (ui_proto, mouse_proto, keyboard_proto, focus_proto) =
             super::ui_events::install(vm, &dom.state, proto, constructor, set_prototype)?;
         vm.root(ui_proto.clone());
         vm.root(mouse_proto.clone());
+        vm.root(keyboard_proto.clone());
+        vm.root(focus_proto.clone());
         dom.state.borrow_mut().mouse_event_prototype = mouse_proto.clone();
+        dom.state.borrow_mut().keyboard_event_prototype = keyboard_proto.clone();
+        dom.state.borrow_mut().focus_event_prototype = focus_proto;
         let root = dom.state.borrow().document.root;
         let document = super::wrap(vm, &dom.state, Some(root))?;
         let state = dom.state.clone();
@@ -1009,8 +1079,8 @@ fn install_with_receiver(
             }
             webidl::required(args, 1, "createEvent")?;
             let interface = vm.to_string(&args[0])?;
-            // The supported names are all ASCII and at most eleven code units.
-            let name = if interface.len() <= 11 {
+            // The supported names are short ASCII identifiers.
+            let name = if interface.len() <= 13 {
                 interface.to_string_lossy().to_ascii_lowercase()
             } else {
                 String::new()
@@ -1024,6 +1094,11 @@ fn install_with_receiver(
                     let proto = if mouse { &mouse_proto } else { &ui_proto };
                     let object = vm.new_object_with_prototype(proto.clone())?;
                     super::ui_events::initialize_empty(vm, &object, mouse)?;
+                    object
+                }
+                "keyboardevent" => {
+                    let object = vm.new_object_with_prototype(keyboard_proto.clone())?;
+                    super::ui_events::initialize_keyboard(vm, &object)?;
                     object
                 }
                 "customevent" => {

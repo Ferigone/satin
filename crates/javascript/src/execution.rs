@@ -15,7 +15,6 @@ use controls::Resume;
 use std::{mem::size_of, rc::Rc};
 
 type Flow = Result<Completion, JsError>;
-const MAX_OWNED_FRAMES: usize = 64;
 
 struct Frame {
     chunk: Rc<Chunk>,
@@ -379,10 +378,7 @@ impl Vm {
         let mut completed: Option<Flow> = None;
         // Owned frames share one driver stack frame and its opcode dispatch.
         if !frames.is_empty() && !self.permits_bytecode_depth(base_depth + 2) {
-            return RunResult::Completed(Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Nested bytecode depth budget exhausted",
-            )));
+            return RunResult::Completed(Err(self.bytecode_depth_error(base_depth + 2)));
         }
         while !frames.is_empty() {
             if completed
@@ -391,10 +387,10 @@ impl Vm {
             {
                 break;
             }
-            if frames.len() > MAX_OWNED_FRAMES {
+            if frames.len() > self.limits().max_bytecode_depth {
                 return RunResult::Completed(Err(JsError::new(
                     ErrorKind::ExecutionLimit,
-                    "Nested bytecode depth budget exhausted",
+                    "Owned bytecode frame depth budget exhausted",
                 )));
             }
             self.execution_depth = base_depth + 2;
@@ -481,6 +477,10 @@ impl Vm {
         self.tick()?;
         let op = &frame.chunk.ops[frame.pc];
         frame.pc += 1;
+        if matches!(op, Op::StatementValue) {
+            frame.result = Some(self.pop_value(&mut frame.operands)?);
+            return Ok(Advance::Keep);
+        }
         if let Op::Pattern(step) = op {
             let step = *step;
             destructuring::step(self, frame, step)?;

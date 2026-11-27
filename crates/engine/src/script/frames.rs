@@ -2,7 +2,7 @@
 //! parent tab's VM heap, but classic scripts execute with the child's globals.
 use super::{
     ConsolePhase, Shared, State, arg, devtools_console, document_part, element, fatal, getter,
-    method, scheduler, set_attribute, text, unsupported,
+    method, scheduler, set_attribute, text, unsupported, webidl,
 };
 use crate::{
     dom::{Document, Namespace, NodeId},
@@ -163,6 +163,9 @@ impl HostIndexedProperties for FrameIndex {
 }
 
 pub(super) fn install(vm: &mut Vm, host: &Shared, prototype: Value) -> Result<(), JsError> {
+    webidl::interface(vm, prototype.clone(), "HTMLIFrameElement", 0, |_, _, _, _| {
+        Err(JsError::type_error("Illegal HTMLIFrameElement constructor"))
+    })?;
     let window = vm.global();
     let index = Rc::new(FrameIndex {
         host: Rc::downgrade(host),
@@ -177,14 +180,14 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, prototype: Value) -> Result<()
     for (name, as_document) in [("contentWindow", false), ("contentDocument", true)] {
         let host = host.clone();
         getter(vm, prototype.clone(), name, move |vm, this, _| {
-            let id = element(&host, &this)?;
+            let id = iframe_receiver(&host, &this)?;
             get(vm, &host, id, this, as_document)
         })?;
     }
     for name in ["src", "srcdoc"] {
         let host_get = host.clone();
         let read = vm.new_native_function(name, move |_, this, _| {
-            let id = element(&host_get, &this)?;
+            let id = iframe_receiver(&host_get, &this)?;
             Ok(host_get
                 .borrow()
                 .document
@@ -194,7 +197,7 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, prototype: Value) -> Result<()
         });
         let host_set = host.clone();
         let write = vm.new_native_function(name, move |vm, this, args| {
-            let id = element(&host_set, &this)?;
+            let id = iframe_receiver(&host_set, &this)?;
             let value = text(vm, arg(args, 0))?;
             set_attribute(vm, &host_set, id, name, Some(value))?;
             Ok(Value::Undefined)
@@ -202,6 +205,15 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, prototype: Value) -> Result<()
         vm.define_accessor(prototype.clone(), name, Some(read), Some(write))?;
     }
     Ok(())
+}
+
+fn iframe_receiver(host: &Shared, this: &Value) -> Result<NodeId, JsError> {
+    let id = element(host, this)?;
+    let state = host.borrow();
+    if state.document.namespace(id) == Namespace::Html && state.document.tag(id) == "iframe" {
+        return Ok(id);
+    }
+    Err(JsError::type_error("Expected an HTMLIFrameElement"))
 }
 
 fn replaceable(

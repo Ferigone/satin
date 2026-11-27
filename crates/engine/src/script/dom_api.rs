@@ -901,6 +901,24 @@ fn insert_html(
     Ok(plan.commit(&mut state))
 }
 
+pub(super) fn contextual_fragment(
+    vm: &mut Vm,
+    host: &Shared,
+    context: NodeId,
+    source: &str,
+    errors: &Errors,
+) -> Result<Value, JsError> {
+    charge(vm, host, Some(context), &[], Walk::Root, false, source.len())?;
+    let prototype = host.borrow().fragment_prototype.clone();
+    let fragment = new_fragment(vm, host, errors, prototype)?;
+    let id = node(host, &fragment)?;
+    let document = host.borrow().document.node_document(context);
+    host.borrow_mut().document.adopt(id, document);
+    insert_html(host, id, context, true, None, None, false, source)
+        .map_err(|failure| errors.convert(vm, failure))?;
+    Ok(fragment)
+}
+
 fn ensure_template(state: &Shared, template: NodeId) -> Checked<NodeId> {
     let mut state = state.borrow_mut();
     if let Some(&content) = state.document.template_contents.get(&template) {
@@ -1573,7 +1591,8 @@ fn install_cloning(
 ) -> Result<(), JsError> {
     let content_state = state.clone();
     let content_errors = errors.clone();
-    getter(vm, prototype.clone(), "content", move |vm, this, _| {
+    let template_prototype = state.borrow().template_prototype.clone();
+    getter(vm, template_prototype, "content", move |vm, this, _| {
         let id = node(&content_state, &this)?;
         charge(vm, &content_state, None, &[], Walk::Root, false, 1)?;
         let is_template = {
@@ -1582,7 +1601,7 @@ fn install_cloning(
                 && s.document.namespace(id) == crate::dom::Namespace::Html
         };
         if !is_template {
-            return Ok(Value::Undefined);
+            return Err(JsError::type_error("Expected HTMLTemplateElement"));
         }
         let content = ensure_template(&content_state, id)
             .map_err(|failure| content_errors.convert(vm, failure))?;

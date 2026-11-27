@@ -1,0 +1,56 @@
+name: YouTube JavaScript compilation measurement
+
+on:
+  push:
+    branches: [ci/youtube-script-memory-36]
+
+concurrency:
+  group: youtube-script-memory-36
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compiler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Run JavaScript regression tests
+        run: cargo test --locked -p rust-browser-javascript --test parser_budget --test semantics
+      - name: Build compiler probe
+        run: cargo build --locked -p rust-browser-javascript --example measure_script
+      - name: Identify the public desktop script and record its digest
+        run: python3 tools/ci-fetch-desktop-script.py
+      - name: Count tokens in the fetched script
+        run: |
+          npm --prefix "$RUNNER_TEMP/satin-count" install --ignore-scripts --no-audit --no-fund acorn@8.15.0
+          node - "$RUNNER_TEMP/satin-count/node_modules/acorn" <<'NODE'
+          const acorn = require(process.argv[2]);
+          const source = require('node:fs').readFileSync('/tmp/satin-desktop.js', 'utf8');
+          let tokens = 0, closing = 0;
+          for (const t of acorn.tokenizer(source, { ecmaVersion: 'latest' })) {
+            tokens += 1;
+            if ([')', ']', '}', ':'].includes(t.type.label)) closing += 1;
+          }
+          console.log({ tokens, closing });
+          NODE
+      - name: Compile the complete site script at the browser's 512 MiB heap budget
+        run: |
+          cp target/debug/examples/measure_script /tmp/satin-compiler-candidate
+          git fetch --depth=1 origin 57e1dbdb00c0c8eb830dcef2503ba46d92b81b19
+          git worktree add /tmp/satin-baseline FETCH_HEAD
+          mkdir -p /tmp/satin-baseline/crates/javascript/examples
+          cp crates/javascript/examples/measure_script.rs /tmp/satin-baseline/crates/javascript/examples/
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked -p rust-browser-javascript --example measure_script --manifest-path /tmp/satin-baseline/Cargo.toml
+          echo "alpha.35"
+          target/debug/examples/measure_script /tmp/satin-desktop.js || true
+          echo "candidate"
+          /tmp/satin-compiler-candidate /tmp/satin-desktop.js

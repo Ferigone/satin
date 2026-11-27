@@ -61,6 +61,8 @@ mod tab_strip;
 mod visit_store;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod update_ui;
+#[cfg(all(test, windows, target_arch = "x86_64"))]
+mod updater_ui_qa;
 use self::address_bar::{
     AddressBar, Movement,
     suggestions::{Direction as SuggestionDirection, Suggestions},
@@ -519,6 +521,10 @@ pub(crate) fn run(
     devtools: Option<crate::devtools::DevTools>,
     #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    if updater_ui_qa::active() {
+        assert!(!enable_updates && smoke_output.is_none() && url.is_some());
+    }
     #[cfg(all(windows, target_arch = "x86_64"))]
     let startup_signal = if enable_updates && url.is_none() {
         crate::updater::StartupSignal::from_parent()?
@@ -540,9 +546,17 @@ pub(crate) fn run(
     let bookmarks = bookmarks::Bookmarks::open(bookmarks_path);
     let visits = visit_store::Visits::open(path.join(visit_store::FILE_NAME));
     let fonts = Fonts::new()?;
-    let events = EventLoop::<()>::with_user_event()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let builder = EventLoop::<()>::with_user_event();
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    let builder = {
+        use winit::platform::windows::EventLoopBuilderExtWindows;
+        let mut builder = builder;
+        if updater_ui_qa::active() {
+            builder.with_any_thread(true);
+        }
+        builder
+    };
+    let events = { builder }.build().map_err(|e| e.to_string())?;
     events.set_control_flow(ControlFlow::Wait);
     let proxy = events.create_proxy();
     let (results, incoming) = mpsc::channel(16);
@@ -578,6 +592,8 @@ pub(crate) fn run(
     let smoke_requested = smoke_output.is_some();
     let chrome_motion_forced_off =
         smoke_requested || std::env::var("SATIN_REDUCED_MOTION").is_ok_and(|value| value == "1");
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    let chrome_motion_forced_off = chrome_motion_forced_off || updater_ui_qa::active();
     let mut app = App {
         window: None,
         graphics: None,
@@ -648,6 +664,7 @@ pub(crate) fn run(
             .transpose()?
             .unwrap_or_default(),
         smoke_wait_deadline: None,
+        smoke_media_samples: Vec::new(),
         smoke_checkpoint_document: None,
         smoke_checkpoint_sample: None,
         smoke_checkpoint_last: None,
@@ -681,6 +698,10 @@ pub(crate) fn run(
         #[cfg(all(windows, target_arch = "x86_64"))]
         startup_signal,
     };
+    #[cfg(all(test, windows, target_arch = "x86_64"))]
+    if updater_ui_qa::active() {
+        app.updater = Some(crate::updater::Updates::ui_qa_fixture(&path));
+    }
     let event_result = events.run_app(&mut app);
     if event_result.is_ok() && smoke_requested {
         app.smoke_result
@@ -691,6 +712,8 @@ pub(crate) fn run(
                 "window_smoke": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "frames_presented": app.presented_frames,
+                "scroll_y": tab.scroll,
+                "content_viewport": tab.layout.as_ref().map(|l| serde_json::json!({"width": l.viewport.width, "height": l.viewport.height})),
                 "url": tab.url,
                 "title": tab.title,
                 "layout_limited": tab.layout.as_ref().is_some_and(|layout| layout.limited),
@@ -702,6 +725,9 @@ pub(crate) fn run(
         });
         if let Some(checkpoints) = app.smoke_checkpoint_outputs.summary() {
             summary["checkpoints"] = checkpoints;
+        }
+        if !app.smoke_media_samples.is_empty() {
+            summary["media_samples"] = std::mem::take(&mut app.smoke_media_samples).into();
         }
         println!("{summary}");
         app.smoke_checkpoint_outputs.commit();
@@ -727,6 +753,7 @@ struct App {
     smoke_click: Option<String>,
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
     smoke_wait_deadline: Option<Instant>,
+    smoke_media_samples: Vec<serde_json::Value>,
     smoke_checkpoint_document: Option<CheckpointDocument>,
     smoke_checkpoint_sample: Option<CheckpointSample>,
     smoke_checkpoint_last: Option<Checkpoint>,
@@ -1128,8 +1155,9 @@ impl App {
         let history = self.tabs[index].history.clone();
         let storage = self.tabs[index].storage.clone();
         match DocumentSession::start_in_tab(opened, history, storage) {
-            Ok((page, session)) => {
+            Ok((page, mut session)) => {
                 let tab = &mut self.tabs[index];
+                session.set_device_pixel_ratio(f64::from(self.scale * tab.zoom), None);
                 tab.url = page.url.clone();
                 tab.install_page(page);
                 tab.runtime = None;
@@ -1171,6 +1199,7 @@ impl App {
         let (Some(session), Some(page)) = (&mut tab.document_session, &mut tab.page) else {
             return false;
         };
+        session.set_device_pixel_ratio(f64::from(self.scale * tab.zoom), tab.runtime.as_ref());
         if !session.needs_advance(tab.runtime.as_ref()) {
             return false;
         }
@@ -1409,6 +1438,12 @@ impl App {
         {
             tab.scroll = request.y;
             tab.scroll_x = request.x;
+        }
+        let ratio = f64::from(self.scale * tab.zoom);
+        if let Some(session) = &mut tab.document_session {
+            session.set_device_pixel_ratio(ratio, tab.runtime.as_ref());
+        } else if let Some(runtime) = &tab.runtime {
+            runtime.set_device_pixel_ratio(ratio);
         }
         let mut viewport = regions.viewport(tab);
         let (width, height) = (viewport.width, viewport.height);
@@ -3703,6 +3738,37 @@ impl App {
             return;
         }
         let tab = &self.tabs[self.active];
+        if let Some(SmokeAction::SampleMedia { after_ms, count_selector }) = self.smoke_actions.front() {
+            let Some(page) = tab.inspected_page() else { return };
+            let now = Instant::now();
+            let delay = Duration::from_millis(*after_ms);
+            let deadline = *self.smoke_wait_deadline.get_or_insert(now + delay);
+            if now < deadline {
+                match event_loop.control_flow() {
+                    ControlFlow::Wait => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                    ControlFlow::WaitUntil(next) if next > deadline => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            let mut sample = serde_json::json!({
+                "navigation": tab.document_navigation,
+                "timestampMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_millis() as u64,
+                "videoElements": page.document.html_elements("video").count(),
+                "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
+            });
+            if let Some(selector) = count_selector {
+                sample["selected"] = crate::testing::count_selected(&page.document, tab.layout.as_deref(), selector);
+            }
+            self.smoke_media_samples.push(sample);
+            self.smoke_actions.pop_front();
+            self.smoke_wait_deadline = None;
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
         if let Some(SmokeAction::WaitTitle { value, timeout_ms }) = self.smoke_actions.front() {
             if &tab.title == value {
                 self.smoke_actions.pop_front();
@@ -4347,7 +4413,7 @@ impl App {
                     Err(format!("Expected native title {value:?}, got {actual:?}"))
                 }
             }
-            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) => {
+            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) | SmokeAction::SampleMedia { .. } => {
                 unreachable!("the event loop handles waiting actions")
             }
             SmokeAction::Key {
@@ -5005,6 +5071,13 @@ impl ApplicationHandler<()> for App {
         if let Some(next) = self.chrome_motion.deadline() {
             deadline = Some(deadline.map_or(next, |current| current.min(next)));
         }
+        #[cfg(all(test, windows, target_arch = "x86_64"))]
+        if let Some(next) = updater_ui_qa::deadline(self, event_loop) {
+            if event_loop.exiting() {
+                return;
+            }
+            deadline = Some(deadline.map_or(next, |current| current.min(next)));
+        }
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if let Err(error) = self.profile.save_storage() {
             self.status = format!("Site data could not be saved. {error}");
@@ -5036,6 +5109,10 @@ impl ApplicationHandler<()> for App {
                 Size::Physical,
             ))
             .with_min_inner_size(LogicalSize::new(390., 400.));
+        #[cfg(all(test, windows, target_arch = "x86_64"))]
+        if let Some(size) = updater_ui_qa::size() {
+            attributes = attributes.with_inner_size(Size::Physical(size));
+        }
         #[cfg(windows)]
         {
             attributes = attributes
@@ -5216,7 +5293,15 @@ impl ApplicationHandler<()> for App {
         }
         match event {
             WindowEvent::CloseRequested => self.close_window(event_loop),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                #[cfg(all(test, windows, target_arch = "x86_64"))]
+                let previous_frame = self.presented_frames;
+                self.draw();
+                #[cfg(all(test, windows, target_arch = "x86_64"))]
+                if self.presented_frames != previous_frame || self.last_present_error.is_some() {
+                    updater_ui_qa::after_draw(self, event_loop);
+                }
+            }
             WindowEvent::Resized(_) => self.window_geometry_changed(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let new_scale = scale_factor as f32;
@@ -5225,6 +5310,14 @@ impl ApplicationHandler<()> for App {
                     self.mouse.1 *= self.scale / new_scale;
                 }
                 self.scale = new_scale;
+                for tab in &mut self.tabs {
+                    let ratio = f64::from(new_scale * tab.zoom);
+                    if let Some(session) = &mut tab.document_session {
+                        session.set_device_pixel_ratio(ratio, tab.runtime.as_ref());
+                    } else if let Some(runtime) = &tab.runtime {
+                        runtime.set_device_pixel_ratio(ratio);
+                    }
+                }
                 self.window_geometry_changed();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),

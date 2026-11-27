@@ -108,7 +108,7 @@ fn thread_cpu_time() -> Option<Duration> {
 }
 
 #[cfg(windows)]
-fn thread_cpu_time() -> Option<Duration> {
+pub(super) fn thread_cpu_time() -> Option<Duration> {
     use windows_sys::Win32::{
         Foundation::FILETIME,
         System::Threading::{GetCurrentThread, GetThreadTimes},

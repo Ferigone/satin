@@ -25,3 +25,22 @@ The runner prints the path of a new sanitized `target/public-media/<run>/summary
 - **Chat:** Twitch read-only evidence is the count of rendered message elements where available, not message content. Do not type, send messages, or sign in. YouTube live chat is not applicable to this regular upload.
 
 For replayable engine checks independent of a changing site, see [Verification](VERIFICATION.md).
+
+## Localizing JS startup failures
+
+Build an **uninstalled diagnostic binary** with
+`cargo build --locked -p rust-browser --features media-startup-diagnostics`.
+Use a distinct Cargo target and run it through the same Satin probe. The
+optional feature adds bounded counters and Rust callsite tags for instruction,
+native work, heap, and compiler limits; it does not raise any limits or change
+what code the scripts are allowed to run. The sanitized receipt retains only
+known record types and engine source paths. For an `instruction` record, the
+location is the **last** native charge, not necessarily the main cost.
+`topWork` summarizes up to eight measured native charge sites for that
+budget failure. Instrumentation can affect timing; compare with an ordinary
+build.
+
+`node tools/probe-media-capabilities.mjs $binary $chrome $rea $scratch` uses
+one local document and reports advertised MIME/codec and player API support
+side by side. It does not establish playback. Run `verify-native-media.mjs`
+separately to exercise the native decoder with known content.

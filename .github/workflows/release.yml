@@ -126,6 +126,10 @@ jobs:
             }
           } else {
             $notes = "$marker`n`n**Windows x64:** Use ``Satin-windows-x64.zip`` for first-time installation or a manual upgrade from alpha.44 and earlier. Installed opt-in clients offer the separate update asset and ask before downloading or restarting."
+            $releaseNotes = "docs/releases/$tag.md"
+            if (Test-Path -LiteralPath $releaseNotes -PathType Leaf) {
+              $notes += "`n`n" + (Get-Content -LiteralPath $releaseNotes -Raw)
+            }
             $options = @('--repo', $repo, '--draft', '--title', "Satin $version", '--generate-notes', '--notes', $notes)
             if ($version.PreReleaseLabel) { $options += '--prerelease' }
             if ($tagExists) { $options += '--verify-tag' } else { $options += @('--target', $commit) }
