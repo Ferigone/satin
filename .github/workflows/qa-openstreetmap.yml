@@ -18,6 +18,8 @@ jobs:
           if (-not (Test-Path "$env:WINDIR/System32/mfplat.dll")) {
             Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
           }
+      - name: Test form and attribute regressions
+        run: cargo test --locked -p rust-browser-engine --test forms --test attributes
       - name: Build actual Satin
         run: cargo build --release --locked -p rust-browser
       - name: Install pinned reference driver
