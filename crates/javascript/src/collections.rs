@@ -670,7 +670,7 @@ fn install_collection(vm: &mut Vm, kind: Kind) {
         "forEach",
         1,
         move |vm, this, args| {
-            crate::builtins::for_each::ForEachCall::collection(vm, this, args, kind)?.run(vm)
+            crate::builtins::callback_iteration::CallbackIteration::collection(vm, this, args, kind)?.run(vm)
         },
     );
     vm.mark_owned_native_call(&for_each, crate::heap::NativeCall::CollectionForEach(kind));

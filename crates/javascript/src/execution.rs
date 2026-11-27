@@ -5,7 +5,7 @@ mod destructuring;
 
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
-    builtins::for_each::ForEachCall,
+    builtins::callback_iteration::CallbackIteration,
     bytecode::{Chunk, Code, Op},
     heap::EnvId,
     patterns::Invocation,
@@ -28,7 +28,7 @@ struct Frame {
     delegate: Option<delegation::Delegation>,
     patterns: Vec<destructuring::ActivePattern>,
     activation: Option<CallActivation>,
-    for_each: Option<ForEachCall>,
+    iteration: Option<CallbackIteration>,
 }
 
 pub(crate) struct Execution {
@@ -65,7 +65,7 @@ enum Advance {
     Keep,
     Operand(Value),
     Call(OwnedCall, Resume),
-    ForEach(ForEachCall),
+    Iteration(CallbackIteration),
     Finish(Completion),
     Child {
         chunk: Rc<Chunk>,
@@ -102,7 +102,7 @@ impl Frame {
             delegate: None,
             patterns: Vec::new(),
             activation: None,
-            for_each: None,
+            iteration: None,
         }
     }
     fn absorb(&mut self, value: Option<Value>) {
@@ -143,7 +143,7 @@ impl Frame {
         if let Some(delegate) = &self.delegate {
             delegate.visit(visit);
         }
-        if let Some(iteration) = &self.for_each {
+        if let Some(iteration) = &self.iteration {
             iteration.visit(visit);
         }
     }
@@ -544,8 +544,8 @@ impl Vm {
                     frame.waiting.take().unwrap(),
                     child,
                 )
-            } else if let Some(iteration) = frame.for_each.take() {
-                Ok(Advance::ForEach(iteration))
+            } else if let Some(iteration) = frame.iteration.take() {
+                Ok(Advance::Iteration(iteration))
             } else if frame.pc == frame.chunk.ops.len() {
                 completed = Some(frames.pop().unwrap().finish(self));
                 continue;
@@ -553,19 +553,20 @@ impl Vm {
                 self.advance_frame(frame, ordinary)
             };
             let advance = advance.and_then(|advance| {
-                let Advance::ForEach(mut iteration) = advance else {
+                let Advance::Iteration(mut iteration) = advance else {
                     return Ok(advance);
                 };
                 let Some(args) = iteration.next(self)? else {
-                    return Ok(Advance::Operand(Value::Undefined));
+                    return Ok(Advance::Operand(iteration.finish()));
                 };
-                match self.dispatch_for_each_callback(&iteration, &args)? {
-                    CallDispatch::Owned(call) => Ok(Advance::Call(call, Resume::ForEach(iteration))),
-                    CallDispatch::Value(_) => {
-                        frame.for_each = Some(iteration);
+                match self.dispatch_iteration_callback(&iteration, &args)? {
+                    CallDispatch::Owned(call) => Ok(Advance::Call(call, Resume::Iteration(iteration))),
+                    CallDispatch::Value(value) => {
+                        iteration.accept(self, value)?;
+                        frame.iteration = Some(iteration);
                         Ok(Advance::Keep)
                     }
-                    CallDispatch::ForEach(_) => unreachable!("forEach callback uses ordinary dispatch"),
+                    CallDispatch::Iteration(_) => unreachable!("iteration callback uses ordinary dispatch"),
                 }
             });
             match advance {
@@ -676,7 +677,7 @@ impl Vm {
             ).map(|call| match call {
                 CallDispatch::Value(value) => Advance::Operand(value),
                 CallDispatch::Owned(call) => Advance::Call(call, Resume::Call),
-                CallDispatch::ForEach(iteration) => Advance::ForEach(iteration),
+                CallDispatch::Iteration(iteration) => Advance::Iteration(iteration),
             });
         }
         if self.run_stack_op(

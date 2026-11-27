@@ -1,4 +1,4 @@
-use super::{arg, for_each::ForEachCall, method};
+use super::{arg, callback_iteration::CallbackIteration, method};
 use crate::{
     JsError, JsString, Value, Vm,
     heap::{ObjectKind, Property, array_index},
@@ -9,17 +9,20 @@ use std::ops::Range;
 enum Visit {
     Every,
     Some,
-    Map,
     Filter,
 }
 
 pub(super) fn install(vm: &mut Vm, proto: &Value) {
-    let for_each = method(vm, proto.clone(), "forEach", 1, |vm, this, args| {
-        ForEachCall::array(vm, this, args)?.run(vm)
-    });
-    vm.mark_owned_native_call(&for_each, crate::heap::NativeCall::ArrayForEach);
+    for (name, intrinsic, map) in [
+        ("forEach", crate::heap::NativeCall::ArrayForEach, false),
+        ("map", crate::heap::NativeCall::ArrayMap, true),
+    ] {
+        let function = method(vm, proto.clone(), name, 1, move |vm, this, args| {
+            CallbackIteration::array(vm, this, args, map)?.run(vm)
+        });
+        vm.mark_owned_native_call(&function, intrinsic);
+    }
     for (name, kind) in [
-        ("map", Visit::Map),
         ("filter", Visit::Filter),
         ("some", Visit::Some),
         ("every", Visit::Every),
@@ -158,7 +161,6 @@ impl PresentIndices {
 fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value, JsError> {
     let (object, length, callback) = prepare(vm, this, args)?;
     let result = match kind {
-        Visit::Map => vm.array_species_create(object.clone(), length)?,
         Visit::Filter => vm.array_species_create(object.clone(), 0)?,
         Visit::Every => Value::Bool(true),
         Visit::Some => Value::Bool(false),
@@ -174,7 +176,6 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value,
             &[value.clone(), Value::from(index as f64), object.clone()],
         )?;
         match kind {
-            Visit::Map => vm.define_property(result.clone(), key, Property::data(mapped))?,
             Visit::Filter if mapped.is_truthy() => {
                 vm.define_property(
                     result.clone(),

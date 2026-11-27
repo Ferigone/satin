@@ -1,6 +1,6 @@
 use crate::{
     ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value,
-    builtins::for_each::ForEachCall,
+    builtins::callback_iteration::CallbackIteration,
     bytecode::{self, Chunk, ClassName, Code, Op, ScopePlan},
     for_in::ForInKeys,
     heap::{
@@ -187,6 +187,8 @@ pub struct Vm {
     pub(crate) qa_callback_gc: (usize, usize, usize, usize),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_callback_target: Option<ObjectId>,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    qa_native_call_stack: Option<Vec<(usize, ObjectId)>>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -238,7 +240,7 @@ pub(crate) struct CallActivation {
 pub(crate) enum CallDispatch {
     Value(Value),
     Owned(OwnedCall),
-    ForEach(ForEachCall),
+    Iteration(CallbackIteration),
 }
 
 #[derive(Clone)]
@@ -353,6 +355,8 @@ impl Vm {
             qa_callback_gc: (0, 0, 0, 0),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_callback_target: None,
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_native_call_stack: std::env::var_os("SATIN_QA_HEAP_STACK").map(|_| Vec::new()),
             limits,
             interrupt: None,
             task_deadline: None,
@@ -2019,6 +2023,14 @@ impl Vm {
                 self.diagnostic_source_site(),
                 self.qa_callback_target.map_or_else(String::new, |id| self.diagnostic_callable(id)),
             );
+            if let Some(native) = &self.qa_native_call_stack {
+                for (depth, id) in native.iter().rev().take(32) {
+                    eprintln!("SATIN_QA_HEAP_STACK native depth={depth}{}", self.diagnostic_callable(*id));
+                }
+                for frame in self.legacy_calls.iter().rev().take(48) {
+                    eprintln!("SATIN_QA_HEAP_STACK script depth={}{}", frame.depth, self.diagnostic_callable(frame.function));
+                }
+            }
         }
     }
 
@@ -3403,7 +3415,16 @@ impl Vm {
         };
         self.call_depth += 1;
         let result = if let Some(callback) = native {
-            callback(self, this, args)
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            if let Some(stack) = &mut self.qa_native_call_stack {
+                stack.push((self.call_depth, id));
+            }
+            let result = callback(self, this, args);
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            if let Some(stack) = &mut self.qa_native_call_stack {
+                stack.pop();
+            }
+            result
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -3485,9 +3506,9 @@ impl Vm {
         self.dispatch_owned_call_inner(function, this, args, true)
     }
 
-    pub(crate) fn dispatch_for_each_callback(
+    pub(crate) fn dispatch_iteration_callback(
         &mut self,
-        iteration: &ForEachCall,
+        iteration: &CallbackIteration,
         args: &[Value],
     ) -> Result<CallDispatch, JsError> {
         self.with_owned_native_call(|vm| {
@@ -3524,7 +3545,7 @@ impl Vm {
         function: Value,
         this: Value,
         args: &[Value],
-        allow_for_each: bool,
+        allow_iteration: bool,
     ) -> Result<CallDispatch, JsError> {
         let Some(mut id) = function.as_object() else {
             return self.invoke(function, this, args).map(CallDispatch::Value);
@@ -3552,9 +3573,11 @@ impl Vm {
                     break (code.clone(), *environment, referrer.clone());
                 }
                 ObjectKind::Native {
-                    owned_call: Some(call @ (NativeCall::ArrayForEach | NativeCall::CollectionForEach(_))),
+                    owned_call: Some(call @ (
+                        NativeCall::ArrayForEach | NativeCall::ArrayMap | NativeCall::CollectionForEach(_)
+                    )),
                     realm_environment, ..
-                } if allow_for_each
+                } if allow_iteration
                     && prefixes.is_empty()
                     && *realm_environment == self.realm.global_env =>
                 {
@@ -3562,13 +3585,15 @@ impl Vm {
                     self.tick()?;
                     return self.with_owned_native_call(|vm| {
                         match call {
-                            NativeCall::ArrayForEach => ForEachCall::array(vm, this, args),
-                            NativeCall::CollectionForEach(kind) => {
-                                ForEachCall::collection(vm, this, args, kind)
+                            NativeCall::ArrayForEach | NativeCall::ArrayMap => {
+                                CallbackIteration::array(vm, this, args, matches!(call, NativeCall::ArrayMap))
                             }
-                            _ => unreachable!("forEach intrinsic"),
+                            NativeCall::CollectionForEach(kind) => {
+                                CallbackIteration::collection(vm, this, args, kind)
+                            }
+                            _ => unreachable!("iteration intrinsic"),
                         }
-                        .map(CallDispatch::ForEach)
+                        .map(CallDispatch::Iteration)
                     });
                 }
                 ObjectKind::Native { owned_call: Some(call), realm_environment, .. }
@@ -3593,7 +3618,7 @@ impl Vm {
                             }
                             _ => args.get(1..).unwrap_or_default(),
                         };
-                        vm.dispatch_owned_call_inner(this, receiver, args, false)
+                        vm.dispatch_owned_call_inner(this, receiver, args, allow_iteration)
                     });
                 }
                 _ => return self.invoke(function, this, args).map(CallDispatch::Value),

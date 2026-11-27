@@ -17,6 +17,7 @@ pub(crate) type NativeConstruct =
 #[derive(Clone, Copy)]
 pub(crate) enum NativeCall {
     ArrayForEach,
+    ArrayMap,
     CollectionForEach(crate::collections::Kind),
     FunctionCall,
     FunctionApply,

@@ -836,6 +836,44 @@ fn nested_array_for_each_can_collect_and_observe_sparse_array_mutations() {
 }
 
 #[test]
+fn array_map_keeps_its_results_and_cursor_across_nested_callback_collection() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_objects: 10_000,
+        max_heap_bytes: 12 * 1024 * 1024,
+        max_instructions: 8_000_000,
+        ..VmLimits::default()
+    });
+    vm.eval(r#"
+        var finished;
+        function receiveResponse() {
+            const rows = [3, , 7, ,];
+            const visited = [];
+            const mapped = Array.prototype.map.call(rows, function (seed, index, input) {
+                if (input !== rows || this.tag !== 'receiver') throw 'map arguments';
+                if (index === 0) {
+                    input[1] = 5;
+                    input[4] = 11;
+                }
+                visited.push(index);
+                let total = 0;
+                [seed].forEach(function (item) {
+                    for (let i = 0; i < 6000; i++) {
+                        const row = [{item}, () => row[0].item];
+                        total += row[1]();
+                    }
+                });
+                return {total};
+            }, {tag: 'receiver'});
+            return [visited.join(','), mapped.length, mapped[0].total, mapped[1].total,
+                    mapped[2].total, 3 in mapped].join('/');
+        }
+        Promise.resolve().then(receiveResponse).then(result => { finished = result; });
+    "#).unwrap();
+    vm.drain_jobs_at_callback_boundary(8).unwrap();
+    assert_eq!(vm.eval("finished").unwrap(), Value::from("0,1,2/4/18000/30000/42000/false"));
+}
+
+#[test]
 fn host_callback_collection_reclaims_cells_without_resetting_task_fuel() {
     let mut vm = Vm::new();
     let rooted = vm.new_object();
