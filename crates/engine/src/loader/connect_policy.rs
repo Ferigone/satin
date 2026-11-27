@@ -276,7 +276,12 @@ impl Source {
 
     fn matches(&self, client: &Url, target: &Url, redirected: bool) -> bool {
         let scheme_matches = |scheme: &str| {
-            scheme == target.scheme() || (scheme == "http" && target.scheme() == "https")
+            let target = target.scheme();
+            scheme == target
+                || matches!(
+                    (scheme, target),
+                    ("http" | "wss", "https") | ("ws", "wss" | "http" | "https")
+                )
         };
         match self {
             Self::Any => matches!(target.scheme(), "http" | "https"),

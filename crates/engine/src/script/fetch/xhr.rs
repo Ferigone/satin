@@ -11,7 +11,7 @@ use crate::{
     Loader,
     loader::{ConnectPolicy, LoadedPage},
     network::{
-        self, CancelSignal, FETCH_BODY_LIMIT, FETCH_TIMEOUT, FETCH_URL_LIMIT, FetchError,
+        self, CancelSignal, FETCH_BODY_LIMIT, FETCH_TIMEOUT, FetchError,
         FetchErrorKind, WebRequest, WebResponse,
     },
     script::{abort, arg, event_target, getter, unsupported, webidl},
@@ -297,7 +297,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         let data = receiver(vm, &xhr)?;
         webidl::required(args, 2, "XMLHttpRequest.open")?;
         let method = byte_string(vm, arg(args, 0))?;
-        let reference = usv(vm, arg(args, 1), FETCH_URL_LIMIT, "XMLHttpRequest URL")?;
+        let reference = super::request_url(vm, arg(args, 1), "XMLHttpRequest URL")?;
         let synchronous = args.get(2).is_some_and(|value| !value.is_truthy());
         if ["CONNECT", "TRACE", "TRACK"]
             .iter()

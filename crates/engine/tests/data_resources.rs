@@ -69,6 +69,35 @@ fn data_fetch_is_readable_in_all_modes_without_network_or_cookies() {
     );
 }
 #[test]
+fn script_fetch_accepts_a_large_inline_body_with_separate_network_url_bounds() {
+    let page = LoadedPage::from_html("https://example.test/", "<!doctype html>");
+    let loader = Loader::new().unwrap();
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval(r#"
+        var result = [];
+        fetch('data:application/octet-stream;base64,' + 'YWJj'.repeat(87500))
+            .then(r => r.arrayBuffer())
+            .then(b => result.push(b.byteLength, new Uint8Array(b)[b.byteLength - 1]));
+    "#).unwrap();
+    let requests = runtime.take_network_requests();
+    assert_eq!(requests.len(), 1);
+    let (id, request) = &requests[0];
+    assert_eq!(request.url.scheme(), "data");
+    let response = loader.web_fetch(request, &AtomicBool::new(false));
+    runtime.complete_network(*id, response).unwrap();
+    assert_eq!(
+        runtime.eval("result.join(',')").unwrap(),
+        rust_browser_javascript::Value::from("262500,99")
+    );
+    assert_eq!(
+        runtime.eval("new Request('https://example.test/?' + 'x'.repeat(350000))")
+            .unwrap_err().kind,
+        rust_browser_javascript::ErrorKind::TypeError,
+    );
+    assert!(runtime.take_network_requests().is_empty());
+}
+
+#[test]
 fn data_navigation_styles_scripts_and_svg_images_use_the_real_loader() {
     let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='30'><rect width='40' height='30' fill='green'/></svg>";
     let script = "document.title='Data pipeline OK';";

@@ -20,6 +20,7 @@ mod element_interface;
 mod error_event;
 mod event_target;
 mod ui_events;
+mod websocket;
 mod fetch;
 mod file_list;
 mod form_data;
@@ -159,12 +160,32 @@ struct State {
     devtools_console: devtools_console::ConsoleBuffer,
     sources: inspection_sources::SourceArchive,
     scheduler: scheduler::Scheduler,
+    microtask_collection: (usize, usize),
     dom_bytes: usize,
     form_attribute_hook: Option<FormAttributeHook>,
     form_clone_hook: Option<FormCloneHook>,
     mutations: Rc<RefCell<mutation_observers::Observers>>,
     canvases: canvas::CanvasStore,
     media: media::Store,
+}
+
+#[derive(Clone, Copy)]
+pub struct MouseInput {
+    pub client_x: f64,
+    pub client_y: f64,
+    pub screen_x: f64,
+    pub screen_y: f64,
+    pub alt: bool,
+    pub control: bool,
+    pub meta: bool,
+    pub shift: bool,
+}
+
+#[derive(Clone, Copy)]
+pub enum MousePhase {
+    Down,
+    Move { primary_down: bool },
+    Up,
 }
 
 pub struct ScriptRuntime {
@@ -183,6 +204,8 @@ pub struct ScriptRuntime {
     messages: message_ports::MessagePorts,
     image_bitmap: canvas::ImageBitmapFactory,
     workers: workers::Workers,
+    sockets: websocket::Sockets,
+    socket_events: websocket::SocketEvents,
 }
 
 fn mark_dirty(state: &mut State) {
@@ -861,6 +884,7 @@ impl ScriptRuntime {
             devtools_console: Default::default(),
             sources: Default::default(),
             scheduler: scheduler::Scheduler::new(started),
+            microtask_collection: (128 * 1024 * 1024, 128 * 1024),
             dom_bytes,
             form_attribute_hook: None,
             form_clone_hook: None,
@@ -1046,9 +1070,12 @@ impl ScriptRuntime {
         let image_data = canvas::install(&mut vm, &state, canvas_prototype, &layout, &blobs)?;
         let image_bitmap = canvas::install_image_bitmap(&mut vm, &state, window.clone())?;
         let cloning =
-            structured_clone::CloneHost::new(&mut vm, blobs, image_data, image_bitmap, file_lists)?;
+            structured_clone::CloneHost::new(&mut vm, blobs.clone(), image_data, image_bitmap, file_lists)?;
         let messages = message_ports::install(&mut vm, events.clone(), cloning.clone())?;
-        let workers = workers::install(&mut vm, &state, events, messages.clone(), page)?;
+        let workers = workers::install(&mut vm, &state, events.clone(), messages.clone(), page)?;
+        let (sockets, socket_events) = websocket::install(
+            &mut vm, &state, events, messages.clone(), blobs, page,
+        )?;
         cloning.install(&mut vm, window, messages.clone())?;
         scheduler::install_performance(&mut vm, &state)?;
         base64_api::install(&mut vm)?;
@@ -1074,6 +1101,8 @@ impl ScriptRuntime {
             messages,
             image_bitmap,
             workers,
+            sockets,
+            socket_events,
         })
     }
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
@@ -1185,12 +1214,16 @@ impl ScriptRuntime {
     }
     /// Returns whether the link's default navigation is allowed.
     pub fn click(&mut self, node: NodeId) -> bool {
+        self.activate_click(node, None)
+    }
+
+    fn activate_click(&mut self, node: NodeId, input: Option<MouseInput>) -> bool {
         let state = self.state.clone();
         state.borrow_mut().media.activate();
         let forms = self.forms.clone();
         forms.activate_picker_gesture();
         let allowed = scheduler::run_input_task(&mut self.vm, |vm| {
-            let allowed = forms.activate(vm, node)?;
+            let allowed = forms.activate_click(vm, node, input)?;
             if allowed {
                 media::default_click(vm, &state, node)?;
             }
@@ -1210,6 +1243,29 @@ impl ScriptRuntime {
         report_unhandled(&mut self.vm, &self.state);
         self.vm.collect_garbage();
         allowed
+    }
+
+    pub fn mouse_input(&mut self, node: NodeId, phase: MousePhase, input: MouseInput) {
+        let state = self.state.clone();
+        let (kind, buttons, detail) = match phase {
+            MousePhase::Down => ("mousedown", 1, 1),
+            MousePhase::Move { primary_down } => ("mousemove", i32::from(primary_down), 0),
+            MousePhase::Up => ("mouseup", 0, 1),
+        };
+        let result = scheduler::run_input_task(&mut self.vm, |vm| {
+            dispatch_mouse(vm, &state, node, kind, input, buttons, detail)?;
+            drain_microtask_queue(vm, &state)
+        });
+        if let Err(error) = result {
+            if fatal(&error) {
+                mutation_observers::discard_jobs(&mut self.vm, &state);
+            }
+            report_error(&state, ConsolePhase::HostTask, Some(kind), &error, || {
+                format!("{kind}: {error}")
+            });
+        }
+        report_unhandled(&mut self.vm, &state);
+        self.collect_after_task(false);
     }
     fn lifecycle_event(&mut self, target: Option<NodeId>, kind: &str, bubbles: bool) {
         let state = self.state.clone();
@@ -1241,6 +1297,22 @@ impl ScriptRuntime {
         self.click_with_default(node).1
     }
     pub fn click_with_default(&mut self, node: NodeId) -> (bool, Option<String>) {
+        self.click_default(node, None)
+    }
+
+    pub fn click_at_with_default(
+        &mut self,
+        node: NodeId,
+        input: MouseInput,
+    ) -> (bool, Option<String>) {
+        self.click_default(node, Some(input))
+    }
+
+    fn click_default(
+        &mut self,
+        node: NodeId,
+        input: Option<MouseInput>,
+    ) -> (bool, Option<String>) {
         let anchor = {
             let state = self.state.borrow();
             let mut current = Some(node);
@@ -1260,7 +1332,7 @@ impl ScriptRuntime {
             }
             anchor
         };
-        if !self.click(node) {
+        if !self.activate_click(node, input) {
             return (false, None);
         }
         (
@@ -1437,7 +1509,7 @@ impl ScriptRuntime {
         let fetch = &self.fetch;
         let result = scheduler::run_script_task(&mut self.vm, |vm| {
             action(fetch, vm)?;
-            drain_microtask_queue(vm, &state)
+            drain_host_microtasks(vm, &state)
         });
         report_unhandled(&mut self.vm, &self.state);
         self.collect_after_task(collect);
@@ -1456,6 +1528,7 @@ impl ScriptRuntime {
             return;
         }
         self.vm.collect_garbage();
+        self.sockets.sweep(&self.vm);
         let live = self.vm.estimated_heap_bytes();
         let limits = self.vm.limits();
         if live < LARGE_HEAP {
@@ -1480,7 +1553,7 @@ impl ScriptRuntime {
     }
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
-        if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| drain_microtask_queue(vm, &state)) {
+        if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| drain_host_microtasks(vm, &state)) {
             report_error(&state, ConsolePhase::Microtask, None, &error, || {
                 error.to_string()
             });
@@ -1502,6 +1575,7 @@ impl ScriptRuntime {
             || self.storage.has_events()
             || self.messages.has_tasks()
             || self.workers.has_tasks()
+            || self.sockets.has_tasks()
             || state.media.has_loads()
             || state.media.has_commands()
             || state.media.has_stream_tasks()
@@ -1528,6 +1602,7 @@ impl ScriptRuntime {
     }
 
     pub fn set_worker_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.sockets.set_wake(wake.clone());
         self.workers.set_wake(wake);
     }
 
@@ -1553,6 +1628,27 @@ impl ScriptRuntime {
             self.network_task(fetch::FetchHost::run_next_xhr_task, false)?;
         }
         media::run_stream_tasks(&mut self.vm, &self.state);
+        if self.sockets.has_tasks() {
+            let state = self.state.clone();
+            for _ in 0..32 {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
+                    if !self.sockets.dispatch_next(vm, &self.socket_events)? {
+                        return Ok(false);
+                    }
+                    drain_microtask_queue(vm, &state)?;
+                    Ok(true)
+                });
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(error) => {
+                        report_error(&state, ConsolePhase::HostTask, Some("WebSocket event delivery"),
+                            &error, || error.to_string());
+                        break;
+                    }
+                }
+            }
+        }
         if self.workers.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
@@ -1859,7 +1955,13 @@ fn run_classic(
         }
     };
     let drained = if checkpoint && evaluated.as_ref().err().is_none_or(|error| !fatal(error)) {
-        drain_microtask_queue(vm, state)
+        let thrown = evaluated.as_ref().err().and_then(|error| error.thrown.clone());
+        let keep = thrown.map(|value| vm.root(value));
+        let result = drain_host_microtasks(vm, state);
+        if let Some(root) = keep {
+            vm.unroot(root);
+        }
+        result
     } else {
         Ok(())
     };
@@ -1874,21 +1976,37 @@ fn run_classic(
 }
 
 fn drain_microtask_queue(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
+    drain_microtask_checkpoint(vm, state, false)
+}
+
+fn drain_host_microtasks(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
+    drain_microtask_checkpoint(vm, state, true)
+}
+
+fn drain_microtask_checkpoint(vm: &mut Vm, state: &Shared, host_boundary: bool) -> Result<(), JsError> {
     if !mutation_observers::begin_checkpoint(state) {
         return Ok(());
     }
-    let result = drain_microtask_jobs(vm, state);
+    let result = drain_microtask_jobs(vm, state, host_boundary);
     mutation_observers::finish_checkpoint(state);
     result
 }
 
-fn drain_microtask_jobs(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
+fn drain_microtask_jobs(vm: &mut Vm, state: &Shared, host_boundary: bool) -> Result<(), JsError> {
+    if host_boundary {
+        collect_microtask_garbage(vm, state);
+    }
     mutation_observers::schedule(vm, state);
     for _ in 0..4096 {
         if !vm.has_pending_jobs() {
             return Ok(());
         }
-        match vm.drain_jobs(1) {
+        let result = if host_boundary {
+            vm.drain_jobs_at_callback_boundary(1)
+        } else {
+            vm.drain_jobs(1)
+        };
+        match result {
             Ok(_) => {}
             Err(error) if fatal(&error) => {
                 mutation_observers::discard_jobs(vm, state);
@@ -1898,11 +2016,37 @@ fn drain_microtask_jobs(vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
                 error.to_string()
             }),
         }
+        if host_boundary {
+            collect_microtask_garbage(vm, state);
+        }
     }
     if mutation_observers::discard_jobs(vm, state) > 0 {
         diagnostic(state, "Microtask checkpoint budget exceeded".into());
     }
     Ok(())
+}
+
+fn collect_microtask_garbage(vm: &mut Vm, state: &Shared) {
+    const MIB: usize = 1024 * 1024;
+    let (bytes_at, cells_at) = state.borrow().microtask_collection;
+    let bytes = vm.estimated_heap_bytes();
+    let cells = vm.heap_cell_count();
+    if bytes < bytes_at && cells < cells_at {
+        return;
+    }
+    let Some(stats) = vm.collect_between_callbacks() else {
+        return;
+    };
+    let live = vm.estimated_heap_bytes();
+    let next = |used: usize, cap: usize, min: usize, max: usize| {
+        used.saturating_add((used / 8).clamp(min, max).min(
+            (cap.saturating_sub(used) / 2).max(min),
+        ))
+    };
+    state.borrow_mut().microtask_collection = (
+        next(live, vm.limits().max_heap_bytes, 16 * MIB, 96 * MIB),
+        next(stats.after, vm.limits().max_heap_objects, 16 * 1024, 96 * 1024),
+    );
 }
 
 fn new_detached(state: &Shared, kind: NodeKind) -> Result<NodeId, JsError> {
@@ -2775,6 +2919,22 @@ fn dispatch_checked_with_mode(
         event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, keyboard || focus], true)?;
     let properties = if keyboard || focus { &[] } else { properties };
     dispatch_prepared_with_mode(vm, state, target, event, properties, mode)
+}
+
+fn dispatch_mouse(
+    vm: &mut Vm,
+    state: &Shared,
+    target: NodeId,
+    kind: &str,
+    input: MouseInput,
+    buttons: i32,
+    detail: i32,
+) -> Result<bool, JsError> {
+    let prototype = state.borrow().mouse_event_prototype.clone();
+    let object = vm.new_object_with_prototype(prototype)?;
+    ui_events::initialize_mouse_input(vm, &object, input, buttons, detail)?;
+    let event = event_target::init_event(vm, object, kind.into(), [true, true, true], true)?;
+    dispatch_prepared(vm, state, Some(target), event, &[])
 }
 
 fn dispatch_prepared(

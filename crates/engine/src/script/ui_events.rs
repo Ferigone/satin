@@ -1,5 +1,5 @@
 //! Window UIEvent, MouseEvent and KeyboardEvent interfaces.
-use super::{Shared, arg, event_target, getter, layout_api::LayoutHost, webidl};
+use super::{MouseInput, Shared, arg, event_target, getter, layout_api::LayoutHost, webidl};
 use crate::layout::ScrollOffset;
 use rust_browser_javascript::{JsError, Value, Vm};
 use std::{cell::Cell, rc::Rc};
@@ -187,6 +187,32 @@ pub(super) fn initialize_click(vm: &mut Vm, event: &Value) -> Result<(), JsError
     initialize_empty(vm, event, true)?;
     let data = fields(vm, event, true)?;
     set(vm, &data, "view", vm.global())
+}
+
+pub(super) fn initialize_mouse_input(
+    vm: &mut Vm,
+    event: &Value,
+    input: MouseInput,
+    buttons: i32,
+    detail: i32,
+) -> Result<(), JsError> {
+    initialize_click(vm, event)?;
+    let data = fields(vm, event, true)?;
+    for (name, value) in [
+        ("clientX", (input.client_x as i32).into()),
+        ("clientY", (input.client_y as i32).into()),
+        ("screenX", (input.screen_x as i32).into()),
+        ("screenY", (input.screen_y as i32).into()),
+        ("buttons", buttons.into()),
+        ("detail", detail.into()),
+        ("altKey", input.alt.into()),
+        ("ctrlKey", input.control.into()),
+        ("metaKey", input.meta.into()),
+        ("shiftKey", input.shift.into()),
+    ] {
+        set(vm, &data, name, value)?;
+    }
+    Ok(())
 }
 
 pub(super) fn initialize_keyboard(vm: &mut Vm, event: &Value) -> Result<Value, JsError> {

@@ -11,7 +11,8 @@ use crate::{
     loader::LoadedPage,
     network::{
         self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT,
-        FETCH_RESPONSE_BODY_LIMIT, FETCH_URL_LIMIT, FetchBody, FetchError, FetchErrorKind, FetchJob, HeaderList,
+        FETCH_DATA_URL_LIMIT, FETCH_RESPONSE_BODY_LIMIT, FETCH_URL_LIMIT, FetchBody, FetchError,
+        FetchErrorKind, FetchJob, HeaderList,
         RedirectMode, RequestCache, RequestMode, ResponseType, StreamingResponse, WebRequest, WebResponse,
     },
 };
@@ -220,15 +221,38 @@ fn byte_string(vm: &mut Vm, value: Value) -> Result<String, JsError> {
 }
 fn usv(vm: &mut Vm, value: Value, limit: usize, field: &str) -> Result<String, JsError> {
     let s = vm.to_string(&value)?;
+    bounded_usv(vm, s, limit, field, |message| JsError::new(ErrorKind::ExecutionLimit, message))
+}
+
+fn request_url(vm: &mut Vm, value: Value, field: &str) -> Result<String, JsError> {
+    let s = vm.to_string(&value)?;
+    let data = s.as_utf16().iter().copied()
+        .skip_while(|unit| *unit <= u16::from(b' '))
+        .filter(|unit| !matches!(*unit, 9 | 10 | 13))
+        .take(5)
+        .map(|unit| u8::try_from(unit).unwrap_or_default().to_ascii_lowercase())
+        .eq(b"data:".iter().copied());
+    let limit = if data { FETCH_DATA_URL_LIMIT } else { FETCH_URL_LIMIT };
+    #[cfg(feature = "media-startup-diagnostics")]
+    if s.len() > FETCH_URL_LIMIT && data {
+        eprintln!("SATIN_QA_FETCH_DATA_URL units={}", s.len());
+    }
+    bounded_usv(vm, s, limit, field, JsError::type_error)
+}
+
+fn bounded_usv(
+    vm: &mut Vm,
+    s: rust_browser_javascript::JsString,
+    limit: usize,
+    field: &str,
+    oversized: impl FnOnce(String) -> JsError,
+) -> Result<String, JsError> {
     vm.charge_buffer_work(s.len())?;
     let size = char::decode_utf16(s.as_utf16().iter().copied())
         .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER).len_utf8())
         .sum::<usize>();
     if size > limit {
-        return Err(JsError::new(
-            ErrorKind::ExecutionLimit,
-            format!("{field} exceeds its {limit}-byte limit ({size} bytes)"),
-        ));
+        return Err(oversized(format!("{field} exceeds its {limit}-byte limit ({size} bytes)")));
     }
     Ok(s.to_string_lossy())
 }
@@ -537,7 +561,7 @@ fn request_init(
     let mut request = if let Some(original) = &original {
         original.borrow().request.clone()
     } else {
-        let value = usv(vm, input.clone(), FETCH_URL_LIMIT, "Fetch request URL")?;
+        let value = request_url(vm, input.clone(), "Fetch request URL")?;
         let (base, resolver, client) = {
             let state = state.borrow();
             (
@@ -1100,7 +1124,12 @@ impl FetchHost {
                         )
                     });
                     let result = (|| {
-                        if response.url.len() > FETCH_URL_LIMIT
+                        let url_limit = if response.url.starts_with("data:") {
+                            FETCH_DATA_URL_LIMIT
+                        } else {
+                            FETCH_URL_LIMIT
+                        };
+                        if response.url.len() > url_limit
                             || response.status_text.len() > FETCH_HEADER_LIMIT
                             || bytes(&response.headers) > FETCH_HEADER_LIMIT * 2
                         {

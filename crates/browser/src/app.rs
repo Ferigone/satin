@@ -6,7 +6,7 @@ use rust_browser_engine::{
     Fonts, Layout, LoadedPage, Rect,
     cookies::CookieContext,
     css::Color,
-    dom::Document,
+    dom::{Document, NodeId},
     history::{
         HistoryScroll, HistoryTransition, NavigationMode, ScriptNavigation, SessionHistory,
         fragment_offset,
@@ -16,7 +16,7 @@ use rust_browser_engine::{
     network::CancelSignal,
     normalize_url,
     paint::Canvas,
-    script::{DocumentSession, FormKey, ScriptRuntime},
+    script::{DocumentSession, FormKey, MouseInput, MousePhase, ScriptRuntime},
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -102,6 +102,13 @@ const CHROME_ACCENT_SOFT: Color = Color(0x44, 0x3d, 0x50, 255);
 struct WindowRegions {
     page: Rect,
     dock: Option<Rect>,
+}
+
+#[derive(Clone, Copy)]
+struct PagePress {
+    tab: TabId,
+    navigation: u64,
+    target: NodeId,
 }
 
 impl WindowRegions {
@@ -635,6 +642,7 @@ pub(crate) fn run(
         site_info_ime_blocked: false,
         chrome_keys: chrome_keys::OwnedKeys::default(),
         select_popup: None,
+        page_press: None,
         hits: vec![],
         tab_hits_current: false,
         tab_scroll: 0.,
@@ -800,6 +808,7 @@ struct App {
     site_info_ime_blocked: bool,
     chrome_keys: chrome_keys::OwnedKeys,
     select_popup: Option<SelectPopup>,
+    page_press: Option<PagePress>,
     hits: Vec<(Rect, Action)>,
     tab_hits_current: bool,
     tab_scroll: f32,
@@ -1049,6 +1058,89 @@ impl App {
             self.mouse.0 / tab.zoom + tab.scroll_x,
             (self.mouse.1 - self.window_regions(self.active).page.y) / tab.zoom + tab.scroll,
         )
+    }
+
+    fn page_mouse_input(&self) -> MouseInput {
+        let zoom = self.tabs[self.active].zoom;
+        let top = self.window_regions(self.active).page.y;
+        let origin = self
+            .window
+            .as_ref()
+            .and_then(|window| window.inner_position().ok())
+            .map_or((0., 0.), |p| (p.x as f32 / self.scale, p.y as f32 / self.scale));
+        MouseInput {
+            client_x: f64::from(self.mouse.0 / zoom),
+            client_y: f64::from((self.mouse.1 - top) / zoom),
+            screen_x: f64::from(origin.0 + self.mouse.0),
+            screen_y: f64::from(origin.1 + self.mouse.1),
+            alt: self.modifiers.alt_key(),
+            control: self.modifiers.control_key(),
+            meta: self.modifiers.super_key(),
+            shift: self.modifiers.shift_key(),
+        }
+    }
+
+    fn same_pressed_document(&self, press: PagePress) -> bool {
+        let tab = &self.tabs[self.active];
+        press.tab == tab.id
+            && press.navigation == tab.document_navigation
+            && tab.inspected_page().is_some()
+    }
+
+    fn page_mouse_move(&mut self) {
+        if self.select_popup.is_some()
+            || self.settings_panel.is_some()
+            || self.history_menu.is_some()
+            || self.downloads_panel.is_some()
+            || self.site_info.is_some()
+            || self.update_panel_open()
+            || self.chrome_menu.is_some()
+            || self.devtools.as_ref().is_some_and(|dock| dock.picking)
+        {
+            return;
+        }
+        let press = self.page_press.filter(|&press| self.same_pressed_document(press));
+        let target = self
+            .page_node_under_pointer()
+            .or_else(|| press.map(|press| press.target));
+        let Some(target) = target else {
+            return;
+        };
+        let input = self.page_mouse_input();
+        if let Some(runtime) = &mut self.tabs[self.active].runtime {
+            runtime.mouse_input(
+                target,
+                MousePhase::Move { primary_down: press.is_some() },
+                input,
+            );
+        }
+    }
+
+    fn page_mouse_release(&mut self, press: PagePress) {
+        if !self.same_pressed_document(press) || !self.pointer_inside {
+            return;
+        }
+        self.sync_runtime(self.active);
+        if !self.same_pressed_document(press) {
+            return;
+        }
+        self.ensure_layout();
+        let hit = self.page_node_under_pointer();
+        let input = self.page_mouse_input();
+        let tab = &mut self.tabs[self.active];
+        if let Some(runtime) = &mut tab.runtime {
+            runtime.mouse_input(hit.unwrap_or(press.target), MousePhase::Up, input);
+        }
+        let Some(doc) = tab.inspected_page().map(|page| &page.document) else {
+            return;
+        };
+        let parent = |node: &NodeId| doc.nodes.get(node.0).and_then(|node| node.parent);
+        let pressed_path: Vec<_> = std::iter::successors(Some(press.target), parent).collect();
+        if let Some(target) =
+            std::iter::successors(hit, parent).find(|node| pressed_path.contains(node))
+        {
+            self.content_click(Some((target, input)));
+        }
     }
 
     fn sync_console(&mut self, index: usize) -> bool {
@@ -4030,6 +4122,7 @@ impl App {
 
     fn left_press(&mut self, event_loop: &ActiveEventLoop) {
         self.wheel = None;
+        self.page_press = None;
         if !self.pointer_inside {
             return;
         }
@@ -4158,7 +4251,21 @@ impl App {
                 }
                 self.set_dock_focus(false);
                 self.address_focus = false;
-                self.content_click();
+                let input = self.page_mouse_input();
+                let target = self.page_node_under_pointer();
+                let tab = &mut self.tabs[self.active];
+                if self.select_popup.is_none()
+                    && let (Some(target), Some(runtime)) = (target, &mut tab.runtime)
+                {
+                    self.page_press = Some(PagePress {
+                        tab: tab.id,
+                        navigation: tab.document_navigation,
+                        target,
+                    });
+                    runtime.mouse_input(target, MousePhase::Down, input);
+                } else {
+                    self.content_click(None);
+                }
             } else if self.select_popup.take().is_some() {
                 self.redraw();
             }
@@ -4166,6 +4273,10 @@ impl App {
     }
 
     fn left_release(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(press) = self.page_press.take() {
+            self.page_mouse_release(press);
+            return;
+        }
         if self.finish_tab_press(event_loop) {
             return;
         }
@@ -4377,7 +4488,7 @@ impl App {
         );
         self.pointer_inside = true;
         self.set_dock_focus(false);
-        self.content_click();
+        self.content_click(None);
         Ok(())
     }
     fn smoke_action(
@@ -4409,6 +4520,7 @@ impl App {
                 self.draw();
                 self.mouse = (x, y);
                 self.pointer_inside = true;
+                self.page_mouse_move();
                 self.left_press(event_loop);
                 self.left_release(event_loop);
                 Ok(())
@@ -4686,7 +4798,7 @@ impl App {
         self.redraw();
     }
 
-    fn content_click(&mut self) {
+    fn content_click(&mut self, position: Option<(NodeId, MouseInput)>) {
         if self.settings_panel.is_some()
             || self.downloads_panel.is_some()
             || !self.pointer_in(self.window_regions(self.active).page)
@@ -4724,10 +4836,11 @@ impl App {
         }
         let x = self.mouse.0 / tab.zoom + tab.scroll_x;
         let y = (self.mouse.1 - content_top) / tab.zoom + tab.scroll;
-        let target = tab
-            .layout
-            .as_ref()
-            .and_then(|layout| layout.element_at(x, y));
+        let target = position.map(|(target, _)| target).or_else(|| {
+            tab.layout
+                .as_ref()
+                .and_then(|layout| layout.element_at(x, y))
+        });
         if let (Some(runtime), Some(target)) = (&mut tab.runtime, target) {
             let focus = tab.page.as_ref().and_then(|page| {
                 let mut current = Some(target);
@@ -4742,7 +4855,10 @@ impl App {
             if let Err(error) = runtime.focus_control(focus) {
                 self.status = error.to_string();
             }
-            let (allowed, href) = runtime.click_with_default(target);
+            let (allowed, href) = match position {
+                Some((_, input)) => runtime.click_at_with_default(target, input),
+                None => runtime.click_with_default(target),
+            };
             link = href.and_then(|href| runtime.resolve_reference(&href));
             if allowed
                 && let Some(option) = tab
@@ -5342,6 +5458,7 @@ impl ApplicationHandler<()> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.page_press = None;
                 self.cancel_tab_press();
                 self.dismiss_tab_context();
                 let caption_changed = self.caption_pressed.take().is_some();
@@ -5464,6 +5581,9 @@ impl ApplicationHandler<()> for App {
                 }
                 let in_dock = dock.is_some_and(|bounds| self.pointer_in(bounds));
                 self.update_pointer(was_in_dock || in_dock);
+                if !self.resizing_dock {
+                    self.page_mouse_move();
+                }
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cancel_tab_press();

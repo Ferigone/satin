@@ -2511,6 +2511,15 @@ impl FormHost {
         Ok(true)
     }
     pub(super) fn activate(&self, vm: &mut Vm, target: NodeId) -> Result<bool, JsError> {
+        self.activate_click(vm, target, None)
+    }
+
+    pub(super) fn activate_click(
+        &self,
+        vm: &mut Vm,
+        target: NodeId,
+        input: Option<MouseInput>,
+    ) -> Result<bool, JsError> {
         self.charge(vm, 0)?;
         let control = {
             let dom = self.dom.borrow();
@@ -2562,7 +2571,11 @@ impl FormHost {
                 data.controls.entry(id).or_default().indeterminate = false;
             }
             self.mark();
-            let outcome = dispatch_checked(vm, &self.dom, Some(target), "click", true, true, &[]);
+            let outcome = if let Some(input) = input {
+                dispatch_mouse(vm, &self.dom, target, "click", input, 0, 1)
+            } else {
+                dispatch_checked(vm, &self.dom, Some(target), "click", true, true, &[])
+            };
             let allowed = outcome.as_ref().is_ok_and(|value| *value);
             if !allowed {
                 let mut data = self.data.borrow_mut();

@@ -134,6 +134,33 @@ pub enum MediaUpdate {
     Error(String),
 }
 
+#[cfg(feature = "media-startup-diagnostics")]
+fn trace_media_update(key: MediaKey, update: &MediaUpdate) {
+    use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+    if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_MEDIA_TRANSITIONS").is_some()) {
+        return;
+    }
+    let message = match update {
+        MediaUpdate::BufferUpdated { buffer, operation, result } => match result {
+            Ok(ranges) => format!("append {buffer} {operation} {:?}", &ranges[..ranges.len().min(12)]),
+            Err(error) => format!("append-error {buffer} {operation} {error}"),
+        },
+        MediaUpdate::Seeked(time) => format!("seeked {time}"),
+        MediaUpdate::Seeking => "seeking".into(),
+        MediaUpdate::Ready => "ready".into(),
+        MediaUpdate::Waiting => "waiting".into(),
+        MediaUpdate::Playing => "playing".into(),
+        MediaUpdate::Paused => "paused".into(),
+        MediaUpdate::Error(error) => format!("error {error}"),
+        _ => return,
+    };
+    if TRACES.fetch_add(1, Ordering::Relaxed) < 160 {
+        eprintln!("SATIN_QA_MEDIA node={} generation={} {message}", key.node.0, key.generation);
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct MediaStatus {
     pub node: usize,
@@ -1172,6 +1199,8 @@ impl super::ScriptRuntime {
     }
 
     pub fn update_media(&mut self, key: MediaKey, update: MediaUpdate) -> bool {
+        #[cfg(feature = "media-startup-diagnostics")]
+        trace_media_update(key, &update);
         let update = match update {
             MediaUpdate::StreamOpened => {
                 return self.queue_stream_update(|store| store.enqueue_opened(key));

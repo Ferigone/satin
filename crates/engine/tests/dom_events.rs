@@ -387,6 +387,62 @@ fn reentrant_synthetic_click_completes_under_native_input_but_inherits_host_eval
 }
 
 #[test]
+fn native_primary_mouse_events_carry_coordinates_and_cancel_click_activation() {
+    use rust_browser_engine::script::{MouseInput, MousePhase};
+
+    let page = LoadedPage::from_html(
+        "https://events.test/",
+        "<input type='checkbox' id='target'>",
+    );
+    let node = page.document.elements("input").next().unwrap();
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime
+        .eval(
+            r#"
+            var seen = [];
+            var target = document.getElementById('target');
+            for (const type of ['mousedown', 'mousemove', 'mouseup', 'click']) {
+                document.body.addEventListener(type, function (e) {
+                    if (!(e instanceof MouseEvent) || !e.isTrusted ||
+                        e.target !== target || e.view !== window ||
+                        !e.bubbles || !e.cancelable || !e.composed ||
+                        !e.shiftKey || e.ctrlKey) {
+                        seen.push('invalid');
+                        return;
+                    }
+                    seen.push([e.type, e.clientX, e.clientY, e.screenX, e.screenY,
+                               e.button, e.buttons, e.detail].join('/'));
+                    if (e.type === 'click') e.preventDefault();
+                });
+            }
+            "#,
+        )
+        .unwrap();
+
+    let input = MouseInput {
+        client_x: 42.,
+        client_y: 19.,
+        screen_x: 142.,
+        screen_y: 219.,
+        alt: false,
+        control: false,
+        meta: false,
+        shift: true,
+    };
+    runtime.mouse_input(node, MousePhase::Down, input);
+    runtime.mouse_input(node, MousePhase::Move { primary_down: true }, input);
+    runtime.mouse_input(node, MousePhase::Up, input);
+    assert_eq!(runtime.click_at_with_default(node, input), (false, None));
+    assert_eq!(
+        runtime.eval("seen.join(';') + ';' + target.checked").unwrap(),
+        Value::from(concat!(
+            "mousedown/42/19/142/219/0/1/1;mousemove/42/19/142/219/0/1/0;",
+            "mouseup/42/19/142/219/0/0/1;click/42/19/142/219/0/0/1;false"
+        )),
+    );
+}
+
+#[test]
 fn keyboard_event_construction_and_native_keydown_share_the_ui_event_interface() {
     let page = LoadedPage::from_html("https://events.test/", "<input id='target'>");
     let mut runtime = ScriptRuntime::new(&page).unwrap();

@@ -2,6 +2,7 @@
 //! never inside a JavaScript native callback or the UI event loop.
 mod streaming;
 mod upload;
+pub(crate) mod websocket;
 
 pub use crate::loader::transport::CancelSignal;
 use crate::{
@@ -33,6 +34,7 @@ pub const FETCH_RESPONSE_BODY_LIMIT: usize = 64 * 1024 * 1024;
 pub const FETCH_HEADER_LIMIT: usize = 64 * 1024;
 /// A request URL has its own bound, independent of serialized headers.
 pub(crate) const FETCH_URL_LIMIT: usize = 256 * 1024;
+pub(crate) const FETCH_DATA_URL_LIMIT: usize = 6 * 1024 * 1024;
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(18);
 pub type HeaderList = Vec<(String, String)>;
 

@@ -380,6 +380,7 @@ pub(crate) fn image_asset_key(url: &str, cors: Option<crate::network::Credential
 #[derive(Clone, Debug)]
 pub struct Loader {
     pub(crate) fetch_client: reqwest::Client,
+    pub(crate) websocket_client: reqwest::Client,
     reactor: &'static tokio::runtime::Runtime,
     pub cookies: CookieStore,
 }
@@ -519,17 +520,31 @@ impl Loader {
         .map_err(|e| e.to_string())?
         .with_no_client_auth();
         Ok(Self {
-            fetch_client: Self::fetch_client_with_tls(tls)?,
+            fetch_client: Self::fetch_client_with_tls(tls.clone())?,
+            websocket_client: Self::transport_client_with_tls(tls, true)?,
             reactor: transport::runtime()?,
             cookies,
         })
     }
 
     pub(crate) fn fetch_client_with_tls(
-        mut tls: rustls::ClientConfig,
+        tls: rustls::ClientConfig,
     ) -> Result<reqwest::Client, String> {
-        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        reqwest::Client::builder()
+        Self::transport_client_with_tls(tls, false)
+    }
+
+    fn transport_client_with_tls(
+        mut tls: rustls::ClientConfig,
+        http1_only: bool,
+    ) -> Result<reqwest::Client, String> {
+        let mut builder = reqwest::Client::builder();
+        if http1_only {
+            tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+            builder = builder.http1_only();
+        } else {
+            tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        }
+        builder
             .use_preconfigured_tls(tls)
             // Only these explicitly pinned localhost names are treated as
             // trustworthy by Fetch's mixed-content policy.

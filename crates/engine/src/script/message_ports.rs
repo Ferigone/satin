@@ -96,6 +96,15 @@ fn replace(vm: &mut Vm, object: &Value, index: u32, value: Value) {
 }
 
 impl MessagePorts {
+    pub(super) fn received_from_network(
+        &self,
+        vm: &mut Vm,
+        data: Value,
+        origin: String,
+    ) -> Result<Value, JsError> {
+        self.message_events.received_from_network(vm, data, origin)
+    }
+
     pub(super) fn received_from_peer(
         &self,
         vm: &mut Vm,

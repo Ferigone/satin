@@ -87,6 +87,14 @@ pub(super) fn target_table_exists(vm: &Vm, object: &Value) -> bool {
     target_table(vm, object).is_some()
 }
 
+pub(super) fn has_listener(vm: &Vm, object: &Value, kinds: &[&str]) -> bool {
+    target_table(vm, object).is_some_and(|(_, data)| {
+        data.listeners.borrow().iter().any(|listener| {
+            kinds.iter().any(|kind| listener.kind.as_utf16().iter().copied().eq(kind.encode_utf16()))
+        })
+    })
+}
+
 fn target_table(vm: &Vm, object: &Value) -> Option<(Value, Rc<TargetData>)> {
     let table = vm.host_slot(object, LISTENERS_SLOT)?;
     let data = vm.host_data::<TargetData>(&table)?;
@@ -291,6 +299,7 @@ fn update_listener_liveness(vm: &mut Vm, object: &Value, data: &TargetData) -> R
             .eq("change".encode_utf16())
     });
     super::media_queries::retain_if_observed(vm, object, listens_for_change);
+    super::websocket::update_liveness(vm, object);
     abort::keep_for_abort_event(vm, object, has_listener)
 }
 
@@ -319,7 +328,7 @@ impl Events {
             .map(|node| (dom, node))
     }
 
-    fn make_event(
+    pub(super) fn make_event(
         &self,
         vm: &mut Vm,
         prototype: Option<Value>,

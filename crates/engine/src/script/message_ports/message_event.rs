@@ -169,7 +169,7 @@ impl MessageEvents {
     pub(super) fn received(&self, vm: &mut Vm, payload: Value) -> Result<Value, JsError> {
         let data = vm.get_property(payload.clone(), "0")?;
         let ports = vm.get_property(payload, "1")?;
-        self.delivered(vm, "message", data, ports)
+        self.delivered(vm, "message", data, ports, "".into())
     }
 
     pub(in crate::script) fn received_from_peer(
@@ -179,7 +179,17 @@ impl MessageEvents {
         data: Value,
     ) -> Result<Value, JsError> {
         let ports = vm.try_new_array(&[])?;
-        self.delivered(vm, kind, data, ports)
+        self.delivered(vm, kind, data, ports, "".into())
+    }
+
+    pub(in crate::script) fn received_from_network(
+        &self,
+        vm: &mut Vm,
+        data: Value,
+        origin: String,
+    ) -> Result<Value, JsError> {
+        let ports = vm.try_new_array(&[])?;
+        self.delivered(vm, "message", data, ports, origin.into())
     }
 
     fn delivered(
@@ -188,10 +198,11 @@ impl MessageEvents {
         kind: &str,
         data: Value,
         ports: Value,
+        origin: Value,
     ) -> Result<Value, JsError> {
         let fields = Fields {
             data,
-            origin: "".into(),
+            origin,
             last_event_id: "".into(),
             source: Value::Null,
             ports: self.freeze_ports(vm, ports)?,
