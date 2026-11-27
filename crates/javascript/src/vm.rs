@@ -1561,15 +1561,7 @@ impl Vm {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
         }
-        let mut current = match &receiver {
-            Value::Object(id) => Some(*id),
-            Value::String(_) => Some(self.realm.string_prototype),
-            Value::Number(_) => Some(self.realm.number_prototype),
-            Value::BigInt(_) => self.realm.bigint_prototype,
-            Value::Bool(_) => Some(self.realm.boolean_prototype),
-            Value::Symbol(_) => self.realm.symbol_prototype,
-            _ => None,
-        };
+        let mut current = self.property_start(&receiver);
         let mut depth = 0;
         while let Some(id) = current {
             depth += 1;
@@ -1615,10 +1607,10 @@ impl Vm {
                 return Ok(Value::String(JsString::from_utf16(vec![*unit])));
             }
             let property = self.stored_argument_property(object, key);
-            let cacheable = cache_own && depth == 1 && receiver.as_object() == Some(id)
+            let cacheable = cache_own && depth == 1
                 && key.len() <= 64 && !object.is_platform_object()
                 && matches!(object.kind, ObjectKind::Ordinary | ObjectKind::Array { .. }
-                    | ObjectKind::Function { .. } | ObjectKind::Native { .. })
+                    | ObjectKind::Function { .. } | ObjectKind::Native { .. } | ObjectKind::Boxed(_))
                 // This property can run the lazy builtin initializer on read.
                 && !crate::temporal::is_lazy_property_name(key);
             current = object.prototype;
@@ -2531,10 +2523,15 @@ impl Vm {
         if object.is_nullish() {
             return Err(JsError::type_error("Cannot access a property of null or undefined"));
         }
-        if let Some(id) = object.as_object()
+        if let Some(id) = self.property_start(&object)
             && let Some(value) = self.heap.cached_own_data(id, name)
+            // A primitive string's own length and character indices take
+            // precedence over properties cached on String.prototype.
+            && (!matches!(object, Value::String(_))
+                || ((name.len() != 6 || !name.as_utf16().iter().copied().eq("length".encode_utf16()))
+                    && !matches!(name.as_utf16().first(), Some(48..=57))))
         {
-            // Exact identity match: no UTF-16 scan, coercion or property search.
+            // Identity hit at the first real object. No property tree lookup.
             self.consume_work(1)?;
             return Ok(value);
         }

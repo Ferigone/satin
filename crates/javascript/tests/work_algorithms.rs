@@ -49,3 +49,37 @@ fn end_anchored_class_runs_preserve_indices_captures_and_local_flags() {
         s[0] === "abc" && re.lastIndex === 5 && /(?<=a)[^!]*$/.exec("aa!") === null
     "#).unwrap(), Value::Bool(true));
 }
+
+#[test]
+fn rejected_literal_searches_preserve_alternatives_folding_and_direction() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        const x = /(abC)(?:def)?/di.exec("xxABC");
+        const y = /(?<=prefix)end/gy; y.lastIndex=6;
+        x[1] === "ABC" && x.indices[1][0] === 2 && y.exec("prefixend")[0] === "end" &&
+        /(?i:abc)DEF/.test("AbcDEF") && !/(?i:abc)DEF/.test("Abcdef") &&
+        /kilo/iu.test("KILO") && /\u212Afoo/iu.test("kfoo") &&
+        /(?:doesnotexist|xyz)/.test("xyz") && /(?:needle)?x/.test("x") &&
+        /(?<!prefix)foo/.test("foo") && !/pre(?:abc)+suf/i.test("PREaaSUF") &&
+        /[a-z\d]+FOO/i.test("Z7foo") && /[^a-z]+FOO/i.test("7foo")
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn cached_primitive_methods_observe_new_descriptors_and_string_virtual_properties() {
+    let mut vm = Vm::new();
+    assert_eq!(vm.eval(r#"
+        function read(s){return s.extra}
+        String.prototype.extra=7;
+        let first=read("a")+read("bb");
+        Object.defineProperty(String.prototype,"extra",{configurable:true,
+            get:function(){ "use strict"; return this }});
+        String.prototype[0]="fallback";
+        function start(s){ return s["0"] }
+        const hit=start("")+start("")+start("x");
+        const length=s=>s.length;
+        first===14 && read("checked")==="checked" && hit==="fallbackfallbackx" &&
+        length("one")===3 && length("different")===9
+    "#).unwrap(), Value::Bool(true));
+}

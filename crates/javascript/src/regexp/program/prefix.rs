@@ -64,10 +64,10 @@ fn head(expr: &Expr, flags: Flags) -> Head {
             }
             out
         }
-        Expr::Character(member) if !flags.has(Flags::IGNORE_CASE) => {
-            Head::consuming(ascii_member(*member).unwrap_or(ALL))
+        Expr::Character(member) => {
+            Head::consuming(member_for_flags(*member, flags).unwrap_or(ALL))
         }
-        Expr::Class { members, negated } if !flags.has(Flags::IGNORE_CASE) => {
+        Expr::Class { members, negated } => {
             Head::consuming(class_ascii(members, *negated, flags).unwrap_or(ALL))
         }
         Expr::Assert(_) | Expr::Look { .. } => Head::EMPTY,
@@ -87,26 +87,42 @@ fn head(expr: &Expr, flags: Flags) -> Head {
                 out
             }
         }
-        // Resource-safe fallback for case folding, backreferences, and any
+        // Resource-safe fallback for backreferences and any
         // future op whose first point or empty-match behavior is unknown.
         _ => Head::UNKNOWN,
     }
 }
 
 /// Exact membership for ASCII code points, or no table if the class requires
-/// case folding, Unicode sets, or an unknown member predicate.
+/// Unicode sets or an unknown member predicate.
 pub(in crate::regexp) fn class_ascii(
     members: &[Member],
     negated: bool,
     flags: Flags,
 ) -> Option<u128> {
-    if flags.has(Flags::IGNORE_CASE | Flags::UNICODE_SETS) {
+    if flags.has(Flags::UNICODE_SETS) {
         return None;
     }
     let mask = members
         .iter()
-        .try_fold(0, |mask, &member| Some(mask | ascii_member(member)?))?;
+        .try_fold(0, |mask, &member| Some(mask | member_for_flags(member, flags)?))?;
     Some(if negated { !mask } else { mask })
+}
+
+fn member_for_flags(member: Member, flags: Flags) -> Option<u128> {
+    let mask = ascii_member(member)?;
+    if !flags.has(Flags::IGNORE_CASE) { return Some(mask); }
+    // Under /iu a non-ASCII literal or range can fold back into ASCII.
+    // Leave those atoms to the full matcher. Shorthands are already exact
+    // for ASCII inputs. Non-ASCII input positions always remain candidates.
+    match member {
+        Member::Point(p) if p > 127 => return None,
+        Member::Range(_, last) if last > 127 => return None,
+        _ => {}
+    }
+    const UPPER: u128 = ((1 << 26) - 1) << 65;
+    const LOWER: u128 = UPPER << 32;
+    Some(mask | ((mask & UPPER) << 32) | ((mask & LOWER) >> 32))
 }
 
 pub(in crate::regexp) fn ascii_member(member: Member) -> Option<u128> {

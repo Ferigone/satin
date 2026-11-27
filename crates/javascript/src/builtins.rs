@@ -1219,13 +1219,32 @@ pub(crate) fn stable_merge_sort<T: Clone>(
             let end = runs.get(pair + 1).copied().unwrap_or(middle);
             let mut left = start;
             let mut right = middle;
+            let mut streak: i8 = 0;
             while left < middle && right < end {
                 if compare(vm, &items[left], &items[right])? != Ordering::Greater {
                     scratch.push(items[left].clone());
                     left += 1;
+                    streak = streak.max(0) + 1;
+                    if streak == 7 {
+                        let n = ordered_prefix(&items[left..middle], |item|
+                            Ok(compare(vm, item, &items[right])? != Ordering::Greater))?;
+                        vm.consume_work(n)?;
+                        scratch.extend_from_slice(&items[left..left+n]);
+                        left += n;
+                        streak = 0;
+                    }
                 } else {
                     scratch.push(items[right].clone());
                     right += 1;
+                    streak = streak.min(0) - 1;
+                    if streak == -7 {
+                        let n = ordered_prefix(&items[right..end], |item|
+                            Ok(compare(vm, &items[left], item)? == Ordering::Greater))?;
+                        vm.consume_work(n)?;
+                        scratch.extend_from_slice(&items[right..right+n]);
+                        right += n;
+                        streak = 0;
+                    }
                 }
             }
             vm.consume_work(middle - left + end - right)?;
@@ -1238,6 +1257,23 @@ pub(crate) fn stable_merge_sort<T: Clone>(
         std::mem::swap(&mut items, &mut scratch);
     }
     Ok(items)
+}
+
+/// Exponential search skips a long winning prefix without comparing every
+/// pair through JavaScript. Equal elements always prefer the left run.
+fn ordered_prefix<T>(items: &[T], mut precedes: impl FnMut(&T) -> Result<bool, JsError>) -> Result<usize, JsError> {
+    let mut lo = 0;
+    let mut probe = 0;
+    while probe < items.len() && precedes(&items[probe])? {
+        lo = probe + 1;
+        probe = probe.saturating_mul(2).saturating_add(1);
+    }
+    let mut hi = probe.min(items.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if precedes(&items[mid])? { lo = mid + 1; } else { hi = mid; }
+    }
+    Ok(lo)
 }
 
 fn install_array(vm: &mut Vm) {

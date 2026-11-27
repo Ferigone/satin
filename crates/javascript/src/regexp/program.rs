@@ -1,5 +1,6 @@
 //! The matcher uses an explicit backtrack stack and reversible captures.
 pub(super) mod prefix;
+mod required;
 
 use super::{
     Flags, case, limit,
@@ -17,6 +18,7 @@ pub(crate) struct Program {
     repeats: usize,
     pub(super) first_ascii: u128,
     start_only: bool,
+    required: Option<required::Literal>,
     bytes: usize,
     pub(super) names: Vec<(JsString, Vec<usize>)>,
 }
@@ -71,6 +73,7 @@ struct Compiler<'a> {
 
 pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Program {
     let first_ascii = prefix::first_ascii(&pattern.body, flags);
+    let required = required::Literal::in_pattern(&pattern.body, flags);
     let mut compiler = Compiler {
         code: Vec::new(),
         repeats: 0,
@@ -99,6 +102,7 @@ pub(super) fn compile(source: JsString, flags: Flags, pattern: Pattern) -> Progr
         repeats: compiler.repeats,
         first_ascii,
         start_only,
+        required,
         names: pattern.names,
         bytes: 0,
     };
@@ -431,6 +435,11 @@ impl Program {
             return Ok(None);
         }
         let single_start = sticky || self.start_only;
+        if !single_start && let Some(literal) = &self.required
+            && !literal.possible(vm, &input[start..])?
+        {
+            return Ok(None);
+        }
         let first_ascii = if single_start { u128::MAX } else { self.first_ascii };
         let Some(mut start) = prefix::seek(vm, input, start, first_ascii)? else {
             return Ok(None);
