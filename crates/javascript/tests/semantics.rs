@@ -769,7 +769,7 @@ fn interpreted_promise_handler_collects_while_preserving_stack_and_weak_targets(
     });
     vm.eval(r#"
         var finished;
-        function measure(input) {
+        function measure(input, prefix, suffix) {
             const weak = new WeakRef({state: 'live'});
             function visit(i) {
                 const local = [{index: i}, () => local[0].index];
@@ -777,13 +777,18 @@ fn interpreted_promise_handler_collects_while_preserving_stack_and_weak_targets(
             }
             let total = 0;
             for (let i = 0; i < 16000; i++) total += visit(i);
-            return input.label + '/' + weak.deref().state + '/' + total;
+            return this.owner + '/' + input.label + '/' + prefix + suffix +
+                '/' + weak.deref().state + '/' + total;
         }
-        Promise.resolve({label: 'kept'}).then(measure)
+        function viaBoundFunctions(input) {
+            const first = measure.bind({owner: 'bound'}, input, 'pre');
+            return first.bind({owner: 'ignored'}, 'fix')();
+        }
+        Promise.resolve({label: 'kept'}).then(viaBoundFunctions)
             .then(result => { finished = result; });
     "#).unwrap();
     vm.drain_jobs_at_callback_boundary(8).unwrap();
-    assert_eq!(vm.eval("finished").unwrap(), Value::from("kept/live/127992000"));
+    assert_eq!(vm.eval("finished").unwrap(), Value::from("bound/kept/prefix/live/127992000"));
     assert!(!vm.collect_garbage().skipped_active_execution);
 }
 

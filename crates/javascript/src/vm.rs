@@ -182,6 +182,8 @@ pub struct Vm {
     qa_task_heap: (usize, usize),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_task_site: Option<&'static std::panic::Location<'static>>,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    pub(crate) qa_callback_gc: (usize, usize, usize),
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -223,6 +225,7 @@ pub(crate) struct OwnedCall {
 
 pub(crate) struct CallActivation {
     previous_referrer: Option<SourceReferrer>,
+    depth: usize,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     _scope: startup_profile::Scope,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -342,6 +345,8 @@ impl Vm {
             qa_task_heap: (0, 0),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_task_site: None,
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_callback_gc: (0, 0, 0),
             limits,
             interrupt: None,
             task_deadline: None,
@@ -636,6 +641,10 @@ impl Vm {
             .map(|value| self.root(value.clone()))
             .collect();
         self.collectible_call = Some(self.active + 1);
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        {
+            self.qa_callback_gc.0 += 1;
+        }
         let result = self.invoke(function, this, args);
         self.collectible_call = None;
         for root in roots {
@@ -720,6 +729,7 @@ impl Vm {
             {
                 self.qa_task_heap = (self.heap.live, self.estimated_heap_bytes());
                 self.qa_task_site = Some(std::panic::Location::caller());
+                self.qa_callback_gc = (0, 0, 0);
             }
         }
         self.active += 1;
@@ -1941,7 +1951,7 @@ impl Vm {
         static TRACES: AtomicUsize = AtomicUsize::new(0);
         if TRACES.fetch_add(1, Ordering::Relaxed) < 24 {
             eprintln!(
-                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={} task={}{}",
+                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={} collectible={:?} callback_gc={:?} task={}{}",
                 self.heap.live,
                 self.estimated_heap_bytes(),
                 self.qa_task_heap.0,
@@ -1953,6 +1963,8 @@ impl Vm {
                 self.execution_depth,
                 self.jobs.len(),
                 self.active,
+                self.collectible_call,
+                self.qa_callback_gc,
                 self.qa_task_site.map_or_else(|| "-".into(), ToString::to_string),
                 self.diagnostic_source_site(),
             );
@@ -3411,41 +3423,77 @@ impl Vm {
         this: Value,
         args: &[Value],
     ) -> Result<CallDispatch, JsError> {
-        let Some(id) = function.as_object() else {
+        let Some(mut id) = function.as_object() else {
             return self.invoke(function, this, args).map(CallDispatch::Value);
         };
-        let object = self.heap.object(id)?;
-        let ObjectKind::Function { code, environment, referrer } = &object.kind else {
-            return self.invoke(function, this, args).map(CallDispatch::Value);
+        let mut receiver = this.clone();
+        let mut prefixes = Vec::new();
+        let (code, parent, referrer) = loop {
+            let object = self.heap.object(id)?;
+            match &object.kind {
+                ObjectKind::Bound { target, this: bound_this, args: bound_args } => {
+                    if prefixes.len() >= self.limits.max_call_depth.saturating_sub(self.call_depth) {
+                        return self.invoke(function, this, args).map(CallDispatch::Value);
+                    }
+                    receiver = bound_this.clone();
+                    prefixes.push(bound_args.as_slice());
+                    id = target.as_object().expect("bound target is callable");
+                }
+                ObjectKind::Function { code, environment, referrer }
+                    if code.kind == FunctionKind::Ordinary
+                        && object.class_data.is_none()
+                        && !(code.body.get().is_some() && code.leaf.is_some())
+                        && (self.inactive_realms.is_empty()
+                            || self.environment_realm(*environment) == self.realm.global_env) =>
+                {
+                    break (code.clone(), *environment, referrer.clone());
+                }
+                _ => return self.invoke(function, this, args).map(CallDispatch::Value),
+            }
         };
-        if code.kind != FunctionKind::Ordinary
-            || object.class_data.is_some()
-            || code.body.get().is_some() && code.leaf.is_some()
-            || !self.inactive_realms.is_empty()
-                && self.environment_realm(*environment) != self.realm.global_env
-        {
-            return self.invoke(function, this, args).map(CallDispatch::Value);
-        }
-        let (code, parent, referrer) = (code.clone(), *environment, referrer.clone());
+        let depth = prefixes.len() + 1;
+        let expanded;
+        let args = if prefixes.is_empty() {
+            args
+        } else {
+            let length = prefixes.iter().fold(args.len(), |length, values| {
+                length.saturating_add(values.len())
+            });
+            self.ensure_allocation(length.saturating_mul(std::mem::size_of::<Value>()))?;
+            expanded = prefixes.into_iter().rev().flatten().chain(args).cloned().collect::<Vec<_>>();
+            &expanded
+        };
         for arg in args {
             self.account_value(arg.clone())?;
         }
-        self.tick()?;
+        for _ in 0..depth {
+            self.tick()?;
+        }
+        self.call_depth += depth - 1;
         if !self.can_enter_call() {
-            return Err(self.call_depth_error());
+            let error = self.call_depth_error();
+            self.call_depth -= depth - 1;
+            return Err(error);
         }
         self.call_depth += 1;
-        self.active += 1;
+        self.active += depth;
         self.active_calls.push(code.name.clone());
         self.enter_legacy_call(id, &code);
         let activation = CallActivation {
             previous_referrer: std::mem::replace(&mut self.realm.active_referrer, referrer),
+            depth,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             _function: startup_profile::function(&code.source),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             _scope: startup_profile::enter(startup_profile::Area::Other),
         };
-        let invocation = Invocation { function, this, args, new_target: Value::Undefined, this_initialized: true };
+        let invocation = Invocation {
+            function: Value::Object(id),
+            this: receiver,
+            args,
+            new_target: Value::Undefined,
+            this_initialized: true,
+        };
         let body = self.function_environment(&code, parent, invocation).and_then(|(env, chunk)| {
             self.prepare(&chunk.scope, env)?;
             Ok((env, chunk))
@@ -3467,8 +3515,8 @@ impl Vm {
         self.realm.active_referrer = activation.previous_referrer;
         self.legacy_calls.pop();
         self.active_calls.pop();
-        self.call_depth -= 1;
-        self.active -= 1;
+        self.call_depth -= activation.depth;
+        self.active -= activation.depth;
         match result? {
             Completion::Return(value) => self.account_value(value),
             Completion::Normal(_) => Ok(Value::Undefined),

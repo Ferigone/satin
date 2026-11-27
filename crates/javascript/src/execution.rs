@@ -288,6 +288,10 @@ impl CallbackCollection {
             return Ok(());
         }
         self.until_probe = 256;
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        {
+            vm.qa_callback_gc.1 += 1;
+        }
         if vm.estimated_heap_bytes() < self.bytes_at && vm.heap_cell_count() < self.cells_at {
             return Ok(());
         }
@@ -310,6 +314,10 @@ impl CallbackCollection {
             _ => {}
         }
         let _stats = vm.collect_rooted_heap(true, &saved);
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        {
+            vm.qa_callback_gc.2 += 1;
+        }
         #[cfg(feature = "media-startup-diagnostics")]
         if _stats.collected >= 8 * 1024 {
             use std::sync::atomic::{AtomicUsize, Ordering};
