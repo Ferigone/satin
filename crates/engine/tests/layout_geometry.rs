@@ -571,3 +571,30 @@ fn fit_content_container_shrinks_to_children_and_centers_with_auto_margins() {
         close(item.x, (400. - width) / 2.);
     }
 }
+
+#[test]
+fn ratio_only_inline_svg_auto_size_uses_containing_block() {
+    let (p, l) = layout(
+        r#"<div style="width:25px;height:40px"><svg id="pin" viewBox="0 0 25 40"></svg></div>
+        <div style="width:500px"><svg id="wide" viewBox="0 0 25 40"></svg></div>
+        <div style="width:25px"><svg id="block" style="display:block" viewBox="0 0 25 40"></svg></div>
+        <div style="width:25px"><svg id="fixed" width="50" viewBox="0 0 25 40"></svg></div>
+        <div style="width:25px"><svg id="height" style="height:80px" viewBox="0 0 25 40"></svg></div>
+        <div style="width:25px"><svg id="plain"></svg></div>
+        <div style="width:100px"><svg id="capped" style="max-width:25px" viewBox="0 0 25 40"></svg></div>"#,
+        800.,
+    );
+    for (name, width, height) in [
+        ("pin", 25., 40.),
+        ("wide", 500., 800.),
+        ("block", 25., 40.),
+        ("fixed", 50., 80.),
+        ("height", 50., 80.),
+        ("plain", 300., 150.),
+        ("capped", 25., 40.),
+    ] {
+        let r = rect(&p, &l, name);
+        close(r.width, width);
+        close(r.height, height);
+    }
+}

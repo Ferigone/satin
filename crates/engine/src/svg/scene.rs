@@ -193,6 +193,12 @@ impl Computed {
     }
 }
 
+pub(super) fn has_intrinsic_ratio_only(doc: &Document, root: NodeId) -> bool {
+    doc.attr(root, "width").is_none()
+        && doc.attr(root, "height").is_none()
+        && viewbox(doc, root, &mut Budget::default())
+            .is_some_and(|v| v.width > 0. && v.height > 0.)
+}
 pub(super) fn intrinsic_size(doc: &Document, root: NodeId) -> (f32, f32) {
     let mut b = Budget::default();
     let vb = viewbox(doc, root, &mut b).filter(|v| v.width > 0. && v.height > 0.);

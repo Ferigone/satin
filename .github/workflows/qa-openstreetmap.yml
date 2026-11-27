@@ -20,6 +20,8 @@ jobs:
           }
       - name: Test document, form, and attribute regressions
         run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console --test document
+      - name: Test layout geometry and SVG regressions
+        run: cargo test --locked -p rust-browser-engine --test layout_geometry --test svg_rendering
       - name: Test worker realm and worker event loop
         run: cargo test --locked -p rust-browser-engine --lib worker
       - name: Build actual Satin

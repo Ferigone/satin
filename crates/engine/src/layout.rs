@@ -3588,6 +3588,10 @@ impl Builder<'_> {
                         v + m.extra_x()
                     }
                 })
+                .or_else(|| {
+                    self.svg_ratio_only_auto_width(id, line.width, m)
+                        .map(|width| width + m.extra_x())
+                })
                 .unwrap_or(max.min((line.width - m.margin[1] - m.margin[3]).max(min)));
             if let Some(max) = s.max_width.resolve(line.width, s.font_size) {
                 width = width.min(if s.box_sizing == BoxSizing::BorderBox {
@@ -3670,6 +3674,7 @@ impl Builder<'_> {
                 .resolve_with_basis(c.containing_height, s.font_size)
                 .filter(|_| !self.is_canvas(id) || nh > 0.)
                 .map(|h| to_content(h, m.extra_y(), s.box_sizing) * nw / nh.max(1.))
+                .or_else(|| self.svg_ratio_only_auto_width(id, available, m))
                 .unwrap_or(nw)
         } else if self.is_replaced_control(id) {
             self.control_intrinsic(id).0
@@ -4370,6 +4375,17 @@ impl Builder<'_> {
                 url: url.into(),
             });
         }
+    }
+    // An embedded SVG with only an intrinsic aspect ratio has no intrinsic
+    // width. In normal flow its auto width uses the containing block instead
+    // of the fallback object size used for image resources.
+    fn svg_ratio_only_auto_width(&self, id: NodeId, available: f32, m: BoxMetrics) -> Option<f32> {
+        let s = &self.styles[id.0];
+        (self.is_svg_root(id)
+            && s.width == Length::Auto
+            && s.height == Length::Auto
+            && crate::svg::SvgScene::has_intrinsic_ratio_only(&self.page.document, id))
+            .then(|| (available - m.margin[1] - m.margin[3] - m.extra_x()).max(0.))
     }
     fn is_svg_root(&self, id: NodeId) -> bool {
         let d = &self.page.document;
