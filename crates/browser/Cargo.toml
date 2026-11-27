@@ -7,6 +7,7 @@ build = "build.rs"
 
 [features]
 media-startup-diagnostics = ["rust-browser-engine/media-startup-diagnostics"]
+html5ever-engine = ["rust-browser-engine/html5ever-engine"]
 v8-engine = ["rust-browser-engine/v8-engine"]
 stylo-engine = ["rust-browser-engine/stylo-engine"]
 vello-renderer = ["rust-browser-engine/vello-renderer"]

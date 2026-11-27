@@ -2,7 +2,8 @@
 //! drives script execution/resources; this module never calls a JavaScript VM.
 use super::{
     MAX_DOM_BYTES, MAX_INPUT_BYTES, MAX_NODES, MAX_OPEN_ELEMENTS,
-    servo_stream::Parser,
+    incremental::IncrementalTokenizer,
+    tokenizer::Token,
     tree_builder::{CustomElementTest, PendingElement, Tree, kind_bytes},
 };
 use crate::dom::mutation::MutationSink;
@@ -98,10 +99,11 @@ struct Lease {
 
 pub struct HtmlStream {
     tree: Tree,
-    parser: Parser,
+    tokenizer: IncrementalTokenizer,
     input: VecDeque<Input>,
     script_created: bool,
     closed: bool,
+    previous_cr: bool,
     next_id: u64,
     active: Vec<ActiveScript>,
     pending: Option<ParserScript>,
@@ -113,10 +115,11 @@ impl HtmlStream {
     pub fn new(scripting_enabled: bool) -> Self {
         Self {
             tree: Tree::new(scripting_enabled),
-            parser: Parser::new(scripting_enabled),
+            tokenizer: IncrementalTokenizer::new(),
             input: VecDeque::new(),
             script_created: false,
             closed: false,
+            previous_cr: false,
             next_id: 1,
             active: vec![],
             pending: None,
@@ -161,8 +164,8 @@ impl HtmlStream {
         parent: NodeId,
         before: Option<NodeId>,
     ) {
-        self.parser.finish_custom(original, element);
-        self.tree.attach(element, parent, before);
+        self.tree
+            .finish_custom_element(original, element, parent, before);
     }
     /// Retained arena strings, including names duplicated in namespace metadata.
     /// While leased, this is the count at the time of take_document().
@@ -243,7 +246,7 @@ impl HtmlStream {
         let references = if self.tree.halted || self.report.completed {
             vec![]
         } else {
-            self.parser
+            self.tree
                 .references()
                 .into_iter()
                 .map(|id| {
@@ -557,30 +560,30 @@ impl HtmlStream {
         if self.lease.is_some() {
             return Err(HtmlStreamError::DocumentLeased);
         }
+        if self.report.truncated || self.tree.halted {
+            self.halt();
+            return Ok(ParserEvent::Truncated);
+        }
+        if self.report.completed {
+            return Ok(ParserEvent::Complete);
+        }
+        if let Some(script) = &mut self.pending {
+            // A host checkpoint can mutate a parser-inserted element before
+            // preparation. Read the new attributes when it requests it again.
+            *script = classify(&self.tree.doc, script.node, self.active.len() + 1);
+            return Ok(ParserEvent::Script(script.clone()));
+        }
+        let mut advanced = 0;
         loop {
-            if self.report.truncated || self.tree.halted {
-                self.halt();
-                return Ok(ParserEvent::Truncated);
+            if let Some(token) = self.tokenizer.pop() {
+                return self.consume(token);
             }
-            if let Some(progress) = self.parser.pop_progress() {
-                for index in progress.new_nodes.clone() {
-                    let id = NodeId(index);
-                    if self.tree.doc.namespace(id) == Namespace::Html && self.tree.doc.tag(id) == "script" {
-                        self.parser_scripts.insert(id);
-                    }
-                }
-                return Ok(ParserEvent::Progress(progress));
-            }
-            if self.report.completed {
-                return Ok(ParserEvent::Complete);
-            }
-            if let Some(script) = &mut self.pending {
-                // A host checkpoint can mutate the attributes before preparation.
-                *script = classify(&self.tree.doc, script.node, self.active.len() + 1);
-                return Ok(ParserEvent::Script(script.clone()));
-            }
-            match self.input.front_mut() {
+            self.tokenizer.allow_cdata = self.tree.allow_cdata();
+            match self.input.front() {
                 Some(Input::Point(_)) => {
+                    if let Some(token) = self.tokenizer.partial() {
+                        return self.consume(token);
+                    }
                     return Ok(ParserEvent::Paused {
                         script: self
                             .active
@@ -589,35 +592,41 @@ impl HtmlStream {
                             .node,
                     });
                 }
-                Some(Input::WriteEnd(id)) => {
-                    let id = *id;
-                    self.input.pop_front();
+                Some(Input::WriteEnd(_)) => {
+                    if let Some(token) = self.tokenizer.partial() {
+                        return self.consume(token);
+                    }
+                    let Some(Input::WriteEnd(id)) = self.input.pop_front() else {
+                        unreachable!()
+                    };
                     return Ok(ParserEvent::WriteComplete(id));
                 }
-                Some(Input::Source { text, offset }) => {
-                    if *offset == text.len() {
+                Some(Input::Source { .. }) => {
+                    let Some(Input::Source { text, offset }) = self.input.front_mut() else {
+                        unreachable!()
+                    };
+                    let c = text[*offset..].chars().next();
+                    let Some(c) = c else {
                         self.input.pop_front();
                         continue;
+                    };
+                    *offset += c.len_utf8();
+                    advanced += c.len_utf8();
+                    self.work(c.len_utf8() + 1)?;
+                    if c == '\n' && self.previous_cr {
+                        self.previous_cr = false;
+                        continue;
                     }
-                    let start = *offset;
-                    let mut end = (start + STREAM_ADVANCE_BYTES).min(text.len());
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
+                    self.previous_cr = c == '\r';
+                    let c = if c == '\r' { '\n' } else { c };
+                    if let Some(token) = self.tokenizer.push(c) {
+                        return self.consume(token);
                     }
-                    let chunk = &text[start..end];
-                    let (script, remaining) = self.parser.feed(&mut self.tree, chunk);
-                    let amount = end - start - remaining.len().min(end - start);
-                    if chunk.ends_with(&remaining) {
-                        *offset = end - remaining.len();
-                    } else {
-                        *offset = end;
-                        self.input.push_front(Input::Source { text: remaining, offset: 0 });
+                    if self.tokenizer.pending_bytes() > MAX_INPUT_BYTES {
+                        self.halt();
+                        return Ok(ParserEvent::Truncated);
                     }
-                    self.work(amount.saturating_mul(2))?;
-                    if let Some(node) = script {
-                        self.report.scripts_prepared += 1;
-                        self.pending = Some(classify(&self.tree.doc, node, self.active.len() + 1));
-                    } else if amount >= STREAM_ADVANCE_BYTES && self.parser.progress_empty() {
+                    if advanced >= STREAM_ADVANCE_BYTES {
                         let count = self.tree.doc.nodes.len();
                         return Ok(ParserEvent::Progress(ParserProgress {
                             new_nodes: count..count,
@@ -626,12 +635,52 @@ impl HtmlStream {
                     }
                 }
                 None if self.closed => {
-                    self.parser.finish(&mut self.tree);
-                    self.report.completed = true;
+                    self.tokenizer.finish();
                 }
-                None => return Ok(ParserEvent::NeedInput),
+                None => {
+                    if let Some(token) = self.tokenizer.partial() {
+                        return self.consume(token);
+                    }
+                    return Ok(ParserEvent::NeedInput);
+                }
             }
         }
+    }
+    fn consume(&mut self, token: Token) -> Result<ParserEvent> {
+        self.work(1)?;
+        let eof = matches!(token, Token::Eof);
+        let script_start = matches!(&token,Token::Start(tag) if tag.name=="script");
+        let step = self.tree.step(token, &mut self.tokenizer.content);
+        if script_start {
+            for index in step.new_nodes.clone() {
+                let id = NodeId(index);
+                if self.tree.doc.namespace(id) == Namespace::Html
+                    && self.tree.doc.tag(id) == "script"
+                {
+                    self.parser_scripts.insert(id);
+                }
+            }
+        }
+        if self.tree.halted {
+            self.halt();
+            return Ok(ParserEvent::Truncated);
+        }
+        if let Some(node) = step.script {
+            let script = classify(&self.tree.doc, node, self.active.len() + 1);
+            self.report.scripts_prepared += 1;
+            self.pending = Some(script.clone());
+            return Ok(ParserEvent::Script(script));
+        }
+        if eof {
+            self.report.completed = true;
+            if step.closed.is_none() && step.new_nodes.is_empty() {
+                return Ok(ParserEvent::Complete);
+            }
+        }
+        Ok(ParserEvent::Progress(ParserProgress {
+            new_nodes: step.new_nodes,
+            closed: step.closed,
+        }))
     }
 }
 

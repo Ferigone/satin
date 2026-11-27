@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 twitch-bootstrap-profile = ["rust-browser-javascript/twitch-bootstrap-profile"]
 media-startup-diagnostics = ["rust-browser-javascript/media-startup-diagnostics"]
+html5ever-engine = ["dep:html5ever"]
 v8-engine = ["rust-browser-javascript/v8-engine"]
 stylo-engine = ["dep:stylo", "dep:stylo_traits"]
 vello-renderer = ["dep:pollster", "dep:vello"]
@@ -20,7 +21,7 @@ indexmap = { version = "2", features = ["serde"] }
 rust-browser-javascript = { path = "../javascript" }
 url = "2.5"
 encoding_rs = "0.8"
-html5ever = "=0.40.1"
+html5ever = { version = "=0.40.1", optional = true }
 stylo = { version = "=0.22.0", default-features = false, features = ["servo"], optional = true }
 stylo_traits = { version = "=0.22.0", optional = true }
 pollster = { version = "=0.4.0", optional = true }

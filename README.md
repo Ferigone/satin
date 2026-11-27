@@ -28,6 +28,11 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.49
+
+- The source tree includes the first integration work for html5ever, V8, Stylo,
+  Vello/wgpu, and GStreamer. Their development status is in the release notes.
+
 ## Changes in alpha.48
 
 - Dedicated workers run more of the WebAssembly and messaging used by media

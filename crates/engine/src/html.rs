@@ -7,12 +7,19 @@
 mod foreign;
 #[path = "html/incremental.rs"]
 mod incremental;
+#[cfg(feature = "html5ever-engine")]
 #[path = "html/servo.rs"]
 mod servo;
+#[cfg(feature = "html5ever-engine")]
 #[path = "html/servo_stream.rs"]
 mod servo_stream;
-#[path = "html/stream.rs"]
+#[cfg_attr(feature = "html5ever-engine", path = "html/html5ever_stream.rs")]
+#[cfg_attr(not(feature = "html5ever-engine"), path = "html/stream.rs")]
 mod stream;
+#[cfg(feature = "html5ever-engine")]
+use self::servo as document_parser;
+#[cfg(not(feature = "html5ever-engine"))]
+use self::tree_builder as document_parser;
 pub use stream::{
     HtmlStream, HtmlStreamError, HtmlStreamReport, MAX_SCRIPT_NESTING, MAX_STREAM_INPUT_PIECES,
     MAX_STREAM_WORK, MAX_WRITE_CALLS, ParserEvent, ParserProgress, ParserScript, ParserScriptKind,
@@ -45,9 +52,7 @@ pub fn parse(source: &str) -> Document {
 /// the corresponding noscript rules. For parser scripts and document.write,
 /// use HtmlStream with a script execution driver.
 pub fn parse_with_scripting(source: &str, enabled: bool) -> Document {
-    parse_input(source, |normalized| {
-        servo::parse(normalized, enabled)
-    })
+    parse_input(source, |normalized| document_parser::parse(normalized, enabled))
 }
 
 /// Fragment context supplied by a DOM embedding. The owning document's quirks mode and nearest form
@@ -85,7 +90,7 @@ pub fn parse_fragment(source: &str, context_tag: &str, scripting: bool) -> Docum
 
 pub fn parse_fragment_with_context(source: &str, context: FragmentContext<'_>) -> Document {
     parse_input(source, |normalized| {
-        servo::parse_fragment(normalized, context)
+        document_parser::parse_fragment(normalized, context)
     })
 }
 
