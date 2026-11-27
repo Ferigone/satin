@@ -681,7 +681,18 @@ fn run_fixture(output: PathBuf, width: u32, step: Step) {
         });
     });
     // Disable installed discovery and startup ACK; do not call main or the CLI.
-    let run_result = run(profile, Some(url), None, None, None, None, None, None, false);
+    let run_result = run(
+        profile,
+        Some(url),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        crate::renderer::PageRenderer::Software,
+        false,
+    );
     let fixture_result = DRIVER.with(|cell| cell.borrow_mut().take().unwrap().result);
     run_result.expect("Offline Winit test window");
     fixture_result.expect("Fixture exited before completion").unwrap();
