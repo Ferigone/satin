@@ -21,7 +21,7 @@ jobs:
       - name: Build actual Satin
         run: cargo build --release --locked -p rust-browser
       - name: Install pinned reference driver
-        run: npm install --prefix "$env:RUNNER_TEMP/osm-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+        run: npm install --prefix "$env:RUNNER_TEMP/osm-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1 acorn@8.15.0
       - name: Capture public map baseline
         shell: pwsh
         run: |
@@ -36,7 +36,9 @@ jobs:
           import {resolve, join} from 'node:path';
           import {performance} from 'node:perf_hooks';
           const run = promisify(execFile);
-          const {chromium} = createRequire(join(process.env.RUNNER_TEMP,'osm-reference','package.json'))('playwright-core');
+          const require = createRequire(join(process.env.RUNNER_TEMP,'osm-reference','package.json'));
+          const {chromium} = require('playwright-core');
+          const acorn = require('acorn');
           const satin = resolve('target/release/rust-browser.exe');
           const chrome = join(process.env.ProgramFiles,'Google','Chrome','Application','chrome.exe');
           const out = resolve('target/osm-evidence');
@@ -84,16 +86,30 @@ jobs:
                   item.chrome.status=(await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000}))?.status();
                   item.chrome.navigationMs=Math.round(performance.now()-start);
                   await page.waitForTimeout(8000);
-                  const sample=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:document.querySelector('#query')?.value??null}));
+                  const sample=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:[...document.querySelectorAll('input#query')].find(i=>i.getClientRects().length>0)?.value??null}));
                   item.chrome.initial=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-initial.png')});
+                  item.chrome.controls=await page.evaluate(()=>[...document.querySelectorAll('#map a, #map button')].filter(e=>e.getClientRects().length&&e.getBoundingClientRect().width>0).slice(0,30).map(e=>({title:e.title,aria:e.getAttribute('aria-label'),class:e.className,tag:e.tagName,text:e.textContent.slice(0,60)})));
                   if(index===0){
-                    const input=page.locator('#query');
+                    try {
+                      const src=await page.evaluate(()=>[...document.scripts].map(e=>e.src).find(v=>/^https:\/\/www\.openstreetmap\.org\/assets\/application-[a-f0-9]+\.js$/.test(v)));
+                      if(!src)throw Error('Public application bundle not found');
+                      const response=await page.request.get(src,{timeout:20000,maxRedirects:0});
+                      if(!response.ok())throw Error('Bundle HTTP '+response.status());
+                      const bytes=await response.body();
+                      if(bytes.length>10*1024*1024)throw Error('Bundle exceeds capture budget');
+                      const name='public-application.js';
+                      await writeFile(join(out,name),bytes);
+                      report.bundle={url:src,name,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
+                    }catch(e){report.bundleError=safe(e.message)}
+                  }
+                  if(index===0){
+                    const input=page.locator('input#query:visible').first();
                     if(await input.isVisible()){
                       await input.click();await input.fill('Warszawa');await input.press('Enter');await page.waitForTimeout(5000);
                       item.chrome.search=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
                     }else item.chrome.searchError='Search input not visible';
                   }else{
-                    const zoom=page.locator('.leaflet-control-zoom-in').first();
+                    const zoom=page.locator('.leaflet-control-zoom-in:visible, [title="Zoom In"]:visible, [title="Zoom in"]:visible, [aria-label="Zoom In"]:visible, [aria-label="Zoom in"]:visible').first();
                     if(await zoom.isVisible()){
                       const box=await zoom.boundingBox();item.chrome.zoomPoint=box;
                       const t=performance.now();await zoom.click({timeout:5000});await page.waitForTimeout(1800);
@@ -106,8 +122,32 @@ jobs:
               item.satin.push(await satinCase(url,index,'headless',[]));await save();
               item.satin.push(await satinCase(url,index,'native-initial',[]));await save();
               if(index===0){
-                item.satin.push(await satinCase(url,index,'native-search',[{action:'click',id:'query'},{action:'text',value:'Warszawa'},key('Enter')]));await save();
+                item.satin.push(await satinCase(url,index,'native-search',[{action:'click_at',x:70,y:203},{action:'text',value:'Warszawa'},key('Enter')]));await save();
               }
+            }
+            if(report.bundle){
+              try {
+                const source=await readFile(join(out,report.bundle.name),'utf8');
+                const diagnostics=report.cases.flatMap(c=>c.satin.flatMap(s=>s.receipt?.diagnostics??[]));
+                const diagnostic=diagnostics.find(s=>s.includes(report.bundle.url)&&s.includes('nesting limit exceeded'));
+                const loc=diagnostic?.match(/\((\d+):(\d+)\)/);
+                if(loc){
+                  const line=Number(loc[1]), column=Number(loc[2]);
+                  const lines=source.split('\n');
+                  const offset=lines.slice(0,line-1).reduce((n,l)=>n+l.length+1,0)+column-1;
+                  let root;
+                  try{root=acorn.parse(source,{ecmaVersion:'latest',sourceType:'script',locations:true});}
+                  catch{root=acorn.parse(source,{ecmaVersion:'latest',sourceType:'module',locations:true});}
+                  const ancestry=[];
+                  for(let node=root;node;){
+                    ancestry.push({type:node.type,start:node.loc.start,end:node.loc.end});
+                    const children=Object.values(node).flatMap(v=>Array.isArray(v)?v:[v]).filter(v=>v&&typeof v.type==='string'&&v.start<=offset&&offset<v.end);
+                    node=children.sort((a,b)=>(a.end-a.start)-(b.end-b.start))[0];
+                  }
+                  report.bundle.parserSite={line,column,offset,excerpt:lines[line-1]?.slice(Math.max(0,column-401),column+400),ancestry};
+                }else report.bundle.parserSiteError='No matching nesting diagnostic for captured bundle';
+              }catch(e){report.bundle.parserSiteError=safe(e.message)}
+              await save();
             }
           } finally {if(browser)await browser.close();await save();await rm(tmp,{recursive:true,force:true,maxRetries:3}).catch(()=>{});}
           '@
@@ -118,6 +158,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: openstreetmap-baseline-alpha45
+          name: openstreetmap-parser-repro-alpha45
           path: target/osm-evidence/
           if-no-files-found: warn
