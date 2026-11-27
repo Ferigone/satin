@@ -272,7 +272,9 @@ impl Player {
                 }
                 Command::Seek { key, time } => {
                     self.pending_seek = Some(time.max(0.));
-                    self.submitted_seek = None;
+                    if self.submitted_seek.take().is_some() {
+                        self.paused_for_seek = false;
+                    }
                     self.waiting_through = None;
                     self.ended = false;
                     self.try_pending_seek(output, key)
@@ -321,20 +323,25 @@ impl Player {
         if self.native_size.is_none() {
             return Ok(());
         }
-        let wait_for_data = matches!(&self.input, Input::Stream(stream)
-            if stream.end_time().is_none() && !stream.ending() && stream.buffered_until(time).is_none());
-        if wait_for_data {
-            if !self.paused_for_seek {
-                // Media Foundation can strand a seek submitted before MSE has
-                // the target range. Let the page request and append it first.
-                if !unsafe { self.engine.IsPaused().as_bool() } {
-                    unsafe { self.engine.Pause()? };
-                }
-                self.paused_for_seek = true;
-                self.seeking = true;
-                self.playing = false;
+        let open_stream = match &self.input {
+            Input::Stream(stream) if stream.end_time().is_none() && !stream.ending() => Some(stream),
+            _ => None,
+        };
+        let wait_for_data = open_stream.is_some_and(|stream| stream.buffered_until(time).is_none());
+        if !self.paused_for_seek && (wait_for_data || (open_stream.is_some() && self.play_requested)) {
+            // Media Foundation can strand a running MSE seek even when the target
+            // is buffered. Pause the native engine before submitting the seek.
+            if !unsafe { self.engine.IsPaused().as_bool() } {
+                unsafe { self.engine.Pause()? };
+            }
+            self.paused_for_seek = true;
+            self.seeking = true;
+            self.playing = false;
+            if wait_for_data {
                 output.publish(key, EventKind::SeekNeedsData);
             }
+        }
+        if wait_for_data {
             return Ok(());
         }
         self.pending_seek = None;
@@ -342,8 +349,7 @@ impl Player {
             self.engine.SetCurrentTime(time)?;
             self.submitted_seek = Some(time);
             if self.paused_for_seek && self.play_requested {
-                // Running the engine lets Media Foundation consume the newly
-                // appended samples while completing the deferred seek.
+                // Resume the engine so it can consume samples and complete the seek.
                 self.engine.Play()?;
             }
         }

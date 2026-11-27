@@ -132,6 +132,15 @@ async function start() {
     await pauseAndSeek(2);
   } else if (mode === 'open') {
     check(source.readyState === 'open', 'Expected a live-like open source');
+    const framesBeforeSeek = clip.getVideoPlaybackQuality().totalVideoFrames;
+    const seeked = event(clip, 'seeked');
+    clip.currentTime = 2.35;
+    check(clip.seeking && !clip.paused, 'Expected a seek during playback');
+    await seeked;
+    await advancePast(2.8);
+    check(!clip.seeking && !clip.paused && clip.readyState >= 2, 'Playback stalled after an in-buffer seek');
+    check(clip.getVideoPlaybackQuality().totalVideoFrames > framesBeforeSeek, 'No frames after the seek');
+    note('seek during playback');
     await pauseAndSeek(1.1);
     check(source.readyState === 'open' && !clip.ended, 'Open source unexpectedly ended');
   } else if (mode === 'rebuffer') {
