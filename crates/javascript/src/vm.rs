@@ -210,6 +210,25 @@ struct LegacyCall {
     visible: bool,
 }
 
+pub(crate) struct OwnedCall {
+    pub chunk: Rc<Chunk>,
+    pub env: EnvId,
+    pub activation: CallActivation,
+}
+
+pub(crate) struct CallActivation {
+    previous_referrer: Option<SourceReferrer>,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    _scope: startup_profile::Scope,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    _function: startup_profile::FunctionFrame,
+}
+
+pub(crate) enum CallDispatch {
+    Value(Value),
+    Owned(OwnedCall),
+}
+
 #[derive(Clone)]
 pub(crate) enum Reference {
     Binding(EnvId, JsString),
@@ -844,15 +863,17 @@ impl Vm {
             && self.estimated_heap_bytes().saturating_add(bytes) > self.limits.max_heap_bytes
         {
             #[cfg(feature = "media-startup-diagnostics")]
-            qa_budget_limit(
-                "heap",
-                Some(std::panic::Location::caller()),
-                bytes as u64,
-                self.limits
-                    .max_heap_bytes
-                    .saturating_sub(self.estimated_heap_bytes()) as u64,
-                self.qa_native_work,
-            );
+            {
+                qa_budget_limit(
+                    "heap",
+                    Some(std::panic::Location::caller()),
+                    bytes as u64,
+                    self.limits.max_heap_bytes.saturating_sub(self.estimated_heap_bytes()) as u64,
+                    self.qa_native_work,
+                );
+                #[cfg(windows)]
+                self.diagnostic_heap_site();
+            }
             Err(JsError::new(
                 ErrorKind::HeapLimit,
                 "Aggregate allocation byte budget exhausted; collect between script tasks",
@@ -1187,8 +1208,8 @@ impl Vm {
         self.roots.remove(&id)
     }
     pub fn collect_garbage(&mut self) -> GcStats {
-        let before = self.heap.live;
         if self.active > 0 || self.realm_depth > 0 {
+            let before = self.heap.live;
             return GcStats {
                 before,
                 after: before,
@@ -1196,6 +1217,21 @@ impl Vm {
                 skipped_active_execution: true,
             };
         }
+        self.collect_rooted_heap()
+    }
+
+    /// Collects at an embedder-owned boundary between script callbacks without
+    /// ending the surrounding task or resetting its deadline and instruction budget.
+    /// The embedder must root any JS values it will use after this boundary.
+    pub fn collect_between_callbacks(&mut self) -> Option<GcStats> {
+        if self.active > 1 || self.call_depth != 0 || self.execution_depth != 0 || self.realm_depth != 0 {
+            return None;
+        }
+        Some(self.collect_rooted_heap())
+    }
+
+    fn collect_rooted_heap(&mut self) -> GcStats {
+        let before = self.heap.live;
         let mut roots = self.heap.trace_roots();
         roots.push(self.realm.global_env.0);
         roots.extend(self.unhandled_promises.iter().copied());
@@ -1814,6 +1850,27 @@ impl Vm {
             _ => String::new(),
         };
         format!(" [source {source} units={units} range={start}..{end} id={signature}]")
+    }
+
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    fn diagnostic_heap_site(&self) {
+        use std::sync::atomic::AtomicUsize;
+        static TRACES: AtomicUsize = AtomicUsize::new(0);
+        if TRACES.fetch_add(1, Ordering::Relaxed) < 24 {
+            eprintln!(
+                "SATIN_QA_HEAP cells={} estimated={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={}{}",
+                self.heap.live,
+                self.estimated_heap_bytes(),
+                self.limits.max_heap_bytes,
+                self.code_bytes,
+                self.string_bytes.saturating_add(self.live_large_string_bytes.get()),
+                self.call_depth,
+                self.execution_depth,
+                self.jobs.len(),
+                self.active,
+                self.diagnostic_source_site(),
+            );
+        }
     }
     fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
         matches!(receiver, Value::String(s) if
@@ -3215,7 +3272,16 @@ impl Vm {
                     FunctionKind::Ordinary => {}
                 }
                 let (body_env, body) = vm.function_environment(&code, parent, invocation)?;
-                vm.run_chunk(&body, body_env)
+                // Enter the iterative driver while the native stack still has
+                // room for re-entry through builtins and property accessors.
+                let completion = if vm.call_depth >= 32
+                    || vm.call_depth >= 8 && !native_stack_available(2 * 1024 * 1024)
+                {
+                    vm.run_deep_ordinary_body(body, body_env)
+                } else {
+                    vm.run_chunk(&body, body_env)
+                };
+                completion
                     .and_then(|completion| match completion {
                         Completion::Return(v) => Ok(v),
                         Completion::Normal(_) => Ok(Value::Undefined),
@@ -3236,6 +3302,77 @@ impl Vm {
         };
         self.call_depth -= 1;
         result
+    }
+
+    pub(crate) fn dispatch_owned_call(
+        &mut self,
+        function: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<CallDispatch, JsError> {
+        let Some(id) = function.as_object() else {
+            return self.invoke(function, this, args).map(CallDispatch::Value);
+        };
+        let object = self.heap.object(id)?;
+        let ObjectKind::Function { code, environment, referrer } = &object.kind else {
+            return self.invoke(function, this, args).map(CallDispatch::Value);
+        };
+        if code.kind != FunctionKind::Ordinary
+            || object.class_data.is_some()
+            || code.body.get().is_some() && code.leaf.is_some()
+            || !self.inactive_realms.is_empty()
+                && self.environment_realm(*environment) != self.realm.global_env
+        {
+            return self.invoke(function, this, args).map(CallDispatch::Value);
+        }
+        let (code, parent, referrer) = (code.clone(), *environment, referrer.clone());
+        for arg in args {
+            self.account_value(arg.clone())?;
+        }
+        self.tick()?;
+        if !self.can_enter_call() {
+            return Err(self.call_depth_error());
+        }
+        self.call_depth += 1;
+        self.active += 1;
+        self.active_calls.push(code.name.clone());
+        self.enter_legacy_call(id, &code);
+        let activation = CallActivation {
+            previous_referrer: std::mem::replace(&mut self.realm.active_referrer, referrer),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            _function: startup_profile::function(&code.source),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            _scope: startup_profile::enter(startup_profile::Area::Other),
+        };
+        let invocation = Invocation { function, this, args, new_target: Value::Undefined, this_initialized: true };
+        let body = self.function_environment(&code, parent, invocation).and_then(|(env, chunk)| {
+            self.prepare(&chunk.scope, env)?;
+            Ok((env, chunk))
+        });
+        match body {
+            Ok((env, chunk)) => Ok(CallDispatch::Owned(OwnedCall { chunk, env, activation })),
+            Err(error) => self.finish_owned_call(activation, Err(error)).map(CallDispatch::Value),
+        }
+    }
+
+    pub(crate) fn finish_owned_call(
+        &mut self,
+        activation: CallActivation,
+        mut result: Result<Completion, JsError>,
+    ) -> Result<Value, JsError> {
+        if let Err(error) = &mut result && error.inspected_calls.is_none() {
+            error.inspected_calls = self.inspect_call_stack();
+        }
+        self.realm.active_referrer = activation.previous_referrer;
+        self.legacy_calls.pop();
+        self.active_calls.pop();
+        self.call_depth -= 1;
+        self.active -= 1;
+        match result? {
+            Completion::Return(value) => self.account_value(value),
+            Completion::Normal(_) => Ok(Value::Undefined),
+            _ => Err(JsError::new(ErrorKind::InternalError, "Unexpected function abrupt completion")),
+        }
     }
     pub fn construct(&mut self, function: Value, args: &[Value]) -> Result<Value, JsError> {
         self.construct_with_new_target(function.clone(), args, function)
@@ -4254,46 +4391,7 @@ impl Vm {
                 }
             }
             Op::Call | Op::FixedCall(_) => {
-                let dynamic;
-                let mut fixed = [const { Value::Undefined }; crate::bytecode::INLINE_ARGUMENTS];
-                let args: &[Value] = if let Op::FixedCall(count) = *op {
-                    let n = usize::from(count);
-                    if n > 0 {
-                        let last = self.pop_value(stack)?;
-                        self.check_argument_slot(n - 1)?;
-                        fixed[n - 1] = self.account_value(last)?;
-                        for item in fixed[..n-1].iter_mut().rev() { *item = self.pop_value(stack)?; }
-                    }
-                    &fixed[..n]
-                } else {
-                    let Some(Item::Arguments(values)) = stack.pop() else { unreachable!() };
-                    dynamic = values;
-                    &dynamic
-                };
-                let Some(Item::CallTarget {
-                    function,
-                    this,
-                    direct_eval,
-                    #[cfg(feature = "media-startup-diagnostics")]
-                    label,
-                }) = stack.pop()
-                else {
-                    unreachable!()
-                };
-                let value = if direct_eval && function.as_object() == self.realm.intrinsic_eval {
-                    self.direct_eval(args.first().cloned().unwrap_or_default(), env, strict)?
-                } else {
-                    #[cfg(feature = "media-startup-diagnostics")]
-                    if !self.is_callable(&function) && let Some(label) = label {
-                        let name = label.as_utf16();
-                        let name = String::from_utf16_lossy(&name[..name.len().min(96)]);
-                        let message = format!("Value is not callable ({name:?})");
-                        #[cfg(windows)]
-                        let message = message + &self.diagnostic_source_site();
-                        return Err(JsError::type_error(message));
-                    }
-                    self.invoke(function, this, args)?
-                };
+                let value = self.execute_call(op, stack, env, strict, |value| value, Self::invoke)?;
                 stack.push(Item::Value(value));
             }
             Op::Construct => {
@@ -4307,6 +4405,62 @@ impl Vm {
             _ => unreachable!(),
         }
         Ok(())
+    }
+    #[inline(never)]
+    pub(crate) fn execute_call<T>(
+        &mut self,
+        op: &Op,
+        stack: &mut Vec<Item>,
+        env: EnvId,
+        strict: bool,
+        immediate: impl FnOnce(Value) -> T,
+        dispatch: impl FnOnce(&mut Self, Value, Value, &[Value]) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let dynamic;
+        let mut fixed = [const { Value::Undefined }; crate::bytecode::INLINE_ARGUMENTS];
+        let args: &[Value] = if let Op::FixedCall(count) = *op {
+            let n = usize::from(count);
+            if n > 0 {
+                let last = self.pop_value(stack)?;
+                self.check_argument_slot(n - 1)?;
+                fixed[n - 1] = self.account_value(last)?;
+                for item in fixed[..n - 1].iter_mut().rev() {
+                    *item = self.pop_value(stack)?;
+                }
+            }
+            &fixed[..n]
+        } else {
+            let Some(Item::Arguments(values)) = stack.pop() else {
+                unreachable!()
+            };
+            dynamic = values;
+            &dynamic
+        };
+        let Some(Item::CallTarget {
+            function,
+            this,
+            direct_eval,
+            #[cfg(feature = "media-startup-diagnostics")]
+            label,
+        }) = stack.pop()
+        else {
+            unreachable!()
+        };
+        if direct_eval && function.as_object() == self.realm.intrinsic_eval {
+            return self
+                .direct_eval(args.first().cloned().unwrap_or_default(), env, strict)
+                .map(immediate);
+        }
+        #[cfg(feature = "media-startup-diagnostics")]
+        if !self.is_callable(&function) && let Some(label) = label {
+            let name = label.as_utf16();
+            let name = String::from_utf16_lossy(&name[..name.len().min(96)]);
+            let message = format!("Value is not callable ({name:?})");
+            #[cfg(windows)]
+            let message = message + &self.diagnostic_source_site();
+            return Err(JsError::type_error(message));
+        }
+        dispatch(self, function, this, args)
     }
     #[cfg(feature = "media-startup-diagnostics")]
     pub fn diagnostic_native_error(&self, value: &Value) -> Option<String> {

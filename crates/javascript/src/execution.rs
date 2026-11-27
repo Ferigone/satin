@@ -9,7 +9,7 @@ use crate::{
     heap::EnvId,
     patterns::Invocation,
     promise::{PromiseCapability, ReactionPair},
-    vm::{Completion, Item, Reference},
+    vm::{CallActivation, CallDispatch, Completion, Item, OwnedCall, Reference},
 };
 use controls::Resume;
 use std::{mem::size_of, rc::Rc};
@@ -26,6 +26,7 @@ struct Frame {
     awaiting_control: bool,
     delegate: Option<delegation::Delegation>,
     patterns: Vec<destructuring::ActivePattern>,
+    activation: Option<CallActivation>,
 }
 
 pub(crate) struct Execution {
@@ -60,6 +61,8 @@ pub(crate) enum RunResult {
 
 enum Advance {
     Keep,
+    Operand(Value),
+    Call(OwnedCall),
     Finish(Completion),
     Child {
         chunk: Rc<Chunk>,
@@ -95,6 +98,7 @@ impl Frame {
             awaiting_control: false,
             delegate: None,
             patterns: Vec::new(),
+            activation: None,
         }
     }
     fn absorb(&mut self, value: Option<Value>) {
@@ -103,10 +107,19 @@ impl Frame {
         }
     }
     fn finish(mut self, vm: &mut Vm) -> Flow {
-        if let Some(operand) = self.operands.pop() {
-            self.result = Some(vm.value(operand)?);
+        let result = match self.operands.pop() {
+            Some(operand) => vm.value(operand).map(|value| Completion::Normal(Some(value))),
+            None => Ok(Completion::Normal(self.result.take())),
+        };
+        self.finish_activation(vm, result)
+    }
+
+    fn finish_activation(&mut self, vm: &mut Vm, result: Flow) -> Flow {
+        match self.activation.take() {
+            Some(activation) => vm.finish_owned_call(activation, result)
+                .map(|value| Completion::Normal(Some(value))),
+            None => result,
         }
-        Ok(Completion::Normal(self.result))
     }
 }
 impl Execution {
@@ -344,9 +357,28 @@ impl Vm {
         input: Option<ResumeValue>,
     ) -> RunResult {
         let depth = self.execution_depth;
-        let result = self.run_frames(&mut execution.frames, input, depth);
+        let result = self.run_frames(&mut execution.frames, input, depth, false);
         self.execution_depth = depth;
         result
+    }
+
+    #[inline(never)]
+    pub(crate) fn run_deep_ordinary_body(&mut self, chunk: Rc<Chunk>, env: EnvId) -> Flow {
+        self.prepare(&chunk.scope, env)?;
+        let depth = self.execution_depth;
+        let mut frames = Vec::new();
+        reserve_one(self, &mut frames)?;
+        frames.push(Frame::new(chunk, env));
+        let result = self.run_frames(&mut frames, None, depth, true);
+        self.execution_depth = depth;
+        // A fatal budget error can exit without visiting the parent frames.
+        while let Some(mut frame) = frames.pop() {
+            frame.finish_activation(self, Ok(Completion::Normal(None)))?;
+        }
+        match result {
+            RunResult::Completed(result) => result,
+            _ => unreachable!("ordinary functions cannot suspend"),
+        }
     }
 
     fn finish_async(&mut self, capability: PromiseCapability, result: Flow) -> Result<(), JsError> {
@@ -371,6 +403,7 @@ impl Vm {
         frames: &mut Vec<Frame>,
         mut input: Option<ResumeValue>,
         base_depth: usize,
+        ordinary: bool,
     ) -> RunResult {
         let mut completed: Option<Flow> = None;
         // Owned frames share one driver stack frame and its opcode dispatch.
@@ -384,7 +417,8 @@ impl Vm {
             {
                 break;
             }
-            if frames.len() > self.limits().max_bytecode_depth {
+            let logical_depth = frames.len().saturating_add(if ordinary { base_depth } else { 0 });
+            if logical_depth > self.limits().max_bytecode_depth {
                 return RunResult::Completed(Err(JsError::new(
                     ErrorKind::ExecutionLimit,
                     "Owned bytecode frame depth budget exhausted",
@@ -408,10 +442,22 @@ impl Vm {
                 completed = Some(frames.pop().unwrap().finish(self));
                 continue;
             } else {
-                self.advance_frame(frame)
+                self.advance_frame(frame, ordinary)
             };
             match advance {
                 Ok(Advance::Keep) => {}
+                Ok(Advance::Operand(value)) => frame.operands.push(Item::Value(value)),
+                Ok(Advance::Call(OwnedCall { chunk, env, activation })) => {
+                    frame.waiting = Some(Resume::Call);
+                    if let Err(error) = reserve_one(self, frames) {
+                        completed = Some(self.finish_owned_call(activation, Err(error))
+                            .map(|value| Completion::Normal(Some(value))));
+                    } else {
+                        let mut frame = Frame::new(chunk, env);
+                        frame.activation = Some(activation);
+                        frames.push(frame);
+                    }
+                }
                 Ok(Advance::Finish(Completion::Normal(result))) => frame.absorb(result),
                 Ok(Advance::Await(promise)) => return RunResult::Await(promise),
                 Ok(Advance::AwaitControl(promise, resume)) => {
@@ -422,7 +468,7 @@ impl Vm {
                 Ok(Advance::Yield(result)) => return RunResult::Yield(result),
                 Ok(Advance::Child { chunk, env, resume }) => {
                     frame.waiting = Some(resume);
-                    if chunk.can_suspend {
+                    if ordinary || chunk.can_suspend {
                         if let Err(error) =
                             reserve_one(self, frames).and_then(|_| self.prepare(&chunk.scope, env))
                         {
@@ -440,8 +486,7 @@ impl Vm {
                         _ => unreachable!(),
                     });
                     let flow = destructuring::close_patterns(self, &mut frame.patterns, flow);
-                    frames.pop();
-                    completed = Some(flow);
+                    completed = Some(frames.pop().unwrap().finish_activation(self, flow));
                 }
             }
         }
@@ -470,7 +515,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn advance_frame(&mut self, frame: &mut Frame) -> Result<Advance, JsError> {
+    fn advance_frame(&mut self, frame: &mut Frame, ordinary: bool) -> Result<Advance, JsError> {
         self.tick()?;
         let op = &frame.chunk.ops[frame.pc];
         frame.pc += 1;
@@ -500,6 +545,15 @@ impl Vm {
             return self.iterator_result(value, false).map(Advance::Yield);
         }
         reserve_one(self, &mut frame.operands)?;
+        if ordinary && matches!(op, Op::Call | Op::FixedCall(_)) {
+            return self.execute_call(
+                op, &mut frame.operands, frame.env, frame.chunk.strict,
+                CallDispatch::Value, Vm::dispatch_owned_call,
+            ).map(|call| match call {
+                CallDispatch::Value(value) => Advance::Operand(value),
+                CallDispatch::Owned(call) => Advance::Call(call),
+            });
+        }
         if self.run_stack_op(
             op,
             &mut frame.operands,
@@ -509,7 +563,7 @@ impl Vm {
         )? {
             return Ok(Advance::Keep);
         }
-        if op.can_suspend() {
+        if op.can_suspend() || ordinary && controls::handles(op) {
             controls::start(self, op, frame.env)
         } else {
             self.run_control_op(op, frame.env, frame.chunk.strict)

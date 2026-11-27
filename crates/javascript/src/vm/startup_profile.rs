@@ -1,7 +1,7 @@
 //! Exclusive work and thread-cycle counters for the diagnostic Windows binary.
 //! No JS data is captured. The outer classic script owns any synchronous reentry.
 mod functions;
-pub(crate) use functions::{function, record_denial};
+pub(crate) use functions::{Frame as FunctionFrame, function, record_denial};
 use functions::Functions;
 use std::{cell::RefCell, time::Instant};
 use windows_sys::Win32::System::{

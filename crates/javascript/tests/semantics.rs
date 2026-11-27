@@ -760,6 +760,63 @@ fn task_scope_shares_one_budget_across_multiple_calls() {
 }
 #[cfg(windows)]
 #[test]
+fn host_callback_collection_reclaims_cells_without_resetting_task_fuel() {
+    let mut vm = Vm::new();
+    let rooted = vm.new_object();
+    let root = vm.root(rooted.clone());
+    let error = vm.with_task_limits(10, None, |vm| {
+        vm.charge_work(8)?;
+        for _ in 0..40 {
+            vm.new_object();
+        }
+        vm.with_task(|vm| {
+            assert!(vm.collect_between_callbacks().is_none());
+            Ok(())
+        })?;
+        let stats = vm.collect_between_callbacks().unwrap();
+        assert!(stats.collected >= 40);
+        assert_eq!(vm.root_value(root), Some(rooted));
+        vm.charge_work(8)
+    }).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+    vm.unroot(root);
+}
+
+#[test]
+fn deep_ordinary_calls_preserve_returns_and_finally_on_a_small_native_stack() {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+        let mut vm = Vm::with_limits(VmLimits {
+            max_bytecode_depth: 4096,
+            max_call_depth: 1024,
+            ..VmLimits::default()
+        });
+        let result = vm.eval(r#"
+            let tree = null, exits = 0, fail = false;
+            for (let i = 0; i < 400; ++i) tree = { child: tree };
+            function visit(node) {
+                try { return children(node); }
+                finally { ++exits; }
+            }
+            function children(node) {
+                if (node) return 1 + visit(node.child);
+                if (fail) throw new Error("marker");
+                return 0;
+            }
+            const value = visit(tree);
+            const baseline = exits === 401;
+            fail = true;
+            let caught = false;
+            try { visit(tree); } catch (error) { caught = error.message === "marker"; }
+            baseline && value === 400 && caught && exits === 802
+        "#).unwrap();
+        assert_eq!(result, Value::Bool(true));
+        assert!(!vm.collect_garbage().skipped_active_execution);
+        assert_eq!(vm.eval("2 + 3").unwrap(), Value::from(5));
+    }).unwrap().join().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
 fn nested_execution_uses_available_windows_stack_and_recovers_at_limits() {
     for stack_size in [1024 * 1024, 4 * 1024 * 1024] {
         std::thread::Builder::new()

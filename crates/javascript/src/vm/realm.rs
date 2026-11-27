@@ -452,7 +452,7 @@ impl Vm {
         slots
     }
 
-    fn environment_realm(&self, mut environment: EnvId) -> EnvId {
+    pub(super) fn environment_realm(&self, mut environment: EnvId) -> EnvId {
         while let Some(parent) = self.heap.environment(environment).parent {
             environment = parent;
         }

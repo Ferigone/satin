@@ -11,6 +11,7 @@ use crate::{
 use std::rc::Rc;
 
 pub(super) enum Resume {
+    Call,
     Pass,
     Label,
     Initialize,
@@ -133,6 +134,14 @@ fn new_scope(vm: &mut Vm, parent: EnvId) -> Result<EnvId, JsError> {
         .allocate_env(Environment::new(Some(parent), EnvKind::Block, None)))
 }
 
+pub(super) fn handles(op: &Op) -> bool {
+    matches!(op,
+        Op::Initialize(_, _, Some(_)) | Op::Block(_) | Op::Label(..) | Op::With(..)
+        | Op::Branch(..) | Op::While(..) | Op::DoWhile(..) | Op::For(_)
+        | Op::ForIn(..) | Op::ForOf(..) | Op::Return(Some(_)) | Op::Throw(_)
+        | Op::Switch(..) | Op::Try(..))
+}
+
 pub(super) fn start(vm: &mut Vm, op: &Op, env: EnvId) -> Result<Advance, JsError> {
     Ok(match op {
         Op::Initialize(_, _, Some(value)) => Advance::child(value, env, Resume::Initialize),
@@ -210,6 +219,7 @@ pub(super) fn after_child(
         return completed.map(Advance::Finish);
     }
     match resume {
+        Resume::Call => Ok(Advance::Operand(expression(completed)?)),
         Resume::Pass => completed.map(Advance::Finish),
         Resume::Label => {
             let Op::Label(label, _) = op else {
