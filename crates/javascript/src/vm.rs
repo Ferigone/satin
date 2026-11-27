@@ -40,7 +40,7 @@ const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
 const MAX_BYTECODE_DEPTH: usize = 4096;
 const MAX_HOST_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
-    256
+    1024
 } else {
     DEFAULT_CALL_DEPTH
 };

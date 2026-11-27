@@ -266,9 +266,9 @@ fn install_character_interfaces(
 }
 
 pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), JsError> {
-    let (template_prototype, div_prototype) = {
+    let (template_prototype, div_prototype, anchor_prototype) = {
         let state = state.borrow();
-        (state.template_prototype.clone(), state.div_prototype.clone())
+        (state.template_prototype.clone(), state.div_prototype.clone(), state.anchor_prototype.clone())
     };
     let custom_state = state.clone();
     let constructor =
@@ -290,7 +290,9 @@ pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Res
     })?;
     vm.call(set_prototype.clone(), Value::Undefined, &[div, constructor.clone()])?;
     let iframe = vm.get_global("HTMLIFrameElement")?;
-    vm.call(set_prototype, Value::Undefined, &[iframe, constructor])?;
+    vm.call(set_prototype.clone(), Value::Undefined, &[iframe, constructor.clone()])?;
+    let anchor = install_anchor(vm, state, anchor_prototype)?;
+    vm.call(set_prototype, Value::Undefined, &[anchor, constructor])?;
     let read_state = state.clone();
     let get = vm.new_native_function("get align", move |vm, this, _| {
         let id = div_receiver(&read_state, &this)?;
@@ -308,6 +310,51 @@ pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Res
     });
     vm.define_accessor(div_prototype, "align", Some(get), Some(set))?;
     Ok(())
+}
+
+fn anchor_id(state: &Shared, receiver: &Value) -> Result<crate::dom::NodeId, JsError> {
+    let id = super::element(state, receiver)?;
+    let state = state.borrow();
+    if state.document.namespace(id) == crate::dom::Namespace::Html && state.document.tag(id) == "a" {
+        return Ok(id);
+    }
+    Err(JsError::type_error("Expected an HTMLAnchorElement"))
+}
+
+fn anchor_value(vm: &mut Vm, host: &Shared, receiver: &Value, name: &str) -> Result<Value, JsError> {
+    let id = anchor_id(host, receiver)?;
+    let state = host.borrow();
+    let Some(raw) = state.document.attr(id, name) else { return Ok("".into()) };
+    vm.charge_buffer_work(raw.len())?;
+    if name == "href" && let Ok(url) = super::document_base(&state).join(raw) {
+        return Ok(url.to_string().into());
+    }
+    Ok(raw.into())
+}
+
+fn install_anchor(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<Value, JsError> {
+    let constructor = webidl::interface(vm, prototype.clone(), "HTMLAnchorElement", 0, |_, _, _, _| {
+        Err(JsError::type_error("Illegal HTMLAnchorElement constructor"))
+    })?;
+    for name in ["href", "target", "download", "rel", "hreflang", "type"] {
+        let read = state.clone();
+        let get = vm.new_native_function(&format!("get {name}"), move |vm, this, _| {
+            anchor_value(vm, &read, &this, name)
+        });
+        let write = state.clone();
+        let set = vm.new_native_function(&format!("set {name}"), move |vm, this, args| {
+            let id = anchor_id(&write, &this)?;
+            let value = super::text(vm, super::arg(args, 0))?;
+            super::set_attribute(vm, &write, id, name, Some(value))?;
+            Ok(Value::Undefined)
+        });
+        vm.define_accessor(prototype.clone(), name, Some(get), Some(set))?;
+    }
+    let host = state.clone();
+    webidl::operation(vm, prototype, "toString", 0, move |vm, this, _| {
+        anchor_value(vm, &host, &this, "href")
+    })?;
+    Ok(constructor)
 }
 
 fn div_receiver(state: &Shared, this: &Value) -> Result<crate::dom::NodeId, JsError> {
