@@ -752,6 +752,8 @@ mod tests {
     #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn child_cpu_timeout_reports_and_a_following_frame_finishes() {
+        use std::time::{Duration, Instant};
+
         let page = LoadedPage::from_html("https://example.test/", "<body></body>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
         let burn = runtime.vm.new_native_function("burnCpu", |vm, _, _| loop {
@@ -777,7 +779,19 @@ mod tests {
                 setTimeout(() => runFrame('done()'), 0);
             }, 0);
         "#).unwrap();
-        runtime.pump();
+        let state = runtime.state.clone();
+        runtime
+            .vm
+            .with_task_cpu_budget(
+                u64::MAX,
+                Duration::from_millis(200),
+                Instant::now() + Duration::from_secs(5),
+                |vm| {
+                    crate::script::scheduler::run_timers(vm, &state);
+                    Ok(())
+                },
+            )
+            .unwrap();
         runtime.pump();
         assert_eq!(
             runtime.eval("trace.join('|')").unwrap(),
