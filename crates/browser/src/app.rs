@@ -712,6 +712,8 @@ pub(crate) fn run(
                 "window_smoke": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "frames_presented": app.presented_frames,
+                "scroll_y": tab.scroll,
+                "content_viewport": tab.layout.as_ref().map(|l| serde_json::json!({"width": l.viewport.width, "height": l.viewport.height})),
                 "url": tab.url,
                 "title": tab.title,
                 "layout_limited": tab.layout.as_ref().is_some_and(|layout| layout.limited),
