@@ -12,6 +12,8 @@ mod media;
 mod named_colors;
 mod oklab;
 pub(crate) mod supports;
+#[cfg(feature = "stylo-engine")]
+mod stylo;
 pub use inspection::InspectorStylesheets;
 use media::media_allows;
 pub(crate) use media::{serialize_media_query_list, stylesheet_media_applies};
@@ -4319,7 +4321,12 @@ fn targets(name: &str) -> Vec<Property> {
 fn compile_declarations(declarations: &[Declaration]) -> Vec<CompiledDeclaration> {
     let mut result = vec![];
     for (order, decl) in declarations.iter().enumerate() {
-        for (property, value) in parse_assignment(&decl.name, &decl.value) {
+        #[cfg(feature = "stylo-engine")]
+        let assignments = stylo::box_assignments(&decl.name, &decl.value)
+            .unwrap_or_else(|| parse_assignment(&decl.name, &decl.value));
+        #[cfg(not(feature = "stylo-engine"))]
+        let assignments = parse_assignment(&decl.name, &decl.value);
+        for (property, value) in assignments {
             result.push(CompiledDeclaration {
                 property,
                 value,

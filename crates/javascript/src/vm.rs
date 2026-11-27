@@ -190,6 +190,8 @@ pub struct Vm {
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_native_call_stack: Option<Vec<(usize, ObjectId)>>,
     task_deadline: Option<TaskDeadline>,
+    #[cfg(feature = "v8-engine")]
+    document_engine: crate::v8_document::DocumentEngine,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
     collectible_call: Option<usize>,
@@ -368,6 +370,8 @@ impl Vm {
             limits,
             interrupt: None,
             task_deadline: None,
+            #[cfg(feature = "v8-engine")]
+            document_engine: crate::v8_document::DocumentEngine::default(),
             active: 0,
             collectible_call: None,
             call_depth: 0,
@@ -523,6 +527,43 @@ impl Vm {
     }
     pub fn eval(&mut self, source: &str) -> Result<Value, JsError> {
         self.eval_with_referrer(source, None, None)
+    }
+
+    #[cfg(feature = "v8-engine")]
+    pub fn enable_v8_document(&mut self) -> Result<(), JsError> {
+        use crate::v8_document::{DocumentEngine, DocumentRuntime};
+        if matches!(self.document_engine, DocumentEngine::Interpreter) {
+            self.document_engine = DocumentEngine::Ready(DocumentRuntime::new(self)?);
+        }
+        Ok(())
+    }
+
+    /// Evaluate a classic page script with the document's selected engine.
+    pub fn eval_document_script(&mut self, source: &str, identifier: &str) -> Result<Value, JsError> {
+        #[cfg(feature = "v8-engine")]
+        {
+            use crate::v8_document::DocumentEngine;
+            self.check_interrupt()?;
+            match std::mem::replace(&mut self.document_engine, DocumentEngine::Running) {
+                DocumentEngine::Interpreter => {
+                    self.document_engine = DocumentEngine::Interpreter;
+                }
+                DocumentEngine::Running => return Err(JsError::new(
+                    ErrorKind::UnsupportedFeature, "Nested document execution across the V8 host bridge",
+                )),
+                DocumentEngine::Ready(mut engine) => {
+                    let deadline = match self.task_deadline.as_ref() {
+                        Some(TaskDeadline::Wall(deadline)) => *deadline,
+                        Some(TaskDeadline::Thread { wall_deadline, .. }) => *wall_deadline,
+                        None => Instant::now() + std::time::Duration::from_secs(180),
+                    };
+                    let result = engine.evaluate(self, source, identifier, deadline.saturating_duration_since(Instant::now()));
+                    self.document_engine = DocumentEngine::Ready(engine);
+                    return result;
+                }
+            }
+        }
+        self.eval_with_identifier(source, identifier)
     }
 
     /// Execute a classic script whose dynamic imports and functions use the given
