@@ -285,6 +285,40 @@ fn evaluate(runtime: &mut Option<ScriptRuntime>, expression: &str) -> Value {
 }
 
 #[test]
+fn device_pixel_ratio_is_available_before_first_script_and_tracks_output_scale() {
+    let started = Instant::now();
+    let (mut page, mut session) = DocumentSession::start(OpenedPage {
+        page: LoadedPage::from_html(PAGE, ""),
+        input: DocumentInput::Html(
+            "<script>var initialRatio=window.devicePixelRatio;var retina=(window.devicePixelRatio||window.screen.deviceXDPI/window.screen.logicalXDPI)>1;</script>".into(),
+        ),
+        started,
+        response_start: started,
+        http_status: None,
+        http_content: Default::default(),
+    })
+    .unwrap();
+    session.set_device_pixel_ratio(1.5, None);
+    let mut runtime = None;
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert_eq!(evaluate(&mut runtime, "initialRatio"), Value::Number(1.5));
+    assert_eq!(evaluate(&mut runtime, "retina"), Value::Bool(true));
+    session.set_device_pixel_ratio(2.0, runtime.as_ref());
+    assert_eq!(evaluate(&mut runtime, "devicePixelRatio"), Value::Number(2.0));
+    session.set_device_pixel_ratio(0.0, runtime.as_ref());
+    assert_eq!(evaluate(&mut runtime, "devicePixelRatio"), Value::Number(2.0));
+}
+
+#[test]
+fn default_headless_device_pixel_ratio_short_circuits_legacy_screen_fallback() {
+    let (_, _, mut runtime) = start(
+        "<script>var retina=(window.devicePixelRatio||window.screen.deviceXDPI/window.screen.logicalXDPI)>1;</script>",
+    );
+    assert_eq!(evaluate(&mut runtime, "window.devicePixelRatio"), Value::Number(1.0));
+    assert_eq!(evaluate(&mut runtime, "retina"), Value::Bool(false));
+}
+
+#[test]
 fn external_classic_bundle_runs_within_the_remaining_document_budget() {
     let (mut page, mut session, mut runtime) = start(
         "<script src='large.js'></script><script src='overflow.js'></script>",
