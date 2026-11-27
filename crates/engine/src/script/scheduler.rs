@@ -14,8 +14,6 @@ use std::{
 };
 
 const MAX_TIMERS: usize = 1024;
-const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
-const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(20);
 const INPUT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(45);
 const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(180);
@@ -609,21 +607,6 @@ fn report_callback(
     }
 }
 
-/// The outer task owns the deadline and fuel, including nested event delivery
-/// and the subsequent microtask checkpoint.
-#[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
-fn run_window_task<T>(
-    vm: &mut Vm,
-    callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
-) -> Result<T, JsError> {
-    vm.with_task_cpu_budget(
-        u64::MAX,
-        WINDOW_TASK_CPU_BUDGET,
-        Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
-        callback,
-    )
-}
-
 pub(super) fn run_input_task<T>(
     vm: &mut Vm,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
@@ -690,7 +673,7 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
         let frame = state.borrow_mut().scheduler.rendering.pop_front();
         let Some(frame) = frame else { break };
         let callback = vm.unroot(frame.callback).unwrap();
-        let result = run_window_task(vm, |vm| {
+        let result = run_script_task(vm, |vm| {
             let result = vm.call_at_callback_boundary(callback, Value::Undefined, &[timestamp.into()]);
             report_callback(vm, state, result)?;
             drain_host_microtasks(vm, state)
@@ -728,9 +711,7 @@ mod task_limit_tests {
         let page = LoadedPage::from_html("about:test", "<!doctype html>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
         let parked = runtime.vm.new_native_function("park", |vm, _, _| {
-            std::thread::sleep(
-                super::WINDOW_TASK_CPU_BUDGET + std::time::Duration::from_millis(50),
-            );
+            std::thread::sleep(std::time::Duration::from_millis(2050));
             vm.charge_work(1)?;
             Ok(Value::Undefined)
         });
