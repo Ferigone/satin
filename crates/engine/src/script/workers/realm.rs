@@ -7,8 +7,8 @@ use super::{
 };
 use crate::network::CancelSignal;
 use crate::script::{
-    abort::AbortHost, arg, dom_api, event_target, fatal, getter, message_ports::message_event,
-    scheduler, webidl,
+    abort::AbortHost, arg, dom_api, event_target, fatal, getter, message_ports,
+    scheduler, structured_clone::CloneHost, webidl,
 };
 use rust_browser_javascript::{ErrorKind, JsError, JsString, StructuredClonePacket, Value, Vm};
 use std::{rc::Rc, time::Instant};
@@ -18,10 +18,16 @@ const NAME_SLOT: u32 = 0;
 const LOCATION_SLOT: u32 = 1;
 const MAX_MICROTASKS: usize = 4096;
 
+pub(super) enum RealmEvent {
+    Fetch(FetchEvent),
+    Port,
+}
+
 pub(super) struct WorkerRealm {
     vm: Vm,
     events: event_target::Events,
-    message_events: message_event::MessageEvents,
+    messages: message_ports::MessagePorts,
+    prefer_port: bool,
     timers: timers::Timers,
     fetch: Option<WorkerFetch>,
 }
@@ -41,11 +47,9 @@ impl WorkerRealm {
         let global = vm.global();
         let object = vm.get_global("Object")?;
         let set_prototype = vm.get_property(object.clone(), "setPrototypeOf")?;
-        let freeze = vm.get_property(object, "freeze")?;
-        let event_constructor = vm.get_global("Event")?;
         let target_constructor = vm.get_global("EventTarget")?;
-        let message_events =
-            message_event::install(&mut vm, &events, &event_constructor, &set_prototype, freeze)?;
+        let cloning = CloneHost::new_worker(&mut vm)?;
+        let messages = message_ports::install(&mut vm, events.clone(), cloning)?;
 
         let worker_proto = vm.new_object_with_prototype(events.target_proto.clone())?;
         let worker = webidl::interface(
@@ -134,7 +138,8 @@ impl WorkerRealm {
         Ok(Self {
             vm,
             events,
-            message_events,
+            messages,
+            prefer_port: true,
             timers,
             fetch,
         })
@@ -170,15 +175,37 @@ impl WorkerRealm {
         }
     }
 
-    pub(super) fn next_fetch_event(&mut self) -> Option<FetchEvent> {
-        self.fetch.as_mut()?.next_event()
+    // Both task sources are local to this worker. Alternate when both
+    // are ready, without treating a port event as a microtask.
+    pub(super) fn next_event(&mut self) -> Option<RealmEvent> {
+        if self.prefer_port && self.messages.has_tasks() {
+            self.prefer_port = false;
+            return Some(RealmEvent::Port);
+        }
+        if let Some(event) = self.fetch.as_mut().and_then(|fetch| fetch.next_event()) {
+            self.prefer_port = true;
+            return Some(RealmEvent::Fetch(event));
+        }
+        if self.messages.has_tasks() {
+            self.prefer_port = false;
+            return Some(RealmEvent::Port);
+        }
+        None
     }
 
-    pub(super) fn dispatch_fetch_event(&mut self, event: FetchEvent) -> Result<(), JsError> {
-        let Some(fetch) = &self.fetch else {
-            return Ok(());
-        };
-        run_task(&mut self.vm, |vm| fetch.receive(vm, event))
+    pub(super) fn dispatch_event(&mut self, event: RealmEvent) -> Result<(), JsError> {
+        match event {
+            RealmEvent::Fetch(event) => {
+                let Some(fetch) = &self.fetch else {
+                    return Ok(());
+                };
+                run_task(&mut self.vm, |vm| fetch.receive(vm, event))
+            }
+            RealmEvent::Port => {
+                let messages = &self.messages;
+                run_task(&mut self.vm, |vm| messages.dispatch_next(vm).map(|_| ()))
+            }
+        }
     }
 
     pub(super) fn timer_deadline(&self) -> Option<Instant> {
@@ -205,10 +232,10 @@ impl WorkerRealm {
         payload: impl FnOnce(&mut Vm) -> (&'static str, Value),
     ) -> Result<(), JsError> {
         let events = &self.events;
-        let message_events = &self.message_events;
+        let messages = &self.messages;
         run_task(&mut self.vm, |vm| {
             let (kind, data) = payload(vm);
-            let event = message_events.received_from_peer(vm, kind, data)?;
+            let event = messages.received_from_peer(vm, kind, data)?;
             let mut reported = None;
             let global = vm.global();
             events.dispatch_with_report(vm, global, event, |_, error| {
@@ -422,6 +449,32 @@ mod tests {
             ]
         );
         assert!(closed.get());
+    }
+
+    #[test]
+    fn worker_local_message_channel_clones_and_dispatches_as_a_task() {
+        let output = Rc::default();
+        let mut realm = realm(&output, &Rc::default());
+        realm.evaluate(
+            r#"
+            const channel = new MessageChannel();
+            const payload = {value: 42};
+            channel.port2.onmessage = event => {
+                postMessage(event.data.value + ':' + (event instanceof MessageEvent));
+                queueMicrotask(() => postMessage('checkpoint'));
+            };
+            channel.port1.postMessage(payload);
+            payload.value = 99;
+            queueMicrotask(() => postMessage('startup'));
+            "#,
+            URL,
+        ).unwrap();
+        assert_eq!(*output.borrow(), ["startup"]);
+        let event = realm.next_event().expect("queued local port task");
+        assert!(matches!(&event, RealmEvent::Port));
+        realm.dispatch_event(event).unwrap();
+        assert_eq!(*output.borrow(), ["startup", "42:true", "checkpoint"]);
+        assert!(realm.next_event().is_none());
     }
 
     #[test]
