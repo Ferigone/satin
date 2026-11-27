@@ -111,6 +111,11 @@ impl SvgScene {
     pub fn intrinsic_size(document: &Document, root: NodeId) -> (f32, f32) {
         scene::intrinsic_size(document, root)
     }
+    /// Whether an embedded SVG supplies only a viewBox ratio and no dimensions.
+    /// Percentage dimensions and other explicit dimensions are handled separately.
+    pub(crate) fn has_intrinsic_ratio_only(document: &Document, root: NodeId) -> bool {
+        scene::has_intrinsic_ratio_only(document, root)
+    }
     /// Paint into the caller's packed 0x00RRGGBB canvas. The target rectangle maps
     /// root viewport units into canvas coordinates; clip is in canvas pixels.
     pub fn paint(

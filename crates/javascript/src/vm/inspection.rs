@@ -101,6 +101,44 @@ impl Vm {
         result
     }
 
+    /// Bounded, inert description of a rejected object. Inspect only selected
+    /// own data descriptors; never run getters, proxy traps or coercions.
+    pub fn inspect_rejection_reason(&self, value: &Value) -> Option<String> {
+        let Value::Object(id) = value else {
+            return None;
+        };
+        let object = self.heap.object(*id).ok()?;
+        let kind = match &object.kind {
+            ObjectKind::Error(kind, _) => Some(kind.name()),
+            _ => None,
+        };
+        let mut fields = Vec::new();
+        for name in ["name", "message", "status", "statusText", "readyState"] {
+            let Some(prop) = object.properties.get(&JsString::from(name)) else {
+                continue;
+            };
+            let PropertyKind::Data { value, .. } = &prop.kind else {
+                continue;
+            };
+            let preview = match value {
+                Value::String(text) => format!("{:?}", string(text, 160)),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                Value::Null => "null".into(),
+                _ => continue,
+            };
+            fields.push(format!("{name}: {preview}"));
+        }
+        if fields.is_empty() {
+            return kind.map(str::to_owned);
+        }
+        Some(format!(
+            "{} {{ {} }}",
+            kind.unwrap_or("object"),
+            fields.join(", ")
+        ))
+    }
+
     pub fn inspect_value(&self, value: &Value) -> String {
         self.preview_value(value, true)
     }

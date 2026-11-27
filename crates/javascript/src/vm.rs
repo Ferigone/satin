@@ -1247,6 +1247,10 @@ impl Vm {
     pub fn get_property(&mut self, object: Value, key: &str) -> Result<Value, JsError> {
         self.get(object, &key.into())
     }
+    /// Test property presence, including inherited properties, without reading its value.
+    pub fn has_property(&mut self, object: &Value, key: &str) -> Result<bool, JsError> {
+        self.has(object, &key.into())
+    }
     /// Compare actual prototype identities without invoking user getters or hooks.
     pub fn has_prototype(&mut self, value: &Value, prototype: &Value) -> Result<bool, JsError> {
         let prototype = prototype

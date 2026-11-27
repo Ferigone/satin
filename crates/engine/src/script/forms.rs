@@ -1568,6 +1568,51 @@ impl FormHost {
                 let index = vm.to_number(&arg(args, 0))? as usize;
                 wrap(vm, &dom, item_ids.get(index).copied())
             })?;
+            if property == "elements" {
+                // The existing collection is a snapshot. Reflect unambiguous
+                // supported names on it as well as through namedItem().
+                // Do not shadow indexed entries, length or built-in methods.
+                // A live collection and RadioNodeList for duplicate matches
+                // require a separate Web IDL collection implementation.
+                let mut names: Vec<(String, Option<NodeId>)> = Vec::new();
+                let mut positions: HashMap<String, usize> = HashMap::new();
+                {
+                    let dom = self.dom.borrow();
+                    for &control in &ids {
+                        for attribute in ["id", "name"] {
+                            let Some(key) = dom.document.attr(control, attribute) else {
+                                continue;
+                            };
+                            vm.charge_buffer_work(key.len())?;
+                            if key.is_empty()
+                                || key.parse::<u32>().is_ok_and(|index| {
+                                    index != u32::MAX && index.to_string() == key
+                                })
+                            {
+                                continue;
+                            }
+                            if let Some(&position) = positions.get(key) {
+                                if names[position].1 != Some(control) {
+                                    names[position].1 = None;
+                                }
+                            } else {
+                                positions.insert(key.to_owned(), names.len());
+                                names.push((key.to_owned(), Some(control)));
+                            }
+                        }
+                    }
+                }
+                for (key, control) in names {
+                    let Some(control) = control else { continue };
+                    if matches!(key.as_str(), "item" | "namedItem")
+                        || vm.has_property(&result, &key)?
+                    {
+                        continue;
+                    }
+                    let value = wrap(vm, &self.dom, Some(control))?;
+                    vm.define_data_property(result.clone(), &key, value, false, false, true)?;
+                }
+            }
             let dom = self.dom.clone();
             method(vm, result.clone(), "namedItem", move |vm, _, args| {
                 let key = text(vm, arg(args, 0))?;

@@ -384,12 +384,12 @@ fn run_worker(
         worker.dispatch_fetch_jobs();
         // A continually due timer must not indefinitely delay an already
         // published transport event. Give it one turn after a timer task.
-        let input = if ran_timer && let Some(event) = worker.next_fetch_event() {
+        let input = if ran_timer && let Some(event) = worker.next_event() {
             Received::External(event)
         } else {
             connection.to_worker.receive_until_or(
                 worker.timer_deadline(),
-                || worker.next_fetch_event(),
+                || worker.next_event(),
                 prefer_fetch,
             )
         };
@@ -413,7 +413,7 @@ fn run_worker(
             }
             Received::External(event) => {
                 prefer_fetch = false;
-                worker.dispatch_fetch_event(event)
+                worker.dispatch_event(event)
             }
             Received::Deadline => worker.dispatch_timer(Instant::now()),
             Received::Closed => break,

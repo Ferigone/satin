@@ -640,3 +640,25 @@ fn focus_selectors_keep_assistive_text_and_reveal_the_keyboard_skip_link() {
         true,
     );
 }
+
+#[test]
+fn form_elements_reflect_unique_names_and_ids_without_shadowing_collection_api() {
+    let (_, mut runtime) = realm(
+        "<!doctype html><form id=f><input id=q name=query value=Warszawa><input name=length><input name=namedItem><input name=100></form><input form=f name=external>",
+    );
+    js(
+        &mut runtime,
+        "var f=document.getElementById('f');var c=f.elements;var q=document.getElementById('q');c.query===q && c.q===q && c.query.value==='Warszawa' && c.namedItem('query')===q && c.external===c.namedItem('external') && c.length===5 && typeof c.namedItem==='function' && c[0]===q && c[100]===undefined && Object.keys(c).indexOf('query')===-1",
+        true,
+    );
+    js(
+        &mut runtime,
+        "q.setAttribute('name','renamed');f.elements.renamed===q && f.elements.query===undefined",
+        true,
+    );
+    js(
+        &mut runtime,
+        "var seen='';f.addEventListener('submit',function(e){e.preventDefault();seen=this.elements.renamed.value;});f.dispatchEvent(new Event('submit',{cancelable:true}));seen==='Warszawa'",
+        true,
+    );
+}

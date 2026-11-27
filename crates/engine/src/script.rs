@@ -2,6 +2,7 @@
 //! A tab shares one VM between its document and accessible child realms.
 //! Native callbacks never borrow the DOM across VM calls.
 mod abort;
+mod attributes;
 mod base64_api;
 mod blobs;
 mod canvas;
@@ -97,6 +98,7 @@ struct State {
     document: Document,
     custom_elements: Rc<RefCell<custom_elements::Registry>>,
     wrappers: HashMap<NodeId, Value>,
+    attribute_nodes: attributes::Cache,
     styles: HashMap<NodeId, Value>,
     nodes: HashMap<ObjectId, NodeId>,
     prototype: Value,
@@ -550,6 +552,9 @@ fn mutate_attribute(
             },
         );
     }
+    if !present && state.document.attr(id, &key).is_some() {
+        attributes::detach(vm, &mut state, id, &key)?;
+    }
     if let NodeKind::Element { attrs, .. } = &mut state.document.nodes[id.0].kind {
         if let Some(value) = value {
             attrs.insert(key.clone(), value);
@@ -824,6 +829,7 @@ impl ScriptRuntime {
         let state = Rc::new(RefCell::new(State {
             document,
             wrappers: HashMap::new(),
+            attribute_nodes: attributes::Cache::default(),
             styles: HashMap::new(),
             nodes: HashMap::new(),
             prototype: prototype.clone(),
@@ -1049,6 +1055,7 @@ impl ScriptRuntime {
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         dataset::install(&mut vm, &state, &dom_errors)?;
+        attributes::install(&mut vm, &state)?;
         let range_prototype = range::install(&mut vm, &state, &dom_errors)?;
         selection::install(&mut vm, &state, &dom_errors, range_prototype)?;
         forms.install_typed_controls(&mut vm)?;
@@ -1827,7 +1834,7 @@ fn link_reference(document: &Document, id: NodeId) -> Option<&str> {
 
 fn report_unhandled(vm: &mut Vm, state: &Shared) {
     for value in vm.take_unhandled_rejections() {
-        devtools_console::report_rejection(state, vm, &value);
+        devtools_console::report_rejection(vm, state, &value);
     }
 }
 

@@ -16,10 +16,10 @@ use rust_browser_javascript::{
 
 #[derive(Clone)]
 pub(super) struct CloneHost {
-    blobs: BlobFactory,
-    image_data: ImageDataFactory,
-    image_bitmap: ImageBitmapFactory,
-    file_lists: FileListHost,
+    blobs: Option<BlobFactory>,
+    image_data: Option<ImageDataFactory>,
+    image_bitmap: Option<ImageBitmapFactory>,
+    file_lists: Option<FileListHost>,
     dom_exception: Value,
     exception_prototype: Value,
 }
@@ -37,10 +37,28 @@ impl CloneHost {
         let exception_prototype = vm.get_property(dom_exception.clone(), "prototype")?;
         vm.root(exception_prototype.clone());
         Ok(Self {
-            blobs,
-            image_data,
-            image_bitmap,
-            file_lists,
+            blobs: Some(blobs),
+            image_data: Some(image_data),
+            image_bitmap: Some(image_bitmap),
+            file_lists: Some(file_lists),
+            dom_exception,
+            exception_prototype,
+        })
+    }
+
+    // Workers have their own VM and DOMException, but do not yet expose
+    // the document-specific factories. Their local ports still clone JS
+    // values and transfer buffers/ports within that VM.
+    pub(super) fn new_worker(vm: &mut Vm) -> Result<Self, JsError> {
+        let dom_exception = vm.get_global("DOMException")?;
+        vm.root(dom_exception.clone());
+        let exception_prototype = vm.get_property(dom_exception.clone(), "prototype")?;
+        vm.root(exception_prototype.clone());
+        Ok(Self {
+            blobs: None,
+            image_data: None,
+            image_bitmap: None,
+            file_lists: None,
             dom_exception,
             exception_prototype,
         })
@@ -76,7 +94,9 @@ impl CloneHost {
         vm: &mut Vm,
         source: &Value,
     ) -> Result<Option<PlatformClone>, StructuredCloneError> {
-        if let Some(object) = self.blobs.clone_blob(vm, source)? {
+        if let Some(blobs) = &self.blobs
+            && let Some(object) = blobs.clone_blob(vm, source)?
+        {
             return Ok(Some(PlatformClone {
                 object,
                 slots: vec![],
@@ -88,13 +108,20 @@ impl CloneHost {
                 slots: vec![],
             }));
         }
-        if let Some(value) = self.file_lists.clone_file_list(vm, source)? {
+        if let Some(file_lists) = &self.file_lists
+            && let Some(value) = file_lists.clone_file_list(vm, source)?
+        {
             return Ok(Some(value));
         }
-        if let Some(value) = self.image_bitmap.clone_bitmap(vm, source)? {
+        if let Some(image_bitmap) = &self.image_bitmap
+            && let Some(value) = image_bitmap.clone_bitmap(vm, source)?
+        {
             return Ok(Some(value));
         }
-        Ok(self.image_data.clone_image_data(vm, source)?)
+        match &self.image_data {
+            Some(image_data) => Ok(image_data.clone_image_data(vm, source)?),
+            None => Ok(None),
+        }
     }
 
     pub(super) fn clone_graph(
@@ -112,7 +139,10 @@ impl CloneHost {
                 if let Some(plan) = ports.prepare_transfer(vm, source)? {
                     return Ok(Some(plan));
                 }
-                self.image_bitmap.prepare_transfer(vm, source)
+                match &self.image_bitmap {
+                    Some(image_bitmap) => image_bitmap.prepare_transfer(vm, source),
+                    None => Ok(None),
+                }
             },
         )
         .map_err(|error| match error {
