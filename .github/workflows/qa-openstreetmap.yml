@@ -46,7 +46,7 @@ jobs:
           const viewport = {width:1280,height:800};
           const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
           const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
-          const report = {commit:process.env.GITHUB_SHA,sourceCommit:'ca7d404557152723e50fe06944b29c632286460c',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const report = {commit:process.env.GITHUB_SHA,sourceCommit:'588db4752c639501ffa6388a1f59b065a81c2fbb',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
           async function satinCase(url,index,phase,actions){
