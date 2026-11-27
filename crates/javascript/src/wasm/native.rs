@@ -14,11 +14,13 @@ use std::{
     rc::Rc,
 };
 use wasmi::{
-    Config, Engine, Extern, ExternType, Func, FuncType, Nullable, ResumableCall, Store, Table, Val,
-    ValType,
+    CompilationMode, Config, Engine, Extern, ExternType, Func, FuncType, Nullable, ResumableCall,
+    Store, Table, Val, ValType,
 };
 
 const FUEL_QUANTUM: u64 = 16_384;
+// Wasmi's default metering charges seven units per byte of lazy translation.
+const TRANSLATION_WORK_PER_BYTE: usize = 7;
 const LINEAR_LIMIT: usize = 128 * 1024 * 1024;
 const LINEAR_POOL_LIMIT: usize = 512 * 1024 * 1024;
 const TABLE_LIMIT: usize = 32_768;
@@ -107,18 +109,29 @@ pub(crate) struct Module {
 }
 
 impl Module {
-    pub(super) fn compile(vm: &mut Vm, bytes: &[u8]) -> Result<Self, JsError> {
+    pub(super) fn compile(
+        vm: &mut Vm,
+        bytes: &[u8],
+        mode: CompilationMode,
+    ) -> Result<Self, JsError> {
         let estimated_bytes = bytes.len().saturating_mul(8);
         vm.ensure_allocation(estimated_bytes)?;
         vm.consume_work(bytes.len().div_ceil(16))?;
+        if matches!(mode, CompilationMode::Eager) {
+            vm.consume_work(bytes.len().saturating_mul(TRANSLATION_WORK_PER_BYTE))?;
+        }
         let mut config = Config::default();
         // A start function can invoke JS before its instance has finished linking.
         config
             .consume_fuel(true)
             .allow_start_fn(false)
-            .wasm_multi_memory(false);
+            .wasm_multi_memory(false)
+            // Translation of the entry function happens before Wasmi can create
+            // a resumable call. Compile executable modules outside execution slices.
+            .compilation_mode(mode);
         let module = wasmi::Module::new(&Engine::new(&config), bytes)
             .map_err(|error| JsError::new(ErrorKind::CompileError, error.to_string()))?;
+        vm.consume_work(0)?;
         Ok(Self {
             module,
             estimated_bytes,

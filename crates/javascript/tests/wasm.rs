@@ -110,6 +110,23 @@ fn core_wasm_checks_loop_fuel_in_the_current_js_task() {
 }
 
 #[test]
+fn native_wasm_compiles_large_functions_before_the_first_call() {
+    let mut vm = Vm::new();
+    let bytes = wat::parse_str(format!(
+        "(module (func (export \"run\") (result i32) (block {}) i32.const 42))",
+        "nop ".repeat(40_000)
+    ))
+    .unwrap();
+    let input = vm.new_uint8_array(bytes).unwrap();
+    vm.set_global("input", input).unwrap();
+    assert_eq!(
+        vm.eval("new WebAssembly.Instance(new WebAssembly.Module(input)).exports.run()")
+            .unwrap(),
+        Value::from(42)
+    );
+}
+
+#[test]
 fn bytes_use_the_visible_view_and_call_the_javascript_import() {
     let mut vm = fixture();
     vm.eval(

@@ -12,6 +12,7 @@ use crate::{
 use decode::{ExportKind, ImportKind, Op, Signature, allocation_error, compile_error};
 pub(crate) use memory::Memory;
 use std::{mem::size_of, rc::Rc};
+use wasmi::CompilationMode;
 
 const INSTANCE_EXPORTS: u32 = 0;
 const INSTANCE_MODULE: u32 = 1;
@@ -45,7 +46,7 @@ impl Module {
     }
 }
 
-fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
+fn decode_source(vm: &mut Vm, bytes: &Value, mode: CompilationMode) -> Result<Module, JsError> {
     let size = vm
         .buffer_source_len(bytes)?
         .ok_or_else(|| JsError::type_error("Expected a WebAssembly BufferSource"))?;
@@ -60,7 +61,7 @@ fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
     match decode::decode(vm, bytes.clone()) {
         Ok(module) => Ok(Module::Simple(module)),
         Err(error) if error.kind == ErrorKind::CompileError => {
-            native::Module::compile(vm, &bytes).map(Module::Native)
+            native::Module::compile(vm, &bytes, mode).map(Module::Native)
         }
         Err(error) => Err(error),
     }
@@ -72,7 +73,7 @@ fn create_module(vm: &mut Vm, bytes: &Value, prototype: ObjectId) -> Result<Valu
             "WebAssembly compilation is disallowed by policy",
         ));
     }
-    let module = decode_source(vm, bytes)?;
+    let module = decode_source(vm, bytes, CompilationMode::Eager)?;
     vm.ensure_allocation(module.retained_bytes().saturating_add(384))?;
     vm.allocate_constructed(ObjectKind::WasmModule(Rc::new(module)), prototype)
 }
@@ -646,7 +647,7 @@ pub(crate) fn install(vm: &mut Vm) {
         namespace.clone(),
         "validate",
         1,
-        |vm, _, args| match decode_source(vm, &arg(args, 0)) {
+        |vm, _, args| match decode_source(vm, &arg(args, 0), CompilationMode::LazyTranslation) {
             Ok(_) => Ok(Value::Bool(true)),
             Err(error) if error.kind == ErrorKind::CompileError => Ok(Value::Bool(false)),
             Err(error) => Err(error),
