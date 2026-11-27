@@ -225,6 +225,7 @@ pub struct DocumentSession {
     preview_at: Instant,
     discarded: usize,
     parser_script_count: usize,
+    device_pixel_ratio: f64,
 }
 
 impl DocumentSession {
@@ -302,8 +303,19 @@ impl DocumentSession {
                 preview_at: Instant::now(),
                 discarded: 0,
                 parser_script_count: 0,
+                device_pixel_ratio: 1.0,
             },
         ))
+    }
+
+    /// Set the output scale before the first script and propagate subsequent changes.
+    pub fn set_device_pixel_ratio(&mut self, ratio: f64, runtime: Option<&ScriptRuntime>) {
+        if ratio.is_finite() && ratio > 0.0 {
+            self.device_pixel_ratio = ratio;
+            if let Some(runtime) = runtime {
+                runtime.set_device_pixel_ratio(ratio);
+            }
+        }
     }
 
     pub fn loaded(&self) -> bool {
@@ -467,6 +479,7 @@ impl DocumentSession {
             state.scheduler.note_response_start(self.response_start);
         }
         realm.set_viewport(viewport);
+        realm.set_device_pixel_ratio(self.device_pixel_ratio);
         // This case is used when a late resource handler is the first caller.
         if self.phase != Phase::Parsing {
             realm.state.borrow_mut().ready_state = if self.loaded() {

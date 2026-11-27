@@ -1153,8 +1153,9 @@ impl App {
         let history = self.tabs[index].history.clone();
         let storage = self.tabs[index].storage.clone();
         match DocumentSession::start_in_tab(opened, history, storage) {
-            Ok((page, session)) => {
+            Ok((page, mut session)) => {
                 let tab = &mut self.tabs[index];
+                session.set_device_pixel_ratio(f64::from(self.scale * tab.zoom), None);
                 tab.url = page.url.clone();
                 tab.install_page(page);
                 tab.runtime = None;
@@ -1196,6 +1197,7 @@ impl App {
         let (Some(session), Some(page)) = (&mut tab.document_session, &mut tab.page) else {
             return false;
         };
+        session.set_device_pixel_ratio(f64::from(self.scale * tab.zoom), tab.runtime.as_ref());
         if !session.needs_advance(tab.runtime.as_ref()) {
             return false;
         }
@@ -1434,6 +1436,12 @@ impl App {
         {
             tab.scroll = request.y;
             tab.scroll_x = request.x;
+        }
+        let ratio = f64::from(self.scale * tab.zoom);
+        if let Some(session) = &mut tab.document_session {
+            session.set_device_pixel_ratio(ratio, tab.runtime.as_ref());
+        } else if let Some(runtime) = &tab.runtime {
+            runtime.set_device_pixel_ratio(ratio);
         }
         let mut viewport = regions.viewport(tab);
         let (width, height) = (viewport.width, viewport.height);
@@ -5300,6 +5308,14 @@ impl ApplicationHandler<()> for App {
                     self.mouse.1 *= self.scale / new_scale;
                 }
                 self.scale = new_scale;
+                for tab in &mut self.tabs {
+                    let ratio = f64::from(new_scale * tab.zoom);
+                    if let Some(session) = &mut tab.document_session {
+                        session.set_device_pixel_ratio(ratio, tab.runtime.as_ref());
+                    } else if let Some(runtime) = &tab.runtime {
+                        runtime.set_device_pixel_ratio(ratio);
+                    }
+                }
                 self.window_geometry_changed();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),

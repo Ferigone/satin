@@ -202,6 +202,8 @@ pub(crate) enum Expr {
     PrivateIn(JsString, Box<Expr>),
     Call(Box<Expr>, Vec<Expr>),
     NestedCalls(Box<Expr>, Vec<(JsString, Vec<Expr>)>),
+    // Inner-to-outer grouped identifier assignments followed by ordinary method calls.
+    AssignedMethodCalls(Box<Expr>, Vec<(JsString, Expr, Vec<Expr>)>),
     New(Box<Expr>, Vec<Expr>),
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
@@ -1536,46 +1538,123 @@ impl Parser {
             self.checked_expression(Expr::PrivateIn(name, Box::new(object)))?
         } else if min <= 2 && self.yield_context == KeywordContext::Body && self.at("yield") {
             self.yield_expression()?
+        } else if min <= 2 && self.grouped_assignment_ahead() {
+            return self.grouped_assignments();
         } else if min <= 2 && (self.at("(") || async_parens) {
             self.advance(if async_parens { 2 } else { 1 });
             let awaits = self.await_count;
             let yields = self.yield_count;
-            let (mut parts, trailing) = self.cover()?;
-            if self.at("=>") && !self.current().newline {
-                if self.yield_count != yields {
-                    return Err(self.error("yield is not allowed in arrow parameters"));
-                }
-                if self.await_count != awaits
-                    && (async_parens || self.await_context != KeywordContext::None)
-                {
-                    return Err(self.error("await is not allowed in arrow parameters"));
-                }
-                self.advance(1);
-                return self
-                    .arrow_from_cover(start, parts, trailing, async_parens)
-                    .map(|arrow| (arrow, true));
-            }
-            let primary = if async_parens {
-                Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
-            } else {
-                if parts.is_empty()
-                    || trailing
-                    || parts.iter().any(|part| matches!(part, Expr::Spread(_)))
-                {
-                    return Err(self.error("Invalid parenthesized expression"));
-                }
-                let inner = if parts.len() == 1 {
-                    parts.pop().unwrap()
-                } else {
-                    self.checked_expression(Expr::Sequence(parts))?
-                };
-                Expr::Group(Box::new(inner))
-            };
-            self.finish_unary(self.checked_expression(primary)?)?
+            let (parts, trailing) = self.cover()?;
+            return self.finish_cover_expression(start, awaits, yields, parts, trailing, async_parens);
         } else {
             self.unary()?
         };
         Ok((left, false))
+    }
+    fn grouped_assignment_ahead(&self) -> bool {
+        self.at("(")
+            && self.lookahead(1).is_some_and(|token| {
+                matches!(&token.kind, TokenKind::Word(name) | TokenKind::EscapedWord(name)
+                    if !matches!(name.as_str(), "async" | "await" | "yield" | "arguments")
+                        && self.identifier_allowed(name))
+            })
+            && self.lookahead(2).is_some_and(|token| token.kind == TokenKind::Punct("="))
+    }
+
+    fn grouped_assignments(&mut self) -> Result<(Expr, bool), JsError> {
+        // The cover grammar can still turn any of these groups into arrow
+        // parameters. Only collect its initial identifier assignment, then
+        // resume the normal expression/cover grammar at each closing group.
+        let previous = self.allow_in;
+        let result = self.grouped_assignments_inner(previous);
+        self.allow_in = previous;
+        result
+    }
+
+    fn grouped_assignments_inner(&mut self, previous: bool) -> Result<(Expr, bool), JsError> {
+        let mut frames = Vec::new();
+        while self.grouped_assignment_ahead() {
+            if frames.len() >= MAX_AST_DEPTH {
+                return Err(self.error("AST nesting limit exceeded"));
+            }
+            let start = self.current().start;
+            self.advance(1);
+            let awaits = self.await_count;
+            let yields = self.yield_count;
+            let name = self.name()?;
+            self.expect("=")?;
+            frames.push((start, awaits, yields, name));
+            self.allow_in = true;
+        }
+        let (left, arrow) = self.expression_prefix(2)?;
+        let mut value = self.expression_tail(2, left, arrow)?;
+        while let Some((start, awaits, yields, name)) = frames.pop() {
+            let assignment = self.combine_operator("=", Expr::Identifier(name), value, true)?;
+            let mut parts = vec![assignment];
+            let trailing = if self.eat(")") {
+                false
+            } else {
+                self.expect(",")?;
+                if self.eat(")") {
+                    true
+                } else {
+                    let (rest, trailing) = self.cover()?;
+                    parts.extend(rest);
+                    trailing
+                }
+            };
+            self.allow_in = if frames.is_empty() { previous } else { true };
+            let (left, arrow) =
+                self.finish_cover_expression(start, awaits, yields, parts, trailing, false)?;
+            if frames.is_empty() {
+                return Ok((left, arrow));
+            }
+            value = self.expression_tail(2, left, arrow)?;
+        }
+        unreachable!("grouped assignment prefix must collect at least one frame")
+    }
+
+    fn finish_cover_expression(
+        &mut self,
+        start: usize,
+        awaits: usize,
+        yields: usize,
+        mut parts: Vec<Expr>,
+        trailing: bool,
+        async_parens: bool,
+    ) -> Result<(Expr, bool), JsError> {
+        if self.at("=>") && !self.current().newline {
+            if self.yield_count != yields {
+                return Err(self.error("yield is not allowed in arrow parameters"));
+            }
+            if self.await_count != awaits
+                && (async_parens || self.await_context != KeywordContext::None)
+            {
+                return Err(self.error("await is not allowed in arrow parameters"));
+            }
+            self.advance(1);
+            return self
+                .arrow_from_cover(start, parts, trailing, async_parens)
+                .map(|arrow| (arrow, true));
+        }
+        let primary = if async_parens {
+            Expr::Call(Box::new(Expr::Identifier("async".into())), parts)
+        } else {
+            if parts.is_empty()
+                || trailing
+                || parts.iter().any(|part| matches!(part, Expr::Spread(_)))
+            {
+                return Err(self.error("Invalid parenthesized expression"));
+            }
+            let inner = if parts.len() == 1 {
+                parts.pop().unwrap()
+            } else {
+                self.checked_expression(Expr::Sequence(parts))?
+            };
+            Expr::Group(Box::new(inner))
+        };
+        self.finish_unary(self.checked_expression(primary)?)
+            .map(|left| (left, false))
     }
     fn expression_tail(
         &mut self,
@@ -1962,11 +2041,33 @@ impl Parser {
         // Keep the outer Call for assignment-target and tagged-template grammar.
         // The existing chain emitter keeps every intermediate property reference
         // (including its receiver) until the subsequent call consumes it.
-        let callee = if links.is_empty() {
-            first_member
-        } else {
-            self.checked_expression(Expr::Chain(Box::new(first_member), links))?
-        };
+        if links.is_empty() {
+            return self.compact_assigned_method_call(first_member, args);
+        }
+        let callee = self.checked_expression(Expr::Chain(Box::new(first_member), links))?;
+        self.checked_expression(Expr::Call(Box::new(callee), args))
+    }
+
+    fn compact_assigned_method_call(&self, callee: Expr, args: Vec<Expr>) -> Result<Expr, JsError> {
+        if let Expr::Member(object, _) = &callee
+            && let Expr::Group(inner) = object.as_ref()
+            && let Expr::Assign("=", left, _) = inner.as_ref()
+            && matches!(left.as_ref(), Expr::Identifier(_))
+        {
+            let Expr::Member(object, key) = callee else { unreachable!() };
+            let Expr::Group(inner) = *object else { unreachable!() };
+            let Expr::Assign("=", left, right) = *inner else { unreachable!() };
+            let Expr::Identifier(name) = *left else { unreachable!() };
+            let (base, mut levels) = match *right {
+                Expr::AssignedMethodCalls(base, levels) => (base, levels),
+                right => (Box::new(right), Vec::new()),
+            };
+            if levels.len() >= MAX_AST_DEPTH {
+                return Err(self.error("AST nesting limit exceeded"));
+            }
+            levels.push((name, *key, args));
+            return self.checked_expression(Expr::AssignedMethodCalls(base, levels));
+        }
         self.checked_expression(Expr::Call(Box::new(callee), args))
     }
     fn chain_link(&self, e: Expr, link: ChainLink) -> Result<Expr, JsError> {
@@ -2347,6 +2448,13 @@ fn ast_within_budget_at(root: Ast<'_>, depth: usize) -> bool {
                 Expr::Sequence(terms) | Expr::AddChain(terms) => {
                     pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
+                Expr::AssignedMethodCalls(base, levels) => {
+                    pending.push((Ast::Expression(base), child_depth));
+                    for (_, key, args) in levels {
+                        pending.push((Ast::Expression(key), child_depth));
+                        pending.extend(args.iter().map(|e| (Ast::Expression(e), child_depth)));
+                    }
+                }
                 Expr::NestedCalls(base, levels) => {
                     pending.push((Ast::Expression(base), child_depth));
                     for (_, args) in levels {
@@ -2449,7 +2557,7 @@ fn ast_within_budget_at(root: Ast<'_>, depth: usize) -> bool {
 
 pub(crate) fn call_assignment_target(mut e: &Expr) -> bool {
     while let Expr::Group(inner) = e { e = inner; }
-    matches!(e, Expr::NestedCalls(..))
+    matches!(e, Expr::NestedCalls(..) | Expr::AssignedMethodCalls(..))
         || matches!(e, Expr::Call(callee, _) if !matches!(callee.as_ref(), Expr::Super))
 }
 

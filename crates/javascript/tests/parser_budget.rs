@@ -668,3 +668,66 @@ fn deferred_functions_distinguish_sloppy_and_nested_strict_scopes() {
         assert_eq!(vm.check_syntax(&invalid).unwrap_err().kind, ErrorKind::SyntaxError);
     });
 }
+
+#[test]
+fn nested_grouped_assignment_method_calls_preserve_values_on_one_mib_stack() {
+    small_stack(|| {
+        // Minifiers emit repeated parenthesized assignments as method receivers.
+        // OpenStreetMap's public date formatter uses 25 of these in one return.
+        let mut expression = String::from("text");
+        for _ in 0..25 {
+            expression = format!("(text={expression}.replace('a','b'))");
+        }
+        let script = format!(
+            r#"(function(){{
+                class Formatter {{
+                    format(text) {{
+                        return function(text) {{
+                            const result = {expression}.replace('b','c');
+                            return text === 'b'.repeat(25) && result === 'c' + 'b'.repeat(24);
+                        }}(text);
+                    }}
+                }}
+                return new Formatter().format('a'.repeat(25));
+            }})()"#
+        );
+        let mut vm = Vm::new();
+        vm.check_syntax(&script).unwrap();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Bool(true));
+    });
+}
+
+#[test]
+fn grouped_assignment_method_calls_keep_cover_grammar_and_reference_order() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval(r#"
+            var log = '', result;
+            var value = { get step() {
+                log += 'g';
+                return function(tag) { log += this === value ? tag : '!'; return this; };
+            } };
+            var scope = {
+                get x() { log += 'r'; return value; },
+                set x(v) { log += v === value ? 's' : '!'; }
+            };
+            with (scope) { result = (x=(x=x).step('a')).step('b'); }
+            result === value && log === 'rsgasgb'
+        "#).unwrap(), Value::Bool(true));
+        assert_eq!(vm.eval(r#"
+            let a, b;
+            const fn = (a=(b=3).toString(), c=2) => a+c;
+            fn() === '32' && b === 3
+        "#).unwrap(), Value::Bool(true));
+        assert_eq!(vm.eval(r#"
+            let f, C;
+            (f=function(){}).toString() && (C=class {}).toString() &&
+                f.name === 'f' && C.name === 'C'
+        "#).unwrap(), Value::Bool(true));
+        for source in ["(x=1,)", "(x=1,...y)", "'use strict'; (eval=1).toString()"] {
+            assert_eq!(vm.check_syntax(source).unwrap_err().kind, ErrorKind::SyntaxError);
+        }
+        let deep = format!("{}x{}", "(x=".repeat(128), ")".repeat(128));
+        assert_eq!(vm.check_syntax(&deep).unwrap_err().kind, ErrorKind::ExecutionLimit);
+    });
+}
