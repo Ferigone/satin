@@ -626,7 +626,8 @@ pub(super) fn run_input_task<T>(
     vm: &mut Vm,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
-    run_window_task(vm, callback)
+    // First interaction can run a deferred script bootstrap plus its microtasks.
+    run_script_task(vm, callback)
 }
 
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {

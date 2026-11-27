@@ -31,6 +31,8 @@ pub const FETCH_BODY_LIMIT: usize = 4 * 1024 * 1024;
 /// Maximum decoded response size for Fetch and XMLHttpRequest.
 pub const FETCH_RESPONSE_BODY_LIMIT: usize = 64 * 1024 * 1024;
 pub const FETCH_HEADER_LIMIT: usize = 64 * 1024;
+/// A request URL has its own bound, independent of serialized headers.
+pub(crate) const FETCH_URL_LIMIT: usize = 256 * 1024;
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(18);
 pub type HeaderList = Vec<(String, String)>;
 

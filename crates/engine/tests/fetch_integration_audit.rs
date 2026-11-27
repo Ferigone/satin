@@ -35,6 +35,27 @@ fn reply(url: &str, body: &str) -> WebResponse {
 }
 
 #[test]
+fn request_targets_are_bounded_separately_from_headers() {
+    let (_, mut runtime) = realm();
+    runtime.eval(r#"
+        const url = "/path?value=" + "a".repeat(82393);
+        const xhr = new XMLHttpRequest();
+        xhr.open("GET", url);
+        let result = false;
+        fetch(new Request(url)).then(response => {
+            result = xhr.readyState === 1 && response.url.endsWith(url);
+        });
+    "#).unwrap();
+    let mut pending = runtime.take_network_requests();
+    assert_eq!(pending.len(), 1);
+    let (id, request) = pending.pop().unwrap();
+    assert!(request.url.as_str().len() > 64 * 1024);
+    runtime.complete_network(id, Ok(reply(request.url.as_str(), "ok"))).unwrap();
+    runtime.pump();
+    assert_eq!(runtime.eval("result").unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn request_cache_mode_is_validated_and_cloned() {
     let page = LoadedPage::from_html("https://example.test/", "");
     let mut runtime = ScriptRuntime::new(&page).unwrap();

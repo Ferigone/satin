@@ -208,7 +208,7 @@ fn web_vm_limits() -> VmLimits {
         max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
         max_call_depth: 1024,
-        max_heap_objects: 1024 * 1024,
+        max_heap_objects: 2 * 1024 * 1024,
         max_heap_bytes: 2 * 1024 * 1024 * 1024,
         buffer_units_per_instruction: 1024,
         ..VmLimits::default()

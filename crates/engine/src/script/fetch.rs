@@ -11,7 +11,7 @@ use crate::{
     loader::LoadedPage,
     network::{
         self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT,
-        FETCH_RESPONSE_BODY_LIMIT, FetchBody, FetchError, FetchErrorKind, FetchJob, HeaderList,
+        FETCH_RESPONSE_BODY_LIMIT, FETCH_URL_LIMIT, FetchBody, FetchError, FetchErrorKind, FetchJob, HeaderList,
         RedirectMode, RequestCache, RequestMode, ResponseType, StreamingResponse, WebRequest, WebResponse,
     },
 };
@@ -537,7 +537,7 @@ fn request_init(
     let mut request = if let Some(original) = &original {
         original.borrow().request.clone()
     } else {
-        let value = usv(vm, input.clone(), FETCH_HEADER_LIMIT, "Fetch request URL")?;
+        let value = usv(vm, input.clone(), FETCH_URL_LIMIT, "Fetch request URL")?;
         let (base, resolver, client) = {
             let state = state.borrow();
             (
@@ -1100,7 +1100,7 @@ impl FetchHost {
                         )
                     });
                     let result = (|| {
-                        if response.url.len() > FETCH_HEADER_LIMIT
+                        if response.url.len() > FETCH_URL_LIMIT
                             || response.status_text.len() > FETCH_HEADER_LIMIT
                             || bytes(&response.headers) > FETCH_HEADER_LIMIT * 2
                         {
