@@ -3604,7 +3604,7 @@ impl Vm {
         self.execution_depth -= 1;
         result
     }
-    fn bytecode_depth_error(&self, depth: usize) -> JsError {
+    pub(crate) fn bytecode_depth_error(&self, depth: usize) -> JsError {
         if depth > self.limits.max_bytecode_depth {
             JsError::new(ErrorKind::ExecutionLimit, "Nested bytecode depth budget exhausted")
         } else {
