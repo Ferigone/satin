@@ -5,8 +5,8 @@ mod destructuring;
 
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
+    builtins::for_each::ForEachCall,
     bytecode::{Chunk, Code, Op},
-    collections::ForEachCall,
     heap::EnvId,
     patterns::Invocation,
     promise::{PromiseCapability, ReactionPair},
@@ -28,7 +28,7 @@ struct Frame {
     delegate: Option<delegation::Delegation>,
     patterns: Vec<destructuring::ActivePattern>,
     activation: Option<CallActivation>,
-    collection: Option<ForEachCall>,
+    for_each: Option<ForEachCall>,
 }
 
 pub(crate) struct Execution {
@@ -102,7 +102,7 @@ impl Frame {
             delegate: None,
             patterns: Vec::new(),
             activation: None,
-            collection: None,
+            for_each: None,
         }
     }
     fn absorb(&mut self, value: Option<Value>) {
@@ -143,8 +143,8 @@ impl Frame {
         if let Some(delegate) = &self.delegate {
             delegate.visit(visit);
         }
-        if let Some(collection) = &self.collection {
-            collection.visit(visit);
+        if let Some(iteration) = &self.for_each {
+            iteration.visit(visit);
         }
     }
 
@@ -544,7 +544,7 @@ impl Vm {
                     frame.waiting.take().unwrap(),
                     child,
                 )
-            } else if let Some(iteration) = frame.collection.take() {
+            } else if let Some(iteration) = frame.for_each.take() {
                 Ok(Advance::ForEach(iteration))
             } else if frame.pc == frame.chunk.ops.len() {
                 completed = Some(frames.pop().unwrap().finish(self));
@@ -559,13 +559,13 @@ impl Vm {
                 let Some(args) = iteration.next(self)? else {
                     return Ok(Advance::Operand(Value::Undefined));
                 };
-                match self.dispatch_collection_callback(&iteration, &args)? {
+                match self.dispatch_for_each_callback(&iteration, &args)? {
                     CallDispatch::Owned(call) => Ok(Advance::Call(call, Resume::ForEach(iteration))),
                     CallDispatch::Value(_) => {
-                        frame.collection = Some(iteration);
+                        frame.for_each = Some(iteration);
                         Ok(Advance::Keep)
                     }
-                    CallDispatch::ForEach(_) => unreachable!("collection callback uses ordinary dispatch"),
+                    CallDispatch::ForEach(_) => unreachable!("forEach callback uses ordinary dispatch"),
                 }
             });
             match advance {

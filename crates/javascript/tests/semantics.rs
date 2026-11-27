@@ -798,6 +798,44 @@ fn interpreted_promise_handler_collects_while_preserving_stack_and_weak_targets(
 }
 
 #[test]
+fn nested_array_for_each_can_collect_and_observe_sparse_array_mutations() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_objects: 10_000,
+        max_heap_bytes: 12 * 1024 * 1024,
+        max_instructions: 8_000_000,
+        ..VmLimits::default()
+    });
+    vm.eval(r#"
+        var finished;
+        function hydrate() {
+            const batches = [0, 8000, , 24000];
+            let reads = 0;
+            Object.defineProperty(batches, 2, {get() { reads++; return 16000; }});
+            let total = 0;
+            const visits = [];
+            batches.forEach(function (start, index, source) {
+                if (source !== batches || this.marker !== 5) throw 'forEach arguments';
+                if (index === 0) {
+                    delete source[3];
+                    source.push(32000);
+                }
+                visits.push(index);
+                [start, start + 4000].forEach(function (chunk) {
+                    for (let item = chunk; item < chunk + 4000; item++) {
+                        const row = [{index: item}, () => row[0].index];
+                        total += row[1]();
+                    }
+                });
+            }, {marker: 5});
+            return visits.join(',') + '/' + reads + '/' + total;
+        }
+        Promise.resolve().then(hydrate).then(result => { finished = result; });
+    "#).unwrap();
+    vm.drain_jobs_at_callback_boundary(8).unwrap();
+    assert_eq!(vm.eval("finished").unwrap(), Value::from("0,1,2/1/287988000"));
+}
+
+#[test]
 fn host_callback_collection_reclaims_cells_without_resetting_task_fuel() {
     let mut vm = Vm::new();
     let rooted = vm.new_object();

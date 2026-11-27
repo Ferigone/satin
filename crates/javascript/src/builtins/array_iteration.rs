@@ -1,4 +1,4 @@
-use super::{arg, method};
+use super::{arg, for_each::ForEachCall, method};
 use crate::{
     JsError, JsString, Value, Vm,
     heap::{ObjectKind, Property, array_index},
@@ -9,14 +9,16 @@ use std::ops::Range;
 enum Visit {
     Every,
     Some,
-    ForEach,
     Map,
     Filter,
 }
 
 pub(super) fn install(vm: &mut Vm, proto: &Value) {
+    let for_each = method(vm, proto.clone(), "forEach", 1, |vm, this, args| {
+        ForEachCall::array(vm, this, args)?.run(vm)
+    });
+    vm.mark_owned_native_call(&for_each, crate::heap::NativeCall::ArrayForEach);
     for (name, kind) in [
-        ("forEach", Visit::ForEach),
         ("map", Visit::Map),
         ("filter", Visit::Filter),
         ("some", Visit::Some),
@@ -43,7 +45,7 @@ pub(super) fn install(vm: &mut Vm, proto: &Value) {
     }
 }
 
-fn prepare(vm: &mut Vm, this: Value, args: &[Value]) -> Result<(Value, u64, Value), JsError> {
+pub(super) fn prepare(vm: &mut Vm, this: Value, args: &[Value]) -> Result<(Value, u64, Value), JsError> {
     let object = vm.coerce_object(this)?;
     let length = vm.get_property(object.clone(), "length")?;
     // LengthOfArrayLike: a large input need not be visited in full or even be
@@ -160,7 +162,6 @@ fn visit(vm: &mut Vm, this: Value, args: &[Value], kind: Visit) -> Result<Value,
         Visit::Filter => vm.array_species_create(object.clone(), 0)?,
         Visit::Every => Value::Bool(true),
         Visit::Some => Value::Bool(false),
-        Visit::ForEach => Value::Undefined,
     };
     let this_arg = arg(args, 1);
     let mut count = 0u64;

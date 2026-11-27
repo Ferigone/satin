@@ -8,6 +8,7 @@ use crate::{
 use std::{cmp::Ordering, mem::size_of, rc::Rc};
 
 mod array_iteration;
+pub(crate) mod for_each;
 mod array_methods;
 mod disposable;
 pub(crate) mod math;

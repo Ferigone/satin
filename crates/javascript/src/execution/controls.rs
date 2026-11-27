@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 pub(super) enum Resume {
     Call,
-    ForEach(crate::collections::ForEachCall),
+    ForEach(super::ForEachCall),
     Pass,
     Label,
     Initialize,

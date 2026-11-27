@@ -156,38 +156,6 @@ impl Orders {
 
 pub(crate) type CollectionCloneEntry = (Value, Option<Value>);
 
-pub(crate) struct ForEachCall {
-    collection: Value,
-    pub(crate) callback: Value,
-    pub(crate) receiver: Value,
-    cursor: u64,
-}
-
-impl ForEachCall {
-    pub(crate) fn new(vm: &Vm, collection: Value, args: &[Value], kind: Kind) -> Result<Self, JsError> {
-        receiver(vm, &collection, kind)?;
-        let callback = arg(args, 0);
-        if !vm.is_callable(&callback) {
-            return Err(JsError::type_error("Collection forEach callback is not callable"));
-        }
-        Ok(Self { collection, callback, receiver: arg(args, 1), cursor: 0 })
-    }
-
-    pub(crate) fn next(&mut self, vm: &mut Vm) -> Result<Option<[Value; 3]>, JsError> {
-        let id = self.collection.as_object().expect("branded collection");
-        Ok(vm.collection_entry(id, self.cursor)?.map(|(order, key, value)| {
-            self.cursor = order + 1;
-            [value, key, self.collection.clone()]
-        }))
-    }
-
-    pub(crate) fn visit(&self, visit: &mut impl FnMut(&Value)) {
-        visit(&self.collection);
-        visit(&self.callback);
-        visit(&self.receiver);
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct CollectionData {
     kind: Kind,
@@ -263,7 +231,7 @@ fn arg(args: &[Value], index: usize) -> Value {
     args.get(index).cloned().unwrap_or_default()
 }
 
-fn receiver(vm: &Vm, value: &Value, kind: Kind) -> Result<ObjectId, JsError> {
+pub(crate) fn receiver(vm: &Vm, value: &Value, kind: Kind) -> Result<ObjectId, JsError> {
     if let Some(id) = value.as_object()
         && let ObjectKind::Collection(data) = &vm.heap.object(id)?.kind
         && data.kind == kind
@@ -445,7 +413,7 @@ impl Vm {
         Ok(true)
     }
 
-    fn collection_entry(
+    pub(crate) fn collection_entry(
         &mut self,
         id: ObjectId,
         cursor: u64,
@@ -702,11 +670,7 @@ fn install_collection(vm: &mut Vm, kind: Kind) {
         "forEach",
         1,
         move |vm, this, args| {
-            let mut iteration = ForEachCall::new(vm, this, args, kind)?;
-            while let Some(args) = iteration.next(vm)? {
-                vm.invoke(iteration.callback.clone(), iteration.receiver.clone(), &args)?;
-            }
-            Ok(Value::Undefined)
+            crate::builtins::for_each::ForEachCall::collection(vm, this, args, kind)?.run(vm)
         },
     );
     vm.mark_owned_native_call(&for_each, crate::heap::NativeCall::CollectionForEach(kind));

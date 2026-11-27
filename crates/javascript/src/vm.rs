@@ -1,9 +1,10 @@
 use crate::{
     ErrorKind, JsError, JsString, ObjectId, PropertyKey, SymbolId, Value,
+    builtins::for_each::ForEachCall,
     bytecode::{self, Chunk, ClassName, Code, Op, ScopePlan},
     for_in::ForInKeys,
     heap::{
-        Binding, Cell, EnvId, EnvKind, Environment, Heap, Object, ObjectKind, Property,
+        Binding, Cell, EnvId, EnvKind, Environment, Heap, NativeCall, Object, ObjectKind, Property,
         PropertyKind, array_index,
     },
     parser::{FunctionKind, LabelId, VarKind},
@@ -237,7 +238,7 @@ pub(crate) struct CallActivation {
 pub(crate) enum CallDispatch {
     Value(Value),
     Owned(OwnedCall),
-    ForEach(crate::collections::ForEachCall),
+    ForEach(ForEachCall),
 }
 
 #[derive(Clone)]
@@ -3484,9 +3485,9 @@ impl Vm {
         self.dispatch_owned_call_inner(function, this, args, true)
     }
 
-    pub(crate) fn dispatch_collection_callback(
+    pub(crate) fn dispatch_for_each_callback(
         &mut self,
-        iteration: &crate::collections::ForEachCall,
+        iteration: &ForEachCall,
         args: &[Value],
     ) -> Result<CallDispatch, JsError> {
         self.with_owned_native_call(|vm| {
@@ -3523,7 +3524,7 @@ impl Vm {
         function: Value,
         this: Value,
         args: &[Value],
-        allow_collection: bool,
+        allow_for_each: bool,
     ) -> Result<CallDispatch, JsError> {
         let Some(mut id) = function.as_object() else {
             return self.invoke(function, this, args).map(CallDispatch::Value);
@@ -3551,17 +3552,24 @@ impl Vm {
                     break (code.clone(), *environment, referrer.clone());
                 }
                 ObjectKind::Native {
-                    owned_call: Some(crate::heap::NativeCall::CollectionForEach(kind)),
+                    owned_call: Some(call @ (NativeCall::ArrayForEach | NativeCall::CollectionForEach(_))),
                     realm_environment, ..
-                }
-                    if allow_collection && prefixes.is_empty() && *realm_environment == self.realm.global_env =>
+                } if allow_for_each
+                    && prefixes.is_empty()
+                    && *realm_environment == self.realm.global_env =>
                 {
-                    let kind = *kind;
+                    let call = *call;
                     self.tick()?;
-                    if !self.can_enter_call() {
-                        return Err(self.call_depth_error());
-                    }
-                    return crate::collections::ForEachCall::new(self, this, args, kind).map(CallDispatch::ForEach);
+                    return self.with_owned_native_call(|vm| {
+                        match call {
+                            NativeCall::ArrayForEach => ForEachCall::array(vm, this, args),
+                            NativeCall::CollectionForEach(kind) => {
+                                ForEachCall::collection(vm, this, args, kind)
+                            }
+                            _ => unreachable!("forEach intrinsic"),
+                        }
+                        .map(CallDispatch::ForEach)
+                    });
                 }
                 ObjectKind::Native { owned_call: Some(call), realm_environment, .. }
                     if prefixes.is_empty()

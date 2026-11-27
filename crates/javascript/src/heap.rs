@@ -16,6 +16,7 @@ pub(crate) type NativeConstruct =
     Rc<dyn Fn(&mut Vm, Value, &[Value], Value) -> Result<Value, JsError>>;
 #[derive(Clone, Copy)]
 pub(crate) enum NativeCall {
+    ArrayForEach,
     CollectionForEach(crate::collections::Kind),
     FunctionCall,
     FunctionApply,
