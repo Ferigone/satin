@@ -22,6 +22,13 @@ pub enum ResourceKind {
     LocalFont(Arc<str>),
 }
 
+impl ResourceKind {
+    pub fn is_script_or_stylesheet(&self) -> bool {
+        matches!(self, Self::Stylesheet | Self::ClassicScript | Self::ModuleScript
+            | Self::JsonModule | Self::TextModule | Self::BytesModule)
+    }
+}
+
 #[derive(Debug)]
 pub struct ResourceRequest {
     pub(crate) url: Url,

@@ -570,6 +570,31 @@ fn resource_transfer_gets_a_fresh_deadline_without_resetting_queue_wait() {
 }
 
 #[test]
+fn scripts_can_start_while_image_transfers_and_the_image_queue_are_full() {
+    let mut queue = ResourceQueue::new();
+    let client = Arc::new(Url::parse(PAGE).unwrap());
+    let now = Instant::now();
+    let deadline = now + DOCUMENT_RESOURCE_QUEUE_TIMEOUT;
+    for index in 0..=CONCURRENT_OTHER_RESOURCES {
+        let path = format!("image-{index}.png");
+        let url = client.join(&path).unwrap();
+        let request = resource_request(url, &client, ResourceKind::Image, None, None, deadline);
+        queue.queue(request, Consumer::Image(path.into())).unwrap();
+    }
+    for _ in 0..CONCURRENT_OTHER_RESOURCES {
+        assert_eq!(queue.take(now).unwrap().request.kind, ResourceKind::Image);
+    }
+    assert!(queue.take(now).is_none());
+    let request = resource_request(
+        client.join("player.js").unwrap(), &client, ResourceKind::ClassicScript,
+        None, None, deadline,
+    );
+    queue.queue(request, Consumer::Classic(NodeId(1))).unwrap();
+    assert_eq!(queue.take(now).unwrap().request.kind, ResourceKind::ClassicScript);
+    assert!(queue.take(now).is_none());
+}
+
+#[test]
 fn async_default_bypasses_ordered_scripts_and_failure_releases_the_front() {
     let (mut page, mut session, mut runtime) = start(
         r#"<!doctype html><script>

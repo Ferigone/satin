@@ -24,6 +24,7 @@ use self::devtools::{Key, Observer, Phase, Request, ResponseDetails, Trace};
 use rust_browser_engine::loader::DownloadResponse;
 
 const FETCH_TRANSFERS: usize = 64;
+const SCRIPT_AND_STYLESHEET_WORKERS: usize = 8;
 
 pub(crate) enum Task {
     Navigate(Box<NavigationRequest>),
@@ -102,6 +103,7 @@ pub(crate) struct Message {
 }
 pub(crate) struct Workers {
     pages: mpsc::Sender<QueuedJob>,
+    scripts_and_stylesheets: mpsc::Sender<QueuedJob>,
     resources: mpsc::Sender<QueuedJob>,
     fetches: mpsc::Sender<QueuedJob>,
     uploads: mpsc::Sender<QueuedJob>,
@@ -147,10 +149,10 @@ impl Workers {
         let wake = Arc::new(wake);
         let shutdown = CancelSignal::new();
         let transfers = Arc::new(Semaphore::new(FETCH_TRANSFERS));
-        let pool = || {
-            let (tx, rx) = mpsc::channel::<QueuedJob>(8);
+        let pool = |workers, queued| {
+            let (tx, rx) = mpsc::channel::<QueuedJob>(queued);
             let rx = Arc::new(Mutex::new(rx));
-            for _ in 0..2 {
+            for _ in 0..workers {
                 let rx = rx.clone();
                 let loader = loader.clone();
                 let results = results.clone();
@@ -182,10 +184,11 @@ impl Workers {
             tx
         };
         Ok(Self {
-            pages: pool(),
-            resources: pool(),
-            fetches: pool(),
-            uploads: pool(),
+            pages: pool(2, 8),
+            scripts_and_stylesheets: pool(SCRIPT_AND_STYLESHEET_WORKERS, 24),
+            resources: pool(2, 8),
+            fetches: pool(2, 8),
+            uploads: pool(2, 8),
             results: results.clone(),
             wake: wake.clone(),
             downloads: Vec::new(),
@@ -202,6 +205,9 @@ impl Workers {
     pub fn try_submit(&self, job: Job) -> Result<(), TrySendError<Job>> {
         let sender = match &job.task {
             Task::Navigate(_) | Task::DownloadLink(_, _) => &self.pages,
+            Task::Resource(load) if load.request.kind().is_script_or_stylesheet() => {
+                &self.scripts_and_stylesheets
+            }
             Task::Resource(_) => &self.resources,
             Task::Fetch(job) if job.upload.is_some() => &self.uploads,
             Task::Fetch(_) => &self.fetches,

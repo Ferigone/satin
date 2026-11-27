@@ -24,17 +24,43 @@ use module_graph::{ModuleGraph, ModuleKey, ModuleSource, Readiness};
 use module_tasks::ModuleTasks;
 pub(super) use parser_host::ParserHost;
 use parser_host::{Discovery, ScriptTag, Source, Step, resource_request};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::time::Duration;
 use url::Url;
 
 const RESOURCE_COUNT: usize = 768;
 const RESOURCE_URL_BYTES: usize = 24 * 1024 * 1024;
-const CONCURRENT_RESOURCES: usize = 4;
+const CONCURRENT_SCRIPTS_AND_STYLESHEETS: usize = 12;
+const CONCURRENT_OTHER_RESOURCES: usize = 4;
 const DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const STYLESHEET_BYTES: usize = 8 * 1024 * 1024;
 const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(210);
 const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(240);
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn trace_stylesheet(url: &Url, phase: &str, id: u64) {
+    use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static EVENTS: AtomicUsize = AtomicUsize::new(0);
+    if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_STYLESHEETS").is_some())
+        || EVENTS.fetch_add(1, Ordering::Relaxed) >= 384
+    {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+    let asset = if url.host_str() == Some("assets.twitch.tv") {
+        url.path_segments()
+            .and_then(Iterator::last)
+            .filter(|name| name.len() <= 180 && name.ends_with(".css")
+                && name.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'.' | b'-' | b'_')))
+            .unwrap_or("-")
+    } else {
+        "-"
+    };
+    eprintln!("SATIN_QA_STYLESHEET {timestamp} {phase} id={id} asset={asset}");
+}
 
 pub struct ResourceLoad {
     pub id: u64,
@@ -85,7 +111,7 @@ struct ResourceQueue {
     url_bytes: usize,
     waiting: VecDeque<ResourceLoad>,
     pending: HashMap<u64, (Consumer, Instant)>,
-    active: HashSet<u64>,
+    active: HashMap<u64, bool>,
     retry_at: Option<Instant>,
 }
 impl ResourceQueue {
@@ -95,7 +121,7 @@ impl ResourceQueue {
             url_bytes: 0,
             waiting: VecDeque::new(),
             pending: HashMap::new(),
-            active: HashSet::new(),
+            active: HashMap::new(),
             retry_at: None,
         }
     }
@@ -107,9 +133,7 @@ impl ResourceQueue {
             .values()
             .map(|(_, deadline)| *deadline)
             .chain(
-                self.retry_at.filter(|_| {
-                    !self.waiting.is_empty() && self.active.len() < CONCURRENT_RESOURCES
-                }),
+                self.retry_at.filter(|_| self.dispatchable_position().is_some()),
             )
             .min()
     }
@@ -133,6 +157,10 @@ impl ResourceQueue {
         self.next += 1;
         self.url_bytes += size;
         self.pending.insert(id, (consumer, queue_deadline));
+        #[cfg(feature = "media-startup-diagnostics")]
+        if request.kind == ResourceKind::Stylesheet {
+            trace_stylesheet(&request.url, "queued", id);
+        }
         self.waiting.push_back(ResourceLoad {
             id,
             request,
@@ -140,28 +168,46 @@ impl ResourceQueue {
         });
         Ok(())
     }
-    fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
-        if self.active.len() >= CONCURRENT_RESOURCES || self.retry_at.is_some_and(|next| next > now)
+    fn dispatchable_position(&self) -> Option<usize> {
+        let active_scripts_and_stylesheets = self.active.values().filter(|&&has_priority| has_priority).count();
+        if active_scripts_and_stylesheets < CONCURRENT_SCRIPTS_AND_STYLESHEETS
+            && let Some(position) = self.waiting.iter()
+                .position(|load| load.request.kind.is_script_or_stylesheet())
         {
+            return Some(position);
+        }
+        if self.active.len() - active_scripts_and_stylesheets < CONCURRENT_OTHER_RESOURCES {
+            self.waiting.iter().position(|load| !load.request.kind.is_script_or_stylesheet())
+        } else {
+            None
+        }
+    }
+    fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
+        if self.retry_at.is_some_and(|next| next > now) {
             return None;
         }
         self.retry_at = None;
-        if now >= self.waiting.front()?.queue_deadline {
+        let position = self.dispatchable_position()?;
+        if now >= self.waiting[position].queue_deadline {
             // Leave expired work for advance(), which delivers its failure.
             return None;
         }
-        let mut load = self.waiting.pop_front()?;
+        let mut load = self.waiting.remove(position).expect("eligible resource");
         let (_, deadline) = self
             .pending
             .get_mut(&load.id)
             .expect("queued resource exists");
         *deadline = now + DOCUMENT_RESOURCE_TIMEOUT;
         load.request.deadline = *deadline;
-        self.active.insert(load.id);
+        self.active.insert(load.id, load.request.kind.is_script_or_stylesheet());
+        #[cfg(feature = "media-startup-diagnostics")]
+        if load.request.kind == ResourceKind::Stylesheet {
+            trace_stylesheet(&load.request.url, "started", load.id);
+        }
         Some(load)
     }
     fn retry(&mut self, mut load: ResourceLoad) {
-        if self.active.remove(&load.id)
+        if self.active.remove(&load.id).is_some()
             && let Some((_, deadline)) = self.pending.get_mut(&load.id)
         {
             *deadline = load.queue_deadline;
@@ -188,7 +234,7 @@ impl ResourceQueue {
                 Consumer::Classic(_) | Consumer::Sheet { .. } | Consumer::Image(_)
             )
         });
-        self.active.retain(|id| self.pending.contains_key(id));
+        self.active.retain(|id, _| self.pending.contains_key(id));
         self.waiting
             .retain(|load| self.pending.contains_key(&load.id));
         if self.waiting.is_empty() {
@@ -577,7 +623,7 @@ impl DocumentSession {
                 .waiting
                 .retain(|load| now < load.queue_deadline);
             for id in expired {
-                let reason = if self.resources.active.contains(&id) {
+                let reason = if self.resources.active.contains_key(&id) {
                     "Document resource transfer deadline exceeded"
                 } else {
                     "Document resource queue deadline exceeded"
@@ -1379,6 +1425,8 @@ impl DocumentSession {
                             .is_ok_and(|source| source.as_ref() == Some(request.as_ref()));
                     (active && unchanged, Arc::from(document.attr(node, "media").unwrap_or("")))
                 });
+                #[cfg(feature = "media-startup-diagnostics")]
+                let received = result.is_ok();
                 if admitted_request && current
                     && let Ok(DocumentResource {
                     url,
@@ -1407,6 +1455,13 @@ impl DocumentSession {
                 } else if admitted_request {
                     self.sheet_sources.remove(&node);
                 }
+                #[cfg(feature = "media-startup-diagnostics")]
+                trace_stylesheet(&request.url, match (admitted_request && current, received, accepted) {
+                    (false, _, _) => "stale",
+                    (_, false, _) => "failed",
+                    (_, _, false) => "rejected",
+                    _ => "loaded",
+                }, id);
             }
             Consumer::Image(key) => {
                 if let Some(ImageState::Pending(waiters)) = self.images.remove(&key) {
