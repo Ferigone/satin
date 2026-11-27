@@ -322,8 +322,9 @@ async function reaCase(chrome, cli, { site, url }, dir) {
 
 const [mode, executable, identifier, site] = process.argv.slice(2);
 const selected = cases.filter(test => !site || test.site === site);
-if (!['chrome', 'satin', 'window'].includes(mode) || !executable || !identifier || !selected.length) {
+if (!['chrome', 'chrome-only', 'satin', 'window'].includes(mode) || !executable || !identifier || !selected.length) {
   console.error('Usage: node tools/verify-public-media.mjs chrome <chrome.exe> <absolute rea.mjs> [twitch|youtube]');
+  console.error('   or: node tools/verify-public-media.mjs chrome-only <chrome.exe> <absolute package.json> [twitch|youtube]');
   console.error('   or: node tools/verify-public-media.mjs satin|window <rust-browser.exe> <git commit> [twitch|youtube]');
   process.exit(1);
 }
@@ -333,7 +334,7 @@ const directory = await mkdtemp(join(root, `${mode}-`));
 const temporary = join(directory, 'transient');
 await mkdir(temporary);
 const exe = resolve(executable);
-const binary = { path: exe, sha256: await sha256(exe), commit: mode === 'chrome' ? null : identifier };
+const binary = { path: exe, sha256: await sha256(exe), commit: mode.startsWith('chrome') ? null : identifier };
 const report = {
   mode, binary, viewport, node: process.version, os: process.platform, osRelease: release(), arch: arch(),
   startedUtc: new Date().toISOString(), cases: [], rea: [],
@@ -344,7 +345,14 @@ const tempKeys = ['TEMP', 'TMP'];
 const previousTemp = tempKeys.map(key => process.env[key]);
 try {
   for (const key of tempKeys) process.env[key] = temporary;
-  if (mode === 'chrome') {
+  if (mode === 'chrome-only') {
+    const require = createRequire(resolve(identifier));
+    const { chromium } = require('playwright-core');
+    for (const test of selected) {
+      report.cases.push(await chromeCase(exe, chromium, test));
+      await save();
+    }
+  } else if (mode === 'chrome') {
     const cli = resolve(identifier);
     const require = createRequire(cli);
     const { chromium } = require('playwright-core');
