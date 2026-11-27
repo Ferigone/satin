@@ -341,6 +341,8 @@ pub(super) fn after_child(
                 unreachable!()
             };
             if let (Err(error), Some((pattern, body))) = (&completed, catch) {
+                #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+                vm.diagnostic_caught(error);
                 let binding = catch_scope(vm, env, strict, pattern.as_deref(), error);
                 if let Ok(scope) = binding {
                     return Ok(Advance::child(body, scope, Resume::Catch));

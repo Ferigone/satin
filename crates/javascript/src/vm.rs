@@ -178,9 +178,12 @@ pub struct Vm {
     qa_last_native_site: Option<&'static std::panic::Location<'static>>,
     #[cfg(feature = "media-startup-diagnostics")]
     qa_work_sites: std::collections::HashMap<(&'static str, u32), u64>,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    qa_task_heap: (usize, usize),
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
+    collectible_call: Option<usize>,
     pub(crate) call_depth: usize,
     active_calls: Vec<Option<JsString>>,
     legacy_calls: Vec<LegacyCall>,
@@ -333,10 +336,13 @@ impl Vm {
             qa_last_native_site: None,
             #[cfg(feature = "media-startup-diagnostics")]
             qa_work_sites: Default::default(),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_task_heap: (0, 0),
             limits,
             interrupt: None,
             task_deadline: None,
             active: 0,
+            collectible_call: None,
             call_depth: 0,
             active_calls: Vec::new(),
             legacy_calls: Vec::new(),
@@ -594,6 +600,52 @@ impl Vm {
         self.active -= 1;
         result
     }
+
+    /// Invoke a scheduled callback at a host boundary. Values retained by the
+    /// host across this call must be rooted. Only the outer interpreted call
+    /// can collect at a bytecode safepoint.
+    pub fn call_at_callback_boundary(
+        &mut self,
+        function: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<Value, JsError> {
+        self.with_task(|vm| vm.invoke_collectible(function, this, args, &[]))
+    }
+
+    pub(crate) fn invoke_collectible(
+        &mut self,
+        function: Value,
+        this: Value,
+        args: &[Value],
+        extra_roots: &[&Value],
+    ) -> Result<Value, JsError> {
+        if self.collectible_call.is_some() || self.call_depth != 0
+            || self.execution_depth != 0 || self.realm_depth != 0
+        {
+            return self.invoke(function, this, args);
+        }
+        let roots: Vec<_> = [&function, &this].into_iter()
+            .chain(args)
+            .chain(extra_roots.iter().copied())
+            .filter(|value| matches!(value, Value::Object(_) | Value::String(_) | Value::Symbol(_)))
+            .map(|value| self.root(value.clone()))
+            .collect();
+        self.collectible_call = Some(self.active + 1);
+        let result = self.invoke(function, this, args);
+        self.collectible_call = None;
+        for root in roots {
+            self.unroot(root);
+        }
+        result
+    }
+
+    pub(crate) fn at_collectible_entry(&self) -> bool {
+        self.collectible_call == Some(self.active)
+            && self.call_depth == 1
+            && self.execution_depth == 0
+            && self.realm_depth == 0
+    }
     /// One browser task and callback/microtask checkpoint share one budget.
     /// Collection is deferred until this scope returns, including on an error.
     pub fn with_task<T, F>(&mut self, callback: F) -> Result<T, JsError>
@@ -655,6 +707,10 @@ impl Vm {
                 self.qa_native_work = 0;
                 self.qa_last_native_site = None;
                 self.qa_work_sites.clear();
+            }
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            {
+                self.qa_task_heap = (self.heap.live, self.estimated_heap_bytes());
             }
         }
         self.active += 1;
@@ -1217,7 +1273,7 @@ impl Vm {
                 skipped_active_execution: true,
             };
         }
-        self.collect_rooted_heap()
+        self.collect_rooted_heap(false, &[])
     }
 
     /// Collects at an embedder-owned boundary between script callbacks without
@@ -1227,10 +1283,14 @@ impl Vm {
         if self.active > 1 || self.call_depth != 0 || self.execution_depth != 0 || self.realm_depth != 0 {
             return None;
         }
-        Some(self.collect_rooted_heap())
+        Some(self.collect_rooted_heap(false, &[]))
     }
 
-    fn collect_rooted_heap(&mut self) -> GcStats {
+    pub(crate) fn collect_rooted_heap(
+        &mut self,
+        keep_weak_references: bool,
+        additional_roots: &[Value],
+    ) -> GcStats {
         let before = self.heap.live;
         let mut roots = self.heap.trace_roots();
         roots.push(self.realm.global_env.0);
@@ -1241,6 +1301,20 @@ impl Vm {
         }
         for value in self.roots.values() {
             roots.value(value);
+        }
+        for value in additional_roots {
+            roots.value(value);
+        }
+        roots.extend(self.legacy_calls.iter().map(|frame| frame.function));
+        if keep_weak_references {
+            // Targets observed through WeakRef stay available until the job ends.
+            for cell in self.heap.live_cells() {
+                if let Cell::Object(object) = cell
+                    && let ObjectKind::WeakRef(Some(target)) = &object.kind
+                {
+                    roots.value(target);
+                }
+            }
         }
         for symbol in self.well_known_symbols.values() {
             roots.symbol(symbol);
@@ -1258,7 +1332,7 @@ impl Vm {
         self.inactive_realms
             .retain(|realm, _| self.heap.realm_core(*realm).is_some());
         self.bigint_storage.reclaim();
-        self.recompute_memory();
+        self.recompute_memory(additional_roots);
         GcStats {
             before,
             after: self.heap.live,
@@ -1269,7 +1343,7 @@ impl Vm {
     pub fn heap_cell_count(&self) -> usize {
         self.heap.live
     }
-    fn recompute_memory(&mut self) {
+    fn recompute_memory(&mut self, additional_roots: &[Value]) {
         let mut strings = Vec::new();
         let mut codes = Vec::new();
         let mut chunks = Vec::new();
@@ -1378,7 +1452,7 @@ impl Vm {
                 }
             }
         }
-        for v in self.roots.values() {
+        for v in self.roots.values().chain(additional_roots) {
             value(v, &mut strings);
         }
         self.string_storage.clear();
@@ -1858,9 +1932,11 @@ impl Vm {
         static TRACES: AtomicUsize = AtomicUsize::new(0);
         if TRACES.fetch_add(1, Ordering::Relaxed) < 24 {
             eprintln!(
-                "SATIN_QA_HEAP cells={} estimated={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={}{}",
+                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={}{}",
                 self.heap.live,
                 self.estimated_heap_bytes(),
+                self.qa_task_heap.0,
+                self.qa_task_heap.1,
                 self.limits.max_heap_bytes,
                 self.code_bytes,
                 self.string_bytes.saturating_add(self.live_large_string_bytes.get()),
@@ -1870,6 +1946,20 @@ impl Vm {
                 self.active,
                 self.diagnostic_source_site(),
             );
+        }
+    }
+
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    pub(crate) fn diagnostic_caught(&self, error: &JsError) {
+        use std::sync::{OnceLock, atomic::AtomicUsize};
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        static TRACES: AtomicUsize = AtomicUsize::new(0);
+        if matches!(error.kind, ErrorKind::TypeError | ErrorKind::ReferenceError | ErrorKind::UnsupportedFeature)
+            && *ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_SCRIPT_CAUGHT").is_some())
+            && TRACES.fetch_add(1, Ordering::Relaxed) < 128
+        {
+            let message: String = error.message.chars().take(200).collect();
+            eprintln!("SATIN_QA_CAUGHT {} {:?}{}", error.kind.name(), message, self.diagnostic_source_site());
         }
     }
     fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
@@ -3274,10 +3364,11 @@ impl Vm {
                 let (body_env, body) = vm.function_environment(&code, parent, invocation)?;
                 // Enter the iterative driver while the native stack still has
                 // room for re-entry through builtins and property accessors.
-                let completion = if vm.call_depth >= 32
+                let collectible = vm.at_collectible_entry();
+                let completion = if collectible || vm.call_depth >= 32
                     || vm.call_depth >= 8 && !native_stack_available(2 * 1024 * 1024)
                 {
-                    vm.run_deep_ordinary_body(body, body_env)
+                    vm.run_deep_ordinary_body(body, body_env, collectible)
                 } else {
                     vm.run_chunk(&body, body_env)
                 };
@@ -4777,6 +4868,8 @@ impl Vm {
                 return completion;
             }
             if let Some((name, handler)) = catch {
+                #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+                self.diagnostic_caught(error);
                 let value = if let Some(value) = &error.thrown {
                     value.clone()
                 } else {

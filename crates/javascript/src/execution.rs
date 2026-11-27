@@ -121,6 +121,36 @@ impl Frame {
             None => result,
         }
     }
+
+    fn visit(&self, visit: &mut impl FnMut(&Value)) {
+        visit(&Value::Object(self.env.0));
+        if let Some(value) = &self.result {
+            visit(value);
+        }
+        for item in &self.operands {
+            visit_operand(item, visit);
+        }
+        for pattern in &self.patterns {
+            pattern.visit(visit);
+        }
+        if let Some(waiting) = &self.waiting {
+            waiting.visit(visit);
+        }
+        if let Some(delegate) = &self.delegate {
+            delegate.visit(visit);
+        }
+    }
+
+    fn extra_bytes(&self) -> usize {
+        self.operands.capacity() * size_of::<Item>()
+            + self.operands.iter().map(|item| match item {
+                Item::Arguments(args) => args.capacity() * size_of::<Value>(),
+                _ => 0,
+            }).sum::<usize>()
+            + self.patterns.capacity() * size_of::<destructuring::ActivePattern>()
+            + self.patterns.iter().map(|p| p.extra_bytes()).sum::<usize>()
+            + self.waiting.as_ref().map_or(0, Resume::extra_bytes)
+    }
 }
 impl Execution {
     pub(crate) fn new(
@@ -143,46 +173,14 @@ impl Execution {
         // The owner retains the compiled code, including all nested chunks.
         visit(&Value::Object(self.owner));
         for frame in &self.frames {
-            visit(&Value::Object(frame.env.0));
-            if let Some(value) = &frame.result {
-                visit(value);
-            }
-            for item in &frame.operands {
-                visit_operand(item, &mut visit);
-            }
-            for pattern in &frame.patterns {
-                pattern.visit(&mut visit);
-            }
-            if let Some(waiting) = &frame.waiting {
-                waiting.visit(&mut visit);
-            }
-            if let Some(delegate) = &frame.delegate {
-                delegate.visit(&mut visit);
-            }
+            frame.visit(&mut visit);
         }
     }
 
     pub(crate) fn extra_bytes(&self) -> usize {
         size_of::<Self>()
             + self.frames.capacity() * size_of::<Frame>()
-            + self
-                .frames
-                .iter()
-                .map(|frame| {
-                    frame.operands.capacity() * size_of::<Item>()
-                        + frame
-                            .operands
-                            .iter()
-                            .map(|item| match item {
-                                Item::Arguments(args) => args.capacity() * size_of::<Value>(),
-                                _ => 0,
-                            })
-                            .sum::<usize>()
-                        + frame.patterns.capacity() * size_of::<destructuring::ActivePattern>()
-                        + frame.patterns.iter().map(|p| p.extra_bytes()).sum::<usize>()
-                        + frame.waiting.as_ref().map_or(0, Resume::extra_bytes)
-                })
-                .sum::<usize>()
+            + self.frames.iter().map(Frame::extra_bytes).sum::<usize>()
     }
 }
 
@@ -256,6 +254,79 @@ fn reserve_one<T>(vm: &mut Vm, elements: &mut Vec<T>) -> Result<(), JsError> {
         elements.reserve_exact(next - elements.len());
     }
     Ok(())
+}
+
+struct CallbackCollection {
+    bytes_at: usize,
+    cells_at: usize,
+    until_probe: usize,
+}
+
+impl CallbackCollection {
+    fn new(vm: &Vm) -> Self {
+        let allowance = |used: usize, cap: usize, step: usize| {
+            let growth = (used / 4).clamp(step / 4, step);
+            used.saturating_add(growth.min((cap.saturating_sub(used) / 2).max(1)))
+        };
+        Self {
+            bytes_at: allowance(
+                vm.estimated_heap_bytes(), vm.limits().max_heap_bytes, 96 * 1024 * 1024,
+            ),
+            cells_at: allowance(vm.heap_cell_count(), vm.limits().max_heap_objects, 96 * 1024),
+            until_probe: 256,
+        }
+    }
+
+    fn poll(
+        &mut self,
+        vm: &mut Vm,
+        frames: &Vec<Frame>,
+        completed: Option<&Flow>,
+    ) -> Result<(), JsError> {
+        self.until_probe -= 1;
+        if self.until_probe != 0 {
+            return Ok(());
+        }
+        self.until_probe = 256;
+        if vm.estimated_heap_bytes() < self.bytes_at && vm.heap_cell_count() < self.cells_at {
+            return Ok(());
+        }
+        let mut saved = Vec::new();
+        let mut retain = |value: &Value| match value {
+            Value::Object(_) | Value::String(_) | Value::Symbol(_) => saved.push(value.clone()),
+            _ => {}
+        };
+        for frame in frames {
+            frame.visit(&mut retain);
+        }
+        match completed {
+            Some(Ok(
+                Completion::Normal(Some(value))
+                | Completion::Return(value)
+                | Completion::Break(_, Some(value))
+                | Completion::Continue(_, Some(value)),
+            )) => retain(value),
+            Some(Err(error)) => error.thrown.iter().for_each(retain),
+            _ => {}
+        }
+        let _stats = vm.collect_rooted_heap(true, &saved);
+        #[cfg(feature = "media-startup-diagnostics")]
+        if _stats.collected >= 8 * 1024 {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static TRACES: AtomicUsize = AtomicUsize::new(0);
+            if TRACES.fetch_add(1, Ordering::Relaxed) < 48 {
+                eprintln!(
+                    "SATIN_QA_CALLBACK_GC cells_before={} cells_after={} retained_bytes={} frames={}",
+                    _stats.before, _stats.after, vm.estimated_heap_bytes(), frames.len(),
+                );
+            }
+        }
+        let frame_bytes = frames.capacity() * size_of::<Frame>()
+            + frames.iter().map(Frame::extra_bytes).sum::<usize>();
+        vm.reserve_allocation(frame_bytes)?;
+        *self = Self::new(vm);
+        Ok(())
+    }
 }
 
 impl Vm {
@@ -357,19 +428,25 @@ impl Vm {
         input: Option<ResumeValue>,
     ) -> RunResult {
         let depth = self.execution_depth;
-        let result = self.run_frames(&mut execution.frames, input, depth, false);
+        let result = self.run_frames(&mut execution.frames, input, depth, false, None);
         self.execution_depth = depth;
         result
     }
 
     #[inline(never)]
-    pub(crate) fn run_deep_ordinary_body(&mut self, chunk: Rc<Chunk>, env: EnvId) -> Flow {
+    pub(crate) fn run_deep_ordinary_body(
+        &mut self,
+        chunk: Rc<Chunk>,
+        env: EnvId,
+        collectible: bool,
+    ) -> Flow {
         self.prepare(&chunk.scope, env)?;
         let depth = self.execution_depth;
         let mut frames = Vec::new();
         reserve_one(self, &mut frames)?;
         frames.push(Frame::new(chunk, env));
-        let result = self.run_frames(&mut frames, None, depth, true);
+        let collection = collectible.then(|| CallbackCollection::new(self));
+        let result = self.run_frames(&mut frames, None, depth, true, collection);
         self.execution_depth = depth;
         // A fatal budget error can exit without visiting the parent frames.
         while let Some(mut frame) = frames.pop() {
@@ -404,6 +481,7 @@ impl Vm {
         mut input: Option<ResumeValue>,
         base_depth: usize,
         ordinary: bool,
+        mut collection: Option<CallbackCollection>,
     ) -> RunResult {
         let mut completed: Option<Flow> = None;
         // Owned frames share one driver stack frame and its opcode dispatch.
@@ -416,6 +494,13 @@ impl Vm {
                 .is_some_and(|result| result.as_ref().is_err_and(JsError::uncatchable))
             {
                 break;
+            }
+            // At this point each interpreted frame is owned by the driver.
+            // Re-entrant native calls cannot collect with incomplete stack roots.
+            if let Some(collection) = &mut collection
+                && let Err(error) = collection.poll(self, frames, completed.as_ref())
+            {
+                return RunResult::Completed(Err(error));
             }
             let logical_depth = frames.len().saturating_add(if ordinary { base_depth } else { 0 });
             if logical_depth > self.limits().max_bytecode_depth {

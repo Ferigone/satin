@@ -760,6 +760,34 @@ fn task_scope_shares_one_budget_across_multiple_calls() {
 }
 #[cfg(windows)]
 #[test]
+fn interpreted_promise_handler_collects_while_preserving_stack_and_weak_targets() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_objects: 10_000,
+        max_heap_bytes: 12 * 1024 * 1024,
+        max_instructions: 8_000_000,
+        ..VmLimits::default()
+    });
+    vm.eval(r#"
+        var finished;
+        function measure(input) {
+            const weak = new WeakRef({state: 'live'});
+            function visit(i) {
+                const local = [{index: i}, () => local[0].index];
+                return local[1]();
+            }
+            let total = 0;
+            for (let i = 0; i < 16000; i++) total += visit(i);
+            return input.label + '/' + weak.deref().state + '/' + total;
+        }
+        Promise.resolve({label: 'kept'}).then(measure)
+            .then(result => { finished = result; });
+    "#).unwrap();
+    vm.drain_jobs_at_callback_boundary(8).unwrap();
+    assert_eq!(vm.eval("finished").unwrap(), Value::from("kept/live/127992000"));
+    assert!(!vm.collect_garbage().skipped_active_execution);
+}
+
+#[test]
 fn host_callback_collection_reclaims_cells_without_resetting_task_fuel() {
     let mut vm = Vm::new();
     let rooted = vm.new_object();

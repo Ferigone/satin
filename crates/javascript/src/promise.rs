@@ -556,6 +556,16 @@ impl Vm {
     /// Consume a throwing microtask and leave subsequent FIFO jobs queued. Promise
     /// handler exceptions are converted to chained rejections inside reaction jobs.
     pub fn drain_jobs(&mut self, max_jobs: usize) -> Result<usize, JsError> {
+        self.drain_jobs_with_collection(max_jobs, false)
+    }
+
+    /// Use heap safepoints inside interpreted promise handlers and queued
+    /// callbacks when the embedder has rooted values retained across this drain.
+    pub fn drain_jobs_at_callback_boundary(&mut self, max_jobs: usize) -> Result<usize, JsError> {
+        self.drain_jobs_with_collection(max_jobs, true)
+    }
+
+    fn drain_jobs_with_collection(&mut self, max_jobs: usize, collectible: bool) -> Result<usize, JsError> {
         self.with_task(|vm| {
             let mut count = 0;
             while count < max_jobs {
@@ -565,7 +575,7 @@ impl Vm {
                     break;
                 };
                 count += 1;
-                vm.run_job(job)?;
+                vm.run_job(job, collectible)?;
             }
             Ok(count)
         })
@@ -925,18 +935,26 @@ impl Vm {
         Ok(())
     }
 
-    fn run_job(&mut self, job: Job) -> Result<(), JsError> {
+    fn run_job(&mut self, job: Job, collectible: bool) -> Result<(), JsError> {
         match job {
             Job::CleanupRegistry(id) => self.cleanup_registry(id)?,
             Job::Microtask(callback) => {
-                self.invoke(callback, Value::Undefined, &[])?;
+                if collectible {
+                    self.invoke_collectible(callback, Value::Undefined, &[], &[])?;
+                } else {
+                    self.invoke(callback, Value::Undefined, &[])?;
+                }
             }
             Job::Call {
                 callback,
                 this,
                 args,
             } => {
-                self.invoke(callback, this, &args)?;
+                if collectible {
+                    self.invoke_collectible(callback, this, &args, &[])?;
+                } else {
+                    self.invoke(callback, this, &args)?;
+                }
             }
             Job::JsonParse {
                 resolve,
@@ -958,7 +976,16 @@ impl Vm {
                 rejected,
             } => {
                 let result = if let Some(handler) = handler {
-                    self.invoke(handler, Value::Undefined, &[argument])
+                    if collectible {
+                        self.invoke_collectible(
+                            handler,
+                            Value::Undefined,
+                            &[argument],
+                            &[&capability.promise, &capability.resolve, &capability.reject],
+                        )
+                    } else {
+                        self.invoke(handler, Value::Undefined, &[argument])
+                    }
                 } else if rejected {
                     self.invoke(capability.reject, Value::Undefined, &[argument])?;
                     return Ok(());
