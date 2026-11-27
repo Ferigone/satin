@@ -570,6 +570,42 @@ fn resource_transfer_gets_a_fresh_deadline_without_resetting_queue_wait() {
 }
 
 #[test]
+fn new_resource_requests_are_dispatched_before_ready_scripts_continue() {
+    let (mut page, mut session, mut runtime) = start(r#"
+        <!doctype html><script>
+        var executed = false;
+        var script = document.createElement('script');
+        script.src = 'ready.js';
+        document.head.appendChild(script);
+        </script>
+    "#);
+    let script = session.next_resource().expect("script request");
+    session.complete_resource(
+        script.id,
+        Ok(DocumentResource {
+            url: script.request.url,
+            transferred: 16,
+            body: ResourceBody::Text("executed = true;".into()),
+            origin_clean: true,
+        }),
+        &mut page,
+        &mut runtime,
+        Viewport::default(),
+    ).unwrap();
+    evaluate(&mut runtime, r#"
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'player.css';
+        document.head.appendChild(link);
+    "#);
+    session.advance(&mut page, &mut runtime, Viewport::default()).unwrap();
+    assert_eq!(evaluate(&mut runtime, "executed"), Value::Bool(false));
+    assert_eq!(session.next_resource().unwrap().request.kind, ResourceKind::Stylesheet);
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert_eq!(evaluate(&mut runtime, "executed"), Value::Bool(true));
+}
+
+#[test]
 fn scripts_can_start_while_image_transfers_and_the_image_queue_are_full() {
     let mut queue = ResourceQueue::new();
     let client = Arc::new(Url::parse(PAGE).unwrap());

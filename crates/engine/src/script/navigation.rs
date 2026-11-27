@@ -38,12 +38,18 @@ const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(210);
 const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[cfg(feature = "media-startup-diagnostics")]
-fn trace_stylesheet(url: &Url, phase: &str, id: u64) {
+fn trace_document_asset(url: &Url, stylesheet: bool, phase: &str, id: u64) {
     use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    static EVENTS: AtomicUsize = AtomicUsize::new(0);
+    static STYLESHEET_EVENTS: AtomicUsize = AtomicUsize::new(0);
+    static SCRIPT_EVENTS: AtomicUsize = AtomicUsize::new(0);
+    let (events, maximum, label, extension) = if stylesheet {
+        (&STYLESHEET_EVENTS, 384, "STYLESHEET", ".css")
+    } else {
+        (&SCRIPT_EVENTS, 1024, "SCRIPT_RESOURCE", ".js")
+    };
     if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_STYLESHEETS").is_some())
-        || EVENTS.fetch_add(1, Ordering::Relaxed) >= 384
+        || events.fetch_add(1, Ordering::Relaxed) >= maximum
     {
         return;
     }
@@ -52,14 +58,14 @@ fn trace_stylesheet(url: &Url, phase: &str, id: u64) {
     let asset = if url.host_str() == Some("assets.twitch.tv") {
         url.path_segments()
             .and_then(Iterator::last)
-            .filter(|name| name.len() <= 180 && name.ends_with(".css")
+            .filter(|name| name.len() <= 180 && name.ends_with(extension)
                 && name.bytes().all(|byte| byte.is_ascii_alphanumeric()
                     || matches!(byte, b'.' | b'-' | b'_')))
             .unwrap_or("-")
     } else {
         "-"
     };
-    eprintln!("SATIN_QA_STYLESHEET {timestamp} {phase} id={id} asset={asset}");
+    eprintln!("SATIN_QA_{label} {timestamp} {phase} id={id} asset={asset}");
 }
 
 pub struct ResourceLoad {
@@ -158,8 +164,8 @@ impl ResourceQueue {
         self.url_bytes += size;
         self.pending.insert(id, (consumer, queue_deadline));
         #[cfg(feature = "media-startup-diagnostics")]
-        if request.kind == ResourceKind::Stylesheet {
-            trace_stylesheet(&request.url, "queued", id);
+        if request.kind.is_script_or_stylesheet() {
+            trace_document_asset(&request.url, request.kind == ResourceKind::Stylesheet, "queued", id);
         }
         self.waiting.push_back(ResourceLoad {
             id,
@@ -182,16 +188,17 @@ impl ResourceQueue {
             None
         }
     }
-    fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
+    fn ready_position(&self, now: Instant) -> Option<usize> {
         if self.retry_at.is_some_and(|next| next > now) {
             return None;
         }
-        self.retry_at = None;
         let position = self.dispatchable_position()?;
-        if now >= self.waiting[position].queue_deadline {
-            // Leave expired work for advance(), which delivers its failure.
-            return None;
-        }
+        // Leave expired work for advance(), which delivers its failure.
+        (now < self.waiting[position].queue_deadline).then_some(position)
+    }
+    fn take(&mut self, now: Instant) -> Option<ResourceLoad> {
+        let position = self.ready_position(now)?;
+        self.retry_at = None;
         let mut load = self.waiting.remove(position).expect("eligible resource");
         let (_, deadline) = self
             .pending
@@ -201,8 +208,8 @@ impl ResourceQueue {
         load.request.deadline = *deadline;
         self.active.insert(load.id, load.request.kind.is_script_or_stylesheet());
         #[cfg(feature = "media-startup-diagnostics")]
-        if load.request.kind == ResourceKind::Stylesheet {
-            trace_stylesheet(&load.request.url, "started", load.id);
+        if load.request.kind.is_script_or_stylesheet() {
+            trace_document_asset(&load.request.url, load.request.kind == ResourceKind::Stylesheet, "started", load.id);
         }
         Some(load)
     }
@@ -633,6 +640,7 @@ impl DocumentSession {
         }
         self.runnable = true;
         for _ in 0..24 {
+            let next_request = self.resources.next;
             self.adopt_replacement_parser(runtime.as_ref());
             self.flush_dynamic_scripts(page, runtime, viewport)?;
             self.flush_parser_discoveries(page, runtime, viewport)?;
@@ -649,6 +657,12 @@ impl DocumentSession {
             }
             self.sync_fonts(page)?;
             self.update_resources(page, runtime);
+            // Start transfers before another script can keep this document busy.
+            if self.resources.next != next_request
+                && self.resources.ready_position(Instant::now()).is_some()
+            {
+                break;
+            }
             if !self.resource_events.is_empty() {
                 let events = std::mem::take(&mut self.resource_events);
                 self.deliver_events(page, runtime, viewport, events)?;
@@ -792,7 +806,9 @@ impl DocumentSession {
                 self.runnable = false;
                 break;
             }
-            if Instant::now() >= end {
+            if Instant::now() >= end || self.resources.next != next_request
+                && self.resources.ready_position(Instant::now()).is_some()
+            {
                 break;
             }
         }
@@ -1224,7 +1240,15 @@ impl DocumentSession {
                         .begin_script(node)
                         .map_err(|e| e.to_string())?;
                 }
+                #[cfg(feature = "media-startup-diagnostics")]
+                if script.external {
+                    trace_document_asset(&identifier, false, "executing", node.0 as u64);
+                }
                 realm.execute_classic(node, &source, &name, identifier.as_str(), script.external);
+                #[cfg(feature = "media-startup-diagnostics")]
+                if script.external {
+                    trace_document_asset(&identifier, false, "executed", node.0 as u64);
+                }
                 if blocking {
                     self.parser
                         .as_ref()
@@ -1360,6 +1384,8 @@ impl DocumentSession {
                         body: ResourceBody::Text(source),
                         ..
                     }) => {
+                        #[cfg(feature = "media-startup-diagnostics")]
+                        trace_document_asset(&url, false, "downloaded", id);
                         accepted = true;
                         self.classic_code(
                             source,
@@ -1456,7 +1482,7 @@ impl DocumentSession {
                     self.sheet_sources.remove(&node);
                 }
                 #[cfg(feature = "media-startup-diagnostics")]
-                trace_stylesheet(&request.url, match (admitted_request && current, received, accepted) {
+                trace_document_asset(&request.url, true, match (admitted_request && current, received, accepted) {
                     (false, _, _) => "stale",
                     (_, false, _) => "failed",
                     (_, _, false) => "rejected",
