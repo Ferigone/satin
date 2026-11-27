@@ -145,7 +145,7 @@ impl Host {
     fn fire(&self, vm: &mut Vm, xhr: Value, kind: &str) -> Result<(), JsError> {
         let event = vm.new_object_with_prototype(self.events.event_proto.clone())?;
         let event = event_target::init_event(vm, event, kind.into(), [false; 3], true)?;
-        self.events.dispatch(vm, xhr, event).map(|_| ())
+        self.events.dispatch_scheduled(vm, xhr, event).map(|_| ())
     }
 
     fn fire_progress(
@@ -165,7 +165,7 @@ impl Host {
             true,
             [Value::Bool(total != 0), loaded.into(), total.into()],
         )?;
-        self.events.dispatch(vm, xhr, event).map(|_| ())
+        self.events.dispatch_scheduled(vm, xhr, event).map(|_| ())
     }
 
     fn success_events(
