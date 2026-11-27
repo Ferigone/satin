@@ -182,6 +182,8 @@ pub struct Vm {
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     pub(crate) qa_callback_gc: (usize, usize, usize, usize),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    pub(crate) qa_callback_gc_time: Duration,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_callback_target: Option<ObjectId>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_native_call_stack: Option<Vec<(usize, ObjectId)>>,
@@ -353,6 +355,8 @@ impl Vm {
             qa_task_site: None,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_callback_gc: (0, 0, 0, 0),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_callback_gc_time: Duration::ZERO,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_callback_target: None,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -757,6 +761,7 @@ impl Vm {
                 self.qa_task_heap = (self.heap.live, self.estimated_heap_bytes());
                 self.qa_task_site = Some(std::panic::Location::caller());
                 self.qa_callback_gc = (0, 0, 0, 0);
+                self.qa_callback_gc_time = Duration::ZERO;
                 self.qa_callback_target = None;
             }
         }
@@ -776,13 +781,16 @@ impl Vm {
     fn check_interrupt(&self) -> Result<(), JsError> {
         if let Some(message) = self.task_deadline.as_ref().and_then(TaskDeadline::exceeded) {
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
-            qa_budget_limit(
-                "task-deadline",
-                self.qa_task_site,
-                self.call_depth as u64,
-                self.execution_depth as u64,
-                self.qa_native_work,
-            );
+            {
+                qa_budget_limit(
+                    "task-deadline",
+                    self.qa_task_site,
+                    self.call_depth as u64,
+                    self.execution_depth as u64,
+                    self.qa_native_work,
+                );
+                self.diagnostic_timed_out_task();
+            }
             return Err(JsError::new(ErrorKind::ExecutionLimit, message));
         }
         if self
@@ -1997,6 +2005,24 @@ impl Vm {
             _ => String::new(),
         };
         format!(" [source {source} units={units} range={start}..{end} id={signature} bound={bound}]")
+    }
+
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    fn diagnostic_timed_out_task(&self) {
+        use std::sync::atomic::AtomicUsize;
+        static TRACES: AtomicUsize = AtomicUsize::new(0);
+        if self.qa_native_call_stack.is_none() || TRACES.fetch_add(1, Ordering::Relaxed) >= 8 {
+            return;
+        }
+        self.qa_report_work_limit("task-deadline-work", self.qa_last_native_site, 0);
+        eprintln!(
+            "SATIN_QA_TASK_STATE cells={} estimated={} callback_gc={:?} callback_gc_ms={}{}",
+            self.heap.live,
+            self.estimated_heap_bytes(),
+            self.qa_callback_gc,
+            self.qa_callback_gc_time.as_millis(),
+            self.diagnostic_source_site(),
+        );
     }
 
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]

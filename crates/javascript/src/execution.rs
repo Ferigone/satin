@@ -277,14 +277,17 @@ struct CallbackCollection {
 impl CallbackCollection {
     fn new(vm: &Vm) -> Self {
         let allowance = |used: usize, cap: usize, step: usize| {
-            let growth = (used / 4).clamp(step / 4, step);
+            // A large live set is expensive to trace repeatedly. Allow
+            // temporary allocations to grow with it, leaving half the
+            // remaining budget available before the next collection.
+            let growth = (used / 2).clamp(step / 8, step);
             used.saturating_add(growth.min((cap.saturating_sub(used) / 2).max(1)))
         };
         Self {
             bytes_at: allowance(
-                vm.estimated_heap_bytes(), vm.limits().max_heap_bytes, 96 * 1024 * 1024,
+                vm.estimated_heap_bytes(), vm.limits().max_heap_bytes, 192 * 1024 * 1024,
             ),
-            cells_at: allowance(vm.heap_cell_count(), vm.limits().max_heap_objects, 96 * 1024),
+            cells_at: allowance(vm.heap_cell_count(), vm.limits().max_heap_objects, 192 * 1024),
             until_probe: 256,
         }
     }
@@ -325,10 +328,13 @@ impl CallbackCollection {
             Some(Err(error)) => error.thrown.iter().for_each(retain),
             _ => {}
         }
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let collection_started = std::time::Instant::now();
         let _stats = vm.collect_rooted_heap(true, &saved);
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
         {
             vm.qa_callback_gc.3 += 1;
+            vm.qa_callback_gc_time += collection_started.elapsed();
         }
         #[cfg(feature = "media-startup-diagnostics")]
         if _stats.collected >= 8 * 1024 {
