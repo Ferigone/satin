@@ -252,7 +252,7 @@ impl Tree {
         refs
     }
 
-    fn connected(&self, mut node: NodeId) -> bool {
+    pub(super) fn connected(&self, mut node: NodeId) -> bool {
         for _ in 0..=MAX_OPEN_ELEMENTS {
             if node == self.doc.root {
                 return true;
@@ -265,7 +265,7 @@ impl Tree {
         false
     }
 
-    fn charge_strings(&mut self, amount: usize) -> bool {
+    pub(super) fn charge_strings(&mut self, amount: usize) -> bool {
         if self.string_bytes.saturating_add(amount) > MAX_DOM_BYTES {
             self.doc.truncated = true;
             self.halted = true;
@@ -412,7 +412,7 @@ impl Tree {
         false
     }
 
-    fn create(&mut self, kind: NodeKind) -> NodeId {
+    pub(super) fn create(&mut self, kind: NodeKind) -> NodeId {
         if self.halted {
             return self.current();
         }
@@ -433,7 +433,7 @@ impl Tree {
         id
     }
 
-    fn detach(&mut self, id: NodeId) {
+    pub(super) fn detach(&mut self, id: NodeId) {
         if let Some(parent) = self.doc.nodes[id.0].parent {
             let scans = 1 + usize::from(self.mutation_sink.is_some());
             if !self.charge_work(
@@ -471,7 +471,7 @@ impl Tree {
         }
     }
 
-    fn attach(&mut self, id: NodeId, parent: NodeId, before: Option<NodeId>) {
+    pub(super) fn attach(&mut self, id: NodeId, parent: NodeId, before: Option<NodeId>) {
         if self.halted {
             return;
         }
@@ -725,10 +725,14 @@ impl Tree {
     }
 
     fn characters(&mut self, text: &str) {
+        let (parent, before) = self.location(None);
+        self.characters_at(parent, before, text);
+    }
+
+    pub(super) fn characters_at(&mut self, parent: NodeId, before: Option<NodeId>, text: &str) {
         if text.is_empty() || self.halted {
             return;
         }
-        let (parent, before) = self.location(None);
         if before.is_some() && !self.charge_work(self.doc.nodes[parent.0].children.len()) {
             return;
         }

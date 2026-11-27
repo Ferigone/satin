@@ -35,6 +35,8 @@ mod syntax;
 mod uri;
 mod value;
 mod vm;
+#[cfg(feature = "v8-engine")]
+mod v8_document;
 mod wasm;
 
 pub use bigint::JsBigInt;

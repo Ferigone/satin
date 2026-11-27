@@ -7,6 +7,8 @@ mod box_border;
 mod controls;
 mod native_chrome;
 mod transformed;
+#[cfg(feature = "vello-renderer")]
+pub mod vello_renderer;
 pub use native_chrome::RoundedShadow;
 use transformed::valid_rect;
 

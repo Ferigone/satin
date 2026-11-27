@@ -89,11 +89,7 @@ impl Interop {
         if bytes.len() > u32::MAX as usize {
             return Err(Error::from_hresult(E_INVALIDARG));
         }
-        let Some(header) = bytes.get(..16).filter(|header| &header[4..8] == b"ftyp") else {
-            return Err(Error::from_hresult(MF_E_INVALID_FILE_FORMAT));
-        };
-        let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
-        if !(16..=bytes.len()).contains(&size) || !size.is_multiple_of(4) {
+        if !super::valid_mp4(bytes) {
             return Err(Error::from_hresult(MF_E_INVALID_FILE_FORMAT));
         }
         let stream = unsafe {

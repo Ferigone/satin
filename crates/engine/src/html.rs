@@ -1,4 +1,4 @@
-//! Independent HTML tokenizer and tree constructor.
+//! HTML document and fragment parsing into Satin's DOM.
 //!
 //! This implements a measured subset of WHATWG HTML document and fragment
 //! parsing, including inert template contents and SVG/MathML foreign content.
@@ -7,6 +7,10 @@
 mod foreign;
 #[path = "html/incremental.rs"]
 mod incremental;
+#[path = "html/servo.rs"]
+mod servo;
+#[path = "html/servo_stream.rs"]
+mod servo_stream;
 #[path = "html/stream.rs"]
 mod stream;
 pub use stream::{
@@ -42,7 +46,7 @@ pub fn parse(source: &str) -> Document {
 /// use HtmlStream with a script execution driver.
 pub fn parse_with_scripting(source: &str, enabled: bool) -> Document {
     parse_input(source, |normalized| {
-        tree_builder::parse(normalized, enabled)
+        servo::parse(normalized, enabled)
     })
 }
 
@@ -81,7 +85,7 @@ pub fn parse_fragment(source: &str, context_tag: &str, scripting: bool) -> Docum
 
 pub fn parse_fragment_with_context(source: &str, context: FragmentContext<'_>) -> Document {
     parse_input(source, |normalized| {
-        tree_builder::parse_fragment(normalized, context)
+        servo::parse_fragment(normalized, context)
     })
 }
 

@@ -13,6 +13,8 @@ mod custom_elements;
 mod dataset;
 mod range;
 mod selection;
+#[cfg(all(test, feature = "v8-engine"))]
+mod v8_document_tests;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
@@ -1100,6 +1102,10 @@ impl ScriptRuntime {
         let base_state = state.clone();
         fetch.set_base_resolver(Rc::new(move || document_base(&base_state.borrow())));
         fetch.set_document(&state);
+        #[cfg(feature = "v8-engine")]
+        if std::env::var_os("SATIN_JAVASCRIPT_ENGINE").as_deref() == Some(std::ffi::OsStr::new("v8")) {
+            vm.enable_v8_document()?;
+        }
         let next_collection_bytes = vm.estimated_heap_bytes() + 1024 * 1024;
         let next_collection_cells = vm.limits().max_heap_objects / 2;
         Ok(Self {
@@ -1959,7 +1965,7 @@ fn run_classic(
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     let evaluation = startup_measure::evaluate(vm, source, identifier, node, external);
     #[cfg(not(all(windows, feature = "media-startup-diagnostics")))]
-    let evaluation = vm.eval_with_identifier(source, identifier);
+    let evaluation = vm.eval_document_script(source, identifier);
     let evaluated = match evaluation {
         Ok(_) => {
             state.borrow_mut().executed += 1;

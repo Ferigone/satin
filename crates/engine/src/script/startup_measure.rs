@@ -11,10 +11,10 @@ pub(super) fn evaluate(
 ) -> Result<Value, JsError> {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     if *DISABLED.get_or_init(|| std::env::var_os("SATIN_QA_DISABLE_SCRIPT_PROFILE").is_some()) {
-        return vm.eval_with_identifier(source, identifier);
+        return vm.eval_document_script(source, identifier);
     }
     let (result, measurement) = rust_browser_javascript::startup_profile::measure(|| {
-        vm.eval_with_identifier(source, identifier)
+        vm.eval_document_script(source, identifier)
     });
     static REPORTS: AtomicUsize = AtomicUsize::new(0);
     if let (Err(error), Some(m)) = (&result, measurement)

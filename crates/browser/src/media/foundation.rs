@@ -1,8 +1,10 @@
-//! A single COM apartment owns the players. The browser receives only owned frames and state.
+//! A dedicated media thread owns the players. The browser receives owned frames and state.
+#[cfg(feature = "gstreamer-media")]
+mod gstreamer_playback;
 mod native;
 
 use super::{Command, Event, EventKind, Key};
-use native::{Interop, Player};
+use native::Interop;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Condvar, Mutex},
@@ -205,7 +207,10 @@ impl Shared {
         let mut updates = self.updates.lock().unwrap();
         let needs_wake = updates.is_empty();
         let droppable = |kind: &EventKind| {
-            matches!(kind, EventKind::Frame { .. } | EventKind::Time(_) | EventKind::DecoderFrameStats { .. })
+            matches!(
+                kind,
+                EventKind::Frame { .. } | EventKind::Time(_) | EventKind::DecoderFrameStats { .. }
+            )
         };
         if droppable(&kind)
             && let Some(index) = updates.iter().position(|event| {
@@ -239,6 +244,84 @@ impl Shared {
     }
 }
 
+enum Player {
+    Foundation(native::Player),
+    #[cfg(feature = "gstreamer-media")]
+    GStreamer(gstreamer_playback::Player),
+}
+
+fn valid_mp4(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..16).filter(|header| &header[4..8] == b"ftyp") else {
+        return false;
+    };
+    let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    (16..=bytes.len()).contains(&size) && size.is_multiple_of(4)
+}
+
+impl Player {
+    fn control(&mut self, command: Command, shared: &Shared) -> Result<(), String> {
+        match self {
+            Self::Foundation(player) => player
+                .control(command, shared)
+                .map_err(|error| error.to_string()),
+            #[cfg(feature = "gstreamer-media")]
+            Self::GStreamer(player) => player.control(command, shared),
+        }
+    }
+
+    fn notification(&mut self, signal: Signal, shared: &Shared, key: Key) -> Result<(), String> {
+        match self {
+            Self::Foundation(player) => player.notification(signal, shared, key),
+            #[cfg(feature = "gstreamer-media")]
+            Self::GStreamer(_) => Ok(()),
+        }
+    }
+
+    fn needs_poll(&self) -> bool {
+        match self {
+            Self::Foundation(player) => player.needs_frame(),
+            #[cfg(feature = "gstreamer-media")]
+            Self::GStreamer(player) => player.needs_poll(),
+        }
+    }
+
+    fn poll(&mut self, shared: &Shared, key: Key) -> Result<(), String> {
+        match self {
+            Self::Foundation(player) => {
+                if let Some(frame) = player
+                    .frame(false, shared, key)
+                    .map_err(|error| error.to_string())?
+                {
+                    shared.publish(key, frame);
+                }
+                Ok(())
+            }
+            #[cfg(feature = "gstreamer-media")]
+            Self::GStreamer(player) => player.poll(shared, key),
+        }
+    }
+}
+
+fn open(
+    interop: &windows::core::Result<Interop>,
+    command: Command,
+    key: Key,
+    shared: &Arc<Shared>,
+) -> Result<Player, String> {
+    #[cfg(feature = "gstreamer-media")]
+    if let Command::Open { bytes, .. } = &command {
+        return gstreamer_playback::Player::open(bytes.clone()).map(Player::GStreamer);
+    }
+    let interop = interop.as_ref().map_err(ToString::to_string)?;
+    match command {
+        Command::Open { bytes, .. } => interop.open(key, &bytes, shared.clone()),
+        Command::OpenStream { .. } => interop.open_stream(key, shared.clone()),
+        _ => unreachable!(),
+    }
+    .map(Player::Foundation)
+    .map_err(|error| error.to_string())
+}
+
 fn run(shared: &Arc<Shared>) {
     let interop = Interop::new();
     let mut players = HashMap::<Key, Player>::new();
@@ -246,7 +329,7 @@ fn run(shared: &Arc<Shared>) {
     while let Some(work) = shared.wait(
         players
             .values()
-            .any(Player::needs_frame)
+            .any(Player::needs_poll)
             .then_some(next_frame),
     ) {
         match work {
@@ -262,21 +345,7 @@ fn run(shared: &Arc<Shared>) {
                 let result = if players.len() >= MAX_PLAYERS {
                     Err("The native media player limit was reached".into())
                 } else {
-                    interop
-                        .as_ref()
-                        .map_err(ToString::to_string)
-                        .and_then(|interop| {
-                            match command {
-                                Command::Open { bytes, .. } => {
-                                    interop.open(key, &bytes, shared.clone())
-                                }
-                                Command::OpenStream { .. } => {
-                                    interop.open_stream(key, shared.clone())
-                                }
-                                _ => unreachable!(),
-                            }
-                            .map_err(|error| error.to_string())
-                        })
+                    open(&interop, command, key, shared)
                 };
                 match result {
                     Ok(player) => {
@@ -299,7 +368,7 @@ fn run(shared: &Arc<Shared>) {
                 if let Some(player) = players.get_mut(&key)
                     && let Err(error) = player.control(command, shared)
                 {
-                    shared.publish(key, EventKind::Error(error.to_string()));
+                    shared.publish(key, EventKind::Error(error));
                     players.remove(&key);
                 }
             }
@@ -316,16 +385,11 @@ fn run(shared: &Arc<Shared>) {
         if Instant::now() >= next_frame {
             next_frame = Instant::now() + FRAME_INTERVAL;
             players.retain(|key, player| {
-                if !player.needs_frame() {
-                    return true;
-                }
-                match player.frame(false, shared, *key) {
-                    Ok(Some(frame)) => shared.publish(*key, frame),
-                    Ok(None) => {}
-                    Err(error) => {
-                        shared.publish(*key, EventKind::Error(error.to_string()));
-                        return false;
-                    }
+                if player.needs_poll()
+                    && let Err(error) = player.poll(shared, *key)
+                {
+                    shared.publish(*key, EventKind::Error(error));
+                    return false;
                 }
                 true
             });

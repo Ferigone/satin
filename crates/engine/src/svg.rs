@@ -13,6 +13,8 @@ mod raster;
 mod scene;
 #[path = "svg/style.rs"]
 mod style;
+#[cfg(feature = "vello-renderer")]
+mod vello;
 
 use crate::{
     css::Color,

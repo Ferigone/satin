@@ -7,6 +7,7 @@ mod headless;
 mod jobs;
 mod media;
 mod profile;
+mod renderer;
 mod shortcuts;
 mod testing;
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -44,7 +45,7 @@ fn run() -> Result<(), String> {
     }
     if args.iter().any(|a| a == "--help") {
         println!(
-            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID --smoke-actions JSON_FILE] [--width PX --height PX] [--file-picker-responses JSON_FILE]"
+            "rust-browser [--url URL] [--profile DIRECTORY] [--headless --screenshot FILE --dump-dom FILE --click-id ID --click-count 1 --run-for-ms 500] [--smoke-window FILE --smoke-click-id ID --smoke-actions JSON_FILE] [--width PX --height PX] [--renderer software|vello] [--file-picker-responses JSON_FILE]"
         );
         return Ok(());
     }
@@ -56,6 +57,7 @@ fn run() -> Result<(), String> {
     };
     let url = value("--url").or_else(|| args.first().filter(|a| !a.starts_with('-')).cloned());
     let headless = args.iter().any(|a| a == "--headless");
+    let mut renderer = renderer::PageRenderer::from_argument(value("--renderer").as_deref())?;
     let mut file_picker_responses = if args.iter().any(|a| a == "--file-picker-responses") {
         if !headless && value("--smoke-window").is_none() {
             return Err("--file-picker-responses requires --headless or --smoke-window".into());
@@ -137,18 +139,27 @@ fn run() -> Result<(), String> {
             std::sync::Arc::new(Layout::build_with_viewport(&page, &fonts, viewport))
         };
         let mut paint_limited = false;
+        let mut page_renderer = None;
         if let Some(path) = value("--screenshot") {
             let mut canvas = Canvas::new(width, height, layout.background);
-            canvas.document(
+            renderer.document(
+                &mut canvas,
                 &layout,
                 &mut fonts,
-                0.,
-                runtime.as_ref().map_or(0., |r| r.viewport().scroll_y),
-            );
+                rust_browser_engine::layout::Rect {
+                    x: 0., y: 0., width: width as f32, height: height as f32,
+                },
+                rust_browser_engine::layout::ScrollOffset {
+                    x: layout.viewport.scroll_x,
+                    y: runtime.as_ref().map_or(0., |r| r.viewport().scroll_y),
+                },
+                1.,
+            )?;
             canvas
                 .save_png(std::path::Path::new(&path))
                 .map_err(|e| e.to_string())?;
             paint_limited = canvas.limited;
+            page_renderer = Some(renderer.name());
         }
         let mut svg_scenes = 0usize;
         let mut svg_unsupported = false;
@@ -170,6 +181,7 @@ fn run() -> Result<(), String> {
                 "document_height": layout.height,
                 "layout_limited": layout.limited,
                 "paint_limited": paint_limited,
+                "page_renderer": page_renderer,
                 "svg": { "scenes": svg_scenes, "unsupported": svg_unsupported },
                 "resources": page.stats.resources,
                 "bytes": page.stats.bytes,
@@ -215,6 +227,7 @@ fn run() -> Result<(), String> {
         file_picker_responses,
         smoke_size,
         Some(devtools::DevTools::default()),
+        renderer,
         #[cfg(all(windows, target_arch = "x86_64"))]
         !args.iter().any(|argument| {
             matches!(

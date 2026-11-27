@@ -530,6 +530,7 @@ pub(crate) fn run(
     file_picker_responses: Option<crate::file_picker::Responses>,
     smoke_size: Option<PhysicalSize<u32>>,
     devtools: Option<crate::devtools::DevTools>,
+    renderer: crate::renderer::PageRenderer,
     #[cfg(all(windows, target_arch = "x86_64"))] enable_updates: bool,
 ) -> Result<(), String> {
     #[cfg(all(test, windows, target_arch = "x86_64"))]
@@ -626,6 +627,8 @@ pub(crate) fn run(
         window: None,
         graphics: None,
         canvas: None,
+        renderer,
+        document_renderer: None,
         fonts,
         profile,
         bookmarks,
@@ -743,6 +746,8 @@ pub(crate) fn run(
                 "title": tab.title,
                 "layout_limited": tab.layout.as_ref().is_some_and(|layout| layout.limited),
                 "paint_limited": app.canvas.as_ref().is_some_and(|canvas| canvas.limited),
+                "page_renderer": app.document_renderer.as_ref().map(|(name, _)| name),
+                "page_renderer_error": app.document_renderer.as_ref().and_then(|(_, error)| error.as_ref()),
                 "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
                 "javascript": {
                     "diagnostics": tab.runtime.as_ref().map(ScriptRuntime::diagnostics).unwrap_or_default()
@@ -791,6 +796,8 @@ struct App {
     window: Option<Rc<Window>>,
     graphics: Option<Graphics>,
     canvas: Option<Canvas>,
+    renderer: crate::renderer::PageRenderer,
+    document_renderer: Option<(&'static str, Option<String>)>,
     fonts: Fonts,
     bookmarks: Result<bookmarks::Bookmarks, String>,
     visits: Result<visit_store::Visits, String>,
@@ -2745,16 +2752,25 @@ impl App {
         if regions.page.height > 0.
             && let Some(layout) = &tab.layout
         {
-            canvas.document_at(
+            let scroll = ScrollOffset { x: tab.scroll_x, y: tab.scroll };
+            let scale = u * tab.zoom;
+            let result = self.renderer.document(
+                &mut canvas,
                 layout,
                 &mut self.fonts,
-                regions.page.y * u,
-                ScrollOffset {
-                    x: tab.scroll_x,
-                    y: tab.scroll,
-                },
-                u * tab.zoom,
+                content_clip,
+                scroll,
+                scale,
             );
+            self.document_renderer = Some(match result {
+                Ok(()) => (self.renderer.name(), None),
+                Err(error) => {
+                    canvas.document_at(layout, &mut self.fonts, content_clip.y, scroll, scale);
+                    ("software", Some(error))
+                }
+            });
+        } else {
+            self.document_renderer = None;
         }
         if let (Some(frame), Some(dock)) = (dock_frame, &mut self.devtools) {
             let page = tab.inspected_page();

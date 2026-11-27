@@ -7,6 +7,10 @@ build = "build.rs"
 
 [features]
 media-startup-diagnostics = ["rust-browser-engine/media-startup-diagnostics"]
+v8-engine = ["rust-browser-engine/v8-engine"]
+stylo-engine = ["rust-browser-engine/stylo-engine"]
+vello-renderer = ["rust-browser-engine/vello-renderer"]
+gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
 [dependencies]
 rust-browser-engine = { path = "../engine" }
@@ -34,6 +38,9 @@ libc = "0.2"
 winresource = "0.1"
 
 [target.'cfg(windows)'.dependencies]
+gstreamer = { version = "=0.25.4", optional = true, features = ["v1_28"] }
+gstreamer-app = { version = "=0.25.2", optional = true, features = ["v1_28"] }
+gstreamer-video = { version = "=0.25.4", optional = true, features = ["v1_28"] }
 windows = { version = "=0.62.2", features = ["Win32_Graphics_Dxgi_Common", "Win32_Graphics_Imaging", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell"] }
 windows-core = "=0.62.2"
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Controls_Dialogs", "Win32_Storage_FileSystem"] }

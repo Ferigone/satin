@@ -152,6 +152,12 @@ impl fmt::Debug for FontFace {
     }
 }
 impl FontFace {
+    /// The decoded OpenType data and face index, shared with the rasterizer.
+    #[cfg(feature = "vello-renderer")]
+    pub(crate) fn sfnt(&self) -> (Arc<[u8]>, u32) {
+        (self.data.bytes.clone(), self.data.index)
+    }
+
     pub fn id(&self) -> u64 {
         self.data.id
     }
@@ -351,6 +357,17 @@ pub struct RunFace {
 }
 
 impl RunFace {
+    /// Normalized OpenType variation coordinates, in the font's axis order.
+    #[cfg(feature = "vello-renderer")]
+    pub(crate) fn normalized_variations(&self) -> Vec<i16> {
+        self.outline_face()
+            .as_ref()
+            .variation_coordinates()
+            .iter()
+            .map(|coordinate| coordinate.get())
+            .collect()
+    }
+
     pub fn face(&self) -> &FontFace {
         &self.face
     }
