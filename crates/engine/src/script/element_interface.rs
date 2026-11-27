@@ -288,7 +288,9 @@ pub(super) fn install_html(vm: &mut Vm, state: &Shared, prototype: Value) -> Res
     let div = webidl::interface(vm, div_prototype.clone(), "HTMLDivElement", 0, |_, _, _, _| {
         Err(JsError::type_error("Illegal HTMLDivElement constructor"))
     })?;
-    vm.call(set_prototype, Value::Undefined, &[div, constructor])?;
+    vm.call(set_prototype.clone(), Value::Undefined, &[div, constructor.clone()])?;
+    let iframe = vm.get_global("HTMLIFrameElement")?;
+    vm.call(set_prototype, Value::Undefined, &[iframe, constructor])?;
     let read_state = state.clone();
     let get = vm.new_native_function("get align", move |vm, this, _| {
         let id = div_receiver(&read_state, &this)?;

@@ -2511,11 +2511,22 @@ impl Vm {
         &mut self,
         base: &Value,
         key: &Value,
+        action: &str,
     ) -> Result<PropertyKey, JsError> {
         if base.is_nullish() {
-            return Err(JsError::type_error(
-                "Cannot access a property of null or undefined",
-            ));
+            let receiver = if *base == Value::Null { "null" } else { "undefined" };
+            let key = match key {
+                Value::String(text) => {
+                    let units = text.as_utf16();
+                    format!("{:?}", String::from_utf16_lossy(&units[..units.len().min(128)]))
+                }
+                Value::Number(number) => number_string(*number),
+                Value::Object(_) => "[object key]".into(),
+                _ => self.inspect_value(key),
+            };
+            return Err(JsError::type_error(format!(
+                "Cannot {action} property {key} of {receiver}"
+            )));
         }
         let key = self.to_property_key(key)?;
         if let PropertyKey::String(name) = &key {
@@ -2585,7 +2596,7 @@ impl Vm {
                 {
                     return Ok(value);
                 }
-                let key = self.property_reference_key(&object, &key)?;
+                let key = self.property_reference_key(&object, &key, "read")?;
                 self.get_property_key(object, key)
             }
             Reference::Private(object, id) => self.private_get(object, id),
@@ -2665,7 +2676,7 @@ impl Vm {
                 {
                     return Ok(());
                 }
-                let key = self.property_reference_key(&object, &key)?;
+                let key = self.property_reference_key(&object, &key, "set")?;
                 if object.as_object().is_some() {
                     return self.set_key(object, &key, value, strict);
                 }
@@ -3889,7 +3900,7 @@ impl Vm {
                 let item = stack.pop().unwrap();
                 let deleted = match item {
                     Item::Reference(Reference::Property(object, key)) => {
-                        let key = self.property_reference_key(&object, &key)?;
+                        let key = self.property_reference_key(&object, &key, "delete")?;
                         self.delete_key(object, &key, strict)?
                     }
                     Item::Reference(

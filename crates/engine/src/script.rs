@@ -109,6 +109,7 @@ struct State {
     canvas_prototype: Value,
     media_prototypes: media::Prototypes,
     input_prototype: Value,
+    form_control_prototypes: HashMap<&'static str, Value>,
     image_prototype: Value,
     link_prototype: Value,
     absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
@@ -329,7 +330,11 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             match state.document.namespace(id) {
                 crate::dom::Namespace::Html if state.document.tag(id) == "div" => state.div_prototype.clone(),
                 crate::dom::Namespace::Html if state.document.tag(id) == "template" => state.template_prototype.clone(),
-                crate::dom::Namespace::Html => state.html_element_prototype.clone(),
+                crate::dom::Namespace::Html => state
+                    .form_control_prototypes
+                    .get(state.document.tag(id))
+                    .unwrap_or(&state.html_element_prototype)
+                    .clone(),
                 crate::dom::Namespace::Svg => state.svg_element_prototype.clone(),
                 _ => state.element_prototype.clone(),
             }
@@ -724,6 +729,12 @@ impl ScriptRuntime {
         let media_prototypes = media::Prototypes::new(&mut vm, &html_element_prototype)?;
         let input_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(input_prototype.clone());
+        let mut form_control_prototypes = HashMap::new();
+        for (tag, _, _) in forms::TYPED_CONTROLS {
+            let control = vm.new_object_with_prototype(html_element_prototype.clone())?;
+            vm.root(control.clone());
+            form_control_prototypes.insert(*tag, control);
+        }
         let link_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(link_prototype.clone());
         let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
@@ -777,6 +788,7 @@ impl ScriptRuntime {
             canvas_prototype: canvas_prototype.clone(),
             media_prototypes,
             input_prototype: input_prototype.clone(),
+            form_control_prototypes,
             image_prototype: image_prototype.clone(),
             link_prototype: link_prototype.clone(),
             absolute_link_hrefs: HashMap::new(),
@@ -973,6 +985,7 @@ impl ScriptRuntime {
         dom_implementation::install(&mut vm, &state)?;
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
+        forms.install_typed_controls(&mut vm)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();
         let streams = streams::StreamHost::install(&mut vm, abort.clone())?;

@@ -17,6 +17,11 @@ const VALUE_UNITS: usize = 1024 * 1024;
 const LIVE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const QUEUED_SUBMISSIONS: usize = 8;
 const SNAPSHOT_UNITS: usize = 8192;
+pub(super) const TYPED_CONTROLS: &[(&str, &str, &[&str])] = &[
+    ("option", "HTMLOptionElement", &["selected", "defaultSelected", "value"]),
+    ("select", "HTMLSelectElement", &["value", "selectedIndex"]),
+    ("textarea", "HTMLTextAreaElement", &["value", "defaultValue"]),
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FormSubmission {
@@ -1403,6 +1408,56 @@ pub(crate) fn initial_snapshots(document: &Document) -> HashMap<NodeId, ControlS
 }
 
 impl FormHost {
+    pub(super) fn install_typed_controls(&self, vm: &mut Vm) -> Result<(), JsError> {
+        let html = vm.get_global("HTMLElement")?;
+        let object = vm.get_global("Object")?;
+        let set_prototype = vm.get_property(object, "setPrototypeOf")?;
+        let input = vm.get_global("HTMLInputElement")?;
+        vm.call(set_prototype.clone(), Value::Undefined, &[input, html.clone()])?;
+        let input_prototype = self.dom.borrow().input_prototype.clone();
+        self.typed_accessors(vm, input_prototype, "input", &["value", "checked"])?;
+        for &(tag, name, properties) in TYPED_CONTROLS {
+            let prototype = self.dom.borrow().form_control_prototypes[tag].clone();
+            let constructor = super::webidl::interface(vm, prototype.clone(), name, 0, move |_, _, _, _| {
+                Err(JsError::type_error(format!("Illegal {name} constructor")))
+            })?;
+            vm.call(set_prototype.clone(), Value::Undefined, &[constructor, html.clone()])?;
+            self.typed_accessors(vm, prototype, tag, properties)?;
+        }
+        Ok(())
+    }
+
+    fn typed_accessors(
+        &self,
+        vm: &mut Vm,
+        prototype: Value,
+        tag: &'static str,
+        properties: &[&'static str],
+    ) -> Result<(), JsError> {
+        for &property in properties {
+            let host = self.clone();
+            let get = vm.new_native_function(&format!("get {property}"), move |vm, this, _| {
+                host.ensure_control_type(&this, tag)?;
+                host.get_property(vm, this, property)
+            });
+            let host = self.clone();
+            let set = vm.new_native_function(&format!("set {property}"), move |vm, this, args| {
+                host.ensure_control_type(&this, tag)?;
+                host.set_property(vm, this, property, arg(args, 0))
+            });
+            vm.define_accessor(prototype.clone(), property, Some(get), Some(set))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_control_type(&self, receiver: &Value, tag: &str) -> Result<(), JsError> {
+        let id = node(&self.dom, receiver)?;
+        if html(&self.dom.borrow().document, id, tag) {
+            return Ok(());
+        }
+        Err(JsError::type_error("Wrong form control for this accessor"))
+    }
+
     fn install_accessors(&self, vm: &mut Vm, prototype: Value) -> Result<(), JsError> {
         for property in [
             "value",

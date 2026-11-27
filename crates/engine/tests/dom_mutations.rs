@@ -12,19 +12,44 @@ fn realm(source: &str) -> (LoadedPage, ScriptRuntime) {
 }
 
 #[test]
-fn html_div_elements_use_the_div_prototype_and_reflect_align() {
-    let (_, mut runtime) = realm("<div id='parsed' align='left'></div><span id='other'></span>");
+fn div_and_iframe_elements_use_distinct_html_interfaces() {
+    let (_, mut runtime) = realm("<div id='parsed' align='left'></div><span id='other'></span><iframe id='frame'></iframe>");
     js(&mut runtime, r#"
         const parsed = document.getElementById("parsed");
         const dynamic = document.createElement("div");
         const other = document.getElementById("other");
+        const iframe = document.getElementById("frame");
         dynamic.align = "right";
         parsed instanceof HTMLDivElement &&
             dynamic instanceof HTMLDivElement &&
             !(other instanceof HTMLDivElement) &&
             Object.getPrototypeOf(HTMLDivElement) === HTMLElement &&
+            iframe instanceof HTMLIFrameElement && !(other instanceof HTMLIFrameElement) &&
+            Object.getPrototypeOf(HTMLIFrameElement) === HTMLElement &&
+            iframe.contentDocument !== null &&
             parsed.align === "left" && dynamic.getAttribute("align") === "right" &&
             Object.prototype.toString.call(parsed) === "[object HTMLDivElement]"
+    "#, true);
+}
+
+#[test]
+fn typed_form_controls_expose_prototype_accessors_used_by_web_frameworks() {
+    let (_, mut runtime) = realm("<input id='input'><textarea id='area'>first</textarea><select id='select'><option>one</option><option>two</option></select>");
+    js(&mut runtime, r#"
+        const accessor = (type, name) => Object.getOwnPropertyDescriptor(type.prototype, name);
+        const area = document.getElementById("area");
+        const select = document.getElementById("select");
+        const option = select.options[1];
+        const input = document.getElementById("input");
+        accessor(HTMLTextAreaElement, "value").set.call(area, "next");
+        accessor(HTMLOptionElement, "selected").set.call(option, true);
+        accessor(HTMLInputElement, "checked").set.call(input, true);
+        let receiverRejected = false;
+        try { accessor(HTMLSelectElement, "value").get.call(area); }
+        catch (error) { receiverRejected = error instanceof TypeError; }
+        area instanceof HTMLTextAreaElement && select instanceof HTMLSelectElement &&
+            option instanceof HTMLOptionElement && area.value === "next" &&
+            select.selectedIndex === 1 && select.value === "two" && input.checked && receiverRejected
     "#, true);
 }
 fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
