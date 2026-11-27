@@ -661,7 +661,7 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     state.document.quirks_mode = crate::dom::QuirksMode::NoQuirks;
     state.document.truncated = false;
     state.ready_state = "loading";
-    state.dynamic_scripts.pending.clear();
+    state.dynamic_scripts.discard_pending();
     state.image_updates.retain(|node| !connected.contains(node));
     state.link_updates.clear();
     state.parser = Rc::downgrade(&parser);

@@ -441,7 +441,7 @@ impl DocumentSession {
                 state.parser = std::rc::Weak::new();
                 state.replacement_parser = None;
                 state.parser_wakeup = false;
-                state.dynamic_scripts.pending.clear();
+                state.dynamic_scripts.discard_pending();
                 state.image_updates.clear();
                 state.link_updates.clear();
             }
@@ -899,7 +899,7 @@ impl DocumentSession {
         {
             self.runnable = true;
         }
-        let pending = std::mem::take(&mut realm.state.borrow_mut().dynamic_scripts.pending);
+        let pending = realm.state.borrow_mut().dynamic_scripts.take_pending();
         for tag in pending {
             let asynchronous = tag.asynchronous;
             let script = self.schedule(tag, page, runtime, viewport)?;

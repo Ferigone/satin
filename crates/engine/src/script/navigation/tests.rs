@@ -715,6 +715,61 @@ fast.src = 'never-fetch.js';"#,
 }
 
 #[test]
+fn many_completed_dynamic_script_batches_keep_executing_in_order() {
+    let (mut page, mut session, mut runtime) = start(
+        "<!doctype html><body><script>var ran = []; var loaded = 0; var firstScript;</script>",
+    );
+    const BATCH_SIZE: usize = 8;
+    const SCRIPT_COUNT: usize = 200;
+    for first in (0..SCRIPT_COUNT).step_by(BATCH_SIZE) {
+        let end = first + BATCH_SIZE;
+        evaluate(
+            &mut runtime,
+            &format!(
+                r#"
+                for (let index = {first}; index < {end}; index++) {{
+                    const script = document.createElement('script');
+                    script.async = false;
+                    script.src = 'chunk-' + index + '.js';
+                    script.onload = () => {{ loaded++; }};
+                    if (index === 0) firstScript = script;
+                    document.body.appendChild(script);
+                }}
+                "#
+            ),
+        );
+        advance_ready(&mut page, &mut session, &mut runtime);
+        let loads: Vec<_> = (first..end)
+            .map(|index| {
+                let load = session.next_resource().unwrap();
+                let url = format!("chunk-{index}.js");
+                assert_eq!(load.request.url.path(), format!("/path/{url}"));
+                (index, load.id, url)
+            })
+            .collect();
+        assert!(session.next_resource().is_none());
+        for (index, id, url) in loads.into_iter().rev() {
+            let script = format!("ran.push({index});");
+            complete(&mut page, &mut session, &mut runtime, id, Some((&url, &script)));
+        }
+        assert!(session.done());
+        assert_eq!(evaluate(&mut runtime, "loaded"), end.into());
+    }
+    assert_eq!(
+        evaluate(&mut runtime, "ran.every((index, position) => index === position) && ran.length"),
+        SCRIPT_COUNT.into(),
+    );
+    assert_eq!(page.stats.script_count, SCRIPT_COUNT + 1);
+    evaluate(
+        &mut runtime,
+        "firstScript.remove(); firstScript.src = 'never-fetch.js'; document.body.appendChild(firstScript);",
+    );
+    advance_ready(&mut page, &mut session, &mut runtime);
+    assert!(session.next_resource().is_none());
+    assert!(session.done());
+}
+
+#[test]
 fn dynamic_module_reuses_the_navigation_graph_and_delays_load_only() {
     let (mut page, mut session, mut runtime) = start(
         r#"<!doctype html><script type="importmap">{"imports":{"leaf":"./leaf.js"}}</script>

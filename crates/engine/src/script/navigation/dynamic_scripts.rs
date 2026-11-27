@@ -12,7 +12,6 @@ use crate::script::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-const SCRIPT_LIMIT: usize = 192;
 const SOURCE_LIMIT: usize = 1024 * 1024;
 const PREPARATION_BYTES: usize = 8 * 1024 * 1024;
 const INLINE_NESTING: usize = 6;
@@ -52,14 +51,32 @@ impl Flags {
 #[derive(Default)]
 pub(in crate::script) struct DynamicScripts {
     pub(super) flags: HashMap<NodeId, Flags>,
-    pub(super) pending: Vec<ScriptTag>,
+    pending: Vec<ScriptTag>,
     pub(super) prepared: usize,
-    bytes: usize,
+    pending_bytes: usize,
+    inline_bytes: usize,
     inline_depth: usize,
 }
 impl DynamicScripts {
     pub(in crate::script) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub(super) fn take_pending(&mut self) -> Vec<ScriptTag> {
+        self.pending_bytes = 0;
+        std::mem::take(&mut self.pending)
+    }
+
+    pub(super) fn discard_pending(&mut self) {
+        drop(self.take_pending());
+    }
+
+    fn check_preparation_bytes(&self, additional: usize) -> Result<(), JsError> {
+        let retained = self.pending_bytes.saturating_add(self.inline_bytes);
+        if retained.saturating_add(additional) > PREPARATION_BYTES {
+            return Err(limit("Dynamic script preparation data exceeds 8 MiB"));
+        }
+        Ok(())
     }
 
     pub(in crate::script) fn mark_fragment_inert(&mut self, node: NodeId) {
@@ -252,9 +269,6 @@ fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
             diagnostic(host, "Dynamic import maps are not implemented".into());
             return Ok(());
         }
-        if state.dynamic_scripts.prepared >= SCRIPT_LIMIT {
-            return Err(limit("Dynamic script count limit exceeded"));
-        }
         let doc = &state.document;
         let external = doc.attr(id, "src");
         let inline_classic = external.is_none() && kind == ParserScriptKind::ClassicBlocking;
@@ -266,21 +280,21 @@ fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
         }
         let mut bytes = size;
         if !inline_classic {
-            bytes = bytes.saturating_add(doc.attr(id, "integrity").map_or(0, str::len));
+            bytes = bytes.saturating_add(doc.attr(id, "integrity").map_or(0, str::len))
+                .saturating_add(std::mem::size_of::<ScriptTag>());
         }
         vm.charge_work(doc.nodes.len())?;
-        if state.dynamic_scripts.bytes.saturating_add(bytes) > PREPARATION_BYTES {
-            return Err(limit("Dynamic script preparation data exceeds 8 MiB"));
-        }
+        state.dynamic_scripts.check_preparation_bytes(bytes)?;
         vm.charge_work(bytes)?;
         let base = Arc::new(document_base(&state));
         bytes = bytes.saturating_add(base.as_str().len());
-        if state.dynamic_scripts.bytes.saturating_add(bytes) > PREPARATION_BYTES {
-            return Err(limit("Dynamic script preparation data exceeds 8 MiB"));
-        }
+        state.dynamic_scripts.check_preparation_bytes(bytes)?;
         vm.charge_work(base.as_str().len())?;
         let inline = if inline_classic {
-            Some((child_text(doc, id).collect::<String>(), base))
+            let source = child_text(doc, id).collect::<String>();
+            state.dynamic_scripts.inline_depth += 1;
+            state.dynamic_scripts.inline_bytes += bytes;
+            Some((source, base, bytes))
         } else {
             let source = match external {
                 Some(src) => Source::External(resolve_resource(&state.url, &base, src)),
@@ -289,9 +303,7 @@ fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
             if let Source::External(Ok(url)) = &source {
                 bytes = bytes.saturating_add(url.as_str().len());
             }
-            if state.dynamic_scripts.bytes.saturating_add(bytes) > PREPARATION_BYTES {
-                return Err(limit("Dynamic script preparation data exceeds 8 MiB"));
-            }
+            state.dynamic_scripts.check_preparation_bytes(bytes)?;
             let tag = ScriptTag {
                 node: id,
                 kind,
@@ -304,17 +316,20 @@ fn prepare(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
                 integrity: integrity_attr(doc, id),
                 charset: crate::loader::script_charset(doc, id),
             };
+            state.dynamic_scripts.pending_bytes += bytes;
             state.dynamic_scripts.pending.push(tag);
             None
         };
         state.dynamic_scripts.prepared += 1;
-        state.dynamic_scripts.bytes += bytes;
-        state.dynamic_scripts.inline_depth += usize::from(inline.is_some());
         inline
     };
-    if let Some((source, base)) = inline {
+    if let Some((source, base, bytes)) = inline {
         let result = run_classic(vm, host, id, &source, base.as_str(), false, false);
-        host.borrow_mut().dynamic_scripts.inline_depth -= 1;
+        {
+            let mut state = host.borrow_mut();
+            state.dynamic_scripts.inline_depth -= 1;
+            state.dynamic_scripts.inline_bytes -= bytes;
+        }
         if let Err(error) = result {
             if fatal(&error) {
                 return Err(error);
