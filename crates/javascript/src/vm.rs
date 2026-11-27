@@ -40,11 +40,6 @@ const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
 const MAX_BYTECODE_DEPTH: usize = 4096;
-const MAX_HOST_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
-    1024
-} else {
-    DEFAULT_CALL_DEPTH
-};
 const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {
@@ -322,9 +317,12 @@ impl Vm {
     }
     pub fn with_limits(mut limits: VmLimits) -> Self {
         limits.buffer_units_per_instruction = limits.buffer_units_per_instruction.clamp(1, 1024);
-        // This first interpreter still uses bounded Rust calls for nested chunks.
-        // Keep the host stack safe even when an embedder requests a larger limit.
-        limits.max_call_depth = limits.max_call_depth.min(MAX_HOST_CALL_DEPTH);
+        // Windows and Linux can check actual native stack headroom even for
+        // embedders that let the interpreter's owned frames grow on the heap.
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            limits.max_call_depth = limits.max_call_depth.min(DEFAULT_CALL_DEPTH);
+        }
         limits.max_bytecode_depth = limits.max_bytecode_depth.min(MAX_BYTECODE_DEPTH);
         let mut heap = Heap::default();
         let global_env = realm::allocate_primary_core(&mut heap);
@@ -2026,6 +2024,10 @@ impl Vm {
             if let Some(native) = &self.qa_native_call_stack {
                 for (depth, id) in native.iter().rev().take(32) {
                     eprintln!("SATIN_QA_HEAP_STACK native depth={depth}{}", self.diagnostic_callable(*id));
+                }
+                let retained_tail = self.legacy_calls.len().saturating_sub(48);
+                for frame in self.legacy_calls.iter().take(retained_tail.min(32)) {
+                    eprintln!("SATIN_QA_HEAP_STACK entry depth={}{}", frame.depth, self.diagnostic_callable(frame.function));
                 }
                 for frame in self.legacy_calls.iter().rev().take(48) {
                     eprintln!("SATIN_QA_HEAP_STACK script depth={}{}", frame.depth, self.diagnostic_callable(frame.function));
@@ -3809,6 +3811,10 @@ impl Vm {
                     self.account_value(value.clone())?;
                 }
                 self.call_depth += 1;
+                #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+                if let Some(stack) = &mut self.qa_native_call_stack {
+                    stack.push((self.call_depth, id));
+                }
                 let result = callback(self, function, args, new_target).and_then(|value| {
                     if value.as_object().is_none() {
                         return Err(JsError::type_error(
@@ -3817,6 +3823,10 @@ impl Vm {
                     }
                     self.account_value(value)
                 });
+                #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+                if let Some(stack) = &mut self.qa_native_call_stack {
+                    stack.pop();
+                }
                 self.call_depth -= 1;
                 return result;
             }
@@ -4116,8 +4126,24 @@ impl Vm {
 
     fn depth_error(&self, reason: &str) -> JsError {
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
-        let reason = format!("{reason} [calls={} bytecode={}]{}",
-            self.call_depth, self.execution_depth, self.diagnostic_source_site());
+        let reason = {
+            let reason = format!("{reason} [calls={} bytecode={}]{}",
+                self.call_depth, self.execution_depth, self.diagnostic_source_site());
+            if let Some(native) = &self.qa_native_call_stack {
+                use std::sync::atomic::AtomicUsize;
+                static TRACES: AtomicUsize = AtomicUsize::new(0);
+                if TRACES.fetch_add(1, Ordering::Relaxed) < 6 {
+                    eprintln!("SATIN_QA_DEPTH {reason}");
+                    for (depth, id) in native.iter().rev().take(16) {
+                        eprintln!("SATIN_QA_DEPTH native depth={depth}{}", self.diagnostic_callable(*id));
+                    }
+                    for frame in self.legacy_calls.iter().rev().take(24) {
+                        eprintln!("SATIN_QA_DEPTH script depth={}{}", frame.depth, self.diagnostic_callable(frame.function));
+                    }
+                }
+            }
+            reason
+        };
         JsError::new(ErrorKind::ExecutionLimit, reason)
     }
     fn run_chunk_inner(

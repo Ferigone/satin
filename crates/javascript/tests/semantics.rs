@@ -929,6 +929,38 @@ fn deep_ordinary_calls_preserve_returns_and_finally_on_a_small_native_stack() {
     }).unwrap().join().unwrap();
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn owned_calls_can_exceed_the_old_call_cap_with_native_reentry_still_guarded() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let mut vm = Vm::with_limits(VmLimits {
+                max_call_depth: usize::MAX,
+                max_bytecode_depth: 4096,
+                ..VmLimits::default()
+            });
+            let reenter = vm.new_native_function("reenter", |vm, _, args| {
+                vm.call(args[0].clone(), Value::Undefined, &args[1..])
+            });
+            vm.set_global("reenter", reenter).unwrap();
+            assert_eq!(
+                vm.eval("function down(n) { return n ? 1 + down(n - 1) : 0; } down(1500)")
+                    .unwrap(),
+                Value::from(1500)
+            );
+            let error = vm
+                .eval("function throughHost(n) { return n ? reenter(throughHost, n - 1) : 42; } throughHost(10000)")
+                .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+            assert!(error.message.contains("Native stack headroom"), "{error}");
+            assert_eq!(vm.eval("throughHost(3)").unwrap(), Value::from(42));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn nested_execution_uses_available_windows_stack_and_recovers_at_limits() {
