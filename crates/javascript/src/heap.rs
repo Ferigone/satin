@@ -682,10 +682,12 @@ impl Heap {
             self.object_mut(owner).unwrap().kind = kind;
         }
         let before = self.live;
+        let mut retained_bytes = 0usize;
         for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.cell.is_some() {
+            if let Some(cell) = &slot.cell {
                 if slot.marked {
                     slot.marked = false;
+                    retained_bytes = retained_bytes.saturating_add(cell_bytes(cell));
                 } else {
                     if matches!(&slot.cell, Some(Cell::Object(object)) if matches!(object.kind, ObjectKind::WeakCollection(_) | ObjectKind::WeakRef(_) | ObjectKind::FinalizationRegistry(_)))
                     {
@@ -698,12 +700,7 @@ impl Heap {
                 }
             }
         }
-        self.estimated_bytes = self
-            .slots
-            .iter()
-            .filter_map(|s| s.cell.as_ref())
-            .map(cell_bytes)
-            .sum();
+        self.estimated_bytes = retained_bytes;
         (before - self.live, cleanup)
     }
 

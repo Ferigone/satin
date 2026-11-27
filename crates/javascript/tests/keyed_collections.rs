@@ -599,6 +599,34 @@ fn collecting_weak_entries_frees_insertion_budget() {
 }
 
 #[test]
+fn retained_bytes_follow_live_ephemerons_through_weak_entry_cleanup() {
+    let mut vm = Vm::new();
+    vm.eval("var weak = new WeakMap(), key = null;").unwrap();
+    vm.collect_garbage();
+    let empty_bytes = vm.estimated_heap_bytes();
+
+    vm.eval("key = {}; weak.set(key, new ArrayBuffer(128 * 1024));")
+        .unwrap();
+    vm.collect_garbage();
+    let live_bytes = vm.estimated_heap_bytes();
+    assert!(live_bytes >= empty_bytes + 128 * 1024);
+
+    vm.eval("weak.set({}, new ArrayBuffer(128 * 1024));")
+        .unwrap();
+    assert!(vm.estimated_heap_bytes() >= live_bytes + 128 * 1024);
+    vm.collect_garbage();
+    assert_eq!(vm.estimated_heap_bytes(), live_bytes);
+    assert_eq!(
+        vm.eval("weak.get(key).byteLength").unwrap(),
+        Value::from(128 * 1024),
+    );
+
+    vm.eval("key = null;").unwrap();
+    vm.collect_garbage();
+    assert_eq!(vm.estimated_heap_bytes(), empty_bytes);
+}
+
+#[test]
 fn weak_targets_and_pending_cleanup_follow_heap_reachability() {
     let mut vm = Vm::new();
     vm.eval(
