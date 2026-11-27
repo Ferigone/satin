@@ -1688,6 +1688,37 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 Expr::Function(function) => {
                     out.push(Op::Function(compile_function(function, strict)?))
                 }
+                Expr::AssignedMethodCalls(base, levels) => {
+                    // Resolve assignment references outside-in, before the
+                    // innermost RHS. Set and call each receiver inside-out.
+                    for (name, key, args) in levels.iter().rev() {
+                        check_identifier(name, strict)?;
+                        if strict && matches!(name.to_string_lossy().as_str(), "eval" | "arguments") {
+                            return Err(syntax("Invalid strict-mode assignment"));
+                        }
+                        out.push(Op::Name(name.clone()));
+                        pending.push(I(Op::Call));
+                        for arg in args.iter().rev() {
+                            if let Expr::Spread(value) = arg {
+                                pending.extend([I(Op::Argument(true)), E(value)]);
+                            } else {
+                                pending.extend([I(Op::Argument(false)), E(arg)]);
+                            }
+                        }
+                        pending.extend([
+                            I(Op::Arguments),
+                            I(Op::PrepareCall(true)),
+                            I(Op::Property),
+                            E(key),
+                            I(Op::Set),
+                        ]);
+                    }
+                    pending.push(if anonymous(base) {
+                        Emit::Named(base, &levels[0].0)
+                    } else {
+                        E(base)
+                    });
+                }
                 Expr::NestedCalls(base, levels) => {
                     // Capture each callee's reference, receiver and function
                     // before evaluating its first argument, from outside in.
