@@ -701,6 +701,21 @@ mod task_limit_tests {
     use crate::{LoadedPage, script::ScriptRuntime};
     use rust_browser_javascript::Value;
 
+    #[test]
+    fn classic_script_can_exceed_the_default_instruction_allowance() {
+        let source = "<script>window.completed = false; work(); window.completed = true</script>";
+        let page = LoadedPage::from_html("https://example.test/", source);
+        let mut runtime = ScriptRuntime::new(&page).unwrap();
+        let work = runtime.vm.new_native_function("work", |vm, _, _| {
+            vm.charge_work(1_100_000)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("work", work).unwrap();
+        runtime.run_initial(&page);
+        assert_eq!(runtime.eval("completed").unwrap(), Value::Bool(true));
+        assert!(runtime.diagnostics().is_empty());
+    }
+
     #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn one_shot_timer_chain_survives_a_parked_callback() {
@@ -726,7 +741,7 @@ mod task_limit_tests {
     }
 
     #[test]
-    fn only_a_scheduled_timer_gets_the_extended_task_allowance() {
+    fn a_scheduled_timer_gets_more_work_than_direct_host_eval() {
         let page = LoadedPage::from_html("about:test", "<!doctype html>");
         let mut runtime = ScriptRuntime::new(&page).unwrap();
         let work = runtime.vm.new_native_function("work", |vm, _, _| {
