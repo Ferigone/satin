@@ -1328,13 +1328,33 @@ impl Vm {
         }
         Ok(())
     }
-    #[cfg_attr(feature = "twitch-bootstrap-profile", track_caller)]
+    // Temporary QA-only instrumentation: keep the original fuel accounting.
+    #[track_caller]
     pub(crate) fn consume_work(&mut self, units: usize) -> Result<(), JsError> {
         #[cfg(feature = "twitch-bootstrap-profile")]
         qa_charge("consume_work", units);
         self.check_interrupt()?;
         let units = units as u64;
+        type QaWork = std::collections::HashMap<(&'static str, u32), (u64, u64)>;
+        std::thread_local! {
+            static QA_WORK: std::cell::RefCell<QaWork> = Default::default();
+        }
+        let loc = std::panic::Location::caller();
+        QA_WORK.with_borrow_mut(|hist| {
+            let row = hist.entry((loc.file(), loc.line())).or_default();
+            row.0 = row.0.saturating_add(units);
+            row.1 = row.1.saturating_add(1);
+        });
         if units > self.remaining {
+            eprintln!("QA_NATIVE_LIMIT caller={}:{} requested={} remaining={}",
+                loc.file(), loc.line(), units, self.remaining);
+            QA_WORK.with_borrow_mut(|hist| {
+                let mut rows: Vec<_> = hist.drain().collect();
+                rows.sort_unstable_by_key(|(_, (cost, _))| std::cmp::Reverse(*cost));
+                for ((file, line), (cost, count)) in rows.into_iter().take(8) {
+                    eprintln!("QA_NATIVE_COST {file}:{line} units={cost} calls={count}");
+                }
+            });
             self.remaining = 0;
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
@@ -1345,11 +1365,13 @@ impl Vm {
         Ok(())
     }
     /// Charge native DOM/host work to the current shared execution budget.
+    #[track_caller]
     pub fn charge_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units)
     }
     /// Charge a linear scan or copy of already bounded bytes / UTF-16 units.
     /// One nonempty operation always costs at least one instruction.
+    #[track_caller]
     pub fn charge_buffer_work(&mut self, units: usize) -> Result<(), JsError> {
         self.consume_work(units.div_ceil(self.limits.buffer_units_per_instruction))
     }
