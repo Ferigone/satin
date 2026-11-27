@@ -41,7 +41,7 @@ function splitFixture(bytes) {
 const progressive = await readFile(join(pages, 'media-demo.mp4'));
 const tracks = Object.fromEntries(await Promise.all(['video', 'audio'].map(async track =>
   [track, splitFixture(await readFile(join(fixtures, `mse-${track}.mp4`)))])));
-const modes = ['progressive', 'open', 'finalized', 'rebuffer'];
+const modes = ['progressive', 'open', 'finalized', 'rebuffer', 'seek-refill'];
 
 function page(mode) {
   return `<!doctype html><meta charset="utf-8"><title>Native media: ${mode}</title>
@@ -104,6 +104,46 @@ async function pauseAndSeek(time) {
   check(!clip.paused && clip.readyState >= 2, 'Playback did not resume');
   note('resume');
 }
+async function seekAndRefill(source, video, audio) {
+  clip.pause();
+  source.duration = 55;
+  const tracks = [[video, 'video'], [audio, 'audio']];
+  for (const [buffer, track] of tracks) {
+    buffer.timestampOffset = 40;
+    for (let i = 1; i <= 5; i++) await append(buffer, track, i);
+  }
+  const seeked = event(clip, 'seeked');
+  clip.currentTime = 42.25;
+  clip.play().catch(fail);
+  await seeked;
+  await event(clip, 'waiting');
+
+  const oldEdge = clip.buffered.end(clip.buffered.length - 1);
+  const stopped = clip.currentTime;
+  const stalledInsideRange = stopped < oldEdge - 0.5;
+  function displayedFrames() {
+    const quality = clip.getVideoPlaybackQuality();
+    return quality.totalVideoFrames - quality.droppedVideoFrames;
+  }
+  const before = displayedFrames();
+  let recoveredInsideRange = false;
+  const timer = setInterval(() => {
+    if (clip.currentTime > stopped + 0.12 && clip.currentTime < oldEdge - 0.14) {
+      recoveredInsideRange ||= displayedFrames() > before + 1;
+    }
+  }, 65);
+  try {
+    for (const [buffer, track] of tracks) {
+      buffer.timestampOffset = buffer.buffered.end(buffer.buffered.length - 1);
+      for (let i = 1; i <= 4; i++) await append(buffer, track, i);
+    }
+    await advancePast(oldEdge + 0.4);
+  } finally {
+    clearInterval(timer);
+  }
+  check(!stalledInsideRange || recoveredInsideRange, 'No fresh video during refill recovery inside the previous range');
+  note('displayed new frames during refill');
+}
 async function start() {
   let source, video, audio;
   if (mode === 'progressive') {
@@ -161,6 +201,8 @@ async function start() {
     await advancePast(edge + 1.2);
     check(source.readyState === 'open' && !clip.paused && clip.readyState >= 3, 'Did not recover from rebuffering');
     note('clock recovered');
+  } else if (mode === 'seek-refill') {
+    await seekAndRefill(source, video, audio);
   } else {
     const previousEnd = clip.buffered.end(0);
     await Promise.all([append(video, 'video', 5), append(audio, 'audio', 5)]);
@@ -209,10 +251,11 @@ try {
   for (const mode of modes) {
     requests.length = 0;
     const dom = join(output, `${mode}.html`);
+    const runTime = {finalized: '7800', rebuffer: '7800', 'seek-refill': '8500'}[mode] ?? '5200';
     const { stdout } = await run(binary, [
       '--headless', '--url', origin + '/' + mode, '--click-id', 'start',
       '--profile', join(output, `${mode}-profile`), '--dump-dom', dom,
-      '--run-for-ms', mode === 'finalized' || mode === 'rebuffer' ? '7800' : '5200',
+      '--run-for-ms', runTime,
       '--width', '420', '--height', '440',
     ], { timeout: 20000, windowsHide: true });
     const result = JSON.parse(stdout);
@@ -230,11 +273,16 @@ try {
     assert.ok(media.current_time > (mode === 'progressive' ? 2.2 : 1.3));
     assert.equal(media.paused, true);
     assert.equal(media.ended, mode === 'finalized');
+    const initialOnly = mode === 'open' || mode === 'seek-refill';
     const expected = mode === 'progressive' ? ['/progressive.mp4']
       : Object.keys(tracks).flatMap(track =>
-        Array.from({ length: mode === 'open' ? 5 : 6 }, (_, index) => `/${track}/${index}`));
+        Array.from({ length: initialOnly ? 5 : 6 }, (_, index) => `/${track}/${index}`));
     if (mode === 'rebuffer') {
       expected.push(...expected.filter(path => /\/[1-4]$/.test(path)));
+    }
+    if (mode === 'seek-refill') {
+      const repeated = expected.filter(path => /\/[1-4]$/.test(path));
+      expected.push(...repeated, ...repeated, ...Object.keys(tracks).map(track => `/${track}/5`));
     }
     assert.deepEqual(requests.filter(path => expected.includes(path)).sort(), expected.sort());
     if (mode === 'open') assert.ok(!requests.some(path => /\/5$/.test(path)));

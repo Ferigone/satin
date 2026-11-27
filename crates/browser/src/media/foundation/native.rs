@@ -623,7 +623,9 @@ impl Player {
     }
 
     pub(super) fn needs_frame(&self) -> bool {
-        (self.playing || self.seeking)
+        // New frames can arrive during refill before the clock crosses the old buffer edge.
+        let recovering = self.play_requested && self.waiting_through.is_some();
+        (self.playing || self.seeking || recovering)
             && match self.input {
                 Input::Stream(_) => unsafe { self.engine.HasVideo().as_bool() },
                 Input::File { .. } => self
