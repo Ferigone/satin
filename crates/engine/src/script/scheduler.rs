@@ -16,7 +16,7 @@ use std::{
 const MAX_TIMERS: usize = 1024;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
-const CLASSIC_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(10);
+const SCRIPT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -25,16 +25,16 @@ enum Handler {
     Source(JsString),
 }
 
-/// Large classic bundles may legitimately need many cheap VM operations.
+/// Web script tasks may legitimately need many cheap VM operations.
 /// Leave the instruction counter for accounting and bound the task by elapsed
 /// CPU and wall time. Re-entrant scripts still share the outer task deadline.
-pub(super) fn run_classic_task<T>(
+pub(super) fn run_script_task<T>(
     vm: &mut Vm,
     run: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
     vm.with_task_cpu_budget(
         u64::MAX,
-        CLASSIC_TASK_CPU_TIMEOUT,
+        SCRIPT_TASK_CPU_TIMEOUT,
         Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
         run,
     )
@@ -639,7 +639,7 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
         };
         // Exception reporting and the microtask checkpoint use the same fuel
         // and deadline as the callback. Return to input/rendering after a long turn.
-        let result = run_classic_task(vm, |vm| {
+        let result = run_script_task(vm, |vm| {
             if let Some(owner) = &timer.owner {
                 vm.with_realm(owner.realm, |vm| {
                     let result = run_timer(vm, &timer, vm.global(), "about:blank");

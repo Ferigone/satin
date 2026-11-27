@@ -4,7 +4,7 @@ use super::{ResourceQueue, ScriptRuntime};
 use crate::network::CredentialsMode;
 use crate::script::{
     JsError, RootId, Shared, Value, Vm, diagnostic, document_base, drain_microtask_queue, fatal,
-    mutation_observers, report_unhandled,
+    mutation_observers, report_unhandled, scheduler,
 };
 use rust_browser_javascript::{DynamicImportRequest, ModuleId, ModuleStatus, PromiseCapability};
 use std::sync::Arc;
@@ -204,7 +204,7 @@ fn module_context<T>(
         state.ignore_destructive_writes += 1;
         state.current_script.take()
     };
-    let result = realm.vm.with_task(task);
+    let result = scheduler::run_script_task(&mut realm.vm, task);
     {
         let mut state = state.borrow_mut();
         state.current_script = current_script;
@@ -244,13 +244,13 @@ fn start_import(
     }
     // The VM reaction now traces both resolvers and preserves their FIFO order.
     request.release(&mut realm.vm);
-    let result = realm.vm.with_task(|vm| drain_microtask_queue(vm, &state));
+    let result = scheduler::run_script_task(&mut realm.vm, |vm| drain_microtask_queue(vm, &state));
     report_import_failure(realm, result);
 }
 
 fn reject_import(realm: &mut ScriptRuntime, request: Request, error: JsError) {
     let state = realm.state.clone();
-    let result = realm.vm.with_task(|vm| {
+    let result = scheduler::run_script_task(&mut realm.vm, |vm| {
         request.reject(vm, error)?;
         drain_microtask_queue(vm, &state)
     });

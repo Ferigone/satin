@@ -278,7 +278,7 @@ fn run_task(
     vm: &mut Vm,
     operation: impl FnOnce(&mut Vm) -> Result<(), JsError>,
 ) -> Result<(), JsError> {
-    let result = vm.with_task(|vm| {
+    let result = scheduler::run_script_task(vm, |vm| {
         let operation = operation(vm);
         if operation.as_ref().is_err_and(fatal) {
             vm.clear_jobs();

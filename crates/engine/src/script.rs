@@ -1107,10 +1107,10 @@ impl ScriptRuntime {
         #[cfg(feature = "twitch-bootstrap-profile")]
         let result = match self.twitch_profile {
             Some(profile) => profile.run(&mut self.vm, identifier, run),
-            None => scheduler::run_classic_task(&mut self.vm, run),
+            None => scheduler::run_script_task(&mut self.vm, run),
         };
         #[cfg(not(feature = "twitch-bootstrap-profile"))]
-        let result = scheduler::run_classic_task(&mut self.vm, run);
+        let result = scheduler::run_script_task(&mut self.vm, run);
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);
@@ -1164,7 +1164,7 @@ impl ScriptRuntime {
         } else {
             DispatchMode::Lifecycle
         };
-        let result = self.vm.with_task(|vm| {
+        let result = scheduler::run_script_task(&mut self.vm, |vm| {
             dispatch_checked_with_mode(vm, &state, target, kind, bubbles, false, &[], mode)?;
             drain_microtask_queue(vm, &state)
         });
@@ -1381,7 +1381,7 @@ impl ScriptRuntime {
     ) -> Result<(), JsError> {
         let state = self.state.clone();
         let fetch = &self.fetch;
-        let result = scheduler::run_classic_task(&mut self.vm, |vm| {
+        let result = scheduler::run_script_task(&mut self.vm, |vm| {
             action(fetch, vm)?;
             drain_microtask_queue(vm, &state)
         });
@@ -1426,7 +1426,7 @@ impl ScriptRuntime {
     }
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
-        if let Err(error) = scheduler::run_classic_task(&mut self.vm, |vm| drain_microtask_queue(vm, &state)) {
+        if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| drain_microtask_queue(vm, &state)) {
             report_error(&state, ConsolePhase::Microtask, None, &error, || {
                 error.to_string()
             });
@@ -1502,7 +1502,7 @@ impl ScriptRuntime {
         if self.workers.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.workers.dispatch_next(vm)? {
                         return Ok(false);
                     }
@@ -1528,7 +1528,7 @@ impl ScriptRuntime {
         if self.messages.has_tasks() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.messages.dispatch_next(vm)? {
                         return Ok(false);
                     }
@@ -1554,7 +1554,7 @@ impl ScriptRuntime {
         if self.storage.has_events() {
             let state = self.state.clone();
             for _ in 0..32 {
-                let result = self.vm.with_task(|vm| {
+                let result = scheduler::run_script_task(&mut self.vm, |vm| {
                     if !self.storage.dispatch_next(vm, &state)? {
                         return Ok(false);
                     }
@@ -1579,7 +1579,7 @@ impl ScriptRuntime {
         }
         if self.state.borrow().routing.has_events() {
             let state = self.state.clone();
-            if let Err(error) = self.vm.with_task(|vm| history_api::run_events(vm, &state)) {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| history_api::run_events(vm, &state)) {
                 report_error(
                     &state,
                     ConsolePhase::HostTask,
@@ -1591,10 +1591,9 @@ impl ScriptRuntime {
         }
         if self.layout.take_resize() {
             self.lifecycle_event(None, "resize", false);
-            if let Err(error) = self
-                .vm
-                .with_task(|vm| self.media_queries.report_changes(vm))
-            {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| {
+                self.media_queries.report_changes(vm)
+            }) {
                 report_error(
                     &self.state,
                     ConsolePhase::HostTask,
@@ -1606,7 +1605,7 @@ impl ScriptRuntime {
         }
         for target in self.layout.take_events() {
             let state = self.state.clone();
-            if let Err(error) = self.vm.with_task(|vm| {
+            if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| {
                 let bubbles = target.is_none();
                 let target = target.or_else(|| Some(state.borrow().document.root));
                 dispatch_checked(vm, &state, target, "scroll", bubbles, false, &[])?;
@@ -2753,7 +2752,7 @@ fn dispatch_prepared_with_mode(
         event_target::DispatchPath::Dom(Rc::downgrade(state), path.clone()),
     )?;
     let root = vm.root(event.clone());
-    let result = vm.with_task(|vm| -> Result<(), JsError> {
+    let result = scheduler::run_script_task(vm, |vm| -> Result<(), JsError> {
         for (name, value) in properties {
             vm.define_data_property(event.clone(), name, value.clone(), false, true, true)?;
         }

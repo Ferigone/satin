@@ -28,6 +28,18 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.46
+
+- Web script tasks use CPU and elapsed time to stop runaway execution. Large
+  scripts can make progress beyond the previous fixed instruction allowance.
+- XMLHttpRequest can send ArrayBuffer and typed-view request bodies. Classic
+  script loading honors the prepared script encoding. The DOM exposes HTML
+  templates and their inert content.
+- JavaScript adds generic array index searches, including `lastIndexOf`. CSS
+  supports nested sRGB color mixing and preserves extended channels.
+- Windows QA covers the offline updater, native favorites scrolling and tab
+  interactions.
+
 ## Changes in alpha.45
 
 - Quiet Cinder adds a compact Windows tab strip, a redesigned start page, a
