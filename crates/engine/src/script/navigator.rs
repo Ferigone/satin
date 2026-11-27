@@ -40,6 +40,8 @@ pub(super) fn install(vm: &mut Vm, window: &Value) -> Result<(), JsError> {
         ("languages", languages),
         ("cookieEnabled", Value::Bool(true)),
         ("hardwareConcurrency", concurrency.into()),
+        // The transport attempts network requests. An unknown link is potentially online.
+        ("onLine", Value::Bool(true)),
     ] {
         let expected = navigator.clone();
         getter(vm, prototype.clone(), name, move |_, this, _| {

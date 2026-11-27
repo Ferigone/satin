@@ -22,7 +22,7 @@ fn navigator_and_images_use_the_window_realm_and_dom() {
         catch (error) { illegalGetter = error.name === 'TypeError'; }
         illegalConstructor && callWithoutNew && illegalGetter && navigator === window.navigator &&
         navigator === clientInformation && navigator instanceof Navigator &&
-        navigator.userAgent.includes('Satin/') && navigator.cookieEnabled &&
+        navigator.userAgent.includes('Satin/') && navigator.cookieEnabled && navigator.onLine === true &&
         'Mozilla/' + navigator.appVersion === navigator.userAgent &&
         navigator.language === navigator.languages[0] && Object.isFrozen(navigator.languages) &&
         navigator.hardwareConcurrency >= 1 &&
