@@ -1107,10 +1107,10 @@ impl ScriptRuntime {
         #[cfg(feature = "twitch-bootstrap-profile")]
         let result = match self.twitch_profile {
             Some(profile) => profile.run(&mut self.vm, identifier, run),
-            None => self.vm.with_task(run),
+            None => scheduler::run_classic_task(&mut self.vm, run),
         };
         #[cfg(not(feature = "twitch-bootstrap-profile"))]
-        let result = self.vm.with_task(run);
+        let result = scheduler::run_classic_task(&mut self.vm, run);
         if let Err(error) = result {
             if fatal(&error) {
                 mutation_observers::discard_jobs(&mut self.vm, &self.state);

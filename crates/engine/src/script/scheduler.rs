@@ -18,12 +18,28 @@ const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
 const INPUT_TASK_INSTRUCTIONS: u64 = 32_000_000;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
+const CLASSIC_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
 enum Handler {
     Callable(Value),
     Source(JsString),
+}
+
+/// Large classic bundles may legitimately need many cheap VM operations.
+/// Leave the instruction counter for accounting and bound the task by elapsed
+/// CPU and wall time. Re-entrant scripts still share the outer task deadline.
+pub(super) fn run_classic_task<T>(
+    vm: &mut Vm,
+    run: impl FnOnce(&mut Vm) -> Result<T, JsError>,
+) -> Result<T, JsError> {
+    vm.with_task_cpu_budget(
+        u64::MAX,
+        CLASSIC_TASK_CPU_TIMEOUT,
+        Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
+        run,
+    )
 }
 
 struct Timer {
