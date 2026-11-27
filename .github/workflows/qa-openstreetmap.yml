@@ -1,0 +1,123 @@
+name: OpenStreetMap public QA baseline
+on:
+  push:
+    branches: [qa/openstreetmap-alpha45-baseline]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Ensure Media Foundation is available
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:WINDIR/System32/mfplat.dll")) {
+            Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
+          }
+      - name: Build actual Satin
+        run: cargo build --release --locked -p rust-browser
+      - name: Install pinned reference driver
+        run: npm install --prefix "$env:RUNNER_TEMP/osm-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1
+      - name: Capture public map baseline
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/osm-evidence | Out-Null
+          $script = @'
+          import {execFile} from 'node:child_process';
+          import {promisify} from 'node:util';
+          import {createRequire} from 'node:module';
+          import {mkdir, mkdtemp, writeFile, rm, readFile} from 'node:fs/promises';
+          import {createHash} from 'node:crypto';
+          import {tmpdir} from 'node:os';
+          import {resolve, join} from 'node:path';
+          import {performance} from 'node:perf_hooks';
+          const run = promisify(execFile);
+          const {chromium} = createRequire(join(process.env.RUNNER_TEMP,'osm-reference','package.json'))('playwright-core');
+          const satin = resolve('target/release/rust-browser.exe');
+          const chrome = join(process.env.ProgramFiles,'Google','Chrome','Application','chrome.exe');
+          const out = resolve('target/osm-evidence');
+          const tmp = await mkdtemp(join(tmpdir(),'satin-osm-'));
+          const viewport = {width:1280,height:800};
+          const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
+          const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
+          const report = {commit:process.env.GITHUB_SHA,sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
+          const key = value => ({action:'key',value});
+          async function satinCase(url,index,phase,actions){
+            const result={phase};const start=performance.now();
+            const common=['--url',url,'--profile',join(tmp,'satin-'+index+'-'+phase)];
+            const image=join(out,'satin-'+index+'-'+phase+'.png');
+            let args;
+            if(phase==='headless'){
+              args=[...common,'--headless','--width','1280','--height','800','--run-for-ms','8000','--screenshot',image];
+            }else{
+              const file=join(tmp,index+'-'+phase+'.json');await writeFile(file,JSON.stringify(actions));
+              args=[...common,'--width','1280','--height','944','--smoke-window',image,'--smoke-actions',file];
+            }
+            try{
+              const {stdout,stderr}=await run(satin,args,{timeout:100000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp')}});
+              try{const j=JSON.parse(stdout.trim());result.receipt={version:j.version,url:j.url,title:j.title,frames:j.frames_presented,windowSmoke:j.window_smoke,layoutLimited:j.layout_limited,paintLimited:j.paint_limited,documentHeight:j.document_height,diagnostics:j.javascript?.diagnostics?.slice(0,40).map(safe)};}catch(e){result.parseError=safe(e.message)}
+              result.stderr=safe(stderr);result.exit=0;
+            }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code;result.killed=e.killed}
+            result.elapsedMs=Math.round(performance.now()-start);
+            return result;
+          }
+          await mkdir(join(tmp,'localapp'),{recursive:true});
+          let browser;
+          try {
+            try {browser=await chromium.launch({executablePath:chrome,headless:true});report.chromeVersion=browser.version();}catch(e){report.chromeLaunchError=safe(e.message)}
+            for(const [index,url] of urls.entries()){
+              const item={url,chrome:{console:[],networkErrors:[]},satin:[]};report.cases.push(item);
+              if(browser){
+                const ctx=await browser.newContext({viewport,deviceScaleFactor:1,locale:'en-US'});
+                try{
+                  const page=await ctx.newPage();
+                  page.on('pageerror',e=>{if(item.chrome.console.length<40)item.chrome.console.push(safe(e.message))});
+                  page.on('console',m=>{if(m.type()==='error'&&item.chrome.console.length<40)item.chrome.console.push(safe(m.text()))});
+                  page.on('requestfailed',r=>{if(item.chrome.networkErrors.length<40)item.chrome.networkErrors.push({url:safe(r.url()),error:safe(r.failure()?.errorText)})});
+                  page.on('response',r=>{if(r.status()>=400&&item.chrome.networkErrors.length<40)item.chrome.networkErrors.push({url:safe(r.url()),status:r.status()})});
+                  const start=performance.now();
+                  item.chrome.status=(await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000}))?.status();
+                  item.chrome.navigationMs=Math.round(performance.now()-start);
+                  await page.waitForTimeout(8000);
+                  const sample=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:document.querySelector('#query')?.value??null}));
+                  item.chrome.initial=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-initial.png')});
+                  if(index===0){
+                    const input=page.locator('#query');
+                    if(await input.isVisible()){
+                      await input.click();await input.fill('Warszawa');await input.press('Enter');await page.waitForTimeout(5000);
+                      item.chrome.search=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
+                    }else item.chrome.searchError='Search input not visible';
+                  }else{
+                    const zoom=page.locator('.leaflet-control-zoom-in').first();
+                    if(await zoom.isVisible()){
+                      const box=await zoom.boundingBox();item.chrome.zoomPoint=box;
+                      const t=performance.now();await zoom.click({timeout:5000});await page.waitForTimeout(1800);
+                      item.chrome.zoomElapsedMs=Math.round(performance.now()-t);
+                      item.chrome.zoom=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-zoom.png')});
+                    }else item.chrome.zoomError='Zoom control not visible';
+                  }
+                }catch(e){item.chrome.error=safe(e.message)}finally{await ctx.close()}
+              }
+              item.satin.push(await satinCase(url,index,'headless',[]));await save();
+              item.satin.push(await satinCase(url,index,'native-initial',[]));await save();
+              if(index===0){
+                item.satin.push(await satinCase(url,index,'native-search',[{action:'click',id:'query'},{action:'text',value:'Warszawa'},key('Enter')]));await save();
+              }
+            }
+          } finally {if(browser)await browser.close();await save();await rm(tmp,{recursive:true,force:true,maxRetries:3}).catch(()=>{});}
+          '@
+          $scriptPath = Join-Path $env:RUNNER_TEMP 'osm-qa.mjs'
+          $script | Set-Content -LiteralPath $scriptPath -Encoding utf8
+          node $scriptPath
+          if ($LASTEXITCODE -ne 0) { throw 'QA runner failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: openstreetmap-baseline-alpha45
+          path: target/osm-evidence/
+          if-no-files-found: warn
