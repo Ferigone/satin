@@ -7,6 +7,8 @@ use rust_browser_engine::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashSet, VecDeque},
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -14,6 +16,8 @@ const MAX_ACTION_BYTES: usize = 1024 * 1024;
 const MAX_CHECKPOINT_HTML: usize = 4 * 1024 * 1024;
 const MAX_CONTEXT_ENTRIES: usize = 32_768;
 const MAX_CONTEXT_CLASS_BYTES: usize = 64 * 1024;
+const MAX_MEDIA_PROOF_FRAMES: usize = 16;
+const MAX_MEDIA_PROOF_WAIT_MS: u64 = 600_000;
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -46,13 +50,25 @@ pub enum SmokeAction {
         timeout_ms: u64,
     },
     SampleMedia { after_ms: u64, #[serde(default)] count_selector: Option<String> },
+    MediaProof { #[serde(default)] capture_frames: bool },
+    WaitForPlaying { timeout_ms: u64 },
     Checkpoint(Checkpoint),
 }
 
 pub fn count_selected(document: &Document, layout: Option<&Layout>, selector: &str) -> serde_json::Value {
+    count_selected_with_viewport(document, layout, selector, None)
+}
+
+pub fn count_selected_with_viewport(
+    document: &Document,
+    layout: Option<&Layout>,
+    selector: &str,
+    viewport: Option<Viewport>,
+) -> serde_json::Value {
     let mut matched = 0;
     let mut with_text = 0;
     let mut laid_out = 0;
+    let mut hittable = 0;
     for node in document.connected_nodes().filter(|&n|
         rust_browser_engine::css::matches_selector(document, n, selector))
     {
@@ -62,9 +78,69 @@ pub fn count_selected(document: &Document, layout: Option<&Layout>, selector: &s
             if layout.and_then(|l| l.rect_for(node)).is_some_and(|r| r.width > 0.0 && r.height > 0.0) {
                 laid_out += 1;
             }
+            if let Some((layout, viewport)) = layout.zip(viewport)
+                && layout_observation(document, layout, viewport, node).is_match()
+            {
+                hittable += 1;
+            }
         }
     }
-    serde_json::json!({"matches": matched, "withText": with_text, "withLayoutAndText": layout.map(|_| laid_out)})
+    let mut result = serde_json::json!({
+        "matches": matched,
+        "withText": with_text,
+        "withLayoutAndText": layout.map(|_| laid_out)
+    });
+    if viewport.is_some() {
+        result["withHittableText"] = layout.map(|_| hittable).into();
+    }
+    result
+}
+
+pub(crate) struct MediaProof {
+    receipt: File,
+    directory: PathBuf,
+    capture_frames: bool,
+}
+
+impl MediaProof {
+    pub fn start(output: &Path, capture_frames: bool) -> Result<Self, String> {
+        let directory = output.with_extension("media-proof");
+        std::fs::create_dir(&directory)
+            .map_err(|error| format!("Could not create smoke media proof directory: {error}"))?;
+        let receipt = File::create_new(directory.join("observations.jsonl"))
+            .map_err(|error| format!("Could not open smoke media receipt: {error}"))?;
+        Ok(Self { receipt, directory, capture_frames })
+    }
+
+    pub fn record(&mut self, value: &serde_json::Value) -> Result<(), String> {
+        let mut line = value.to_string();
+        line.push('\n');
+        self.receipt.write_all(line.as_bytes())
+            .map_err(|error| format!("Could not write smoke media receipt: {error}"))
+    }
+
+    pub fn frame_path(&self, sample: usize) -> Option<PathBuf> {
+        self.capture_frames
+            .then(|| self.directory.join(format!("sample-{sample:02}.png")))
+    }
+}
+
+pub(crate) fn media_timestamp_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis() as u64
+}
+
+impl SmokeAction {
+    pub fn media_input(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Click { id } => Some(serde_json::json!({"action": "click", "id": id})),
+            Self::ClickAt { x, y } => Some(serde_json::json!({"action": "click_at", "x": x, "y": y})),
+            Self::Key { value, control, shift, alt } => Some(serde_json::json!({
+                "action": "key", "value": value, "control": control, "shift": shift, "alt": alt
+            })),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -623,9 +699,34 @@ fn parse_actions(bytes: &[u8]) -> Result<VecDeque<SmokeAction>, String> {
     if actions.len() > 256 {
         return Err("Smoke actions exceed 256 steps".into());
     }
+    let proof = match actions.front() {
+        Some(SmokeAction::MediaProof { capture_frames }) => Some(*capture_frames),
+        _ => None,
+    };
+    if let Some(capture_frames) = proof {
+        let samples = actions.iter().filter(|a| matches!(a, SmokeAction::SampleMedia { .. })).count();
+        if samples == 0 || capture_frames && samples > MAX_MEDIA_PROOF_FRAMES {
+            return Err("Invalid number of samples for smoke media proof".into());
+        }
+    }
     let mut follows_click = false;
     let mut names = HashSet::new();
-    for action in &actions {
+    for (index, action) in actions.iter().enumerate() {
+        match action {
+            SmokeAction::MediaProof { .. } if index != 0 => {
+                return Err("Media proof must be the first smoke action".into());
+            }
+            SmokeAction::WaitForPlaying { timeout_ms }
+                if proof.is_none() || !(1..=MAX_MEDIA_PROOF_WAIT_MS).contains(timeout_ms) =>
+            {
+                return Err("Invalid wait for playback in smoke media proof".into());
+            }
+            SmokeAction::MediaProof { .. } | SmokeAction::WaitForPlaying { .. }
+            | SmokeAction::SampleMedia { .. } | SmokeAction::Click { .. }
+            | SmokeAction::ClickAt { .. } | SmokeAction::Key { .. } => {}
+            _ if proof.is_some() => return Err("Unsupported action in smoke media proof".into()),
+            _ => {}
+        }
         if let SmokeAction::SampleMedia { after_ms, count_selector } = action {
             if *after_ms > 60_000 { return Err("Media sample delay exceeds 60 seconds".into()); }
             if count_selector.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256) {
@@ -669,6 +770,67 @@ mod tests {
             serde_json::json!({"matches":3,"withText":2,"withLayoutAndText":1}));
         assert_eq!(count_selected(&page.document, None, ".row"),
             serde_json::json!({"matches":3,"withText":2,"withLayoutAndText":null}));
+    }
+
+    #[test]
+    fn media_proof_counts_hittable_rows_separately_from_laid_out_rows() {
+        let page = LoadedPage::from_html(
+            "about:blank",
+            r#"<p class="row">Visible</p>
+               <p class="row" style="position:absolute;top:5000px">Offscreen</p>"#,
+        );
+        let viewport = Viewport::default();
+        let layout = Layout::build_with_viewport(&page, &Fonts::new().unwrap(), viewport);
+        assert_eq!(
+            count_selected_with_viewport(&page.document, Some(&layout), ".row", Some(viewport)),
+            serde_json::json!({"matches":2,"withText":2,"withLayoutAndText":2,"withHittableText":1})
+        );
+    }
+
+    #[test]
+    fn media_proof_requires_an_explicit_first_action_and_bounded_controls() {
+        let proof = r#"{"action":"media_proof","capture_frames":true}"#;
+        let sample = r#"{"action":"sample_media","after_ms":40}"#;
+        let playing = r#"{"action":"wait_for_playing","timeout_ms":120000}"#;
+        let input = r#"{"action":"key","value":"m"}"#;
+        let parse = |steps: &[&str]| parse_actions(format!("[{}]", steps.join(",")).as_bytes());
+        assert!(parse(&[proof, sample, playing, input, sample]).is_ok());
+        assert!(parse(&[proof, playing]).is_err());
+        assert!(parse(&[sample, proof]).is_err());
+        assert!(parse(&[proof, proof, sample]).is_err());
+        assert!(parse(&[playing, sample]).is_err());
+        assert!(parse(&[proof, sample, &playing.replace("120000", "600001")]).is_err());
+        assert!(parse(&[proof, sample, r#"{"action":"text","value":"text"}"#]).is_err());
+        let frames = std::iter::once(proof)
+            .chain(std::iter::repeat_n(sample, MAX_MEDIA_PROOF_FRAMES + 1))
+            .collect::<Vec<_>>();
+        assert!(parse(&frames).is_err());
+    }
+
+    #[test]
+    fn media_proof_receipt_is_readable_before_finish_and_is_not_overwritten() {
+        let root = std::env::temp_dir().join(format!(
+            "satin-media-proof-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("smoke.png");
+        let mut proof = MediaProof::start(&output, true).unwrap();
+        let receipt = root.join("smoke.media-proof").join("observations.jsonl");
+        let sample = serde_json::json!({"kind":"sample","sampleIndex":0});
+        proof.record(&sample).unwrap();
+        assert_eq!(std::fs::read_to_string(&receipt).unwrap(), format!("{sample}\n"));
+        assert_eq!(proof.frame_path(0), Some(root.join("smoke.media-proof").join("sample-00.png")));
+        assert!(MediaProof::start(&output, true).is_err());
+        assert_eq!(std::fs::read_to_string(&receipt).unwrap(), format!("{sample}\n"));
+        drop(proof);
+        std::fs::remove_file(receipt).unwrap();
+        std::fs::remove_dir(root.join("smoke.media-proof")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

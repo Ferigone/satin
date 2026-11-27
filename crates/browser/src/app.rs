@@ -70,7 +70,7 @@ use self::address_bar::{
 use self::bookmark_menu::Menu;
 use crate::testing::{
     Checkpoint, CheckpointDocument, CheckpointObservation, CheckpointOutputs, CheckpointSample,
-    SmokeAction,
+    MediaProof, SmokeAction, media_timestamp_ms,
 };
 use chrome_motion::{Button as MotionButton, ChromeMotion, TabInk};
 use navigation_error::Recovery;
@@ -601,6 +601,23 @@ pub(crate) fn run(
     }
     let next_id = tabs.len() as u64 + 1;
     let smoke_requested = smoke_output.is_some();
+    let mut smoke_actions = smoke_actions
+        .as_deref()
+        .map(crate::testing::read_actions)
+        .transpose()?
+        .unwrap_or_default();
+    let smoke_media_proof = if matches!(smoke_actions.front(), Some(SmokeAction::MediaProof { .. })) {
+        let Some(SmokeAction::MediaProof { capture_frames }) = smoke_actions.pop_front() else {
+            unreachable!();
+        };
+        if smoke_click.is_some() {
+            return Err("Smoke media proof requires its inputs in the action list".into());
+        }
+        let output = smoke_output.as_deref().ok_or("Smoke media proof requires --smoke-window")?;
+        Some(MediaProof::start(output, capture_frames)?)
+    } else {
+        None
+    };
     let chrome_motion_forced_off =
         smoke_requested || std::env::var("SATIN_REDUCED_MOTION").is_ok_and(|value| value == "1");
     #[cfg(all(test, windows, target_arch = "x86_64"))]
@@ -670,11 +687,8 @@ pub(crate) fn run(
         smoke_output,
         smoke_size,
         smoke_click,
-        smoke_actions: smoke_actions
-            .as_deref()
-            .map(crate::testing::read_actions)
-            .transpose()?
-            .unwrap_or_default(),
+        smoke_actions,
+        smoke_media_proof,
         smoke_wait_deadline: None,
         smoke_media_samples: Vec::new(),
         smoke_checkpoint_document: None,
@@ -763,6 +777,7 @@ struct App {
     smoke_size: Option<PhysicalSize<u32>>,
     smoke_click: Option<String>,
     smoke_actions: VecDeque<crate::testing::SmokeAction>,
+    smoke_media_proof: Option<MediaProof>,
     smoke_wait_deadline: Option<Instant>,
     smoke_media_samples: Vec<serde_json::Value>,
     smoke_checkpoint_document: Option<CheckpointDocument>,
@@ -3851,7 +3866,9 @@ impl App {
         }
         let tab = &self.tabs[self.active];
         if let Some(SmokeAction::SampleMedia { after_ms, count_selector }) = self.smoke_actions.front() {
-            let Some(page) = tab.inspected_page() else { return };
+            if tab.inspected_page().is_none() {
+                return;
+            }
             let now = Instant::now();
             let delay = Duration::from_millis(*after_ms);
             let deadline = *self.smoke_wait_deadline.get_or_insert(now + delay);
@@ -3865,20 +3882,87 @@ impl App {
                 }
                 return;
             }
+            let count_selector = count_selector.clone();
+            let sample_index = self.smoke_media_samples.len();
+            let frame_path = self.smoke_media_proof.as_ref().and_then(|proof| proof.frame_path(sample_index));
+            if frame_path.is_some() {
+                self.draw();
+            } else if self.smoke_media_proof.is_some() && count_selector.is_some() {
+                self.ensure_layout();
+            }
+            let tab = &self.tabs[self.active];
+            let Some(page) = tab.inspected_page() else { return };
             let mut sample = serde_json::json!({
                 "navigation": tab.document_navigation,
-                "timestampMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_millis() as u64,
+                "timestampMs": media_timestamp_ms(),
                 "videoElements": page.document.html_elements("video").count(),
                 "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
             });
             if let Some(selector) = count_selector {
-                sample["selected"] = crate::testing::count_selected(&page.document, tab.layout.as_deref(), selector);
+                sample["selected"] = if self.smoke_media_proof.is_some() {
+                    crate::testing::count_selected_with_viewport(
+                        &page.document, tab.layout.as_deref(), &selector, Some(self.tab_viewport(self.active)),
+                    )
+                } else {
+                    crate::testing::count_selected(&page.document, tab.layout.as_deref(), &selector)
+                };
+            }
+            if let Some(proof) = &mut self.smoke_media_proof {
+                let result = (|| {
+                    proof.record(&serde_json::json!({
+                        "kind": "sample", "sampleIndex": sample_index, "sample": sample,
+                    }))?;
+                    if let Some(path) = frame_path {
+                        if let Some(error) = &self.last_present_error {
+                            return Err(error.clone());
+                        }
+                        self.canvas.as_ref().ok_or("Missing smoke media frame")?
+                            .save_png(&path).map_err(|error| error.to_string())?;
+                        proof.record(&serde_json::json!({
+                            "kind": "frame", "sampleIndex": sample_index, "path": path,
+                            "framesPresented": self.presented_frames,
+                        }))?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    self.fail_smoke(event_loop, error);
+                    return;
+                }
             }
             self.smoke_media_samples.push(sample);
             self.smoke_actions.pop_front();
             self.smoke_wait_deadline = None;
             event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
+        if let Some(SmokeAction::WaitForPlaying { timeout_ms }) = self.smoke_actions.front() {
+            let now = Instant::now();
+            let deadline = *self.smoke_wait_deadline.get_or_insert(now + Duration::from_millis(*timeout_ms));
+            let playing = tab.inspected_page().is_some()
+                && tab.runtime.as_ref().is_some_and(|runtime| {
+                    runtime.media_status().iter().any(|media| {
+                        !media.paused && !media.ended && media.ready_state >= 2
+                            && media.video_width > 0 && media.video_height > 0
+                            && media.decoded_frames > 0
+                    })
+                });
+            if playing {
+                self.smoke_actions.pop_front();
+                self.smoke_wait_deadline = None;
+                event_loop.set_control_flow(ControlFlow::Poll);
+            } else if now >= deadline {
+                self.fail_smoke(event_loop, "Timed out waiting for video playback".into());
+            } else {
+                let next = deadline.min(now + Duration::from_millis(100));
+                match event_loop.control_flow() {
+                    ControlFlow::Wait => event_loop.set_control_flow(ControlFlow::WaitUntil(next)),
+                    ControlFlow::WaitUntil(prior) if prior > next => {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                    }
+                    _ => {}
+                }
+            }
             return;
         }
         if let Some(SmokeAction::WaitTitle { value, timeout_ms }) = self.smoke_actions.front() {
@@ -3947,7 +4031,14 @@ impl App {
                 }
             }
         }
-        if tab.loading
+        // Live playback can keep network and worker activity pending for the
+        // entire test. Only the opt-in media proof acts on the displayed page
+        // without waiting for ordinary smoke quiescence.
+        if self.smoke_media_proof.is_some() {
+            if tab.inspected_page().is_none() {
+                return;
+            }
+        } else if tab.loading
             || self.media.has_pending(tab.id, tab.document_navigation)
             || tab.document_session.as_ref().is_some_and(|session| {
                 !session.done() || session.needs_advance(tab.runtime.as_ref())
@@ -3965,13 +4056,25 @@ impl App {
         if !self.smoke_actions.is_empty() {
             let result = self.arm_smoke_checkpoint().and_then(|()| {
                 let action = self.smoke_actions.pop_front().expect("action is pending");
-                self.smoke_action(action, event_loop)
+                let input = self.smoke_media_proof.as_ref().and_then(|_| action.media_input());
+                let navigation = self.tabs[self.active].document_navigation;
+                if let Some((proof, input)) = self.smoke_media_proof.as_mut().zip(input.as_ref()) {
+                    proof.record(&serde_json::json!({
+                        "kind": "input", "phase": "begin", "timestampMs": media_timestamp_ms(),
+                        "navigation": navigation, "input": input,
+                    }))?;
+                }
+                self.smoke_action(action, event_loop)?;
+                if let Some((proof, input)) = self.smoke_media_proof.as_mut().zip(input.as_ref()) {
+                    proof.record(&serde_json::json!({
+                        "kind": "input", "phase": "end", "timestampMs": media_timestamp_ms(),
+                        "navigation": navigation, "input": input,
+                    }))?;
+                }
+                Ok(())
             });
             if let Err(error) = result {
-                self.smoke_output = None;
-                self.smoke_result = Some(Err(error));
-                event_loop.set_control_flow(ControlFlow::Poll);
-                event_loop.exit();
+                self.fail_smoke(event_loop, error);
                 return;
             }
             self.redraw();
@@ -4024,6 +4127,12 @@ impl App {
         self.smoke_result = Some(result);
         // Winit's Windows AboutToWait path can enter Wait before observing its
         // exit flag; Poll guarantees a wake after an idle hidden-window check.
+        event_loop.set_control_flow(ControlFlow::Poll);
+        event_loop.exit();
+    }
+    fn fail_smoke(&mut self, event_loop: &ActiveEventLoop, error: String) {
+        self.smoke_output = None;
+        self.smoke_result = Some(Err(error));
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.exit();
     }
@@ -4545,7 +4654,8 @@ impl App {
                     Err(format!("Expected native title {value:?}, got {actual:?}"))
                 }
             }
-            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) | SmokeAction::SampleMedia { .. } => {
+            SmokeAction::WaitTitle { .. } | SmokeAction::Checkpoint(_) | SmokeAction::SampleMedia { .. }
+            | SmokeAction::MediaProof { .. } | SmokeAction::WaitForPlaying { .. } => {
                 unreachable!("the event loop handles waiting actions")
             }
             SmokeAction::Key {
