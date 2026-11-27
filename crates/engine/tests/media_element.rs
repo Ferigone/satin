@@ -50,8 +50,10 @@ fn seeking_listener_observes_missing_target_data_even_when_paused() {
     runtime.eval(r#"
         const clip = document.getElementById('clip');
         let observed;
+        let loadedCount = 0;
         clip.src = URL.createObjectURL(new Blob(['sample'], {type: 'video/mp4'}));
         clip.onseeking = () => { observed = [clip.currentTime, clip.readyState, clip.paused].join('/'); };
+        clip.onloadeddata = () => { loadedCount++; };
     "#).unwrap();
     let commands = runtime.take_media_commands();
     let [MediaCommand::Open { key, .. }, ..] = commands.as_slice() else {
@@ -62,6 +64,9 @@ fn seeking_listener_observes_missing_target_data_even_when_paused() {
     runtime.update_media(*key, MediaUpdate::Waiting);
     runtime.update_media(*key, MediaUpdate::Seeking);
     assert_eq!(runtime.eval("observed").unwrap(), Value::from("30/1/true"));
+    runtime.update_media(*key, MediaUpdate::Seeked(30.));
+    runtime.update_media(*key, MediaUpdate::Ready);
+    assert_eq!(runtime.eval("loadedCount").unwrap(), Value::from(1));
 }
 
 #[test]

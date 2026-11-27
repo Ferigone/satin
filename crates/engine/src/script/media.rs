@@ -183,6 +183,7 @@ struct Track {
     opened: bool,
     network: u8,
     ready: u8,
+    loaded_data: bool,
     time: f64,
     played: Vec<(f64, f64)>,
     duration: f64,
@@ -217,6 +218,7 @@ impl Track {
             opened: false,
             network: 0,
             ready: 0,
+            loaded_data: false,
             time: 0.,
             played: Vec::new(),
             duration: f64::NAN,
@@ -1259,16 +1261,17 @@ impl super::ScriptRuntime {
                 };
             }
             MediaUpdate::Ready => {
-                events = match track.ready {
-                    0 | 1 => &["loadeddata", "canplay"],
-                    2 => &["canplay"],
+                events = match (track.loaded_data, track.ready) {
+                    (false, _) => &["loadeddata", "canplay"],
+                    (true, 0..=2) => &["canplay"],
                     _ => &[],
                 };
+                track.loaded_data = true;
                 track.ready = 4;
             }
             MediaUpdate::Playing if !track.paused => {
                 // Some native recoveries emit PLAYING without a fresh CANPLAY.
-                events = if track.ready == 2 {
+                events = if track.loaded_data && track.ready < 3 {
                     track.ready = 4;
                     &["canplay", "playing"]
                 } else {
