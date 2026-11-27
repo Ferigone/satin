@@ -93,7 +93,7 @@ impl Harness {
                     self.playback.playing = false;
                     self.playback.paused = true;
                 }
-                EventKind::Seeking => self.playback.seeking = true,
+                EventKind::Seeking | EventKind::SeekNeedsData => self.playback.seeking = true,
                 EventKind::Seeked(position) => {
                     self.playback.position = position;
                     self.playback.seeked = true;

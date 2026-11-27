@@ -120,6 +120,7 @@ pub enum MediaUpdate {
     },
     Waiting,
     Seeking,
+    SeekNeedsData,
     Seeked(f64),
     Time(f64),
     Ended,
@@ -149,6 +150,7 @@ fn trace_media_update(key: MediaKey, update: &MediaUpdate) {
         },
         MediaUpdate::Seeked(time) => format!("seeked {time}"),
         MediaUpdate::Seeking => "seeking".into(),
+        MediaUpdate::SeekNeedsData => "seeking-needs-data".into(),
         MediaUpdate::Ready => "ready".into(),
         MediaUpdate::Waiting => "waiting".into(),
         MediaUpdate::Playing => "playing".into(),
@@ -1305,6 +1307,17 @@ impl super::ScriptRuntime {
             MediaUpdate::Seeking => {
                 track.seeking = true;
                 events = &["seeking"];
+            }
+            MediaUpdate::SeekNeedsData => {
+                track.seeking = true;
+                let interrupted = !track.paused && !track.ended && track.ready >= 3;
+                track.ready = track.ready.min(1);
+                events = if interrupted {
+                    track.last_event_time = track.time;
+                    &["seeking", "timeupdate", "waiting"]
+                } else {
+                    &["seeking"]
+                };
             }
             MediaUpdate::Seeked(time) => {
                 track.time = time;

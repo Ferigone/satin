@@ -51,9 +51,13 @@ fn seeking_listener_observes_missing_target_data_even_when_paused() {
         const clip = document.getElementById('clip');
         let observed;
         let loadedCount = 0;
+        const order = [];
         clip.src = URL.createObjectURL(new Blob(['sample'], {type: 'video/mp4'}));
         clip.onseeking = () => { observed = [clip.currentTime, clip.readyState, clip.paused].join('/'); };
         clip.onloadeddata = () => { loadedCount++; };
+        for (const event of ['seeking', 'timeupdate', 'waiting']) {
+            clip.addEventListener(event, () => order.push(event));
+        }
     "#).unwrap();
     let commands = runtime.take_media_commands();
     let [MediaCommand::Open { key, .. }, ..] = commands.as_slice() else {
@@ -61,12 +65,15 @@ fn seeking_listener_observes_missing_target_data_even_when_paused() {
     };
     runtime.update_media(*key, MediaUpdate::Ready);
     runtime.eval("clip.currentTime = 30").unwrap();
-    runtime.update_media(*key, MediaUpdate::Waiting);
-    runtime.update_media(*key, MediaUpdate::Seeking);
+    runtime.update_media(*key, MediaUpdate::SeekNeedsData);
     assert_eq!(runtime.eval("observed").unwrap(), Value::from("30/1/true"));
     runtime.update_media(*key, MediaUpdate::Seeked(30.));
     runtime.update_media(*key, MediaUpdate::Ready);
     assert_eq!(runtime.eval("loadedCount").unwrap(), Value::from(1));
+    runtime.eval("order.length = 0; clip.muted = true; clip.play(); clip.currentTime = 60;").unwrap();
+    runtime.update_media(*key, MediaUpdate::SeekNeedsData);
+    assert_eq!(runtime.eval("observed").unwrap(), Value::from("60/1/false"));
+    assert_eq!(runtime.eval("order.join(',')").unwrap(), Value::from("seeking,timeupdate,waiting"));
 }
 
 #[test]

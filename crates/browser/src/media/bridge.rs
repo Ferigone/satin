@@ -260,6 +260,7 @@ impl Bridge {
                 MediaUpdate::RateRejected { revision, actual }
             }
             EventKind::Seeking => MediaUpdate::Seeking,
+            EventKind::SeekNeedsData => MediaUpdate::SeekNeedsData,
             EventKind::Seeked(time) => MediaUpdate::Seeked(time),
             EventKind::Time(time) => MediaUpdate::Time(time),
             EventKind::Ended => MediaUpdate::Ended,

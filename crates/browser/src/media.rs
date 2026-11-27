@@ -141,6 +141,7 @@ pub(crate) enum EventKind {
     },
     Waiting,
     Seeking,
+    SeekNeedsData,
     Seeked(f64),
     Time(f64),
     Ended,
