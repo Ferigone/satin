@@ -243,6 +243,55 @@ fn plays_incrementally_appended_audio_and_video_before_end_of_stream() {
 }
 
 #[test]
+fn seek_into_an_unbuffered_range_resumes_when_both_tracks_arrive() {
+    let video = fragments(VIDEO);
+    let audio = fragments(AUDIO);
+    let mut harness = Harness::new();
+    harness.command(Command::OpenStream { key: KEY });
+    harness.until("native MediaSource open", |media| media.source_open);
+    for (buffer, mime) in [
+        (1, "video/mp4; codecs=\"avc1.42C01E\""),
+        (2, "audio/mp4; codecs=\"mp4a.40.2\""),
+    ] {
+        harness.command(Command::AddBuffer {
+            key: KEY,
+            buffer,
+            mime: mime.into(),
+        });
+    }
+    harness.command(Command::Muted { key: KEY, muted: true });
+    for segment in 0..5 {
+        append_pair(&mut harness, segment as u64 + 1, video[segment], audio[segment]);
+    }
+    harness.command(Command::SetDuration {
+        key: KEY,
+        duration: 4.83,
+    });
+    harness.command(Command::Play(KEY));
+    harness.until("initial playback", |media| {
+        media.playing && media.frames > 0 && media.position > 0.2
+    });
+    let target = 4.52;
+    assert!(harness.playback.ranges[&(1, 5)].last().unwrap().1 < target);
+    assert!(harness.playback.ranges[&(2, 5)].last().unwrap().1 < target);
+    let before = harness.playback.frames;
+    harness.command(Command::Seek { key: KEY, time: target });
+    harness.until("seeking before the target range arrives", |media| media.seeking);
+    assert!(!harness.playback.seeked);
+    append_pair(&mut harness, 6, video[5], audio[5]);
+    for buffer in [1, 2] {
+        let ranges = &harness.playback.ranges[&(buffer, 6)];
+        assert!(
+            ranges.iter().any(|&(start, end)| start <= target && target < end),
+            "buffer {buffer} did not cover {target}: {ranges:?}",
+        );
+    }
+    harness.until("new frames and clock advancement after the seek", |media| {
+        media.seeked && media.position > target + 0.1 && media.frames > before
+    });
+}
+
+#[test]
 fn streaming_append_window_offset_and_removal_use_native_ranges() {
     let video = fragments(VIDEO);
     let mut harness = Harness::new();

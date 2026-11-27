@@ -170,6 +170,9 @@ impl Player {
             frame_stats: (0, 0),
             native_size: None,
             pending_seek: None,
+            submitted_seek: None,
+            paused_for_seek: false,
+            play_requested: false,
             pending_rate: None,
             ready: false,
             playing: false,
@@ -220,6 +223,9 @@ pub(super) struct Player {
     frame_stats: (u32, u32),
     native_size: Option<(u32, u32)>,
     pending_seek: Option<f64>,
+    submitted_seek: Option<f64>,
+    paused_for_seek: bool,
+    play_requested: bool,
     pending_rate: Option<(u64, f64)>,
     ready: bool,
     playing: bool,
@@ -241,6 +247,10 @@ impl Player {
         unsafe {
             match command {
                 Command::Play(_) => {
+                    self.play_requested = true;
+                    if self.paused_for_seek {
+                        return Ok(());
+                    }
                     if matches!(&self.input, Input::Stream(stream) if stream.ending()) {
                         self.play_after_stream_end = true;
                         return Ok(());
@@ -252,6 +262,7 @@ impl Player {
                     self.engine.Play()
                 }
                 Command::Pause(_) => {
+                    self.play_requested = false;
                     self.play_after_stream_end = false;
                     self.waiting_through = None;
                     self.engine.Pause()
@@ -259,14 +270,12 @@ impl Player {
                 Command::Seek { time, .. } if !time.is_finite() => {
                     Err(Error::from_hresult(E_INVALIDARG))
                 }
-                Command::Seek { time, .. } if self.native_size.is_none() => {
+                Command::Seek { key, time } => {
                     self.pending_seek = Some(time.max(0.));
-                    Ok(())
-                }
-                Command::Seek { time, .. } => {
+                    self.submitted_seek = None;
                     self.waiting_through = None;
                     self.ended = false;
-                    self.engine.SetCurrentTime(time.max(0.))
+                    self.try_pending_seek(output, key)
                 }
                 Command::PlaybackRate {
                     revision, value, ..
@@ -305,6 +314,79 @@ impl Player {
         }
     }
 
+    fn try_pending_seek(&mut self, output: &Shared, key: Key) -> Result<()> {
+        let Some(time) = self.pending_seek else {
+            return Ok(());
+        };
+        if self.native_size.is_none() {
+            return Ok(());
+        }
+        let wait_for_data = matches!(&self.input, Input::Stream(stream)
+            if stream.end_time().is_none() && !stream.ending() && stream.buffered_until(time).is_none());
+        if wait_for_data {
+            if !self.paused_for_seek {
+                // Media Foundation can strand a seek submitted before MSE has
+                // the target range. Let the page request and append it first.
+                if !unsafe { self.engine.IsPaused().as_bool() } {
+                    unsafe { self.engine.Pause()? };
+                }
+                self.paused_for_seek = true;
+                self.seeking = true;
+                self.playing = false;
+                output.publish(key, EventKind::Seeking);
+                if self.play_requested {
+                    output.publish(key, EventKind::Waiting);
+                }
+            }
+            return Ok(());
+        }
+        self.pending_seek = None;
+        unsafe {
+            self.engine.SetCurrentTime(time)?;
+            self.submitted_seek = Some(time);
+            if self.paused_for_seek && self.play_requested {
+                // Running the engine lets Media Foundation consume the newly
+                // appended samples while completing the deferred seek.
+                self.engine.Play()?;
+            }
+        }
+        self.trace_seek("submitted");
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "media-startup-diagnostics"))]
+    fn trace_seek(&self, phase: &str) {
+        use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        static TRACES: AtomicUsize = AtomicUsize::new(0);
+        if *ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_NATIVE_SEEK").is_some())
+            && TRACES.fetch_add(1, Ordering::Relaxed) < 48
+        {
+            let (paused, seeking, ready) = unsafe {
+                (self.engine.IsPaused().as_bool(), self.engine.IsSeeking().as_bool(), self.engine.GetReadyState())
+            };
+            eprintln!("SATIN_QA_NATIVE_SEEK {phase} target={:?} time={:.5} paused={paused} seeking={seeking} ready={ready}",
+                self.submitted_seek.or(self.pending_seek), self.time());
+        }
+    }
+
+    #[cfg(not(any(test, feature = "media-startup-diagnostics")))]
+    fn trace_seek(&self, _: &str) {}
+
+    fn finish_seek(&mut self) -> Result<f64> {
+        self.trace_seek("complete");
+        self.submitted_seek = None;
+        self.seeking = false;
+        let time = self.time();
+        if std::mem::take(&mut self.paused_for_seek) && self.play_requested {
+            self.waiting_through = Some(time);
+            if unsafe { self.engine.IsPaused().as_bool() } {
+                unsafe { self.engine.Play()? };
+            }
+        }
+        Ok(time)
+    }
+
     fn apply_rate(&self, key: Key, output: &Shared, revision: u64, requested: f64) {
         // Rate support can also depend on the current source. A rejected
         // optional speed change must leave the current media session usable.
@@ -320,10 +402,7 @@ impl Player {
         }
         let size = self.video_size()?;
         self.publish_metadata(size, output, key);
-        if let Some(time) = self.pending_seek.take() {
-            unsafe { self.engine.SetCurrentTime(time)? };
-        }
-        Ok(())
+        self.try_pending_seek(output, key)
     }
 
     fn video_size(&self) -> Result<(u32, u32)> {
@@ -376,6 +455,7 @@ impl Player {
                 if let Input::Stream(stream) = &mut self.input {
                     stream.ended();
                 }
+                self.try_pending_seek(output, key).map_err(|error| error.to_string())?;
                 if std::mem::take(&mut self.play_after_stream_end) {
                     self.control(Command::Play(key), output)
                         .map_err(|error| error.to_string())?;
@@ -390,6 +470,7 @@ impl Player {
                 if let Input::Stream(stream) = &mut self.input {
                     stream.complete(buffer, operation, status);
                 }
+                self.try_pending_seek(output, key).map_err(|error| error.to_string())?;
                 return Ok(());
             }
             Signal::Metadata => {
@@ -416,11 +497,17 @@ impl Player {
                 return Ok(());
             }
             Signal::Playing => {
+                if self.paused_for_seek {
+                    return Ok(());
+                }
                 self.playing = true;
                 self.waiting_through = None;
                 EventKind::Playing
             }
             Signal::Paused => {
+                if self.paused_for_seek {
+                    return Ok(());
+                }
                 self.playing = false;
                 self.waiting_through = None;
                 if self.ended {
@@ -440,19 +527,35 @@ impl Player {
                 EventKind::Waiting
             }
             Signal::Seeking => {
+                if self.paused_for_seek {
+                    return Ok(());
+                }
                 self.seeking = true;
                 EventKind::Seeking
             }
             Signal::Seeked => {
-                self.seeking = false;
+                if self.pending_seek.is_some() || (!self.seeking && self.submitted_seek.is_none()) {
+                    return Ok(());
+                }
                 capture = self.ready;
-                EventKind::Seeked(self.time())
+                EventKind::Seeked(self.finish_seek().map_err(|error| error.to_string())?)
             }
             Signal::Time => {
-                if self.ended {
+                if self.ended || self.pending_seek.is_some() {
                     return Ok(());
                 }
                 let time = self.time();
+                if self.paused_for_seek {
+                    self.trace_seek("clock");
+                    let reached_position = self.submitted_seek.is_some_and(|target| {
+                        time >= target - 0.02 && !unsafe { self.engine.IsSeeking().as_bool() }
+                    });
+                    if !reached_position {
+                        return Ok(());
+                    }
+                    let seeked = self.finish_seek().map_err(|error| error.to_string())?;
+                    output.publish(key, EventKind::Seeked(seeked));
+                }
                 if self.waiting_through.is_some_and(|edge| time > edge)
                     && !self.seeking
                     && unsafe {
@@ -477,6 +580,7 @@ impl Player {
                 }
                 EventKind::Time(time)
             }
+            Signal::Ended if self.paused_for_seek => return Ok(()),
             Signal::Ended => {
                 self.finish(output, key);
                 return Ok(());
@@ -540,6 +644,7 @@ impl Player {
 
     fn finish(&mut self, output: &Shared, key: Key) {
         self.playing = false;
+        self.play_requested = false;
         self.waiting_through = None;
         if !std::mem::replace(&mut self.ended, true) {
             output.publish(key, EventKind::Time(self.time()));
@@ -553,6 +658,9 @@ impl Player {
         output: &Shared,
         key: Key,
     ) -> Result<Option<EventKind>> {
+        if self.pending_seek.is_some() {
+            return Ok(None);
+        }
         let stream = matches!(self.input, Input::Stream(_));
         if (stream && !unsafe { self.engine.HasVideo().as_bool() })
             || (!stream

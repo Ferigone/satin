@@ -1303,6 +1303,7 @@ impl super::ScriptRuntime {
                 track.seeking = false;
                 events = &["timeupdate", "seeked"];
             }
+            MediaUpdate::Time(_) if track.seeking => {}
             MediaUpdate::Time(time) => {
                 track.advance_time(time);
                 if (time - track.last_event_time).abs() >= 0.25 {
