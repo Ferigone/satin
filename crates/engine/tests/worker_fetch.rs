@@ -383,6 +383,25 @@ fn browser_and_worker_base64_use_binary_strings_and_reject_invalid_input() {
 }
 
 #[test]
+fn secure_blob_worker_can_generate_random_values_and_digest() {
+    let page = LoadedPage::from_html("https://example.test/", "<!doctype html>");
+    let source = r#"
+        const array = new Uint32Array(4);
+        const alive = isSecureContext && self.crypto === crypto &&
+            crypto.getRandomValues(array) === array && array.some(value => value !== 0) &&
+            crypto.randomUUID().charAt(14) === '4';
+        crypto.subtle.digest('SHA-256', new Uint8Array([97, 98, 99])).then(out => {
+            postMessage(alive && new Uint8Array(out).toHex() ===
+                'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+            close();
+        });
+    "#;
+    let (mut runtime, wakes) = worker(&page, source);
+    wait_until(&mut runtime, &wakes, "results.length === 1");
+    assert_eq!(runtime.eval("results[0]").unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn imported_scripts_check_csp_on_redirect_destinations() {
     let (same_server, origin) = loopback();
     let (foreign_server, foreign) = loopback();

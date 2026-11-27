@@ -7,6 +7,7 @@ mod blobs;
 mod canvas;
 mod class_list;
 mod collections;
+mod crypto;
 mod custom_elements;
 mod dataset;
 mod range;
@@ -979,6 +980,8 @@ impl ScriptRuntime {
             prototype.clone(),
             document_prototype.clone(),
         )?;
+        let address = state.borrow().url.clone();
+        crypto::install(&mut vm, &window, &address, &dom_errors)?;
         document_interface::install(&mut vm, &state, document_prototype.clone(), &dom_errors)?;
         tree_walker::install(&mut vm, &state, &document_prototype, &dom_errors)?;
         style_sheets::install(&mut vm, &state, style_element_prototype, &dom_errors)?;

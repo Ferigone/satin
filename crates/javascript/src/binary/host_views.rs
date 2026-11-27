@@ -12,6 +12,14 @@ impl ArrayBufferViewKind {
     pub fn element_width(self) -> usize {
         self.0.map_or(1, Element::width)
     }
+
+    pub fn is_integer_typed_array(self) -> bool {
+        matches!(self.0, Some(
+            Element::Int8 | Element::Uint8 | Element::Uint8Clamped
+            | Element::Int16 | Element::Uint16 | Element::Int32 | Element::Uint32
+            | Element::BigInt64 | Element::BigUint64
+        ))
+    }
 }
 
 /// A native ArrayBufferView's underlying buffer and visible byte range.
@@ -24,20 +32,29 @@ pub struct ArrayBufferView {
 }
 
 impl Vm {
-    /// Reads a Web IDL ArrayBufferView without consulting its JS properties.
-    pub fn fixed_array_buffer_view(&self, value: &Value) -> Result<ArrayBufferView, JsError> {
+    fn array_buffer_view_layout(&self, value: &Value) -> Result<(View, ArrayBufferViewKind), JsError> {
         let id = kind_id(self, value, "Expected an ArrayBufferView")?;
         let (view, kind) = match self.heap.object(id)?.kind {
             ObjectKind::TypedArray(array) => (array.view, Some(array.element)),
             ObjectKind::DataView(view) => (view, None),
             _ => return Err(JsError::type_error("Expected an ArrayBufferView")),
         };
+        Ok((view, ArrayBufferViewKind(kind)))
+    }
+
+    /// Reports the intrinsic view kind, including for a detached view.
+    pub fn array_buffer_view_kind(&self, value: &Value) -> Result<ArrayBufferViewKind, JsError> {
+        self.array_buffer_view_layout(value).map(|(_, kind)| kind)
+    }
+
+    /// Reads a Web IDL ArrayBufferView without consulting its JS properties.
+    pub fn fixed_array_buffer_view(&self, value: &Value) -> Result<ArrayBufferView, JsError> {
+        let (view, kind) = self.array_buffer_view_layout(value)?;
         if self.buffer_data(view.buffer)?.maximum.is_some() {
             return Err(JsError::type_error(
                 "Resizable ArrayBufferView is not allowed",
             ));
         }
-        let kind = ArrayBufferViewKind(kind);
         Ok(ArrayBufferView {
             buffer: Value::Object(view.buffer),
             byte_range: self.require_view_range(view, kind.element_width())?,

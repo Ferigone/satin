@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{loader::DocumentPolicy, network::CancelSignal};
 use crate::script::{
-    abort::AbortHost, arg, dom_api, event_target, fatal, getter, message_ports::message_event,
+    abort::AbortHost, arg, crypto, dom_api, event_target, fatal, getter, message_ports::message_event,
     scheduler, webidl,
 };
 use rust_browser_javascript::{ErrorKind, JsError, JsString, StructuredClonePacket, Value, Vm};
@@ -37,7 +37,7 @@ impl WorkerRealm {
         network: Option<(Network, CancelSignal, Wake)>,
         policy: DocumentPolicy,
     ) -> Result<Self, JsError> {
-        dom_api::install_errors(&mut vm)?;
+        let dom_errors = dom_api::install_errors(&mut vm)?;
         crate::script::base64_api::install(&mut vm)?;
         let abort = AbortHost::install_worker(&mut vm)?;
         let events = abort.events().clone();
@@ -131,7 +131,8 @@ impl WorkerRealm {
             Ok(Value::Undefined)
         })?;
         scheduler::install_queue_microtask(&mut vm, global.clone())?;
-        let timers = timers::Timers::install(&mut vm, global)?;
+        let timers = timers::Timers::install(&mut vm, global.clone())?;
+        crypto::install(&mut vm, &global, url, &dom_errors)?;
         let fetch = network
             .map(|(network, generation, wake)| {
                 WorkerFetch::install(&mut vm, url, abort, network, generation, wake)

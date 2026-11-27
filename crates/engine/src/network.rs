@@ -392,7 +392,7 @@ fn validate_url(url: &Url) -> Result<(), FetchError> {
     }
     Ok(())
 }
-fn trustworthy(url: &Url) -> bool {
+pub(super) fn trustworthy(url: &Url) -> bool {
     url.scheme() == "https"
         || match url.host() {
             Some(url::Host::Ipv4(address)) => address.is_loopback(),
