@@ -16,8 +16,7 @@ use std::{
 const MAX_TIMERS: usize = 1024;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
-const SCRIPT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(60);
-const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(120);
+const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -27,17 +26,16 @@ enum Handler {
 }
 
 /// Web script tasks may legitimately need many cheap VM operations.
-/// Leave the instruction counter for accounting and bound the task by elapsed
-/// CPU and wall time. Re-entrant scripts still share the outer task deadline.
+/// The wall deadline bounds a task, including callbacks and microtasks that
+/// re-enter JavaScript. Startup render work can use multiple CPU-intensive passes.
 #[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
 pub(super) fn run_script_task<T>(
     vm: &mut Vm,
     run: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
-    vm.with_task_cpu_budget(
+    vm.with_task_limits(
         u64::MAX,
-        SCRIPT_TASK_CPU_TIMEOUT,
-        Instant::now() + SCRIPT_TASK_WALL_TIMEOUT,
+        Some(Instant::now() + SCRIPT_TASK_WALL_TIMEOUT),
         run,
     )
 }

@@ -33,8 +33,8 @@ const RESOURCE_URL_BYTES: usize = 24 * 1024 * 1024;
 const CONCURRENT_RESOURCES: usize = 4;
 const DECODED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 const STYLESHEET_BYTES: usize = 8 * 1024 * 1024;
-const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(18);
-const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(36);
+const DOCUMENT_RESOURCE_TIMEOUT: Duration = Duration::from_secs(210);
+const DOCUMENT_RESOURCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(240);
 
 pub struct ResourceLoad {
     pub id: u64,

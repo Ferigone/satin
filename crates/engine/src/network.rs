@@ -62,7 +62,7 @@ fn trace_media_fetch(request: &WebRequest, phase: &str, status: Option<u16>) {
             request.method);
     }
 }
-pub const FETCH_TIMEOUT: Duration = Duration::from_secs(18);
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(210);
 pub type HeaderList = Vec<(String, String)>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

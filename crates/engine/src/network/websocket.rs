@@ -142,11 +142,17 @@ async fn run(
     events: &mpsc::Sender<Notification>,
     wake: &WakeSlot,
 ) -> Notification {
+    #[cfg(feature = "media-startup-diagnostics")]
+    let traced_host = websocket_trace_host(&opening.url);
     let Ok(Some((transport, protocol))) =
         timeout(HANDSHAKE_TIMEOUT, handshake(&loader, opening)).await
     else {
+        #[cfg(feature = "media-startup-diagnostics")]
+        trace_websocket(traced_host.as_deref(), "handshake-failed", 0);
         return abnormal();
     };
+    #[cfg(feature = "media-startup-diagnostics")]
+    trace_websocket(traced_host.as_deref(), "open", 0);
     let config = WebSocketConfig::default()
         .read_buffer_size(16 * 1024)
         .write_buffer_size(0)
@@ -175,6 +181,10 @@ async fn run(
             }
             incoming = socket.next() => {
                 let Some(Ok(incoming)) = incoming else { return abnormal(); };
+                #[cfg(feature = "media-startup-diagnostics")]
+                if matches!(incoming, Message::Text(_) | Message::Binary(_)) {
+                    trace_websocket(traced_host.as_deref(), "message", incoming.len());
+                }
                 let message = match incoming {
                     Message::Text(text) => Notification::Text(text.to_string()),
                     Message::Binary(bytes) => Notification::Binary(bytes.to_vec()),
@@ -204,6 +214,28 @@ async fn run(
                 return abnormal();
             }
         }
+    }
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn websocket_trace_host(url: &Url) -> Option<String> {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_WEBSOCKET").is_some()) {
+        url.host_str().map(str::to_owned)
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn trace_websocket(host: Option<&str>, phase: &str, message_bytes: usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+    if let Some(host) = host
+        && TRACES.fetch_add(1, Ordering::Relaxed) < 96
+    {
+        eprintln!("SATIN_QA_WEBSOCKET {phase} host={host} bytes={message_bytes}");
     }
 }
 
