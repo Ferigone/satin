@@ -176,6 +176,7 @@ pub(crate) enum Op {
     ArrayElement(bool),
     ArrayHole,
     Object,
+    ConstantRecord(Rc<[(JsString, Value)]>),
     ObjectSpread,
     Destructure(Rc<PatternCode>),
     Pattern(PatternStep),
@@ -437,6 +438,13 @@ pub(crate) fn retained_size(
                     bytes = bytes.saturating_add(integer.retained_bytes())
                 }
                 Op::RegExp(program) => bytes = bytes.saturating_add(program.retained_bytes()),
+                Op::ConstantRecord(fields) => {
+                    bytes = bytes.saturating_add(RC_COUNTS + std::mem::size_of_val(fields.as_ref()));
+                    for (key, value) in fields.iter() {
+                        bytes = bytes.saturating_add(key.allocation_bytes());
+                        if let Value::String(s) = value { bytes = bytes.saturating_add(s.allocation_bytes()); }
+                    }
+                }
                 Op::TemplateObject(site) => {
                     bytes = bytes.saturating_add(
                         std::mem::size_of::<TemplateSite>() + RC_COUNTS + vector_storage(&site.parts)
@@ -1435,6 +1443,23 @@ fn queue_arguments<'a>(args: &'a [Expr], action: Op, pending: &mut Vec<Emit<'a>>
     }
 }
 
+fn constant_fields(entries: &[ObjectEntry]) -> Option<Rc<[(JsString,Value)]>> {
+    if entries.len() < 2 { return None; }
+    entries.iter().map(|entry| {
+        let ObjectEntry::Property { key, value, prototype:false, method:None, cover:false, .. } = entry else { return None };
+        let Expr::Literal(Value::String(key)) = ungroup(key) else { return None };
+        let value = match ungroup(value) {
+            Expr::Literal(v @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_))) => v.clone(),
+            Expr::Unary(op @ ("-" | "!"), inner) => {
+                let Expr::Literal(Value::Number(n)) = ungroup(inner) else { return None };
+                if *op == "-" { Value::Number(-n) } else { Value::Bool(*n == 0.0 || n.is_nan()) }
+            }
+            _ => return None,
+        };
+        Some((key.clone(),value))
+    }).collect()
+}
+
 fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
     use Emit::{Expression as E, Instruction as I, Reference as R};
     let mut pending = vec![E(e)];
@@ -1685,6 +1710,10 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                         > 1
                     {
                         return Err(syntax("Duplicate __proto__ property"));
+                    }
+                    if let Some(fields) = constant_fields(pairs) {
+                        out.push(Op::ConstantRecord(fields));
+                        continue;
                     }
                     out.push(Op::Object);
                     for entry in pairs.iter().rev() {

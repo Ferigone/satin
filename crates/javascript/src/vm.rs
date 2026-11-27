@@ -2021,10 +2021,7 @@ impl Vm {
         }
         let previous = self.own_descriptor(id, &key)?;
         if previous.is_none() {
-            self.account_string(&key)?;
-            let bytes = 192usize.saturating_add(key.len().saturating_mul(2));
-            self.ensure_allocation(bytes)?;
-            self.heap.estimated_bytes = self.heap.estimated_bytes.saturating_add(bytes);
+            self.reserve_new_property(&key)?;
         }
         if let Some(old) = &previous {
             if !old.configurable {
@@ -3384,13 +3381,19 @@ impl Vm {
             )),
         }
     }
+    fn reserve_new_property(&mut self, key: &JsString) -> Result<(), JsError> {
+        self.account_string(key)?;
+        self.reserve_allocation(192usize.saturating_add(key.len().saturating_mul(2)))
+    }
+
     pub(crate) fn append_array_literal(
         &mut self,
         array: Value,
         value: Option<Value>,
     ) -> Result<(), JsError> {
         let id = array.as_object().unwrap();
-        let ObjectKind::Array { length, .. } = self.heap.object(id)?.kind else {
+        let array_object = self.heap.object(id)?;
+        let ObjectKind::Array { length, length_writable } = array_object.kind else {
             unreachable!()
         };
         if length >= self.limits.max_array_length {
@@ -3400,11 +3403,17 @@ impl Vm {
             ));
         }
         if let Some(value) = value {
-            self.define_property(
-                array,
-                JsString::from(length.to_string()),
-                Property::data(value),
-            )?;
+            let key = JsString::from(length.to_string());
+            if !array_object.extensible || !length_writable {
+                return self.define_property(array, key, Property::data(value));
+            }
+            // An array has no own index at its current length. CreateDataProperty
+            // does not invoke an inherited setter for this new element.
+            let value = self.account_value(value)?;
+            self.reserve_new_property(&key)?;
+            let object = self.heap.object_mut(id)?;
+            object.properties.insert(key, Property::data(value));
+            if let ObjectKind::Array { length, .. } = &mut object.kind { *length += 1; }
         } else if let ObjectKind::Array { length, .. } = &mut self.heap.object_mut(id)?.kind {
             *length += 1;
         }
@@ -3721,6 +3730,7 @@ impl Vm {
             | Op::Array
             | Op::ArrayHole
             | Op::ArrayElement(..)
+            | Op::ConstantRecord(..)
             | Op::Object
             | Op::ObjectSpread
             | Op::Destructure(..)
@@ -3977,6 +3987,22 @@ impl Vm {
                 } else {
                     self.append_array_literal(array, Some(value))?;
                 }
+            }
+            Op::ConstantRecord(fields) => {
+                self.ensure_allocation(256)?;
+                let object = self.new_object();
+                let id = object.as_object().unwrap();
+                for (name, value) in fields.iter() {
+                    self.tick()?;
+                    self.check_string_length(name.len())?;
+                    self.account_string(name)?;
+                    let value = self.account_value(value.clone())?;
+                    if !self.heap.object(id)?.properties.contains_key(name) {
+                        self.reserve_new_property(name)?;
+                    }
+                    self.heap.object_mut(id)?.insert(name.clone(), Property::data(value));
+                }
+                stack.push(Item::Value(object));
             }
             Op::Object => {
                 self.ensure_allocation(256)?;

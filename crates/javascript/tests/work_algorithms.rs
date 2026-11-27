@@ -1,6 +1,28 @@
 use rust_browser_javascript::{ErrorKind, Value, Vm, VmLimits};
 
 #[test]
+fn constant_records_and_array_appends_keep_descriptors_order_and_prototypes() {
+    let result=Vm::new().eval(r#"
+        function record(){return {"10":3, "2":4, x:"first", ["__proto__"]:"own", x:"last", n:-0, b:!0, f:!1}}
+        const a=record(), b=record(), descriptor=Object.getOwnPropertyDescriptor(a,"x");
+        a.x="changed";
+        let log=""; const k={toString(){log+="k";return "r"}};
+        const dynamic={get q(){log+="g";return 3},[k]:(log+="v",9)};
+        const aryPrototype=Object.create(Array.prototype);
+        Object.defineProperty(aryPrototype,"0",{set(v){log+="bad"}});
+        const array=[...["a"],,"b"];
+        Object.setPrototypeOf(array,aryPrototype);
+        const plain={__proto__:null,r:2};
+        Object.keys(b).join(",")==="2,10,x,__proto__,n,b,f" && b.x==="last" &&
+        b.__proto__==="own" && Object.getPrototypeOf(b)===Object.prototype &&
+        descriptor.configurable && descriptor.writable && descriptor.enumerable && descriptor.value==="last" &&
+        Object.is(b.n,-0) && b.b && !b.f && dynamic.q===3 && log==="kvg" && dynamic.r===9 &&
+        array[0]==="a" && !(1 in array) && array.length===3 && Object.getPrototypeOf(plain)===null
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
 fn descending_typed_stores_check_the_evaluated_range_and_preserve_observable_setters() {
     let mut vm = Vm::new();
     let result=vm.eval(r#"

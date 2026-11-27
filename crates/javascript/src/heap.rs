@@ -158,10 +158,14 @@ impl Object {
         }
     }
     pub fn insert(&mut self, key: JsString, property: Property) {
-        if !self.properties.contains_key(&key) && array_index(&key).is_none() {
-            self.order.push(key.clone());
+        use std::collections::btree_map::Entry;
+        match self.properties.entry(key) {
+            Entry::Occupied(mut entry) => { entry.insert(property); }
+            Entry::Vacant(entry) => {
+                if array_index(entry.key()).is_none() { self.order.push(entry.key().clone()); }
+                entry.insert(property);
+            }
         }
-        self.properties.insert(key, property);
     }
     pub fn keys(&self, enumerable_only: bool) -> Vec<JsString> {
         let mut indices: Vec<(u32, JsString)> = self
