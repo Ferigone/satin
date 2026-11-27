@@ -18,6 +18,7 @@ const LIVE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 const QUEUED_SUBMISSIONS: usize = 8;
 const SNAPSHOT_UNITS: usize = 8192;
 pub(super) const TYPED_CONTROLS: &[(&str, &str, &[&str])] = &[
+    ("form", "HTMLFormElement", &["action", "method", "enctype", "target", "name", "noValidate", "elements", "length"]),
     ("option", "HTMLOptionElement", &["selected", "defaultSelected", "value"]),
     ("select", "HTMLSelectElement", &["value", "selectedIndex"]),
     ("textarea", "HTMLTextAreaElement", &["value", "defaultValue"]),
@@ -1445,7 +1446,8 @@ impl FormHost {
                 host.ensure_control_type(&this, tag)?;
                 host.set_property(vm, this, property, arg(args, 0))
             });
-            vm.define_accessor(prototype.clone(), property, Some(get), Some(set))?;
+            let writable = !matches!(property, "elements" | "length");
+            vm.define_accessor(prototype.clone(), property, Some(get), writable.then_some(set))?;
         }
         Ok(())
     }

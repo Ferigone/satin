@@ -199,7 +199,7 @@ fn web_vm_limits() -> VmLimits {
         // Document and worker hosts do not yet provide cross-origin isolation.
         shared_array_buffer: false,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
-        max_call_depth: 160,
+        max_call_depth: 256,
         max_heap_objects: 1024 * 1024,
         max_heap_bytes: 2 * 1024 * 1024 * 1024,
         buffer_units_per_instruction: 1024,

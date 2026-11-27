@@ -64,6 +64,29 @@ pub enum RedirectMode {
     Error,
     Manual,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RequestCache {
+    #[default]
+    Default,
+    NoStore,
+    Reload,
+    NoCache,
+    ForceCache,
+    OnlyIfCached,
+}
+
+impl RequestCache {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::NoStore => "no-store",
+            Self::Reload => "reload",
+            Self::NoCache => "no-cache",
+            Self::ForceCache => "force-cache",
+            Self::OnlyIfCached => "only-if-cached",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResponseType {
     Basic,
@@ -95,6 +118,7 @@ pub struct WebRequest {
     pub mode: RequestMode,
     pub credentials: CredentialsMode,
     pub redirect: RedirectMode,
+    pub cache: RequestCache,
     pub signal: Option<CancelSignal>,
     // A document API can carry the active connect-src snapshot through the
     // generic transport, including checks on redirect destinations.
@@ -111,6 +135,7 @@ impl WebRequest {
             mode: RequestMode::Cors,
             credentials: CredentialsMode::SameOrigin,
             redirect: RedirectMode::Follow,
+            cache: RequestCache::Default,
             signal: None,
             connect_policy: None,
         }
@@ -122,6 +147,9 @@ impl WebRequest {
 
     pub(crate) fn validate_metadata(&mut self) -> Result<(), FetchError> {
         self.method = normalize_method(&self.method)?;
+        if self.cache == RequestCache::OnlyIfCached && self.mode != RequestMode::SameOrigin {
+            return Err(FetchError::invalid("only-if-cached requires same-origin mode"));
+        }
         if matches!(self.method.as_str(), "GET" | "HEAD") && self.body.is_some() {
             return Err(FetchError::invalid("GET/HEAD cannot have a request body"));
         }
@@ -718,6 +746,11 @@ impl Loader {
             }
             .into());
         }
+        // The transport has no HTTP response cache. A cache-only request
+        // therefore fails without sending a network request.
+        if request.cache == RequestCache::OnlyIfCached {
+            return Err(FetchError::new(FetchErrorKind::Network, "No cached HTTP response"));
+        }
         let source_origin = request.client_url.origin();
         let mut cookie_context = crate::cookies::CookieContext::subresource(&request.client_url);
         cookie_context.method = request.method.clone();
@@ -804,10 +837,23 @@ impl Loader {
             }
             let method = Method::from_bytes(request.method.as_bytes())
                 .map_err(|_| FetchError::invalid("Invalid method"))?;
+            let mut headers = header_map(&request.headers)?;
+            // These are transport headers and are outside the CORS check of
+            // headers supplied by the author.
+            match request.cache {
+                RequestCache::NoStore | RequestCache::Reload => {
+                    headers.entry(reqwest::header::PRAGMA).or_insert(HeaderValue::from_static("no-cache"));
+                    headers.entry(reqwest::header::CACHE_CONTROL).or_insert(HeaderValue::from_static("no-cache"));
+                }
+                RequestCache::NoCache => {
+                    headers.entry(reqwest::header::CACHE_CONTROL).or_insert(HeaderValue::from_static("max-age=0"));
+                }
+                _ => {}
+            }
             let mut builder = self
                 .fetch_client
                 .request(method, request.url.clone())
-                .headers(header_map(&request.headers)?);
+                .headers(headers);
             // Same-origin credentials stop after CORS/opaque tainting, even if
             // a later redirect returns to the original origin.
             let credentials = request.credentials == CredentialsMode::Include

@@ -12,7 +12,7 @@ use crate::{
     network::{
         self, CancelSignal, CredentialsMode, FETCH_BODY_LIMIT, FETCH_HEADER_LIMIT,
         FETCH_RESPONSE_BODY_LIMIT, FetchBody, FetchError, FetchErrorKind, FetchJob, HeaderList,
-        RedirectMode, RequestMode, ResponseType, StreamingResponse, WebRequest, WebResponse,
+        RedirectMode, RequestCache, RequestMode, ResponseType, StreamingResponse, WebRequest, WebResponse,
     },
 };
 use rust_browser_javascript::{ErrorKind, JsError, RootId, Value, Vm};
@@ -501,7 +501,6 @@ fn request_init(
 ) -> Result<(RequestData, Value, RequestBody), JsError> {
     let init = dictionary(init)?;
     for name in [
-        "cache",
         "integrity",
         "referrer",
         "referrerPolicy",
@@ -586,6 +585,18 @@ fn request_init(
             "error" => RedirectMode::Error,
             "manual" => RedirectMode::Manual,
             _ => return Err(JsError::type_error("Invalid Request redirect mode")),
+        };
+    }
+    let cache = field(vm, &init, "cache")?;
+    if !cache.is_undefined() {
+        request.cache = match text(vm, cache)?.as_str() {
+            "default" => RequestCache::Default,
+            "no-store" => RequestCache::NoStore,
+            "reload" => RequestCache::Reload,
+            "no-cache" => RequestCache::NoCache,
+            "force-cache" => RequestCache::ForceCache,
+            "only-if-cached" => RequestCache::OnlyIfCached,
+            _ => return Err(JsError::type_error("Invalid Request cache mode")),
         };
     }
     let guard = if request.mode == RequestMode::NoCors {
@@ -1574,6 +1585,7 @@ fn install_request(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), 
         "mode",
         "credentials",
         "redirect",
+        "cache",
         "duplex",
         "headers",
         "signal",
@@ -1594,6 +1606,7 @@ fn install_request(vm: &mut Vm, state: &Shared, prototype: Value) -> Result<(), 
             Ok(Value::from(match name {
                 "url" => data.request.url.as_str(),
                 "method" => &data.request.method,
+                "cache" => data.request.cache.as_str(),
                 "mode" => match data.request.mode {
                     RequestMode::Cors => "cors",
                     RequestMode::SameOrigin => "same-origin",

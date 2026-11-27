@@ -1,7 +1,7 @@
 use rust_browser_engine::{
     Loader,
     network::{
-        CredentialsMode, FetchErrorKind, RedirectMode, RequestMode, ResponseType, WebRequest,
+        CredentialsMode, FetchErrorKind, RedirectMode, RequestCache, RequestMode, ResponseType, WebRequest,
     },
 };
 use std::{
@@ -178,6 +178,26 @@ fn same_origin_status_body_and_headers_are_real_not_loader_resource_rules() {
             .any(|(name, _)| name == "set-cookie")
     );
 }
+#[test]
+fn transport_cache_headers_do_not_trigger_preflight_and_cache_only_does_not_send() {
+    let server = Server::new(|_| Reply::ok("ok").header("Access-Control-Allow-Origin", "*"));
+    let mut request = server.request("/fresh");
+    request.client_url = Url::parse("http://127.0.0.1:1/").unwrap();
+    request.cache = RequestCache::NoStore;
+    let loader = Loader::new().unwrap();
+    let cancelled = AtomicBool::new(false);
+    assert_eq!(loader.web_fetch(&request, &cancelled).unwrap().status, 200);
+    let mut cache_only = server.request("/cached");
+    cache_only.mode = RequestMode::SameOrigin;
+    cache_only.cache = RequestCache::OnlyIfCached;
+    assert_eq!(loader.web_fetch(&cache_only, &cancelled).unwrap_err().kind, FetchErrorKind::Network);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].headers["cache-control"], "no-cache");
+    assert_eq!(requests[0].headers["pragma"], "no-cache");
+}
+
 #[test]
 fn cors_denied_response_is_not_exposed_and_no_cors_is_opaque() {
     let server = Server::new(|_| Reply::ok("secret").header("X-Hidden", "yes"));

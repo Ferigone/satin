@@ -16,7 +16,8 @@ use std::{
 const MAX_TIMERS: usize = 1024;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
-const SCRIPT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(10);
+const SCRIPT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(20);
+const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
 
@@ -35,7 +36,7 @@ pub(super) fn run_script_task<T>(
     vm.with_task_cpu_budget(
         u64::MAX,
         SCRIPT_TASK_CPU_TIMEOUT,
-        Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
+        Instant::now() + SCRIPT_TASK_WALL_TIMEOUT,
         run,
     )
 }

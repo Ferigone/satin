@@ -35,6 +35,22 @@ fn reply(url: &str, body: &str) -> WebResponse {
 }
 
 #[test]
+fn request_cache_mode_is_validated_and_cloned() {
+    let page = LoadedPage::from_html("https://example.test/", "");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+        let invalid = 0;
+        try { new Request("/video", {cache: "only-if-cached"}); } catch(error) { invalid += error instanceof TypeError; }
+        try { new Request("/video", {cache: "unknown"}); } catch(error) { invalid += error instanceof TypeError; }
+        const current = new Request("/video", {cache: "no-store"});
+        const local = new Request("/video", {mode: "same-origin", cache: "only-if-cached"});
+        invalid === 2 && current.cache === "no-store" && current.clone().cache === "no-store" &&
+           new Request(current).cache === "no-store" && local.cache === "only-if-cached" &&
+           new Request("/video").cache === "default"
+    "#).unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn reentrant_request_getter_cannot_exceed_pending_quota() {
     let (_, mut runtime) = realm();
     runtime.eval("var rejected=0;var options={};Object.defineProperty(options,'method',{get:function(){for(var i=0;i<16;i++)fetch('/inner').catch(function(){rejected++;});return 'GET';}});fetch('/outer',options).catch(function(){rejected++;});").unwrap();
