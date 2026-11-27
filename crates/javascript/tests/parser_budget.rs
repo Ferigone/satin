@@ -643,3 +643,31 @@ fn deferred_functions_distinguish_sloppy_and_nested_strict_scopes() {
         assert_eq!(vm.check_syntax(&invalid).unwrap_err().kind, ErrorKind::SyntaxError);
     });
 }
+
+#[test]
+fn nested_grouped_assignment_method_calls_preserve_values_on_one_mib_stack() {
+    small_stack(|| {
+        // Minifiers emit repeated parenthesized assignments as method receivers.
+        // OpenStreetMap's public date formatter uses 25 of these in one return.
+        let mut expression = String::from("text");
+        for _ in 0..25 {
+            expression = format!("(text={expression}.replace('a','b'))");
+        }
+        let script = format!(
+            r#"(function(){{
+                class Formatter {{
+                    format(text) {{
+                        return function(text) {{
+                            const result = {expression}.replace('b','c');
+                            return text === 'b'.repeat(25) && result === 'c' + 'b'.repeat(24);
+                        }}(text);
+                    }}
+                }}
+                return new Formatter().format('a'.repeat(25));
+            }})()"#
+        );
+        let mut vm = Vm::new();
+        vm.check_syntax(&script).unwrap();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Bool(true));
+    });
+}
