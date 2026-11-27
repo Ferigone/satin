@@ -35,7 +35,7 @@ fn div_and_iframe_elements_use_distinct_html_interfaces() {
 #[test]
 fn anchors_resolve_their_href_and_buttons_keep_their_native_brand() {
     let (_, mut runtime) = realm("<base href='/path/'><a id='link' href='clip'>Link</a><button id='btn' value='go'></button>");
-    js(&mut runtime, r#"
+    js(&mut runtime, r##"
         const link = document.getElementById("link"), btn = document.getElementById("btn");
         const initial = link.href === "https://example.test/path/clip" && String(link) === link.href;
         link.href = "#time";
@@ -43,7 +43,7 @@ fn anchors_resolve_their_href_and_buttons_keep_their_native_brand() {
         initial && link instanceof HTMLAnchorElement && btn instanceof HTMLButtonElement &&
             link.getAttribute("href") === "#time" && link.href === "https://example.test/path/#time" &&
             link.getAttribute("download") === "clip.mp4" && btn.value === "go"
-    "#, true);
+    "##, true);
 }
 
 #[test]
