@@ -954,6 +954,9 @@ impl Loader {
                 builder = builder.body((**body).clone());
                 None
             } else {
+                if matches!(request.method.as_str(), "POST" | "PUT") {
+                    builder = builder.header(reqwest::header::CONTENT_LENGTH, "0");
+                }
                 None
             };
             let response = control

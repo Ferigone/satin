@@ -179,6 +179,28 @@ fn same_origin_status_body_and_headers_are_real_not_loader_resource_rules() {
     );
 }
 #[test]
+fn bodyless_post_and_put_send_zero_content_length() {
+    let server = Server::new(|_| Reply::ok("ok"));
+    let loader = Loader::new().unwrap();
+    let cancelled = AtomicBool::new(false);
+    for method in ["POST", "PUT", "GET"] {
+        let mut request = server.request("/bodyless");
+        request.method = method.into();
+        assert_eq!(loader.web_fetch(&request, &cancelled).unwrap().status, 200);
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in &requests[..2] {
+        assert_eq!(
+            request.headers.get("content-length").map(String::as_str),
+            Some("0")
+        );
+        assert!(request.body.is_empty());
+    }
+    assert!(!requests[2].headers.contains_key("content-length"));
+}
+
+#[test]
 fn transport_cache_headers_do_not_trigger_preflight_and_cache_only_does_not_send() {
     let server = Server::new(|_| Reply::ok("ok").header("Access-Control-Allow-Origin", "*"));
     let mut request = server.request("/fresh");
