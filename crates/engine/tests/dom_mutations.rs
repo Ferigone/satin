@@ -72,6 +72,27 @@ fn dataset_reflects_attributes_and_keeps_name_order_and_wrapper_identity() {
             Object.keys(data).join(",") === "order,version,toString" && invalid
     "#, true);
 }
+
+#[test]
+fn range_tracks_valid_boundaries_and_parses_contextual_fragments() {
+    let (_, mut runtime) = realm("<main><p id='p'>Hi 😀</p><p>there</p></main>");
+    js(&mut runtime, r#"
+        const p = document.getElementById("p"), r = document.createRange();
+        const initiallyCollapsed = r instanceof Range && r.collapsed && r.startContainer === document;
+        r.selectNode(p);
+        const parsed = r.createContextualFragment("<em>part</em>");
+        const copy = r.cloneRange();
+        copy.selectNodeContents(p.firstChild);
+        let invalid = false;
+        try { copy.setEnd(p.firstChild, 6); } catch(error) { invalid = error.name === "IndexSizeError"; }
+        const compared = r.compareBoundaryPoints(Range.START_TO_START, copy) === -1;
+        copy.collapse(false);
+        initiallyCollapsed && compared && invalid && parsed.firstChild.tagName === "EM" &&
+            parsed.firstChild.textContent === "part" && r.commonAncestorContainer === p.parentNode &&
+            copy.collapsed && copy.startContainer === p.firstChild && copy.startOffset === 5 &&
+            new Range().endContainer === document
+    "#, true);
+}
 fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
     assert_eq!(
         runtime

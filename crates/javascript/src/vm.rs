@@ -38,7 +38,7 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
-const MAX_BYTECODE_DEPTH: usize = 192;
+const MAX_BYTECODE_DEPTH: usize = 512;
 const MAX_HOST_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     160
 } else {
@@ -3584,10 +3584,7 @@ impl Vm {
 
     pub(crate) fn run_chunk(&mut self, chunk: &Chunk, env: EnvId) -> Result<Completion, JsError> {
         if !self.permits_bytecode_depth(self.execution_depth + 1) {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Nested bytecode depth budget exhausted",
-            ));
+            return Err(self.bytecode_depth_error(self.execution_depth + 1));
         }
         self.execution_depth += 1;
         let result = self.run_chunk_inner(chunk, env, true);
@@ -3600,15 +3597,19 @@ impl Vm {
         env: EnvId,
     ) -> Result<Completion, JsError> {
         if !self.permits_bytecode_depth(self.execution_depth + 1) {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Nested bytecode depth budget exhausted",
-            ));
+            return Err(self.bytecode_depth_error(self.execution_depth + 1));
         }
         self.execution_depth += 1;
         let result = self.run_chunk_inner(chunk, env, false);
         self.execution_depth -= 1;
         result
+    }
+    fn bytecode_depth_error(&self, depth: usize) -> JsError {
+        if depth > self.limits.max_bytecode_depth {
+            JsError::new(ErrorKind::ExecutionLimit, "Nested bytecode depth budget exhausted")
+        } else {
+            JsError::new(ErrorKind::ExecutionLimit, "Native stack headroom exhausted during bytecode evaluation")
+        }
     }
     fn run_chunk_inner(
         &mut self,

@@ -8,6 +8,7 @@ mod class_list;
 mod collections;
 mod custom_elements;
 mod dataset;
+mod range;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
@@ -696,7 +697,7 @@ impl ScriptRuntime {
         // DOM callbacks can re-enter page code underneath several lexical blocks.
         // The VM checks native stack headroom before every deeper bytecode entry.
         let mut vm = Vm::with_limits(VmLimits {
-            max_bytecode_depth: 192,
+            max_bytecode_depth: 512,
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
@@ -987,6 +988,7 @@ impl ScriptRuntime {
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         dataset::install(&mut vm, &state, &dom_errors)?;
+        range::install(&mut vm, &state, &dom_errors)?;
         forms.install_typed_controls(&mut vm)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();

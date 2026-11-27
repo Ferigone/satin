@@ -901,6 +901,24 @@ fn insert_html(
     Ok(plan.commit(&mut state))
 }
 
+pub(super) fn contextual_fragment(
+    vm: &mut Vm,
+    host: &Shared,
+    context: NodeId,
+    source: &str,
+    errors: &Errors,
+) -> Result<Value, JsError> {
+    charge(vm, host, Some(context), &[], Walk::Root, false, source.len())?;
+    let prototype = host.borrow().fragment_prototype.clone();
+    let fragment = new_fragment(vm, host, errors, prototype)?;
+    let id = node(host, &fragment)?;
+    let document = host.borrow().document.node_document(context);
+    host.borrow_mut().document.adopt(id, document);
+    insert_html(host, id, context, true, None, None, false, source)
+        .map_err(|failure| errors.convert(vm, failure))?;
+    Ok(fragment)
+}
+
 fn ensure_template(state: &Shared, template: NodeId) -> Checked<NodeId> {
     let mut state = state.borrow_mut();
     if let Some(&content) = state.document.template_contents.get(&template) {
