@@ -424,3 +424,28 @@ fn console_selection_is_the_live_node_without_modifying_page_bindings() {
     );
     assert_eq!(runtime.eval("$0").unwrap(), Value::from("page scope"));
 }
+
+#[test]
+fn rejection_diagnostics_include_inert_error_and_http_details() {
+    let page = LoadedPage::from_html("https://console.test/", "<!doctype html>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    runtime.eval(r#"
+        var calls = 0;
+        Promise.reject(new TypeError("missing member"));
+        Promise.reject({
+            status: 503, statusText: "Unavailable", readyState: 4,
+            get message() { calls++; return "bad"; },
+            toString() { calls++; return "bad"; }
+        });
+    "#).unwrap();
+    runtime.pump();
+    let records = runtime.take_console_snapshot().records;
+    assert_eq!(records.len(), 2, "{records:?}");
+    assert!(records[0].text.contains("TypeError"), "{records:?}");
+    assert!(records[0].text.contains("missing member"), "{records:?}");
+    assert!(records[1].text.contains("status: 503"), "{records:?}");
+    assert!(records[1].text.contains("Unavailable"), "{records:?}");
+    assert!(!records[1].text.contains("bad"), "{records:?}");
+    assert_eq!(runtime.eval("calls").unwrap(), Value::from(0));
+    assert!(runtime.diagnostics().iter().any(|row| row.contains("missing member")));
+}

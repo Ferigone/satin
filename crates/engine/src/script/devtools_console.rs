@@ -423,10 +423,13 @@ fn record_error_at_node(
     });
 }
 
-pub(super) fn report_rejection(state: &Shared, value: &Value) {
+pub(super) fn report_rejection(vm: &Vm, state: &Shared, value: &Value) {
     let make_preview = || {
         if matches!(value, Value::Object(_)) {
-            ("object".into(), false)
+            (
+                vm.inspect_rejection_reason(value).unwrap_or_else(|| "object".into()),
+                false,
+            )
         } else {
             preview(value, DIAGNOSTIC_CHAR_LIMIT)
         }

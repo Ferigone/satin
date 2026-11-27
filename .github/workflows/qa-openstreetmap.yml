@@ -19,7 +19,7 @@ jobs:
             Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
           }
       - name: Test form and attribute regressions
-        run: cargo test --locked -p rust-browser-engine --test forms --test attributes
+        run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console
       - name: Test worker realm and worker event loop
         run: cargo test --locked -p rust-browser-engine --lib worker
       - name: Build actual Satin

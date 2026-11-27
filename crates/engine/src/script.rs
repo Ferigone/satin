@@ -1704,7 +1704,7 @@ fn link_reference(document: &Document, id: NodeId) -> Option<&str> {
 
 fn report_unhandled(vm: &mut Vm, state: &Shared) {
     for value in vm.take_unhandled_rejections() {
-        devtools_console::report_rejection(state, &value);
+        devtools_console::report_rejection(vm, state, &value);
     }
 }
 
