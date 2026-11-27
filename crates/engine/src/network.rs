@@ -35,6 +35,33 @@ pub const FETCH_HEADER_LIMIT: usize = 64 * 1024;
 /// A request URL has its own bound, independent of serialized headers.
 pub(crate) const FETCH_URL_LIMIT: usize = 256 * 1024;
 pub(crate) const FETCH_DATA_URL_LIMIT: usize = 6 * 1024 * 1024;
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn trace_media_fetch(request: &WebRequest, phase: &str, status: Option<u16>) {
+    use std::sync::{OnceLock, atomic::AtomicUsize};
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static TRACES: AtomicUsize = AtomicUsize::new(0);
+    if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_MEDIA_FETCH").is_some()) {
+        return;
+    }
+    let url = &request.url;
+    let leaf = url.path().rsplit('/').next().unwrap_or("");
+    let Some(kind) = ["videoplayback", ".m3u8", ".mpd", ".m4s", ".mp4", ".ts"]
+        .into_iter().find(|suffix| leaf.ends_with(suffix))
+    else {
+        return;
+    };
+    let range = url.query_pairs().find(|(key, _)| key == "range").map(|(_, value)| value);
+    let range = range.as_deref()
+        .filter(|range| range.len() <= 40 && range.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
+        .unwrap_or("-");
+    if TRACES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 256 {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map_or(0, |value| value.as_millis());
+        eprintln!("SATIN_QA_MEDIA_FETCH {timestamp} {phase} method={} kind={kind} range={range} status={status:?}",
+            request.method);
+    }
+}
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(18);
 pub type HeaderList = Vec<(String, String)>;
 
@@ -890,6 +917,8 @@ impl Loader {
                 }
                 _ => {}
             }
+            #[cfg(feature = "media-startup-diagnostics")]
+            trace_media_fetch(&request, "request", None);
             let mut builder = self
                 .fetch_client
                 .request(method, request.url.clone())
@@ -948,6 +977,8 @@ impl Loader {
                 }
             }
             let status = response.status();
+            #[cfg(feature = "media-startup-diagnostics")]
+            trace_media_fetch(&request, "response", Some(status.as_u16()));
             if status == StatusCode::UNAUTHORIZED
                 && source_is_stream
                 && credentials

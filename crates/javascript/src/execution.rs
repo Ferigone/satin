@@ -297,7 +297,7 @@ impl CallbackCollection {
         self.until_probe = 256;
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
         {
-            vm.qa_callback_gc.1 += 1;
+            vm.qa_callback_gc.2 += 1;
         }
         if vm.estimated_heap_bytes() < self.bytes_at && vm.heap_cell_count() < self.cells_at {
             return Ok(());
@@ -323,7 +323,7 @@ impl CallbackCollection {
         let _stats = vm.collect_rooted_heap(true, &saved);
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
         {
-            vm.qa_callback_gc.2 += 1;
+            vm.qa_callback_gc.3 += 1;
         }
         #[cfg(feature = "media-startup-diagnostics")]
         if _stats.collected >= 8 * 1024 {
@@ -460,7 +460,13 @@ impl Vm {
         let mut frames = Vec::new();
         reserve_one(self, &mut frames)?;
         frames.push(Frame::new(chunk, env));
-        let collection = collectible.then(|| CallbackCollection::new(self));
+        let collection = collectible.then(|| {
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            {
+                self.qa_callback_gc.1 += 1;
+            }
+            CallbackCollection { until_probe: 1, ..CallbackCollection::new(self) }
+        });
         let result = self.run_frames(&mut frames, None, depth, true, collection);
         self.execution_depth = depth;
         // A fatal budget error can exit without visiting the parent frames.

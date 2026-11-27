@@ -183,7 +183,9 @@ pub struct Vm {
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_task_site: Option<&'static std::panic::Location<'static>>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
-    pub(crate) qa_callback_gc: (usize, usize, usize),
+    pub(crate) qa_callback_gc: (usize, usize, usize, usize),
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    qa_callback_target: Option<ObjectId>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -347,7 +349,9 @@ impl Vm {
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_task_site: None,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
-            qa_callback_gc: (0, 0, 0),
+            qa_callback_gc: (0, 0, 0, 0),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_callback_target: None,
             limits,
             interrupt: None,
             task_deadline: None,
@@ -645,6 +649,7 @@ impl Vm {
         #[cfg(all(windows, feature = "media-startup-diagnostics"))]
         {
             self.qa_callback_gc.0 += 1;
+            self.qa_callback_target = function.as_object();
         }
         let result = self.invoke(function, this, args);
         self.collectible_call = None;
@@ -746,7 +751,8 @@ impl Vm {
             {
                 self.qa_task_heap = (self.heap.live, self.estimated_heap_bytes());
                 self.qa_task_site = Some(std::panic::Location::caller());
-                self.qa_callback_gc = (0, 0, 0);
+                self.qa_callback_gc = (0, 0, 0, 0);
+                self.qa_callback_target = None;
             }
         }
         self.active += 1;
@@ -764,6 +770,14 @@ impl Vm {
 
     fn check_interrupt(&self) -> Result<(), JsError> {
         if let Some(message) = self.task_deadline.as_ref().and_then(TaskDeadline::exceeded) {
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_budget_limit(
+                "task-deadline",
+                self.qa_task_site,
+                self.call_depth as u64,
+                self.execution_depth as u64,
+                self.qa_native_work,
+            );
             return Err(JsError::new(ErrorKind::ExecutionLimit, message));
         }
         if self
@@ -1942,7 +1956,24 @@ impl Vm {
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     fn diagnostic_source_site(&self) -> String {
         let Some(frame) = self.legacy_calls.last() else { return String::new() };
-        let Ok(object) = self.heap.object(frame.function) else { return String::new() };
+        self.diagnostic_callable(frame.function)
+    }
+
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    fn diagnostic_callable(&self, mut id: ObjectId) -> String {
+        let mut bound = 0;
+        let object = loop {
+            let Ok(object) = self.heap.object(id) else { return String::new() };
+            if let ObjectKind::Bound { target, .. } = &object.kind {
+                id = target.as_object().expect("bound target is callable");
+                bound += 1;
+            } else {
+                break object;
+            }
+        };
+        if let ObjectKind::Native { initial_name, .. } = &object.kind {
+            return format!(" [native {} bound={bound}]", initial_name.to_string_lossy());
+        }
         let ObjectKind::Function { code, referrer, .. } = &object.kind else {
             return String::new();
         };
@@ -1960,7 +1991,7 @@ impl Vm {
             }
             _ => String::new(),
         };
-        format!(" [source {source} units={units} range={start}..{end} id={signature}]")
+        format!(" [source {source} units={units} range={start}..{end} id={signature} bound={bound}]")
     }
 
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -1969,7 +2000,7 @@ impl Vm {
         static TRACES: AtomicUsize = AtomicUsize::new(0);
         if TRACES.fetch_add(1, Ordering::Relaxed) < 24 {
             eprintln!(
-                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={} collectible={:?} callback_gc={:?} task={}{}",
+                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={} collectible={:?} callback_gc={:?} task={}{} callback={}",
                 self.heap.live,
                 self.estimated_heap_bytes(),
                 self.qa_task_heap.0,
@@ -1985,6 +2016,7 @@ impl Vm {
                 self.qa_callback_gc,
                 self.qa_task_site.map_or_else(|| "-".into(), ToString::to_string),
                 self.diagnostic_source_site(),
+                self.qa_callback_target.map_or_else(String::new, |id| self.diagnostic_callable(id)),
             );
         }
     }
