@@ -1559,44 +1559,26 @@ fn install_array(vm: &mut Vm) {
             search_array(vm, this, a, backwards)
         });
     }
-    for (name, includes) in [("includes", true)] {
-        method(vm, proto.clone(), name, 1, move |vm, this, a| {
-            let object = vm.coerce_object(this)?;
-            let len = array_like_length(vm, object.clone())?;
-            if len == 0 {
-                return Ok(if includes {
-                    Value::Bool(false)
-                } else {
-                    Value::from(-1)
-                });
+    method(vm, proto.clone(), "includes", 1, |vm, this, args| {
+        let object = vm.coerce_object(this)?;
+        let length = array_like_length(vm, object.clone())?;
+        if length == 0 {
+            return Ok(Value::Bool(false));
+        }
+        let start = relative_index(integer(vm, arg(args, 1))?, length);
+        let needle = arg(args, 0);
+        for index in start..length {
+            vm.tick()?;
+            let value = vm.get(object.clone(), &JsString::from(index.to_string()))?;
+            vm.charge_bigint_comparison(&value, &needle)?;
+            if value == needle
+                || matches!((&value, &needle), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+            {
+                return Ok(Value::Bool(true));
             }
-            let start = relative_index(integer(vm, arg(a, 1))?, len);
-            let needle = arg(a, 0);
-            for i in start..len {
-                vm.tick()?;
-                let key = JsString::from(i.to_string());
-                if includes || vm.has(&object, &key)? {
-                    let v = vm.get(object.clone(), &key)?;
-                    vm.charge_bigint_comparison(&v, &needle)?;
-                    if v == needle
-                        || (includes
-                            && matches!((&v,&needle),(Value::Number(a),Value::Number(b))if a.is_nan()&&b.is_nan()))
-                    {
-                        return Ok(if includes {
-                            Value::Bool(true)
-                        } else {
-                            Value::from(i as f64)
-                        });
-                    }
-                }
-            }
-            Ok(if includes {
-                Value::Bool(false)
-            } else {
-                Value::from(-1)
-            })
-        });
-    }
+        }
+        Ok(Value::Bool(false))
+    });
     array_iteration::install(vm, &proto);
     array_methods::install(vm, &proto);
     method(vm, proto, "reverse", 0, |vm, this, _| {
