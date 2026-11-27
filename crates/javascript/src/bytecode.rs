@@ -1867,6 +1867,17 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                         pending.extend([I(Op::Binary(op)), E(right), E(left)]);
                     }
                 }
+                Expr::AddChain(terms) => {
+                    let (first, rest) = terms.split_first().expect("add chain has operands");
+                    for term in rest.iter().rev() {
+                        if let Expr::Literal(Value::Number(n)) = ungroup(term) {
+                            pending.push(I(Op::BinaryNumber("+", *n)));
+                        } else {
+                            pending.extend([I(Op::Binary("+")), E(term)]);
+                        }
+                    }
+                    pending.push(E(first));
+                }
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
                         if crate::parser::call_assignment_target(left) {

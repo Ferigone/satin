@@ -205,6 +205,7 @@ pub(crate) enum Expr {
     New(Box<Expr>, Vec<Expr>),
     Unary(&'static str, Box<Expr>),
     Binary(&'static str, Box<Expr>, Box<Expr>),
+    AddChain(Vec<Expr>),
     Assign(&'static str, Box<Expr>, Box<Expr>),
     Update(&'static str, Box<Expr>, bool),
     Conditional(Vec<(Expr, Expr)>, Box<Expr>),
@@ -1702,6 +1703,18 @@ impl Parser {
         }
         let expression = if op == "+" {
             match (left, right) {
+                (Expr::AddChain(mut terms), right) => {
+                    // The existing operands already fit. Only the new operand
+                    // gains a parent, so check it without walking the prefix again.
+                    if !ast_within_budget_at(Ast::Expression(&right), 2) {
+                        return Err(self.error("AST nesting limit exceeded"));
+                    }
+                    terms.push(right);
+                    return Ok(Expr::AddChain(terms));
+                }
+                (Expr::Binary("+", first, second), right) => {
+                    Expr::AddChain(vec![*first, *second, right])
+                }
                 (Expr::Literal(Value::String(a)), Expr::Literal(Value::String(b))) => {
                     let mut units = Vec::with_capacity(a.len() + b.len());
                     units.extend_from_slice(a.as_utf16());
@@ -2229,7 +2242,11 @@ enum Ast<'a> {
 /// Children were checked when constructed; each wrapper can exceed the budget
 /// by only one node before it is rejected, keeping error-path destruction safe.
 fn ast_within_budget(root: Ast<'_>) -> bool {
-    let mut pending = vec![(root, 1usize)];
+    ast_within_budget_at(root, 1)
+}
+
+fn ast_within_budget_at(root: Ast<'_>, depth: usize) -> bool {
+    let mut pending = vec![(root, depth)];
     while let Some((node, depth)) = pending.pop() {
         if depth > MAX_AST_DEPTH {
             return false;
@@ -2327,7 +2344,7 @@ fn ast_within_budget(root: Ast<'_>) -> bool {
                     pending.push((Ast::Expression(value), child_depth));
                     pending.extend(options.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
-                Expr::Sequence(terms) => {
+                Expr::Sequence(terms) | Expr::AddChain(terms) => {
                     pending.extend(terms.iter().map(|e| (Ast::Expression(e), child_depth)));
                 }
                 Expr::NestedCalls(base, levels) => {

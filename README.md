@@ -37,6 +37,9 @@ Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box
   templates and their inert content.
 - JavaScript adds generic array index searches, including `lastIndexOf`. CSS
   supports nested sRGB color mixing and preserves extended channels.
+- Long JavaScript addition chains preserve evaluation order without growing
+  the syntax tree for each term. Scripts can construct `AnimationEvent` and
+  subscribe through the standard animation event-handler properties.
 - Windows QA covers the offline updater, native favorites scrolling and tab
   interactions.
 

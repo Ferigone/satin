@@ -282,7 +282,7 @@ fn braced_controls_still_have_grammar_and_ast_limits_on_one_mib_stack() {
             let source = format!(
                 "{}{}1;{}",
                 "if(false){".repeat(16),
-                "1+".repeat(terms - 1),
+                "1-".repeat(terms - 1),
                 "}".repeat(16)
             );
             if fits {
@@ -301,7 +301,7 @@ fn braced_controls_still_have_grammar_and_ast_limits_on_one_mib_stack() {
 fn long_valid_flat_chains_report_execution_limit_on_one_mib_stack() {
     small_stack(|| {
         let chains = [
-            std::iter::repeat_n("1", 4096).collect::<Vec<_>>().join("+"),
+            std::iter::repeat_n("1", 4096).collect::<Vec<_>>().join("-"),
             std::iter::repeat_n("true", 4096)
                 .collect::<Vec<_>>()
                 .join("&&"),
@@ -343,6 +343,31 @@ fn conditional_alternates_select_one_arm_on_one_mib_stack() {
             first === 137 && visits === 138 && pick() === -1 && visits === 318 && selections === 1;
         "#);
         assert_eq!(Vm::new().eval(&source).unwrap(), Value::Bool(true));
+    });
+}
+
+#[test]
+fn long_addition_chains_preserve_left_associativity_and_coercion() {
+    small_stack(|| {
+        let mut vm = Vm::new();
+        let tail = "+'x'".repeat(180);
+        let script = format!(
+            r#"
+            let order = '';
+            function term(name, value) {{
+                order += name;
+                return {{ [Symbol.toPrimitive]() {{ order += name.toUpperCase(); return value }} }};
+            }}
+            const result = term('a', 1) + term('b', 2) + term('c', 'x'){tail};
+            order === 'abABcC' && result.length === 182 && result.slice(0, 3) === '3xx'
+                && (1 + (2 + 'x') + 'x') === '12xx';
+            "#,
+        );
+        vm.check_syntax(&script).unwrap();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Bool(true));
+        let body = format!("return 0{}", "+1".repeat(4096));
+        let dynamic = format!("Function('{body}')()");
+        assert_eq!(vm.eval(&dynamic).unwrap(), Value::Number(4096.0));
     });
 }
 
@@ -497,7 +522,7 @@ fn recursive_grammar_and_dynamic_function_share_the_budget() {
                 ErrorKind::ExecutionLimit
             );
         }
-        let body = std::iter::repeat_n("1", 4096).collect::<Vec<_>>().join("+");
+        let body = std::iter::repeat_n("1", 4096).collect::<Vec<_>>().join("-");
         let source = format!("Function('return {body}')");
         assert_eq!(
             vm.eval(&source).unwrap_err().kind,

@@ -2578,6 +2578,10 @@ fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<
             "onpopstate",
             "onhashchange",
             "onstorage",
+            "onanimationstart",
+            "onanimationiteration",
+            "onanimationend",
+            "onanimationcancel",
         ],
     )
 }

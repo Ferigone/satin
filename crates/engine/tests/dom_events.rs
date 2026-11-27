@@ -471,6 +471,33 @@ fn dom_listeners_share_a_bounded_document_quota_and_reuse_removed_slots() {
 }
 
 #[test]
+fn animation_event_uses_event_flags_and_immutable_animation_data() {
+    let page = LoadedPage::from_html("https://events.test/animation", "<button></button>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let result = runtime.eval(r#"
+        const button = document.querySelector('button');
+        const seen = [];
+        document.onanimationend = event => seen.push(event);
+        class CustomAnimation extends AnimationEvent {}
+        const event = new CustomAnimation('animationend', {
+            animationName: 'fade', elapsedTime: 1.25, pseudoElement: '::before',
+            bubbles: true
+        });
+        button.dispatchEvent(event);
+        let invalid = false;
+        try { new AnimationEvent('animationend', {elapsedTime: Infinity}); }
+        catch (e) { invalid = e instanceof TypeError; }
+        const defaults = new AnimationEvent('animationstart');
+        seen[0] === event && event instanceof AnimationEvent && event instanceof Event
+            && event.animationName === 'fade' && event.elapsedTime === 1.25
+            && event.pseudoElement === '::before' && !event.isTrusted && invalid
+            && defaults.animationName === '' && defaults.elapsedTime === 0
+            && defaults.pseudoElement === '';
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
 fn a_single_dom_target_preserves_its_listener_limit() {
     let page = LoadedPage::from_html("https://events.test/listeners", "<button></button>");
     let mut runtime = ScriptRuntime::new(&page).unwrap();
