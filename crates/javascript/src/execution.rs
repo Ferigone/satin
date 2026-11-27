@@ -140,6 +140,11 @@ impl Frame {
         if let Some(waiting) = &self.waiting {
             waiting.visit(visit);
         }
+        if let Some(capability) = self.activation.as_ref()
+            .and_then(|activation| activation.promise_constructor.as_ref())
+        {
+            capability.visit(&mut *visit);
+        }
         if let Some(delegate) = &self.delegate {
             delegate.visit(visit);
         }
@@ -670,11 +675,16 @@ impl Vm {
             return self.iterator_result(value, false).map(Advance::Yield);
         }
         reserve_one(self, &mut frame.operands)?;
-        if ordinary && matches!(op, Op::Call | Op::FixedCall(_)) {
-            return self.execute_call(
-                op, &mut frame.operands, frame.env, frame.chunk.strict,
-                CallDispatch::Value, Vm::dispatch_owned_call,
-            ).map(|call| match call {
+        if ordinary && matches!(op, Op::Call | Op::FixedCall(_) | Op::Construct) {
+            let call = if matches!(op, Op::Construct) {
+                self.execute_construct(&mut frame.operands, Vm::dispatch_owned_constructor)
+            } else {
+                self.execute_call(
+                    op, &mut frame.operands, frame.env, frame.chunk.strict,
+                    CallDispatch::Value, Vm::dispatch_owned_call,
+                )
+            };
+            return call.map(|call| match call {
                 CallDispatch::Value(value) => Advance::Operand(value),
                 CallDispatch::Owned(call) => Advance::Call(call, Resume::Call),
                 CallDispatch::Iteration(iteration) => Advance::Iteration(iteration),

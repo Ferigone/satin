@@ -9,6 +9,7 @@ use crate::{
     },
     parser::{FunctionKind, LabelId, VarKind},
     patterns::{Invocation, PatternMode},
+    promise::PromiseCapability,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -226,6 +227,7 @@ pub(crate) struct OwnedCall {
 pub(crate) struct CallActivation {
     previous_referrer: Option<SourceReferrer>,
     depth: usize,
+    pub promise_constructor: Option<PromiseCapability>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     _scope: startup_profile::Scope,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -3518,6 +3520,35 @@ impl Vm {
         })
     }
 
+    pub(crate) fn dispatch_owned_constructor(
+        &mut self,
+        function: Value,
+        args: &[Value],
+    ) -> Result<CallDispatch, JsError> {
+        if function.as_object().is_none() || function.as_object() != self.realm.promise_constructor {
+            return self.construct_target(function.clone(), args, function).map(CallDispatch::Value);
+        }
+        self.tick()?;
+        self.with_owned_native_call(|vm| {
+            for arg in args {
+                vm.account_value(arg.clone())?;
+            }
+            let executor = args.first().cloned().unwrap_or_default();
+            let capability = vm.begin_promise_constructor(&executor, function)?;
+            let args = [capability.resolve.clone(), capability.reject.clone()];
+            let result = match vm.dispatch_owned_call_inner(executor, Value::Undefined, &args, false) {
+                Ok(CallDispatch::Owned(mut call)) => {
+                    call.activation.promise_constructor = Some(capability);
+                    return Ok(CallDispatch::Owned(call));
+                }
+                Ok(CallDispatch::Value(value)) => Ok(value),
+                Ok(CallDispatch::Iteration(_)) => unreachable!("constructor executor uses ordinary dispatch"),
+                Err(error) => Err(error),
+            };
+            vm.complete_promise_constructor(capability, result).map(CallDispatch::Value)
+        })
+    }
+
     #[inline(never)]
     fn with_owned_native_call(
         &mut self,
@@ -3657,6 +3688,7 @@ impl Vm {
         let activation = CallActivation {
             previous_referrer: std::mem::replace(&mut self.realm.active_referrer, referrer),
             depth,
+            promise_constructor: None,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             _function: startup_profile::function(&code.source),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -3692,10 +3724,14 @@ impl Vm {
         self.active_calls.pop();
         self.call_depth -= activation.depth;
         self.active -= activation.depth;
-        match result? {
+        let result = result.and_then(|completion| match completion {
             Completion::Return(value) => self.account_value(value),
             Completion::Normal(_) => Ok(Value::Undefined),
             _ => Err(JsError::new(ErrorKind::InternalError, "Unexpected function abrupt completion")),
+        });
+        match activation.promise_constructor {
+            Some(capability) => self.complete_promise_constructor(capability, result),
+            None => result,
         }
     }
     pub fn construct(&mut self, function: Value, args: &[Value]) -> Result<Value, JsError> {
@@ -4743,17 +4779,27 @@ impl Vm {
                 stack.push(Item::Value(value));
             }
             Op::Construct => {
-                let Some(Item::Arguments(args)) = stack.pop() else {
-                    unreachable!()
-                };
-                let function = self.pop_value(stack)?;
-                let value = self.construct_target(function.clone(), &args, function)?;
+                let value = self.execute_construct(stack, |vm, function, args| {
+                    vm.construct_target(function.clone(), args, function)
+                })?;
                 stack.push(Item::Value(value));
             }
             _ => unreachable!(),
         }
         Ok(())
     }
+    pub(crate) fn execute_construct<T>(
+        &mut self,
+        stack: &mut Vec<Item>,
+        dispatch: impl FnOnce(&mut Self, Value, &[Value]) -> Result<T, JsError>,
+    ) -> Result<T, JsError> {
+        let Some(Item::Arguments(args)) = stack.pop() else {
+            unreachable!("constructor argument list")
+        };
+        let function = self.pop_value(stack)?;
+        dispatch(self, function, &args)
+    }
+
     #[inline(never)]
     pub(crate) fn execute_call<T>(
         &mut self,

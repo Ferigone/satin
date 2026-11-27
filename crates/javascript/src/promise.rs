@@ -661,6 +661,31 @@ impl Vm {
     fn intrinsic_promise_capability(&mut self) -> Result<PromiseCapability, JsError> {
         self.promise_capability_with_prototype(self.realm.promise_prototype)
     }
+    pub(crate) fn begin_promise_constructor(
+        &mut self,
+        executor: &Value,
+        new_target: Value,
+    ) -> Result<PromiseCapability, JsError> {
+        if !self.is_callable(executor) {
+            return Err(JsError::type_error("Promise executor is not callable"));
+        }
+        let fallback = self.realm.promise_prototype.expect("installed Promise prototype");
+        let prototype = self.prototype_from_constructor(new_target, fallback)?;
+        self.promise_capability_with_prototype(Some(prototype))
+    }
+
+    pub(crate) fn complete_promise_constructor(
+        &mut self,
+        capability: PromiseCapability,
+        result: Result<Value, JsError>,
+    ) -> Result<Value, JsError> {
+        if let Err(error) = result {
+            let reason = self.error_reason(error)?;
+            self.invoke(capability.reject, Value::Undefined, &[reason])?;
+        }
+        Ok(capability.promise)
+    }
+
     fn promise_capability_with_prototype(
         &mut self,
         prototype: Option<ObjectId>,
@@ -1516,24 +1541,13 @@ pub(crate) fn install(vm: &mut Vm) {
     vm.realm.promise_constructor = constructor.as_object();
     replace_construct(vm, constructor.clone(), |vm, _, args, target| {
         let executor = arg(args, 0);
-        if !vm.is_callable(&executor) {
-            return Err(JsError::type_error("Promise executor is not callable"));
-        }
-        let fallback = vm
-            .realm
-            .promise_prototype
-            .expect("installed Promise prototype");
-        let prototype = vm.prototype_from_constructor(target, fallback)?;
-        let capability = vm.promise_capability_with_prototype(Some(prototype))?;
-        if let Err(error) = vm.invoke(
+        let capability = vm.begin_promise_constructor(&executor, target)?;
+        let result = vm.invoke(
             executor,
             Value::Undefined,
-            &[capability.resolve, capability.reject.clone()],
-        ) {
-            let reason = vm.error_reason(error)?;
-            vm.invoke(capability.reject, Value::Undefined, &[reason])?;
-        }
-        Ok(capability.promise)
+            &[capability.resolve.clone(), capability.reject.clone()],
+        );
+        vm.complete_promise_constructor(capability, result)
     });
     vm.define_data_property(
         constructor.clone(),

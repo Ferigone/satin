@@ -882,6 +882,39 @@ fn array_map_keeps_its_results_and_cursor_across_nested_callback_collection() {
 }
 
 #[test]
+fn promise_constructor_keeps_its_executor_collectible_and_preserves_settlement() {
+    let mut vm = Vm::with_limits(VmLimits {
+        max_heap_objects: 10_000,
+        max_heap_bytes: 12 * 1024 * 1024,
+        max_instructions: 8_000_000,
+        ..VmLimits::default()
+    });
+    vm.eval(r#"
+        var finished;
+        function receiveResponse() {
+            const order = ['caller'];
+            const response = new Promise(function (resolve) {
+                order.push('executor');
+                let total = 0;
+                for (let index = 0; index < 12000; index++) {
+                    const row = [{index}, () => row[0].index];
+                    total += row[1]();
+                }
+                resolve({total});
+                throw 'ignored after resolution';
+            });
+            order.push('returned');
+            const rejected = new Promise(() => { throw 'expected'; });
+            return response.then(value => rejected.catch(error =>
+                [order.join(','), value.total, error].join('/')));
+        }
+        Promise.resolve().then(receiveResponse).then(result => { finished = result; });
+    "#).unwrap();
+    vm.drain_jobs_at_callback_boundary(16).unwrap();
+    assert_eq!(vm.eval("finished").unwrap(), Value::from("caller,executor,returned/71994000/expected"));
+}
+
+#[test]
 fn host_callback_collection_reclaims_cells_without_resetting_task_fuel() {
     let mut vm = Vm::new();
     let rooted = vm.new_object();
