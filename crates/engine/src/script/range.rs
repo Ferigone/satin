@@ -2,22 +2,22 @@
 use super::{
     Shared, arg, document_node,
     dom_api::{self, Errors},
-    getter, node, text, webidl, wrap,
+    getter, node, selection, text, webidl, wrap,
 };
 use crate::dom::{Document, NodeId, NodeKind};
 use rust_browser_javascript::{JsError, Value, Vm};
 use std::{cell::Cell, cmp::Ordering, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Point {
-    node: NodeId,
-    offset: usize,
+pub(super) struct Point {
+    pub node: NodeId,
+    pub offset: usize,
 }
 
-#[derive(Clone, Copy)]
-struct Bounds {
-    start: Point,
-    end: Point,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Bounds {
+    pub start: Point,
+    pub end: Point,
 }
 
 struct Range(Cell<Bounds>);
@@ -31,6 +31,21 @@ fn new_range(vm: &mut Vm, object: Value, bounds: Bounds) -> Result<Value, JsErro
     vm.mark_platform_object(&object)?;
     vm.set_host_data(object.clone(), Rc::new(Range(Cell::new(bounds))))?;
     Ok(object)
+}
+
+pub(super) fn create(vm: &mut Vm, prototype: Value, bounds: Bounds) -> Result<Value, JsError> {
+    let object = vm.new_object_with_prototype(prototype)?;
+    new_range(vm, object, bounds)
+}
+
+pub(super) fn bounds(vm: &Vm, value: &Value) -> Result<Bounds, JsError> {
+    Ok(range(vm, value)?.0.get())
+}
+
+fn update_bounds(vm: &mut Vm, host: &Shared, receiver: &Value, range: &Range, bounds: Bounds) {
+    if range.0.replace(bounds) != bounds {
+        selection::range_changed(vm, host, receiver);
+    }
 }
 
 fn collapsed(node: NodeId) -> Bounds {
@@ -66,7 +81,7 @@ fn child_offset(
         .expect("DOM parent owns child"))
 }
 
-fn compare(
+pub(super) fn compare(
     vm: &mut Vm,
     doc: &Document,
     left: Point,
@@ -102,7 +117,7 @@ fn compare(
     Ok(Some(result))
 }
 
-fn node_length(vm: &mut Vm, doc: &Document, node: NodeId) -> Result<usize, JsError> {
+pub(super) fn node_length(vm: &mut Vm, doc: &Document, node: NodeId) -> Result<usize, JsError> {
     let node = &doc.nodes[node.0];
     if let Some(text) = node.kind.character_data() {
         vm.charge_buffer_work(text.len())?;
@@ -111,30 +126,28 @@ fn node_length(vm: &mut Vm, doc: &Document, node: NodeId) -> Result<usize, JsErr
     Ok(node.children.len())
 }
 
-fn set_boundary(
+fn adjusted_bounds(
     vm: &mut Vm,
     doc: &Document,
-    bounds: &Range,
+    mut bounds: Bounds,
     point: Point,
     start: bool,
-) -> Result<(), JsError> {
-    let mut value = bounds.0.get();
+) -> Result<Bounds, JsError> {
     if start {
-        if compare(vm, doc, point, value.end)?.is_none_or(|order| order.is_gt()) {
-            value.end = point;
+        if compare(vm, doc, point, bounds.end)?.is_none_or(|order| order.is_gt()) {
+            bounds.end = point;
         }
-        value.start = point;
+        bounds.start = point;
     } else {
-        if compare(vm, doc, point, value.start)?.is_none_or(|order| order.is_lt()) {
-            value.start = point;
+        if compare(vm, doc, point, bounds.start)?.is_none_or(|order| order.is_lt()) {
+            bounds.start = point;
         }
-        value.end = point;
+        bounds.end = point;
     }
-    bounds.0.set(value);
-    Ok(())
+    Ok(bounds)
 }
 
-pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(), JsError> {
+pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<Value, JsError> {
     let prototype = vm.new_object();
     let intrinsic = prototype.clone();
     let owner = host.clone();
@@ -159,8 +172,7 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
         0,
         move |vm, document, _| {
             let id = document_node(&owner, &document)?;
-            let object = vm.new_object_with_prototype(intrinsic.clone())?;
-            new_range(vm, object, collapsed(id))
+            create(vm, intrinsic.clone(), collapsed(id))
         },
     )?;
     for (name, value) in [
@@ -226,7 +238,9 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
                     "Range offset exceeds the node length",
                 ));
             }
-            set_boundary(vm, doc, &range, Point { node, offset }, start)?;
+            let bounds = adjusted_bounds(vm, doc, range.0.get(), Point { node, offset }, start)?;
+            drop(state);
+            update_bounds(vm, &owner, &receiver, &range, bounds);
             Ok(Value::Undefined)
         })?;
     }
@@ -254,12 +268,13 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
             wrap(vm, &owner, common)
         },
     )?;
+    let owner = host.clone();
     webidl::operation(
         vm,
         prototype.clone(),
         "collapse",
         0,
-        |vm, receiver, args| {
+        move |vm, receiver, args| {
             let range = range(vm, &receiver)?;
             let bounds = range.0.get();
             let point = if arg(args, 0).is_truthy() {
@@ -267,10 +282,11 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
             } else {
                 bounds.end
             };
-            range.0.set(Bounds {
+            let bounds = Bounds {
                 start: point,
                 end: point,
-            });
+            };
+            update_bounds(vm, &owner, &receiver, &range, bounds);
             Ok(Value::Undefined)
         },
     )?;
@@ -282,8 +298,7 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
         0,
         move |vm, receiver, _| {
             let bounds = range(vm, &receiver)?.0.get();
-            let object = vm.new_object_with_prototype(intrinsic.clone())?;
-            new_range(vm, object, bounds)
+            create(vm, intrinsic.clone(), bounds)
         },
     )?;
     for contents in [false, true] {
@@ -316,7 +331,7 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
                 let index = child_offset(vm, doc, parent, node)?;
                 (parent, index, index + 1)
             };
-            range.0.set(Bounds {
+            let bounds = Bounds {
                 start: Point {
                     node: container,
                     offset: start,
@@ -325,7 +340,9 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
                     node: container,
                     offset: end,
                 },
-            });
+            };
+            drop(state);
+            update_bounds(vm, &owner, &receiver, &range, bounds);
             Ok(Value::Undefined)
         })?;
     }
@@ -371,7 +388,7 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
     let fragment_errors = errors.clone();
     webidl::operation(
         vm,
-        prototype,
+        prototype.clone(),
         "createContextualFragment",
         1,
         move |vm, receiver, args| {
@@ -388,5 +405,5 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<(),
             dom_api::contextual_fragment(vm, &owner, context, &source, &fragment_errors)
         },
     )?;
-    Ok(())
+    Ok(prototype)
 }

@@ -11,6 +11,7 @@ mod crypto;
 mod custom_elements;
 mod dataset;
 mod range;
+mod selection;
 mod devtools_console;
 mod inspection_sources;
 pub use inspection_sources::InspectedSource;
@@ -1048,7 +1049,8 @@ impl ScriptRuntime {
         shadow_dom::install(&mut vm, &state, &dom_errors)?;
         element_interface::install_html(&mut vm, &state, html_element_prototype)?;
         dataset::install(&mut vm, &state, &dom_errors)?;
-        range::install(&mut vm, &state, &dom_errors)?;
+        let range_prototype = range::install(&mut vm, &state, &dom_errors)?;
+        selection::install(&mut vm, &state, &dom_errors, range_prototype)?;
         forms.install_typed_controls(&mut vm)?;
         custom_elements::install(&mut vm, &state, &dom_errors)?;
         let events = abort.events().clone();

@@ -642,6 +642,9 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     parser.stream.take_document().map_err(parser_error)?;
     let parser = Rc::new(RefCell::new(parser));
     let root = state.document.root;
+    if let Some(document) = state.wrappers.get(&root) {
+        super::super::selection::reset_document(vm, document)?;
+    }
     let removed = std::mem::take(&mut state.document.nodes[root.0].children);
     for node in &removed {
         state.document.nodes[node.0].parent = None;
