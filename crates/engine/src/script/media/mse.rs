@@ -493,7 +493,7 @@ fn finish_operation(
     Ok(())
 }
 
-fn make_ranges(vm: &mut Vm, store: &Store, ranges: Vec<Range>) -> Result<Value, JsError> {
+pub(super) fn make_ranges(vm: &mut Vm, store: &Store, ranges: Vec<Range>) -> Result<Value, JsError> {
     let total = store.live_ranges.get() + ranges.len();
     if total > LIVE_RANGES {
         return Err(JsError::new(

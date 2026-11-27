@@ -4,6 +4,43 @@ use rust_browser_engine::{
 };
 
 #[test]
+fn played_reports_snapshots_of_playback_without_covering_seek_gaps() {
+    use rust_browser_engine::script::MediaUpdate;
+
+    let page = LoadedPage::from_html("https://example.test/", "<video id='clip' muted></video>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+        const clip = document.getElementById("clip");
+        const before = clip.played;
+        clip.src = URL.createObjectURL(new Blob(["sample"], {type:"video/mp4"}));
+        clip.play();
+        before instanceof TimeRanges && before.length === 0
+    "#).unwrap().as_bool(), Some(true));
+    let commands = runtime.take_media_commands();
+    let [MediaCommand::Open { key, .. }, ..] = commands.as_slice() else { panic!("expected a media source"); };
+    let key = *key;
+    runtime.update_media(key, MediaUpdate::Playing);
+    runtime.update_media(key, MediaUpdate::Time(1.));
+    runtime.update_media(key, MediaUpdate::Time(2.));
+    runtime.eval("const first = clip.played; clip.currentTime = 10;").unwrap();
+    runtime.update_media(key, MediaUpdate::Time(9.));
+    runtime.update_media(key, MediaUpdate::Seeked(10.));
+    runtime.update_media(key, MediaUpdate::Time(11.));
+    runtime.eval("clip.currentTime = 1").unwrap();
+    runtime.update_media(key, MediaUpdate::Seeked(1.));
+    runtime.update_media(key, MediaUpdate::Time(3.));
+    runtime.eval("clip.pause()").unwrap();
+    runtime.update_media(key, MediaUpdate::Time(15.));
+    assert_eq!(runtime.eval(r#"
+        const now = clip.played;
+        before.length === 0 && first.length === 1 && first.end(0) === 2 &&
+            now.length === 2 && now.start(0) === 0 && now.end(0) === 3 &&
+            now.start(1) === 10 && now.end(1) === 11
+    "#).unwrap().as_bool(), Some(true));
+    assert_eq!(runtime.eval("clip.load(); clip.played.length").unwrap().as_number(), Some(0.));
+}
+
+#[test]
 fn only_actual_volume_and_mute_changes_dispatch_volumechange() {
     let page = LoadedPage::from_html(
         "https://example.test/",

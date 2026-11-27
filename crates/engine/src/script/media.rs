@@ -23,6 +23,7 @@ use std::{
 const MAX_ELEMENTS: usize = 12;
 const MAX_PENDING_PLAYS: usize = 32;
 const MAX_COMMANDS: usize = 128;
+const MAX_PLAYED_RANGES: usize = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MediaKey {
@@ -156,6 +157,7 @@ struct Track {
     network: u8,
     ready: u8,
     time: f64,
+    played: Vec<(f64, f64)>,
     duration: f64,
     width: u32,
     height: u32,
@@ -189,6 +191,7 @@ impl Track {
             network: 0,
             ready: 0,
             time: 0.,
+            played: Vec::new(),
             duration: f64::NAN,
             width: 0,
             height: 0,
@@ -206,6 +209,25 @@ impl Track {
             error: None,
             plays: Vec::new(),
         }
+    }
+
+    fn advance_time(&mut self, time: f64) {
+        if !time.is_finite() {
+            return;
+        }
+        if !self.paused && !self.seeking && time > self.time {
+            let first = self.played.partition_point(|&(_, end)| end < self.time);
+            let after = self.played.partition_point(|&(start, _)| start <= time);
+            if first != after || self.played.len() < MAX_PLAYED_RANGES {
+                let (mut start, mut end) = (self.time, time);
+                if first < after {
+                    start = start.min(self.played[first].0);
+                    end = end.max(self.played[after - 1].1);
+                }
+                self.played.splice(first..after, [(start, end)]);
+            }
+        }
+        self.time = time;
     }
 }
 
@@ -988,6 +1010,13 @@ pub(super) fn install_streaming(
 ) -> Result<(), JsError> {
     mse::install(vm, state, events)?;
     let prototype = state.borrow().media_prototypes.media.clone();
+    let host = state.clone();
+    getter(vm, prototype.clone(), "played", move |vm, this, _| {
+        let id = receiver(&host, &this)?;
+        let realm = host.borrow();
+        let ranges = realm.media.tracks.get(&id).map(|track| track.played.clone()).unwrap_or_default();
+        mse::make_ranges(vm, &realm.media.mse, ranges)
+    })?;
     for (name, seekable) in [("buffered", false), ("seekable", true)] {
         let host = state.clone();
         getter(vm, prototype.clone(), name, move |vm, this, _| {
@@ -1246,7 +1275,7 @@ impl super::ScriptRuntime {
                 events = &["timeupdate", "seeked"];
             }
             MediaUpdate::Time(time) => {
-                track.time = time;
+                track.advance_time(time);
                 if (time - track.last_event_time).abs() >= 0.25 {
                     track.last_event_time = time;
                     events = &["timeupdate"];
