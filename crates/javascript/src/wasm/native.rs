@@ -325,6 +325,8 @@ struct Function {
     execution: Execution,
     function: Func,
     ty: FuncType,
+    #[cfg(feature = "media-startup-diagnostics")]
+    trace_name: Option<String>,
 }
 
 impl Function {
@@ -372,6 +374,8 @@ impl Function {
                         output = imported_call(vm, context, call)?;
                         break;
                     }
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    self.trace_trap(&error);
                     return Err(runtime_error(error));
                 }
             };
@@ -388,6 +392,29 @@ impl Function {
             }
         }
     }
+
+    #[cfg(feature = "media-startup-diagnostics")]
+    fn trace_trap(&self, error: &wasmi::Error) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TRACES: AtomicUsize = AtomicUsize::new(0);
+        if let (Some(name), Some(trap)) = (&self.trace_name, error.as_trap_code())
+            && TRACES.fetch_add(1, Ordering::Relaxed) < 32
+        {
+            eprintln!("SATIN_QA_WASM_TRAP export={name} trap={trap:?}");
+        }
+    }
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn trap_trace_name(name: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_WASM_TRAPS").is_some()) {
+        return None;
+    }
+    let safe = !name.is_empty() && name.len() <= 32
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_$".contains(&byte));
+    Some(if safe { name } else { "-" }.into())
 }
 
 fn function(
@@ -403,6 +430,8 @@ fn function(
         execution: execution.clone(),
         function,
         ty,
+        #[cfg(feature = "media-startup-diagnostics")]
+        trace_name: trap_trace_name(name),
     });
     let callable = native.clone();
     let captured = context.clone();

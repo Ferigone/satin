@@ -31,6 +31,40 @@ impl StructuredClonePacket {
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
     }
+
+    #[cfg(feature = "media-startup-diagnostics")]
+    fn diagnostic_property(&self, path: &[&str]) -> Option<&PacketValue> {
+        path.iter().try_fold(&self.root, |value, key| {
+            let PacketValue::Record(index) = value else {
+                return None;
+            };
+            let PacketRecord::Properties { properties, .. } = self.records.get(*index)? else {
+                return None;
+            };
+            properties
+                .iter()
+                .find(|property| property.key.iter().copied().eq(key.encode_utf16()))
+                .map(|property| &property.value)
+        })
+    }
+
+    /// Inspect already serialized text without running script or copying data.
+    #[cfg(feature = "media-startup-diagnostics")]
+    pub fn diagnostic_string(&self, path: &[&str]) -> Option<&[u16]> {
+        match self.diagnostic_property(path)? {
+            PacketValue::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Inspect an already serialized number without running script.
+    #[cfg(feature = "media-startup-diagnostics")]
+    pub fn diagnostic_number(&self, path: &[&str]) -> Option<f64> {
+        match self.diagnostic_property(path)? {
+            PacketValue::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for StructuredClonePacket {

@@ -1,4 +1,6 @@
 //! Classic dedicated workers run in separate JavaScript VMs.
+#[cfg(feature = "media-startup-diagnostics")]
+mod diagnostics;
 mod fetch;
 mod mailbox;
 mod realm;
@@ -55,6 +57,7 @@ enum WorkerTask {
 }
 
 struct Connection {
+    id: u64,
     to_worker: Mailbox<WorkerTask>,
     to_window: Mailbox<Notice>,
     cancelled: Arc<AtomicBool>,
@@ -66,8 +69,9 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(budget: Budget, task_budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
+    fn new(id: u64, budget: Budget, task_budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
         Self {
+            id,
             to_worker: Mailbox::default(),
             to_window: Mailbox::default(),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -333,7 +337,11 @@ fn run_worker(
                 Some(&parent.budget),
                 send_exception.get().expect("worker DOMException installed"),
                 Some(&parent.to_window),
-                Notice::Message,
+                |packet| {
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    diagnostics::packet("worker-post", parent.id, &packet);
+                    Notice::Message(packet)
+                },
             )? {
                 parent.wake_window();
             }
@@ -380,7 +388,11 @@ fn run_worker(
             Received::Message(Envelope(task, _charge)) => {
                 prefer_fetch = true;
                 match task {
-                    WorkerTask::Message(packet) => worker.dispatch_packet(packet),
+                    WorkerTask::Message(packet) => {
+                        #[cfg(feature = "media-startup-diagnostics")]
+                        diagnostics::packet("worker-dispatch", connection.id, &packet);
+                        worker.dispatch_packet(packet)
+                    }
                     WorkerTask::Host(task) => worker.dispatch_host_task(task),
                 }
             }
@@ -442,7 +454,7 @@ impl Workers {
         source: Result<Source, &'static str>,
         network: Network,
     ) -> Result<(), JsError> {
-        let (id, connection) = {
+        let connection = {
             let mut state = self.store.borrow_mut();
             if state.active.len() == MAX_DOCUMENT_WORKERS {
                 return Err(JsError::new(
@@ -453,6 +465,7 @@ impl Workers {
             state.next_id += 1;
             let id = state.next_id;
             let connection = Arc::new(Connection::new(
+                id,
                 state.budget.clone(),
                 state.task_budget.clone(),
                 state.wake.clone(),
@@ -465,13 +478,13 @@ impl Workers {
                     connection: connection.clone(),
                 },
             );
-            (id, connection)
+            connection
         };
         match (source, ThreadPermit::acquire()) {
             (Ok(source), Some(permit)) => {
                 let worker = connection.clone();
                 if let Err(error) = std::thread::Builder::new()
-                    .name(format!("satin-worker-{id}"))
+                    .name(format!("satin-worker-{}", worker.id))
                     .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
                         let _permit = permit;
@@ -601,9 +614,15 @@ impl Workers {
             let object = vm.root_value(root).expect("rooted active Worker");
             match notice {
                 Notice::Message(packet) => {
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    diagnostics::packet("window-dispatch", id, &packet);
                     let event = match vm.deserialize_clone_packet(packet) {
                         Ok(data) => self.messages.received_from_peer(vm, "message", data)?,
-                        Err(_) => self.messages.received_from_peer(vm, "messageerror", Value::Null)?,
+                        Err(_) => {
+                            #[cfg(feature = "media-startup-diagnostics")]
+                            diagnostics::message_error("window-dispatch", id);
+                            self.messages.received_from_peer(vm, "messageerror", Value::Null)?
+                        }
                     };
                     self.events.dispatch_scheduled(vm, object, event)?;
                 }
@@ -642,6 +661,7 @@ mod worker_lifecycle_tests {
 
     fn connection() -> Arc<Connection> {
         Arc::new(Connection::new(
+            0,
             Budget::default(),
             Budget::default(),
             Arc::default(),
@@ -785,7 +805,11 @@ pub(super) fn install(
             link.as_ref().map(|link| &link.budget),
             messaging.exception,
             link.as_ref().map(|link| &link.to_worker),
-            WorkerTask::Message,
+            |packet| {
+                #[cfg(feature = "media-startup-diagnostics")]
+                diagnostics::packet("window-post", id, &packet);
+                WorkerTask::Message(packet)
+            },
         )?;
         Ok(Value::Undefined)
     })?;

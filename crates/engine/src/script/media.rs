@@ -137,30 +137,50 @@ pub enum MediaUpdate {
 }
 
 #[cfg(feature = "media-startup-diagnostics")]
-fn trace_media_update(key: MediaKey, update: &MediaUpdate) {
-    use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+fn trace_media(key: MediaKey, message: std::fmt::Arguments<'_>) {
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
     static ENABLED: OnceLock<bool> = OnceLock::new();
     static TRACES: AtomicUsize = AtomicUsize::new(0);
-    if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_MEDIA_TRANSITIONS").is_some()) {
-        return;
+    if *ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_MEDIA_TRANSITIONS").is_some())
+        && TRACES.fetch_add(1, Ordering::Relaxed) < 160
+    {
+        eprintln!(
+            "SATIN_QA_MEDIA node={} generation={} {message}",
+            key.node.0, key.generation
+        );
     }
-    let message = match update {
-        MediaUpdate::BufferUpdated { buffer, operation, result } => match result {
-            Ok(ranges) => format!("append {buffer} {operation} {:?}", &ranges[..ranges.len().min(12)]),
-            Err(error) => format!("append-error {buffer} {operation} {error}"),
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+fn trace_media_update(key: MediaKey, update: &MediaUpdate) {
+    match update {
+        MediaUpdate::StreamOpened => trace_media(key, format_args!("stream-opened")),
+        MediaUpdate::BufferUpdated {
+            buffer,
+            operation,
+            result,
+        } => match result {
+            Ok(ranges) => trace_media(
+                key,
+                format_args!("append {buffer} {operation} {:?}", &ranges[..ranges.len().min(12)]),
+            ),
+            Err(error) => trace_media(
+                key,
+                format_args!("append-error {buffer} {operation} {error}"),
+            ),
         },
-        MediaUpdate::Seeked(time) => format!("seeked {time}"),
-        MediaUpdate::Seeking => "seeking".into(),
-        MediaUpdate::SeekNeedsData => "seeking-needs-data".into(),
-        MediaUpdate::Ready => "ready".into(),
-        MediaUpdate::Waiting => "waiting".into(),
-        MediaUpdate::Playing => "playing".into(),
-        MediaUpdate::Paused => "paused".into(),
-        MediaUpdate::Error(error) => format!("error {error}"),
-        _ => return,
-    };
-    if TRACES.fetch_add(1, Ordering::Relaxed) < 160 {
-        eprintln!("SATIN_QA_MEDIA node={} generation={} {message}", key.node.0, key.generation);
+        MediaUpdate::Seeked(time) => trace_media(key, format_args!("seeked {time}")),
+        MediaUpdate::Seeking => trace_media(key, format_args!("seeking")),
+        MediaUpdate::SeekNeedsData => trace_media(key, format_args!("seeking-needs-data")),
+        MediaUpdate::Ready => trace_media(key, format_args!("ready")),
+        MediaUpdate::Waiting => trace_media(key, format_args!("waiting")),
+        MediaUpdate::Playing => trace_media(key, format_args!("playing")),
+        MediaUpdate::Paused => trace_media(key, format_args!("paused")),
+        MediaUpdate::Error(error) => trace_media(key, format_args!("error {error}")),
+        _ => (),
     }
 }
 
@@ -546,6 +566,8 @@ fn attach_object_url(
             bytes: Arc::from(blob.bytes()),
         }
     } else if state.media.mse.attach(vm, object, key) {
+        #[cfg(feature = "media-startup-diagnostics")]
+        trace_media(key, format_args!("queue stream-open"));
         MediaCommand::OpenStream { key }
     } else {
         return Ok(false);

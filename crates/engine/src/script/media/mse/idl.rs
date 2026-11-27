@@ -183,6 +183,8 @@ fn add_buffer(
         return Err(JsError::type_error("An empty media type is invalid"));
     }
     if !state.borrow().media.mse.is_supported(&mime) {
+        #[cfg(feature = "media-startup-diagnostics")]
+        super::super::trace_media(key, format_args!("reject add-source-buffer unsupported"));
         return Err(exception(
             vm,
             state,
@@ -219,6 +221,8 @@ fn add_buffer(
         buffer: id,
         mime,
     });
+    #[cfg(feature = "media-startup-diagnostics")]
+    super::super::trace_media(key, format_args!("queue add-source-buffer {id}"));
     media.mse.event(vm, &list, "addsourcebuffer");
     Ok(value)
 }
@@ -506,6 +510,13 @@ fn edit(
     }));
     media.mse.pending_bytes += bytes;
     media.commands.push_back(command);
+    #[cfg(feature = "media-startup-diagnostics")]
+    if !removing {
+        super::super::trace_media(
+            key,
+            format_args!("queue append {} {id} bytes={bytes}", buffer.id),
+        );
+    }
     media.mse.event(vm, &value, "updatestart");
     Ok(Value::Undefined)
 }

@@ -407,6 +407,8 @@ pub(super) fn run_next(vm: &mut Vm, state: &Shared) -> Result<bool, JsError> {
             {
                 store.ensure_tasks(1)?;
                 source.ready.set(ReadyState::Open);
+                #[cfg(feature = "media-startup-diagnostics")]
+                super::trace_media(key, format_args!("queue sourceopen"));
                 store.event(vm, &object, "sourceopen");
             }
         }
