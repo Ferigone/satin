@@ -28,6 +28,16 @@ Website compatibility is partial. YouTube and Twitch playback remains in develop
 
 Press **Ctrl+Shift+C** to pick an element. Inspect its matched CSS rules and box model, edit an inline declaration, or evaluate JavaScript in the active page.
 
+## Changes in alpha.48
+
+- Dedicated workers run more of the WebAssembly and messaging used by media
+  players. Worker input and output queues are paced independently.
+- Windows media playback handles seeking within an open MediaSource and
+  presents new video frames sooner after the buffer refills.
+- The web engine adds document selection, live element attributes, inert HTML
+  parsing, and improved sizing for embedded SVG. Dynamic scripts can keep
+  loading as earlier preparation work completes.
+
 ## Changes in alpha.47
 
 - The Windows browser menu always offers an update check. Browsers launched
