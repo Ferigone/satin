@@ -148,6 +148,7 @@ pub(crate) enum Op {
     Property,
     NamedProperty(JsString),
     LoadProperty(JsString),
+    LoadComputed,
     PrivateProperty(JsString),
     PrivateIn(JsString),
     Get,
@@ -1649,7 +1650,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     if let Expr::Literal(Value::String(name)) = key.as_ref() {
                         pending.extend([I(Op::LoadProperty(name.clone())), E(object)]);
                     } else {
-                        pending.extend([I(Op::Get), I(Op::Property), E(key), E(object)]);
+                        pending.extend([I(Op::LoadComputed), E(key), E(object)]);
                     }
                 }
                 Expr::PrivateMember(..) => pending.extend([I(Op::Get), R(e, false)]),

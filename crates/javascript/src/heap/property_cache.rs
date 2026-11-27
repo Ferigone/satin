@@ -52,7 +52,4 @@ impl PropertyCache {
         }
     }
 
-    pub(super) fn clear(&mut self) {
-        self.rows.iter_mut().flatten().for_each(|entry| *entry = None);
-    }
 }

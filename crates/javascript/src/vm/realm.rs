@@ -356,7 +356,7 @@ impl Vm {
     // may later overwrite or delete any of the corresponding global properties.
     fn constructor_prototypes(&self) -> Vec<Option<ObjectId>> {
         fn data_object(heap: &Heap, object: ObjectId, key: &str) -> Option<ObjectId> {
-            match &heap.object(object).ok()?.properties.get(&key.into())?.kind {
+            match &heap.object(object).ok()?.properties.get(&crate::JsString::from(key))?.kind {
                 PropertyKind::Data { value, .. } => value.as_object(),
                 _ => None,
             }

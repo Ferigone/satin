@@ -21,6 +21,7 @@ use std::{
 
 use crate::dynamic_import::SourceReferrer;
 
+mod indexed_access;
 mod inspection;
 pub(crate) mod realm;
 mod task_deadline;
@@ -2486,6 +2487,10 @@ impl Vm {
         }
     }
     fn normalize_reference(&mut self, reference: &mut Reference) -> Result<(), JsError> {
+        // A primitive number has a stable property key and no coercion hooks.
+        if matches!(reference, Reference::Property(_, Value::Number(_))) {
+            return Ok(());
+        }
         let (base, key) = match reference {
             Reference::Property(base, key) | Reference::Super(base, _, key) => (base, key),
             _ => return Ok(()),
@@ -2568,6 +2573,11 @@ impl Vm {
             Reference::Global(object, key) => self.get(Value::Object(object), &key),
             Reference::Property(object, Value::String(name)) => self.read_named_property(object, &name),
             Reference::Property(object, key) => {
+                if let Value::Number(number) = &key
+                    && let Some(value) = self.read_indexed_data(&object, *number)?
+                {
+                    return Ok(value);
+                }
                 let key = self.property_reference_key(&object, &key)?;
                 self.get_property_key(object, key)
             }
@@ -2643,6 +2653,11 @@ impl Vm {
                 self.set(global, &key, value, strict)
             }
             Reference::Property(object, key) => {
+                if let Value::Number(number) = &key
+                    && self.write_indexed_data(&object, *number, &value, strict)?
+                {
+                    return Ok(());
+                }
                 let key = self.property_reference_key(&object, &key)?;
                 if object.as_object().is_some() {
                     return self.set_key(object, &key, value, strict);
@@ -3647,6 +3662,7 @@ impl Vm {
             op @ (Op::Property
             | Op::NamedProperty(..)
             | Op::LoadProperty(..)
+            | Op::LoadComputed
             | Op::Get
             | Op::ReadForUpdate
             | Op::ApplyUpdate(..)
@@ -3806,6 +3822,12 @@ impl Vm {
                 self.account_string(name)?;
                 let object = self.pop_value(stack)?;
                 let value = self.read_named_property(object, name)?;
+                stack.push(Item::Value(value));
+            }
+            Op::LoadComputed => {
+                let key = self.pop_value(stack)?;
+                let object = self.pop_value(stack)?;
+                let value = self.read_reference(Reference::Property(object, key))?;
                 stack.push(Item::Value(value));
             }
             Op::Property => {

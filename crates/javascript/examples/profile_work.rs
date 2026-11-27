@@ -2,7 +2,9 @@
 #[cfg(windows)]
 fn main() {
     use rust_browser_javascript::{Value, Vm, VmLimits, startup_profile};
-    let path = std::env::args_os().nth(1).expect("pass one JavaScript file");
+    let path = std::env::args_os()
+        .nth(1)
+        .expect("pass one JavaScript file");
     let source = std::fs::read_to_string(path).expect("read UTF-8 source");
     let mut vm = Vm::with_limits(VmLimits {
         buffer_units_per_instruction: 1024,
@@ -15,8 +17,14 @@ fn main() {
         Ok(_) => String::from("wrongResult"),
         Err(error) => format!("{:?}", error.kind),
     };
-    println!("{result}\t{}\t{}\t{}", sample.work.iter().sum::<u64>(), sample.wall_us,
-        sample.cpu_us.map_or_else(|| "-".to_owned(), |n| n.to_string()));
+    println!(
+        "{result}\t{}\t{}\t{}",
+        sample.work.iter().sum::<u64>(),
+        sample.wall_us,
+        sample
+            .cpu_us
+            .map_or_else(|| "-".to_owned(), |n| n.to_string())
+    );
 }
 
 #[cfg(not(windows))]

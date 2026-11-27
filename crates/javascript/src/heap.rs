@@ -595,9 +595,9 @@ impl Heap {
         mut pending: TraceEdges,
         conditional_edges: impl Iterator<Item = (ObjectId, ObjectId)>,
     ) -> (usize, Vec<ObjectId>) {
-        if let Some(cache) = &mut self.property_cache {
-            cache.clear();
-        }
+        // Cache entries are optional and must never keep values alive across
+        // collection. Return their backing allocation to the heap budget too.
+        self.property_cache = None;
         let mut symbols = BTreeSet::new();
         let mut weak_owners = Vec::new();
         let mut cleanup = Vec::new();

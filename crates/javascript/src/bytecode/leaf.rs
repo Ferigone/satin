@@ -46,34 +46,81 @@ impl Operand {
 
 impl LeafReturn {
     pub(super) fn compile(f: &Function, params: &[JsString], simple: bool) -> Option<Box<Self>> {
-        let [Stmt::Return(Some(expr))] = f.body.as_slice() else { return None; };
-        if f.kind != FunctionKind::Ordinary || !simple || params.len() > 8
-            || params.iter().enumerate().any(|(i,p)| params[..i].contains(p))
-        { return None; }
+        let [Stmt::Return(Some(expr))] = f.body.as_slice() else {
+            return None;
+        };
+        if f.kind != FunctionKind::Ordinary
+            || !simple
+            || params.len() > 8
+            || params
+                .iter()
+                .enumerate()
+                .any(|(i, p)| params[..i].contains(p))
+        {
+            return None;
+        }
         let (expr, select) = match ungroup(expr) {
             Expr::Conditional(arms, fallback) => {
-                let [(test, value)] = arms.as_slice() else { return None; };
-                (ungroup(test), Some((Operand::compile(value,params)?, Operand::compile(fallback,params)?)))
+                let [(test, value)] = arms.as_slice() else {
+                    return None;
+                };
+                (
+                    ungroup(test),
+                    Some((
+                        Operand::compile(value, params)?,
+                        Operand::compile(fallback, params)?,
+                    )),
+                )
             }
             expr => (expr, None),
         };
-        let Expr::Binary(operator,left,right) = expr else { return None; };
-        if !matches!(*operator, "<" | ">" | "<=" | ">=" | "===" | "!==" | "==" | "!="
-            | "+" | "-" | "*" | "/" | "%" | "|" | "&" | "^" | "<<" | ">>" | ">>>")
-        { return None; }
-        Some(Box::new(Self { operator, left:Operand::compile(left,params)?,
-            right:Operand::compile(right,params)?, select }))
+        let Expr::Binary(operator, left, right) = expr else {
+            return None;
+        };
+        if !matches!(
+            *operator,
+            "<" | ">"
+                | "<="
+                | ">="
+                | "==="
+                | "!=="
+                | "=="
+                | "!="
+                | "+"
+                | "-"
+                | "*"
+                | "/"
+                | "%"
+                | "|"
+                | "&"
+                | "^"
+                | "<<"
+                | ">>"
+                | ">>>"
+        ) {
+            return None;
+        }
+        Some(Box::new(Self {
+            operator,
+            left: Operand::compile(left, params)?,
+            right: Operand::compile(right, params)?,
+            select,
+        }))
     }
 
     pub(crate) fn evaluate(&self, vm: &mut Vm, args: &[Value]) -> Option<Result<Value, JsError>> {
         let left = self.left.value(args);
         let right = self.right.value(args);
-        if left.as_object().is_some() || right.as_object().is_some() { return None; }
-        Some(vm.tick().and_then(|()| vm.binary(self.operator, left, right)).map(|result| {
-            match &self.select {
-                Some((yes,no)) => if result.is_truthy() { yes } else { no }.value(args),
-                None => result,
-            }
-        }))
+        if left.as_object().is_some() || right.as_object().is_some() {
+            return None;
+        }
+        Some(
+            vm.tick()
+                .and_then(|()| vm.binary(self.operator, left, right))
+                .map(|result| match &self.select {
+                    Some((yes, no)) => if result.is_truthy() { yes } else { no }.value(args),
+                    None => result,
+                }),
+        )
     }
 }
