@@ -1,13 +1,16 @@
 //! Effective decisions for the CSP checks supported by the engine.
 use crate::dom::{Document, Namespace, NodeId};
+use super::ConnectPolicy;
 use reqwest::header::HeaderMap;
 
 const SOURCE_DIRECTIVES: [&[u8]; 4] = [b"worker-src", b"child-src", b"script-src", b"default-src"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DocumentPolicy {
     blob_worker_allowed: bool,
     wasm_compilation_allowed: bool,
+    imported_scripts: ConnectPolicy,
+    require_corp: bool,
 }
 
 impl Default for DocumentPolicy {
@@ -15,6 +18,8 @@ impl Default for DocumentPolicy {
         Self {
             blob_worker_allowed: true,
             wasm_compilation_allowed: true,
+            imported_scripts: ConnectPolicy::default(),
+            require_corp: false,
         }
     }
 }
@@ -25,6 +30,10 @@ impl DocumentPolicy {
         for value in headers.get_all("content-security-policy").iter() {
             policy.restrict_serialized(value.as_bytes());
         }
+        policy.require_corp = headers.get_all("cross-origin-embedder-policy").iter()
+            .any(|value| value.to_str().is_ok_and(|value| {
+                value.split(';').next().is_some_and(|token| token.trim() == "require-corp")
+            }));
         policy
     }
 
@@ -58,24 +67,37 @@ impl DocumentPolicy {
 
     fn restrict_serialized(&mut self, policies: &[u8]) {
         for serialized in policies.split(|&byte| byte == b',') {
-            self.restrict(Self::parse(serialized));
+            let (blob, wasm) = Self::parse(serialized);
+            self.blob_worker_allowed &= blob;
+            self.wasm_compilation_allowed &= wasm;
+            self.imported_scripts.add_imported_script(serialized);
         }
     }
 
-    pub(crate) fn restrict(&mut self, policy: Self) {
+    pub(crate) fn restrict(&mut self, policy: &Self) {
         self.blob_worker_allowed &= policy.blob_worker_allowed;
         self.wasm_compilation_allowed &= policy.wasm_compilation_allowed;
+        self.imported_scripts = self.imported_scripts.intersect(&policy.imported_scripts);
+        self.require_corp |= policy.require_corp;
     }
 
-    pub(crate) fn allows_blob(self) -> bool {
+    pub(crate) fn allows_blob(&self) -> bool {
         self.blob_worker_allowed
     }
 
-    pub(crate) fn allows_wasm_compilation(self) -> bool {
+    pub(crate) fn allows_wasm_compilation(&self) -> bool {
         self.wasm_compilation_allowed
     }
 
-    fn parse(policy: &[u8]) -> Self {
+    pub(crate) fn imported_scripts(&self) -> &ConnectPolicy {
+        &self.imported_scripts
+    }
+
+    pub(crate) fn requires_corp(&self) -> bool {
+        self.require_corp
+    }
+
+    fn parse(policy: &[u8]) -> (bool, bool) {
         let mut directives = [const { None }; SOURCE_DIRECTIVES.len()];
         for directive in policy.split(|&byte| byte == b';') {
             let mut tokens = directive
@@ -94,22 +116,22 @@ impl DocumentPolicy {
             directives[index].get_or_insert(tokens);
         }
         let [worker_src, child_src, script_src, default_src] = directives;
-        Self {
+        (
             // For HTTP documents a Blob URL matches only the explicit blob: scheme source.
-            blob_worker_allowed: worker_src
+            worker_src
                 .or(child_src)
                 .or(script_src.clone())
                 .or(default_src.clone())
                 .is_none_or(|mut sources| {
                     sources.any(|token| token.eq_ignore_ascii_case(b"blob:"))
                 }),
-            wasm_compilation_allowed: script_src.or(default_src).is_none_or(|mut sources| {
+            script_src.or(default_src).is_none_or(|mut sources| {
                 sources.any(|token| {
                     token.eq_ignore_ascii_case(b"'wasm-unsafe-eval'")
                         || token.eq_ignore_ascii_case(b"'unsafe-eval'")
                 })
             }),
-        }
+        )
     }
 }
 
@@ -212,12 +234,12 @@ mod tests {
         );
         let mut policy = DocumentPolicy::from_headers(&headers);
         assert_eq!(policy, DocumentPolicy::default());
-        policy.restrict(DocumentPolicy::from_meta("worker-src 'none'"));
+        policy.restrict(&DocumentPolicy::from_meta("worker-src 'none'"));
         assert!(policy.allows_wasm_compilation());
-        policy.restrict(DocumentPolicy::from_meta(
+        policy.restrict(&DocumentPolicy::from_meta(
             "script-src 'none'; worker-src blob:",
         ));
-        policy.restrict(DocumentPolicy::from_meta(
+        policy.restrict(&DocumentPolicy::from_meta(
             "script-src 'unsafe-eval'; worker-src blob:",
         ));
         assert!(!policy.allows_wasm_compilation());

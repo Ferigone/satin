@@ -12,6 +12,59 @@ fn realm(source: &str) -> (LoadedPage, ScriptRuntime) {
 }
 
 #[test]
+fn namespaced_svg_attributes_follow_the_local_name_and_emit_mutations() {
+    let (_, mut runtime) = realm("<svg><use id='target' xlink:href='#old'></use></svg>");
+    js(&mut runtime, r##"
+        const xlink = "http://www.w3.org/1999/xlink";
+        const target = document.getElementById("target");
+        const observer = new MutationObserver(() => {});
+        observer.observe(target, { attributes: true, attributeOldValue: true });
+        const initial = target.getAttributeNS(xlink, "href") === "#old";
+        target.setAttributeNS(xlink, "xlink:href", "#new");
+        target.setAttributeNS("", "viewBox", "0 0 4 4");
+        let invalid = false;
+        try { target.setAttributeNS(null, "xlink:title", "bad"); }
+        catch (error) { invalid = error.name === "NamespaceError"; }
+        const set = target.getAttribute("xlink:href") === "#new" &&
+            target.hasAttributeNS(xlink, "href") && !target.hasAttributeNS(null, "href") &&
+            target.getAttributeNS(null, "viewBox") === "0 0 4 4" &&
+            !target.hasAttributeNS(null, "viewbox");
+        target.removeAttributeNS(xlink, "href");
+        const records = observer.takeRecords();
+        initial && invalid && set && target.getAttributeNS(xlink, "href") === null &&
+            records.length === 3 && records[0].attributeName === "href" &&
+            records[0].attributeNamespace === xlink && records[0].oldValue === "#old" &&
+            records[2].oldValue === "#new"
+    "##, true);
+}
+
+#[test]
+fn connected_inline_stylesheet_rules_change_rendered_style_without_editing_the_dom() {
+    let (_, mut runtime) = realm("<main id='target'></main>");
+    js(&mut runtime, r#"
+        const element = document.createElement("style");
+        const detached = element.sheet === null;
+        document.head.appendChild(element);
+        const sheet = element.sheet;
+        const target = document.getElementById("target");
+        const initial = sheet instanceof CSSStyleSheet && element instanceof HTMLStyleElement &&
+            sheet === element.sheet && sheet.ownerNode === element && sheet.cssRules.length === 0;
+        const index = sheet.insertRule("main { color: green; }", 0);
+        const applied = getComputedStyle(target).color === "rgb(0, 128, 0)" &&
+            sheet.cssRules.length === 1 && sheet.cssRules[0].parentStyleSheet === sheet &&
+            element.textContent === "";
+        sheet.disabled = true;
+        const disabled = getComputedStyle(target).color !== "rgb(0, 128, 0)";
+        sheet.disabled = false;
+        const reenabled = getComputedStyle(target).color === "rgb(0, 128, 0)";
+        sheet.deleteRule(0);
+        const removed = sheet.cssRules.length === 0 &&
+            getComputedStyle(target).color !== "rgb(0, 128, 0)";
+        detached && initial && index === 0 && applied && disabled && reenabled && removed
+    "#, true);
+}
+
+#[test]
 fn div_and_iframe_elements_use_distinct_html_interfaces() {
     let (_, mut runtime) = realm("<div id='parsed' align='left'></div><span id='other'></span><iframe id='frame'></iframe>");
     js(&mut runtime, r#"

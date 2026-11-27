@@ -78,7 +78,7 @@ fn push(out: &mut Vec<u8>, value: u8, max: usize) -> Result<(), DataUrlError> {
     out.push(value);
     Ok(())
 }
-fn base64(input: Percent<'_>, max: usize) -> Result<Vec<u8>, DataUrlError> {
+pub(crate) fn forgiving_base64(input: impl IntoIterator<Item = u8>, max: usize) -> Result<Vec<u8>, DataUrlError> {
     let mut out = Vec::new();
     let mut bits = 0u32;
     let mut used = 0u8;
@@ -155,7 +155,7 @@ pub fn process(url: &Url, max_bytes: usize) -> Result<DataUrl, DataUrlError> {
         offset: 0,
     };
     let body = if is_base64 {
-        base64(input, max_bytes)?
+        forgiving_base64(input, max_bytes)?
     } else {
         let mut body = Vec::new();
         for b in input {

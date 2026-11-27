@@ -297,7 +297,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
         let data = receiver(vm, &xhr)?;
         webidl::required(args, 2, "XMLHttpRequest.open")?;
         let method = byte_string(vm, arg(args, 0))?;
-        let reference = usv(vm, arg(args, 1), FETCH_HEADER_LIMIT)?;
+        let reference = usv(vm, arg(args, 1), FETCH_HEADER_LIMIT, "XMLHttpRequest URL")?;
         let synchronous = args.get(2).is_some_and(|value| !value.is_truthy());
         if ["CONNECT", "TRACE", "TRACK"]
             .iter()
@@ -464,7 +464,7 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
                 if body.as_string().is_none() {
                     return Err(unsupported("XMLHttpRequest request body type is not implemented"));
                 }
-                let body = usv(vm, body, FETCH_BODY_LIMIT)?;
+                let body = usv(vm, body, FETCH_BODY_LIMIT, "XMLHttpRequest body")?;
                 super::add_content_type(&mut request.headers, Some("text/plain;charset=UTF-8"))?;
                 request.body = Some(Arc::new(body.into_bytes()));
             }

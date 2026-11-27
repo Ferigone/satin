@@ -969,7 +969,7 @@ impl DocumentSession {
             page.document_policy.restrict(parser.meta_policy());
             page.meta_connect_policy = parser.connect_policy().clone();
             if let Some(realm) = runtime {
-                restrict_document_policy(&mut realm.vm, &realm.state, page.document_policy);
+                restrict_document_policy(&mut realm.vm, &realm.state, &page.document_policy);
                 realm
                     .workers
                     .set_meta_connect_policy(&page.meta_connect_policy);

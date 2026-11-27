@@ -182,7 +182,7 @@ impl LoadedPage {
         let mut document_policy = DocumentPolicy::default();
         for node in document.html_elements("meta") {
             if let Some(policy) = DocumentPolicy::from_meta_element(&document, node) {
-                document_policy.restrict(policy);
+                document_policy.restrict(&policy);
             }
         }
         let meta_connect_policy = ConnectPolicy::from_document(&document);
@@ -303,7 +303,11 @@ impl LoadedPage {
                             ty.trim().is_empty() || ty.trim().eq_ignore_ascii_case("text/css")
                         }) =>
                     {
-                        Some(Arc::from(self.document.text(id)))
+                        let text = self.document.text(id);
+                        match self.document.inline_style_overrides.get(&id) {
+                            Some(sheet) if sheet.original.as_ref() == text => sheet.source.clone(),
+                            _ => Some(Arc::from(text)),
+                        }
                     }
                     "link"
                         if self.document.attr(id, "disabled").is_none()
@@ -1031,7 +1035,7 @@ impl Loader {
         page.fetch_loader = Some(self.clone());
         page.connect_policy = main.connect_policy;
         page.navigation_context = main.context;
-        page.document_policy.restrict(main.document_policy);
+        page.document_policy.restrict(&main.document_policy);
         if page.document.truncated {
             return Err("Dokument przekracza limit złożoności parsera w tej wersji alfa.".into());
         }
@@ -1976,7 +1980,12 @@ mod tests {
         let redirect = NavigationRequest::get(&format!("{origin}/redirect")).unwrap();
         let opened = loader.open_navigation(&redirect, &cancel).unwrap();
         assert_eq!(opened.page.url, format!("{origin}/allowed"));
-        assert_eq!(opened.page.document_policy, DocumentPolicy::default());
+        assert!(opened.page.document_policy.allows_blob());
+        assert!(opened.page.document_policy.allows_wasm_compilation());
+        let client = Url::parse(&origin).unwrap();
+        assert!(!opened.page.document_policy.imported_scripts().allows(
+            &client, &client.join("/worker-import.js").unwrap(), false
+        ));
         let denied = loader.load(&format!("{origin}/denied"), &cancel).unwrap();
         assert!(!denied.document_policy.allows_blob());
         assert!(!denied.document_policy.allows_wasm_compilation());

@@ -1,11 +1,12 @@
 //! JavaScript and its event loop checkpoint for a dedicated worker thread.
+mod imports;
 mod timers;
 
 use super::{
     Wake,
     fetch::{FetchEvent, Network, WorkerFetch},
 };
-use crate::network::CancelSignal;
+use crate::{loader::DocumentPolicy, network::CancelSignal};
 use crate::script::{
     abort::AbortHost, arg, dom_api, event_target, fatal, getter, message_ports::message_event,
     scheduler, webidl,
@@ -34,8 +35,10 @@ impl WorkerRealm {
         post: impl Fn(&mut Vm, &[Value]) -> Result<(), JsError> + 'static,
         close: impl Fn() + 'static,
         network: Option<(Network, CancelSignal, Wake)>,
+        policy: DocumentPolicy,
     ) -> Result<Self, JsError> {
         dom_api::install_errors(&mut vm)?;
+        crate::script::base64_api::install(&mut vm)?;
         let abort = AbortHost::install_worker(&mut vm)?;
         let events = abort.events().clone();
         let global = vm.global();
@@ -88,10 +91,14 @@ impl WorkerRealm {
             scope(vm, &this)?;
             Ok(vm.global())
         })?;
-        getter(&mut vm, worker_proto, "location", |vm, this, _| {
+        getter(&mut vm, worker_proto.clone(), "location", |vm, this, _| {
             scope(vm, &this)?;
             Ok(vm.host_slot(&vm.global(), LOCATION_SLOT).unwrap())
         })?;
+        let import_network = network.as_ref().map(|(network, signal, _)| {
+            (network.clone(), signal.clone())
+        });
+        imports::install(&mut vm, worker_proto, url.clone(), import_network, policy)?;
         let get_name = vm.new_native_function("get name", |vm, this, _| {
             scope(vm, &this)?;
             Ok(vm.host_slot(&vm.global(), NAME_SLOT).unwrap())
@@ -340,6 +347,7 @@ mod tests {
             },
             move || closed.set(true),
             None,
+            DocumentPolicy::default(),
         )
         .unwrap()
     }

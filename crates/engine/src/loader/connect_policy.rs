@@ -1,4 +1,4 @@
-//! Enforced `connect-src` snapshots for classic Blob workers.
+//! Enforced CSP source lists for network requests from classic Blob workers.
 //!
 //! Only expressions that can be matched confidently are accepted. Unknown
 //! expressions never turn a restricted source list into an unrestricted one.
@@ -11,13 +11,13 @@ const MAX_POLICIES: usize = 32;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_SOURCES: usize = 128;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ConnectPolicy {
     lists: Arc<Vec<Arc<[Source]>>>,
     blocked: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Source {
     Any,
     SameOrigin,
@@ -31,7 +31,7 @@ enum Source {
     },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Port {
     Any,
     Default,
@@ -53,6 +53,10 @@ impl ConnectPolicy {
 
     pub(crate) fn add_meta(&mut self, content: &str) {
         self.add(content.as_bytes());
+    }
+
+    pub(super) fn add_imported_script(&mut self, policy: &[u8]) {
+        self.add_sources(policy, true);
     }
 
     pub(super) fn from_document(document: &Document) -> Self {
@@ -79,7 +83,7 @@ impl ConnectPolicy {
     }
 
     pub(crate) fn intersect(&self, other: &Self) -> Self {
-        if self.blocked || other.blocked || self.lists.len() + other.lists.len() > MAX_POLICIES {
+        if self.blocked || other.blocked {
             return Self {
                 blocked: true,
                 ..Self::default()
@@ -91,19 +95,23 @@ impl ConnectPolicy {
         if other.lists.is_empty() {
             return self.clone();
         }
-        Self {
-            lists: Arc::new(
-                self.lists
-                    .iter()
-                    .chain(other.lists.iter())
-                    .cloned()
-                    .collect(),
-            ),
-            blocked: false,
+        let mut merged = self.clone();
+        for list in other.lists.iter() {
+            if !merged.lists.contains(list) {
+                if merged.lists.len() == MAX_POLICIES {
+                    return Self { blocked: true, ..Self::default() };
+                }
+                Arc::make_mut(&mut merged.lists).push(list.clone());
+            }
         }
+        merged
     }
 
     fn add(&mut self, policy: &[u8]) {
+        self.add_sources(policy, false);
+    }
+
+    fn add_sources(&mut self, policy: &[u8], imported_script: bool) {
         if self.blocked {
             return;
         }
@@ -112,21 +120,30 @@ impl ConnectPolicy {
             return;
         }
         let policy = std::str::from_utf8(policy).expect("ASCII CSP policy");
-        let mut connect = None;
+        let mut directive = None;
+        let mut script_elem = None;
         let mut default = None;
+        let primary = if imported_script { "script-src" } else { "connect-src" };
         for mut words in policy.split(';').map(str::split_ascii_whitespace) {
             let Some(name) = words.next() else {
                 continue;
             };
-            if name.eq_ignore_ascii_case("connect-src") {
-                connect.get_or_insert(words);
+            if name.eq_ignore_ascii_case(primary) {
+                directive.get_or_insert(words);
+            } else if imported_script && name.eq_ignore_ascii_case("script-src-elem") {
+                script_elem.get_or_insert(words);
             } else if name.eq_ignore_ascii_case("default-src") {
                 default.get_or_insert(words);
             }
         }
-        let Some(words) = connect.or(default) else {
+        let Some(words) = script_elem.or(directive).or(default) else {
             return;
         };
+        // importScripts is non-parser-inserted and has no nonce or integrity
+        // metadata. With strict-dynamic the source list is not used.
+        if imported_script && words.clone().any(|word| word.eq_ignore_ascii_case("'strict-dynamic'")) {
+            return;
+        }
         if self.lists.len() == MAX_POLICIES {
             self.blocked = true;
             return;

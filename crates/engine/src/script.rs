@@ -2,6 +2,7 @@
 //! A tab shares one VM between its document and accessible child realms.
 //! Native callbacks never borrow the DOM across VM calls.
 mod abort;
+mod base64_api;
 mod blobs;
 mod canvas;
 mod class_list;
@@ -115,6 +116,7 @@ struct State {
     form_control_prototypes: HashMap<&'static str, Value>,
     image_prototype: Value,
     link_prototype: Value,
+    style_element_prototype: Value,
     absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
     image_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
@@ -200,6 +202,10 @@ fn web_vm_limits() -> VmLimits {
     VmLimits {
         // Document and worker hosts do not yet provide cross-origin isolation.
         shared_array_buffer: false,
+        // Web callbacks can re-enter JavaScript underneath several lexical blocks.
+        // The VM checks native stack headroom before each deeper bytecode entry.
+        max_bytecode_depth: 4096,
+        max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
         max_string_units: crate::network::FETCH_RESPONSE_BODY_LIMIT,
         max_call_depth: 1024,
         max_heap_objects: 1024 * 1024,
@@ -209,7 +215,7 @@ fn web_vm_limits() -> VmLimits {
     }
 }
 
-fn restrict_document_policy(vm: &mut Vm, state: &Shared, policy: DocumentPolicy) {
+fn restrict_document_policy(vm: &mut Vm, state: &Shared, policy: &DocumentPolicy) {
     let mut state = state.borrow_mut();
     state.document_policy.restrict(policy);
     vm.set_wasm_compilation_allowed(state.document_policy.allows_wasm_compilation());
@@ -313,6 +319,8 @@ fn wrap(vm: &mut Vm, state: &Shared, id: Option<NodeId>) -> Result<Value, JsErro
             prototype
         } else if link_element::is_link(&state.document, id) {
             state.link_prototype.clone()
+        } else if style_sheets::is_style_element(&state.document, id) {
+            state.style_element_prototype.clone()
         } else if image_element::is_image(&state.document, id) {
             state.image_prototype.clone()
         } else if state.document.namespace(id) == crate::dom::Namespace::Html
@@ -451,50 +459,64 @@ fn set_attribute(
     key: &str,
     value: Option<String>,
 ) -> Result<(), JsError> {
+    mutate_attribute(vm, state, id, key, value, None)
+}
+
+fn mutate_attribute(
+    vm: &mut Vm,
+    state: &Shared,
+    id: NodeId,
+    key: &str,
+    value: Option<String>,
+    qualified: Option<Option<crate::dom::AttributeNamespace>>,
+) -> Result<(), JsError> {
     if !valid_attribute_name(key) {
         return Err(JsError::type_error("Invalid attribute name"));
     }
     let host = state;
     let mut state = host.borrow_mut();
     let present = value.is_some();
-    let key = if state.document.html_element_in_html_document(id) {
+    let key = if qualified.is_none() && state.document.html_element_in_html_document(id) {
         key.to_ascii_lowercase()
     } else {
         key.to_owned()
     };
     let old = state.document.attr(id, &key);
+    let previous_namespace = state.document.attribute_namespace(id, &key);
+    let namespace = qualified.unwrap_or(previous_namespace);
+    if old.is_some() && namespace != previous_namespace {
+        return Err(unsupported("Attributes with identical qualified names in distinct namespaces"));
+    }
+    let local_name = if namespace.is_some() {
+        key.split_once(':').map_or(key.as_str(), |(_, local)| local)
+    } else {
+        &key
+    };
     let custom_reaction = custom_elements::attribute(
         &state,
         id,
-        &key,
+        local_name,
         old,
         value.as_deref(),
-        state.document.attribute_namespace(id, &key),
+        namespace,
     );
     let changes_canvas_attribute = matches!(key.as_str(), "width" | "height")
         && (present || old.is_some())
-        && state.document.attribute_namespace(id, &key).is_none();
+        && namespace.is_none();
     let next_bytes = changed_bytes(
         &state,
-        old.map_or(0, |value| key.len() + value.len()),
-        value.as_ref().map_or(0, |value| key.len() + value.len()),
+        old.map_or(0, |value| key.len() + value.len() + usize::from(previous_namespace.is_some()) * key.len()),
+        value.as_ref().map_or(0, |value| key.len() + value.len() + usize::from(namespace.is_some()) * key.len()),
     )?;
     if (present || old.is_some())
         && matches!(state.document.nodes[id.0].kind, NodeKind::Element { .. })
         && state.mutations.borrow().active()
     {
-        let namespace = state.document.attribute_namespace(id, &key);
-        let name = if namespace.is_some() {
-            key.rsplit_once(':')
-                .map_or(key.as_str(), |(_, local)| local)
-        } else {
-            &key
-        };
         mutation_observers::note(
             &state,
             Mutation::Attribute {
                 target: id,
-                name,
+                name: local_name,
                 namespace,
                 old,
             },
@@ -506,12 +528,13 @@ fn set_attribute(
         } else {
             attrs.shift_remove(&key);
         }
-        let removed_namespace = state.document.attr(id, &key).is_none()
-            && state
-                .document
-                .attribute_namespaces
-                .remove(&(id, key.clone()))
-                .is_some();
+        if let Some(namespace) = namespace {
+            if present {
+                state.document.attribute_namespaces.insert((id, key.clone()), namespace);
+            } else {
+                state.document.attribute_namespaces.remove(&(id, key.clone()));
+            }
+        }
         if let Some(hook) = &state.form_attribute_hook {
             hook(vm, &state.document, id, &key);
         }
@@ -523,7 +546,7 @@ fn set_attribute(
         {
             vm.unroot(root);
         }
-        state.dom_bytes = next_bytes.saturating_sub(if removed_namespace { key.len() } else { 0 });
+        state.dom_bytes = next_bytes;
         mark_style_dirty(&mut state);
         if changes_canvas_attribute {
             canvas::attribute_changed(vm, &mut state, id, &key)?;
@@ -697,13 +720,7 @@ impl ScriptRuntime {
                 "DOM string data exceeds 16 MiB",
             ));
         }
-        // DOM callbacks can re-enter page code underneath several lexical blocks.
-        // The VM checks native stack headroom before every deeper bytecode entry.
-        let mut vm = Vm::with_limits(VmLimits {
-            max_bytecode_depth: 4096,
-            max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
-            ..web_vm_limits()
-        });
+        let mut vm = Vm::with_limits(web_vm_limits());
         vm.set_wasm_compilation_allowed(page.document_policy.allows_wasm_compilation());
         let prototype = vm.new_object();
         vm.root(prototype.clone());
@@ -744,6 +761,8 @@ impl ScriptRuntime {
         }
         let link_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(link_prototype.clone());
+        let style_element_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
+        vm.root(style_element_prototype.clone());
         let image_prototype = vm.new_object_with_prototype(html_element_prototype.clone())?;
         vm.root(image_prototype.clone());
         let character_data_prototype = vm.new_object_with_prototype(prototype.clone())?;
@@ -799,6 +818,7 @@ impl ScriptRuntime {
             form_control_prototypes,
             image_prototype: image_prototype.clone(),
             link_prototype: link_prototype.clone(),
+            style_element_prototype: style_element_prototype.clone(),
             absolute_link_hrefs: HashMap::new(),
             image_updates: Default::default(),
             invalid_images: Default::default(),
@@ -829,7 +849,7 @@ impl ScriptRuntime {
             replacement_parser: None,
             parser_wakeup: false,
             parser_connect_policy: page.meta_connect_policy.clone(),
-            document_policy: page.document_policy,
+            document_policy: page.document_policy.clone(),
             navigation_attached: false,
             dynamic_scripts,
             import_requests: module_tasks::ImportRequests::default(),
@@ -937,8 +957,9 @@ impl ScriptRuntime {
         )?;
         document_interface::install(&mut vm, &state, document_prototype.clone(), &dom_errors)?;
         tree_walker::install(&mut vm, &state, &document_prototype, &dom_errors)?;
-        style_sheets::install(&mut vm, &dom_errors)?;
+        style_sheets::install(&mut vm, &state, style_element_prototype, &dom_errors)?;
         class_list::install(&mut vm, &state, &element_prototype, &dom_errors)?;
+        namespaces::install_attributes(&mut vm, &state, &element_prototype, &dom_errors)?;
         namespaces::install(
             &mut vm,
             &state,
@@ -1030,6 +1051,7 @@ impl ScriptRuntime {
         let workers = workers::install(&mut vm, &state, events, messages.clone(), page)?;
         cloning.install(&mut vm, window, messages.clone())?;
         scheduler::install_performance(&mut vm, &state)?;
+        base64_api::install(&mut vm)?;
         history_api::install(&mut vm, &state, document, &layout)?;
         let base_state = state.clone();
         fetch.set_base_resolver(Rc::new(move || document_base(&base_state.borrow())));
@@ -1671,7 +1693,7 @@ impl ScriptRuntime {
         {
             let state = self.state.borrow();
             page.canvas_frames = state.canvases.frames.clone();
-            page.document_policy.restrict(state.document_policy);
+            page.document_policy.restrict(&state.document_policy);
             if !state.dirty {
                 return false;
             }
@@ -2574,6 +2596,7 @@ fn install_event_handlers(vm: &mut Vm, state: &Shared, object: Value) -> Result<
             "onfocusout",
             "onkeydown",
             "onscroll",
+            "onwheel",
             "onresize",
             "onpopstate",
             "onhashchange",

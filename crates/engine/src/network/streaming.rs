@@ -216,7 +216,7 @@ impl Loader {
                 request,
                 &control,
                 FETCH_RESPONSE_BODY_LIMIT,
-                true,
+                super::FetchConsumer::Web,
                 upload,
                 policy,
             )

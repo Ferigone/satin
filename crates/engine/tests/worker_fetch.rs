@@ -13,6 +13,10 @@ const WASM: &[u8] = &[
     0, 10, 6, 1, 4, 0, 65, 42, 11,
 ];
 
+fn reply_script(socket: &mut TcpStream, mime: &str, policy: &str, body: &str) {
+    write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\n{policy}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+}
+
 fn loopback() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -313,5 +317,92 @@ fn worker_fetches_and_parses_json_larger_than_the_standalone_vm_string_limit() {
     let (mut runtime, wakes) = worker(&page, &src);
     wait_until(&mut runtime, &wakes, "results.length === 1");
     assert_eq!(runtime.eval("results[0]").unwrap(), Value::from(length));
+    server.join().unwrap();
+}
+
+#[test]
+fn import_scripts_uses_the_worker_global_and_obeys_response_policy() {
+    let (same_server, origin) = loopback();
+    let (foreign_server, foreign) = loopback();
+    let same = std::thread::spawn(move || {
+        let (mut socket, headers) = accept(&same_server);
+        assert!(headers.contains("worker=kept"));
+        reply_script(&mut socket, "text/javascript", "", "var imported = ['first'];");
+    });
+    let other = std::thread::spawn(move || {
+        for (path, mime, policy, script) in [
+            ("/next.js", "application/javascript", "", "imported.push('second');"),
+            ("/wrong.js", "text/plain", "", "imported.push('wrong MIME');"),
+            ("/corp.js", "text/javascript", "Cross-Origin-Resource-Policy: same-origin\r\n", "imported.push('wrong origin');"),
+            ("/throws.js", "text/javascript", "", "throw new Error('foreign message');"),
+        ] {
+            let (mut socket, headers) = accept(&foreign_server);
+            assert!(headers.starts_with(&format!("GET {path} ")));
+            assert!(!headers.contains("worker=kept"));
+            reply_script(&mut socket, mime, policy, script);
+        }
+    });
+    let page = LoadedPage::from_html(&origin, "<!doctype html>");
+    let script = format!(r#"
+        queueMicrotask(() => postMessage('checkpoint'));
+        importScripts();
+        importScripts('{origin}/first.js', '{foreign}/next.js');
+        for (const path of ['wrong.js','corp.js','throws.js']) {{
+            try {{ importScripts('{foreign}/' + path); }}
+            catch (error) {{ imported.push(error.name); }}
+        }}
+        postMessage(imported.join(','));
+        close();
+    "#);
+    let (mut runtime, wakes) = worker(&page, &script);
+    wait_until(&mut runtime, &wakes, "results.length === 2");
+    assert_eq!(runtime.eval("results.join('|')").unwrap(),
+        "first,second,NetworkError,NetworkError,NetworkError|checkpoint".into());
+    same.join().unwrap();
+    other.join().unwrap();
+}
+
+#[test]
+fn browser_and_worker_base64_use_binary_strings_and_reject_invalid_input() {
+    let page = LoadedPage::from_html("https://example.test/", "<!doctype html>");
+    let checks = r#"
+        (() => {
+            let rejected = 0;
+            for (const test of [() => btoa("\u0100"), () => atob("A===")]) {
+                try { test(); } catch (error) { if (error.name === "InvalidCharacterError") rejected++; }
+            }
+            try { btoa(); } catch (error) { if (error instanceof TypeError) rejected++; }
+            return btoa("\u0000\u00ff") === "AP8=" &&
+                atob(" A P8\n").charCodeAt(1) === 255 && rejected === 3;
+        })()
+    "#;
+    let (mut runtime, wakes) = worker(&page, &format!("postMessage({checks}); close();"));
+    wait_until(&mut runtime, &wakes, "results.length === 1");
+    assert_eq!(runtime.eval("results[0]").unwrap(), Value::Bool(true));
+    assert_eq!(runtime.eval(checks).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn imported_scripts_check_csp_on_redirect_destinations() {
+    let (same_server, origin) = loopback();
+    let (foreign_server, foreign) = loopback();
+    let target = foreign.clone();
+    let server = std::thread::spawn(move || {
+        let (mut socket, headers) = accept(&same_server);
+        assert!(headers.starts_with("GET /redirect "));
+        write!(socket, "HTTP/1.1 302 Found\r\nLocation: {target}/foreign.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+    });
+    let page = LoadedPage::from_html(&origin,
+        r#"<meta http-equiv="Content-Security-Policy" content="worker-src blob:; script-src 'none'; script-src-elem 'self'">"#);
+    let script = format!(r#"
+        try {{ importScripts('{origin}/redirect'); postMessage('allowed'); }}
+        catch (error) {{ postMessage(error.name); }}
+        close();
+    "#);
+    let (mut runtime, wakes) = worker(&page, &script);
+    wait_until(&mut runtime, &wakes, "results.length === 1");
+    assert_eq!(runtime.eval("results[0]").unwrap(), "NetworkError".into());
+    foreign_server.set_nonblocking(true).unwrap();
+    assert_eq!(foreign_server.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     server.join().unwrap();
 }

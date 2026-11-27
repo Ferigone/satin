@@ -129,7 +129,7 @@ fn preview(value: &Value, units: usize) -> (String, bool) {
     (text, false)
 }
 
-fn preview_args(args: &[Value]) -> (String, bool) {
+fn preview_args(args: &[Value], _vm: Option<&Vm>) -> (String, bool) {
     // Keep the legacy spacing and UTF-16 preview behavior. The structured
     // record has an additional byte cap applied after this step.
     let mut text = String::new();
@@ -142,6 +142,12 @@ fn preview_args(args: &[Value]) -> (String, bool) {
         }
         if !text.is_empty() {
             text.push(' ');
+        }
+        #[cfg(feature = "media-startup-diagnostics")]
+        if let Some(error) = _vm.and_then(|vm| vm.diagnostic_native_error(value)) {
+            text.push_str(&error[..error.floor_char_boundary(remaining.min(error.len()))]);
+            truncated |= error.len() > remaining;
+            continue;
         }
         let (value, clipped) = preview(value, remaining);
         text.push_str(&value);
@@ -163,7 +169,7 @@ fn record_call(
 ) {
     let mut state = state.borrow_mut();
     let legacy_preview = if state.diagnostics.len() < DIAGNOSTIC_LIMIT {
-        let preview = preview_args(args);
+        let preview = preview_args(args, vm);
         state
             .diagnostics
             .push(preview.0.chars().take(DIAGNOSTIC_CHAR_LIMIT).collect());
@@ -173,7 +179,7 @@ fn record_call(
     };
     let active_node = state.current_script;
     state.devtools_console.push(|| {
-        let (text, truncated) = legacy_preview.unwrap_or_else(|| preview_args(args));
+        let (text, truncated) = legacy_preview.unwrap_or_else(|| preview_args(args, vm));
         let mut record = ConsoleRecord::new(level, origin, &text);
         if let Some(node) = active_node {
             record.script_node = Some(node);

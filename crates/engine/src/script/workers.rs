@@ -332,6 +332,7 @@ fn run_worker(
             ingress.close_ingress();
         },
         network,
+        source.policy,
     )?;
     let vm = worker.vm_mut();
     let class = vm.get_global("DOMException")?;
@@ -456,6 +457,7 @@ impl Workers {
                 let worker = connection.clone();
                 if let Err(error) = std::thread::Builder::new()
                     .name(format!("satin-worker-{id}"))
+                    .stack_size(8 * 1024 * 1024)
                     .spawn(move || {
                         let _permit = permit;
                         if let Err(error) = run_worker(&worker, name, address, source, Some(network))
@@ -530,7 +532,7 @@ impl Workers {
             .map_err(|_| exception(vm, self.exception, "SyntaxError", "Invalid Worker URL"))?;
         // Snapshot the creator's effective policy when constructing the
         // worker, not when its thread is scheduled or the Blob is created.
-        let policy = document.borrow().document_policy;
+        let policy = document.borrow().document_policy.clone();
         // Parser-written metadata takes effect even for the next nested
         // script, before the document scheduler has drained parser results.
         let parser = document.borrow().parser.upgrade();

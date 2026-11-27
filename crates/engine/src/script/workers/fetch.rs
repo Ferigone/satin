@@ -3,9 +3,10 @@ use super::Wake;
 use crate::{
     Loader,
     cookies::CookieStore,
-    loader::{ConnectPolicy, LoadedPage, transport},
+    loader::{ConnectPolicy, DocumentPolicy, LoadedPage, transport},
     network::{
         CancelSignal, FETCH_TIMEOUT, FetchError, FetchErrorKind, FetchJob, StreamingResponse,
+        WebRequest, WebResponse,
     },
     script::{
         abort::AbortHost, blobs, fetch::FetchHost, streams::StreamHost, text_encoding, url_api,
@@ -35,6 +36,28 @@ pub(super) struct Network {
 }
 
 impl Network {
+    fn loader(&self) -> Result<&Loader, String> {
+        self.loader
+            .get_or_init(|| Loader::with_cookies(self.cookies.clone()))
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    pub(super) fn import_script(
+        &self,
+        address: Url,
+        generation: &CancelSignal,
+        policy: &DocumentPolicy,
+    ) -> Result<WebResponse, String> {
+        self.loader()?.fetch_worker_import(
+            WebRequest::get(address, self.client.clone()),
+            generation,
+            Instant::now() + FETCH_TIMEOUT,
+            policy.imported_scripts(),
+            policy.requires_corp(),
+        ).map_err(|error| error.to_string())
+    }
+
     pub(super) fn from_page(page: &LoadedPage) -> Self {
         let loader = OnceLock::new();
         if let Some(mut shared) = page.fetch_loader.clone() {
@@ -216,10 +239,7 @@ async fn transfer(network: Network, sender: Sender, job: FetchJob, deadline: Ins
         request,
         upload,
     } = job;
-    let loader = match network
-        .loader
-        .get_or_init(|| Loader::with_cookies(network.cookies))
-    {
+    let loader = match network.loader() {
         Ok(loader) => loader,
         Err(error) => {
             sender

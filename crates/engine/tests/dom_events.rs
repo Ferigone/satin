@@ -498,6 +498,27 @@ fn animation_event_uses_event_flags_and_immutable_animation_data() {
 }
 
 #[test]
+fn wheel_event_inherits_mouse_coordinates_and_supports_cancelable_dispatch() {
+    let page = LoadedPage::from_html("https://events.test/wheel", "<button></button>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    let result = runtime.eval(r#"
+        const button = document.querySelector('button');
+        const event = new WheelEvent('wheel', {
+            deltaX: -0.25, deltaY: 3, deltaMode: WheelEvent.DOM_DELTA_LINE,
+            clientX: 20, bubbles: true, cancelable: true
+        });
+        let seen;
+        document.onwheel = value => { seen = value; value.preventDefault(); };
+        const delivered = button.dispatchEvent(event);
+        !delivered && seen === event && event instanceof MouseEvent &&
+            event.deltaX === -0.25 && event.deltaY === 3 && event.deltaZ === 0 &&
+            event.deltaMode === 1 && event.clientX === 20 &&
+            new WheelEvent('wheel').deltaMode === WheelEvent.DOM_DELTA_PIXEL;
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
 fn a_single_dom_target_preserves_its_listener_limit() {
     let page = LoadedPage::from_html("https://events.test/listeners", "<button></button>");
     let mut runtime = ScriptRuntime::new(&page).unwrap();

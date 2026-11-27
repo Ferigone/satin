@@ -136,8 +136,8 @@ impl ParserHost {
         }
     }
 
-    pub(super) fn meta_policy(&self) -> DocumentPolicy {
-        self.meta_policy
+    pub(super) fn meta_policy(&self) -> &DocumentPolicy {
+        &self.meta_policy
     }
 
     pub(in crate::script) fn connect_policy(&self) -> &crate::loader::ConnectPolicy {
@@ -433,7 +433,7 @@ impl ParserHost {
                 }
                 "meta" => {
                     if let Some(policy) = DocumentPolicy::from_meta_element(doc, id) {
-                        self.meta_policy.restrict(policy);
+                        self.meta_policy.restrict(&policy);
                     }
                 }
                 "base"
@@ -553,11 +553,11 @@ impl ParserHost {
                 let before = parser.stream.report().work;
                 let step = parser.advance(Some(state), write);
                 let work = parser.stream.report().work - before;
-                (step, work, parser.meta_policy())
+                (step, work, parser.meta_policy().clone())
             };
             // A write can run nested scripts or return to its caller before
             // the navigation scheduler sees these tokens.
-            restrict_document_policy(vm, state, policy);
+            restrict_document_policy(vm, state, &policy);
             let step = step.map_err(parser_error)?;
             mutation_observers::schedule(vm, state);
             Self::construct_element(handle, vm, state)?;

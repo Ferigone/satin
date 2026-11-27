@@ -142,6 +142,12 @@ pub(crate) enum DocumentKind {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct InlineStyleOverride {
+    pub original: std::sync::Arc<str>,
+    pub source: Option<std::sync::Arc<str>>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Document {
     pub nodes: Vec<Node>,
     pub root: NodeId,
@@ -164,6 +170,7 @@ pub struct Document {
     /// Namespaced attributes, keyed by element and the qualified name stored in
     /// its attrs map. Unlisted attributes have no namespace, even with a colon.
     pub attribute_namespaces: BTreeMap<(NodeId, String), AttributeNamespace>,
+    pub(crate) inline_style_overrides: BTreeMap<NodeId, InlineStyleOverride>,
 }
 
 impl Default for Document {
@@ -185,6 +192,7 @@ impl Default for Document {
             shadow_hosts: BTreeMap::new(),
             namespaces: BTreeMap::new(),
             attribute_namespaces: BTreeMap::new(),
+            inline_style_overrides: BTreeMap::new(),
         }
     }
 }

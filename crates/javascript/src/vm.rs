@@ -222,6 +222,8 @@ pub(crate) enum Item {
         function: Value,
         this: Value,
         direct_eval: bool,
+        #[cfg(feature = "media-startup-diagnostics")]
+        label: Option<JsString>,
     },
     Arguments(Vec<Value>),
 }
@@ -1780,6 +1782,30 @@ impl Vm {
             visible: !code.strict && code.constructible(),
         });
     }
+
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    fn diagnostic_source_site(&self) -> String {
+        let Some(frame) = self.legacy_calls.last() else { return String::new() };
+        let Ok(object) = self.heap.object(frame.function) else { return String::new() };
+        let ObjectKind::Function { code, referrer, .. } = &object.kind else {
+            return String::new();
+        };
+        let [units, start, end, signature] = code.source.profile_site();
+        let source = match referrer {
+            Some(SourceReferrer::Script(url)) => {
+                let units = url.as_utf16();
+                let text = String::from_utf16_lossy(&units[..units.len().min(240)]);
+                let address = text.split(['?', '#']).next().unwrap_or("");
+                if address.starts_with("https://") || address.starts_with("http://") {
+                    address.to_owned()
+                } else {
+                    String::new()
+                }
+            }
+            _ => String::new(),
+        };
+        format!(" [source {source} units={units} range={start}..{end} id={signature}]")
+    }
     fn primitive_string_has_own_key(receiver: &Value, key: &JsString) -> bool {
         matches!(receiver, Value::String(s) if
             key == &JsString::from("length")
@@ -2542,9 +2568,10 @@ impl Vm {
             let receiver = if object == Value::Null { "null" } else { "undefined" };
             let units = name.as_utf16();
             let clipped_name = String::from_utf16_lossy(&units[..units.len().min(128)]);
-            return Err(JsError::type_error(format!(
-                "Cannot read properties of {receiver} (reading {clipped_name:?})"
-            )));
+            let message = format!("Cannot read properties of {receiver} (reading {clipped_name:?})");
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let message = message + &self.diagnostic_source_site();
+            return Err(JsError::type_error(message));
         }
         if let Some(id) = self.property_start(&object)
             && let Some(value) = self.heap.cached_own_data(id, name)
@@ -4136,6 +4163,15 @@ impl Vm {
             }
             Op::PrepareCall(allow_direct_eval) => {
                 let callee = stack.pop().unwrap();
+                #[cfg(feature = "media-startup-diagnostics")]
+                let label = match &callee {
+                    Item::Reference(Reference::Property(_, Value::String(name))
+                        | Reference::Super(_, _, Value::String(name))
+                        | Reference::Binding(_, name) | Reference::Global(_, name)
+                        | Reference::With(_, name) | Reference::Import(_, name)
+                        | Reference::Unresolvable(name)) => Some(name.clone()),
+                    _ => None,
+                };
                 let direct_eval = *allow_direct_eval
                     && match &callee {
                         Item::Reference(
@@ -4159,6 +4195,8 @@ impl Vm {
                     function,
                     this,
                     direct_eval,
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    label,
                 });
             }
             Op::Arguments => stack.push(Item::Arguments(Vec::new())),
@@ -4167,7 +4205,11 @@ impl Vm {
                 self.account_string(name)?;
                 let this = self.pop_value(stack)?;
                 let function = self.read_named_property(this.clone(), name)?;
-                stack.push(Item::CallTarget { function, this, direct_eval: false });
+                stack.push(Item::CallTarget {
+                    function, this, direct_eval: false,
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    label: Some(name.clone()),
+                });
             }
             Op::FixedArgument(index) => {
                 let value = self.pop_value(stack)?;
@@ -4209,6 +4251,8 @@ impl Vm {
                     function,
                     this,
                     direct_eval,
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    label,
                 }) = stack.pop()
                 else {
                     unreachable!()
@@ -4216,6 +4260,15 @@ impl Vm {
                 let value = if direct_eval && function.as_object() == self.realm.intrinsic_eval {
                     self.direct_eval(args.first().cloned().unwrap_or_default(), env, strict)?
                 } else {
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    if !self.is_callable(&function) && let Some(label) = label {
+                        let name = label.as_utf16();
+                        let name = String::from_utf16_lossy(&name[..name.len().min(96)]);
+                        let message = format!("Value is not callable ({name:?})");
+                        #[cfg(windows)]
+                        let message = message + &self.diagnostic_source_site();
+                        return Err(JsError::type_error(message));
+                    }
                     self.invoke(function, this, args)?
                 };
                 stack.push(Item::Value(value));
@@ -4232,6 +4285,18 @@ impl Vm {
         }
         Ok(())
     }
+    #[cfg(feature = "media-startup-diagnostics")]
+    pub fn diagnostic_native_error(&self, value: &Value) -> Option<String> {
+        let object = self.heap.object(value.as_object()?).ok()?;
+        let ObjectKind::Error(kind, _) = object.kind else { return None };
+        let message = object.properties.get(&JsString::from("message"))?;
+        let PropertyKind::Data { value: Value::String(message), .. } = &message.kind else {
+            return None;
+        };
+        let units = message.as_utf16();
+        Some(format!("{kind:?}: {}", String::from_utf16_lossy(&units[..units.len().min(256)])))
+    }
+
     pub(crate) fn thrown_error(&mut self, value: Value) -> Result<JsError, JsError> {
         let mut kind = ErrorKind::Thrown;
         let diagnostic = match &value {

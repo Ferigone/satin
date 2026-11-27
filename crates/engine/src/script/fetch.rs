@@ -218,7 +218,7 @@ fn byte_string(vm: &mut Vm, value: Value) -> Result<String, JsError> {
     }
     Ok(s.as_utf16().iter().map(|u| char::from(*u as u8)).collect())
 }
-fn usv(vm: &mut Vm, value: Value, limit: usize) -> Result<String, JsError> {
+fn usv(vm: &mut Vm, value: Value, limit: usize, field: &str) -> Result<String, JsError> {
     let s = vm.to_string(&value)?;
     vm.charge_buffer_work(s.len())?;
     let size = char::decode_utf16(s.as_utf16().iter().copied())
@@ -227,7 +227,7 @@ fn usv(vm: &mut Vm, value: Value, limit: usize) -> Result<String, JsError> {
     if size > limit {
         return Err(JsError::new(
             ErrorKind::ExecutionLimit,
-            "Fetch string exceeds alpha byte limit",
+            format!("{field} exceeds its {limit}-byte limit ({size} bytes)"),
         ));
     }
     Ok(s.to_string_lossy())
@@ -465,7 +465,7 @@ fn body_input(
         )
     } else {
         (
-            usv(vm, value, limit)?.into_bytes(),
+            usv(vm, value, limit, "Fetch request body")?.into_bytes(),
             Some("text/plain;charset=UTF-8".into()),
         )
     };
@@ -537,7 +537,7 @@ fn request_init(
     let mut request = if let Some(original) = &original {
         original.borrow().request.clone()
     } else {
-        let value = usv(vm, input.clone(), FETCH_HEADER_LIMIT)?;
+        let value = usv(vm, input.clone(), FETCH_HEADER_LIMIT, "Fetch request URL")?;
         let (base, resolver, client) = {
             let state = state.borrow();
             (

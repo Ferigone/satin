@@ -10,6 +10,7 @@ const MOUSE_BRAND: u32 = 202;
 const WINDOW_VIEWPORT: u32 = 203;
 const KEYBOARD_BRAND: u32 = 204;
 const FOCUS_BRAND: u32 = 205;
+const WHEEL_BRAND: u32 = 214;
 const UI: &[&str] = &["detail", "view"];
 const MODIFIERS: &[(&str, &str)] = &[
     ("Alt", "altKey"),
@@ -37,6 +38,7 @@ const MOUSE: &[&str] = &[
     "screenY",
 ];
 const KEYBOARD: &[&str] = &["key", "code", "location", "repeat", "isComposing"];
+const WHEEL: &[&str] = &["deltaMode", "deltaX", "deltaY", "deltaZ"];
 const LEGACY: &[&str] = &[
     "view",
     "detail",
@@ -78,6 +80,13 @@ fn convert(vm: &mut Vm, dom: &Shared, name: &str, value: Value) -> Result<Value,
         }
         "relatedTarget" => return Err(JsError::type_error("Expected an EventTarget or null")),
         "key" | "code" => Value::String(vm.to_string(&value)?),
+        "deltaX" | "deltaY" | "deltaZ" => {
+            let value = vm.to_number(&value)?;
+            if !value.is_finite() {
+                return Err(JsError::type_error("WheelEvent delta must be finite"));
+            }
+            Value::Number(value)
+        }
         "repeat" | "isComposing" => value.is_truthy().into(),
         name if name.ends_with("Key") || name.starts_with("modifier") => value.is_truthy().into(),
         _ => {
@@ -86,7 +95,7 @@ fn convert(vm: &mut Vm, dom: &Shared, name: &str, value: Value) -> Result<Value,
             match name {
                 "button" => i32::from(unsigned as i16).into(),
                 "buttons" => u32::from(unsigned as u16).into(),
-                "location" => unsigned.into(),
+                "location" | "deltaMode" => unsigned.into(),
                 _ => (unsigned as i32).into(),
             }
         }
@@ -340,20 +349,7 @@ pub(super) fn install(
                 let event = webidl::instance(vm, target, &intrinsic)?;
                 initialize_empty(vm, &event, mouse)?;
                 let data = fields(vm, &event, mouse)?;
-                let members = UI.iter().copied().chain(
-                    MODIFIERS
-                        .iter()
-                        .map(|(_, key)| *key)
-                        .chain(MOUSE.iter().copied())
-                        .filter(|_| mouse),
-                );
-                for member in members {
-                    let value = event_target::option(vm, &options, member)?;
-                    if !value.is_undefined() {
-                        let value = convert(vm, &state, member, value)?;
-                        set(vm, &data, member, value)?;
-                    }
-                }
+                set_event_options(vm, &state, &data, &options, mouse, false)?;
                 event_target::init_event(vm, event, kind, flags, false)
             })?;
         vm.call(
@@ -441,7 +437,71 @@ pub(super) fn install(
             modifier_value(vm, fields(vm, &this, true)?, args)
         },
     )?;
+    install_wheel(vm, dom, &mouse_proto, parent, &set_proto)?;
     let keyboard_proto = install_keyboard(vm, dom, &ui_proto, set_proto.clone())?;
     let focus_proto = install_focus(vm, dom, &ui_proto, set_proto)?;
     Ok((ui_proto, mouse_proto, keyboard_proto, focus_proto))
+}
+
+fn set_event_options(
+    vm: &mut Vm,
+    state: &Shared,
+    data: &Value,
+    options: &Value,
+    mouse: bool,
+    wheel: bool,
+) -> Result<(), JsError> {
+    let members = UI.iter().copied().chain(
+        MODIFIERS.iter().map(|(_, key)| *key).chain(MOUSE.iter().copied()).filter(|_| mouse),
+    ).chain(WHEEL.iter().copied().filter(|_| wheel));
+    for member in members {
+        let value = event_target::option(vm, options, member)?;
+        if !value.is_undefined() {
+            let value = convert(vm, state, member, value)?;
+            set(vm, data, member, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn install_wheel(
+    vm: &mut Vm,
+    dom: &Shared,
+    mouse_proto: &Value,
+    mouse_constructor: Value,
+    set_proto: &Value,
+) -> Result<(), JsError> {
+    let prototype = vm.new_object_with_prototype(mouse_proto.clone())?;
+    let intrinsic = prototype.clone();
+    let state = dom.clone();
+    let constructor = webidl::interface(vm, prototype.clone(), "WheelEvent", 1,
+        move |vm, _, args, target| {
+            let target = target.ok_or_else(|| JsError::type_error("WheelEvent requires new"))?;
+            webidl::required(args, 1, "WheelEvent")?;
+            let kind = event_target::kind(vm, &args[0])?;
+            let options = arg(args, 1);
+            let flags = event_target::flags(vm, &options)?;
+            let event = webidl::instance(vm, target, &intrinsic)?;
+            initialize_empty(vm, &event, true)?;
+            let data = fields(vm, &event, true)?;
+            vm.set_host_slot(event.clone(), WHEEL_BRAND, data.clone())?;
+            set_event_options(vm, &state, &data, &options, true, true)?;
+            event_target::init_event(vm, event, kind, flags, false)
+        },
+    )?;
+    vm.call(set_proto.clone(), Value::Undefined, &[constructor.clone(), mouse_constructor])?;
+    for (index, name) in ["DOM_DELTA_PIXEL", "DOM_DELTA_LINE", "DOM_DELTA_PAGE"].into_iter().enumerate() {
+        for object in [&constructor, &prototype] {
+            vm.define_data_property(object.clone(), name, (index as u32).into(), false, true, false)?;
+        }
+    }
+    for &name in WHEEL {
+        getter(vm, prototype.clone(), name, move |vm, event, _| {
+            if vm.host_slot(&event, WHEEL_BRAND).is_none() {
+                return Err(JsError::type_error("Illegal WheelEvent receiver"));
+            }
+            field(vm, &event, name, true)
+        })?;
+    }
+    Ok(())
 }

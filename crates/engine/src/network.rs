@@ -614,6 +614,13 @@ struct AuthorizedResponse {
     transfer: Option<reqwest::Response>,
 }
 
+#[derive(Clone, Copy)]
+enum FetchConsumer {
+    Web,
+    Resource,
+    WorkerImport { require_corp: bool },
+}
+
 impl From<WebResponse> for AuthorizedResponse {
     fn from(metadata: WebResponse) -> Self {
         Self {
@@ -660,11 +667,39 @@ impl Loader {
         body_limit: usize,
         expose_only: bool,
     ) -> Result<WebResponse, FetchError> {
+        let consumer = if expose_only { FetchConsumer::Web } else { FetchConsumer::Resource };
+        self.fetch_buffered(request, control, body_limit, consumer, None).await
+    }
+
+    pub(crate) fn fetch_worker_import(
+        &self,
+        mut request: WebRequest,
+        cancel: &CancelSignal,
+        deadline: Instant,
+        policy: &ConnectPolicy,
+        require_corp: bool,
+    ) -> Result<WebResponse, FetchError> {
+        request.mode = RequestMode::NoCors;
+        let control = RequestControl::new(cancel, deadline);
+        self.transport_handle().block_on(self.fetch_buffered(
+            &request, &control, crate::loader::CLASSIC_SCRIPT_LIMIT,
+            FetchConsumer::WorkerImport { require_corp }, Some(policy),
+        ))
+    }
+
+    async fn fetch_buffered(
+        &self,
+        request: &WebRequest,
+        control: &RequestControl<'_>,
+        body_limit: usize,
+        consumer: FetchConsumer,
+        policy: Option<&ConnectPolicy>,
+    ) -> Result<WebResponse, FetchError> {
         let AuthorizedResponse {
             mut metadata,
             transfer,
         } = self
-            .open_fetch(request, control, body_limit, expose_only, None, None)
+            .open_fetch(request, control, body_limit, consumer, None, policy)
             .await?;
         if let Some(response) = transfer {
             let bytes =
@@ -688,10 +723,11 @@ impl Loader {
         request: &WebRequest,
         control: &RequestControl<'_>,
         body_limit: usize,
-        expose_only: bool,
+        consumer: FetchConsumer,
         mut upload: Option<UploadBody>,
         connect_policy: Option<&ConnectPolicy>,
     ) -> Result<AuthorizedResponse, FetchError> {
+        let expose_only = matches!(consumer, FetchConsumer::Web);
         let mut request = request.clone();
         request.validate()?;
         let use_cors_preflight = upload.is_some();
@@ -1007,7 +1043,22 @@ impl Loader {
                 continue;
             }
             if opaque_tainted {
-                return Ok(WebResponse::opaque(ResponseType::Opaque).into());
+                let FetchConsumer::WorkerImport { require_corp } = consumer else {
+                    return Ok(WebResponse::opaque(ResponseType::Opaque).into());
+                };
+                let source_site = crate::cookies::Site::from_url(&request.client_url);
+                let header = get(&headers, "cross-origin-resource-policy");
+                let allowed = match header {
+                    Some("same-origin") => source_origin == request.url.origin(),
+                    Some("same-site") => source_site.is_some()
+                        && source_site == crate::cookies::Site::from_url(&request.url),
+                    Some("cross-origin") => true,
+                    _ => !require_corp,
+                };
+                if !allowed {
+                    return Err(FetchError::new(FetchErrorKind::Network,
+                        "Cross-Origin-Resource-Policy blocked the imported script"));
+                }
             }
             let has_body =
                 request.method != "HEAD" && !matches!(status.as_u16(), 101 | 103 | 204 | 205 | 304);
@@ -1055,7 +1106,9 @@ impl Loader {
                     status_text,
                     headers,
                     body: None,
-                    response_type: if cors_tainted {
+                    response_type: if opaque_tainted {
+                        ResponseType::Opaque
+                    } else if cors_tainted {
                         ResponseType::Cors
                     } else {
                         ResponseType::Basic
