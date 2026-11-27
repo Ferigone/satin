@@ -849,9 +849,13 @@ fn install_function(vm: &mut Vm) {
         let name = match &vm.heap.object(id)?.kind {
             ObjectKind::Function { code, .. } => {
                 let source = code.source.clone();
-                vm.consume_work(source.len())?;
+                // SourceSpan already bounds the source retained by compilation.
+                // Charge its three linear scans (length, capacity, conversion)
+                // as native buffer work, then account for the output separately.
+                // Keep the string/heap checks before allocating the UTF-16 Vec.
+                vm.charge_buffer_work(source.len().saturating_mul(3))?;
                 vm.ensure_string_allocation(source.utf16_len(0..source.len()))?;
-                return vm.finish_string(source.utf16_range(0..source.len()));
+                return vm.finish_buffer_string(source.utf16_range(0..source.len()));
             }
             ObjectKind::Native { initial_name, .. } => initial_name.clone(),
             _ => JsString::default(),
@@ -2774,4 +2778,36 @@ pub(crate) fn create_error(
         vm.define_data_property(error.clone(), "cause", cause, true, false, true)?;
     }
     Ok(error)
+}
+
+#[cfg(test)]
+mod function_source_budget_tests {
+    use super::*;
+    use crate::VmLimits;
+
+    #[test]
+    fn large_function_source_uses_bounded_buffer_work() {
+        let source = format!("function large() {{ /*{}🦀*/ }}", "x".repeat(64 * 1024));
+        let mut vm = Vm::with_limits(VmLimits {
+            max_instructions: 10_000,
+            buffer_units_per_instruction: 1024,
+            ..VmLimits::default()
+        });
+        vm.eval(&source).unwrap();
+        assert_eq!(vm.eval("large.toString()").unwrap(), Value::from(source.as_str()));
+    }
+
+    #[test]
+    fn large_function_source_still_obeys_native_work_limit() {
+        let source = format!("function large() {{ /*{}*/ }}", "x".repeat(64 * 1024));
+        let mut vm = Vm::with_limits(VmLimits {
+            max_instructions: 10_000,
+            ..VmLimits::default()
+        });
+        vm.eval(&source).unwrap();
+        assert_eq!(
+            vm.eval("large.toString()").unwrap_err().kind,
+            ErrorKind::ExecutionLimit
+        );
+    }
 }
