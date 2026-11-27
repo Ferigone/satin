@@ -7,7 +7,7 @@ permissions:
 jobs:
   baseline:
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -46,7 +46,7 @@ jobs:
           const viewport = {width:1280,height:800};
           const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
           const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
-          const report = {commit:process.env.GITHUB_SHA,sourceCommit:'3f2a89f8cf3b583e4ab2329700ea54867a179578',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,productionBase:'ad4dfb4692b9e70b87ee27cfcb99256734caf423',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
           async function satinCase(url,index,phase,actions){
@@ -61,7 +61,7 @@ jobs:
               args=[...common,'--width','1280','--height','944','--smoke-window',image,'--smoke-actions',file];
             }
             try{
-              const {stdout,stderr}=await run(satin,args,{timeout:100000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp')}});
+              const {stdout,stderr}=await run(satin,args,{timeout:180000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp')}});
               try{const j=JSON.parse(stdout.trim());result.receipt={version:j.version,url:j.url,title:j.title,frames:j.frames_presented,windowSmoke:j.window_smoke,layoutLimited:j.layout_limited,paintLimited:j.paint_limited,documentHeight:j.document_height,diagnostics:j.javascript?.diagnostics?.slice(0,40).map(safe)};}catch(e){result.parseError=safe(e.message)}
               result.stderr=safe(stderr);result.exit=0;
             }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code;result.killed=e.killed}
@@ -164,6 +164,40 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: openstreetmap-grouped-assignment-retest
+          name: openstreetmap-alpha47-retest
           path: target/osm-evidence/
+          if-no-files-found: warn
+
+  public-release-hashes:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Independently download and hash the published Windows packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $versions = @('v0.1.0-alpha.46', 'v0.1.0-alpha.47')
+          $records = foreach ($version in $versions) {
+            $meta = Invoke-RestMethod "https://api.github.com/repos/Ferigone/satin/releases/tags/$version"
+            if ($meta.draft) { throw "Release is draft: $version" }
+            $assets = @($meta.assets | Where-Object { $_.name -match '\.(exe|zip)$' })
+            if ($assets.Count -ne 2) { throw "Missing release packages: $version" }
+            foreach ($asset in $assets) {
+              $path = Join-Path $env:RUNNER_TEMP "$version-$($asset.name)"
+              try {
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $path
+                $digest = 'sha256:' + (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                [pscustomobject]@{version=$version;name=$asset.name;sha256=$digest;expected=$asset.digest;match=($digest -ceq $asset.digest);bytes=(Get-Item -LiteralPath $path).Length;expectedBytes=$asset.size}
+              } finally { Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue }
+            }
+          }
+          New-Item -ItemType Directory -Force target/release-hash-evidence | Out-Null
+          $records | ConvertTo-Json | Set-Content target/release-hash-evidence/hashes.json
+          Get-Content target/release-hash-evidence/hashes.json
+          if (@($records | Where-Object { -not $_.match -or $_.bytes -ne $_.expectedBytes }).Count -ne 0 -or @($records).Count -ne 4) { throw 'Release digest mismatch or incomplete assets' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: alpha46-alpha47-public-package-hashes
+          path: target/release-hash-evidence/
           if-no-files-found: warn
