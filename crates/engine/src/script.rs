@@ -1682,7 +1682,7 @@ impl ScriptRuntime {
                     if !self.messages.dispatch_next(vm)? {
                         return Ok(false);
                     }
-                    drain_microtask_queue(vm, &state)?;
+                    drain_host_microtasks(vm, &state)?;
                     Ok(true)
                 });
                 match result {
@@ -3017,6 +3017,7 @@ fn dispatch_prepared_with_mode(
                 &this,
                 &event,
                 capture,
+                Vm::call,
                 |_, error| {
                     report_error(state, ConsolePhase::DomListener, Some(&kind), error, || {
                         format!("{kind}: {error}")

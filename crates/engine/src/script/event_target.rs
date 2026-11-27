@@ -354,7 +354,26 @@ impl Events {
         object: Value,
         event_value: Value,
     ) -> Result<bool, JsError> {
-        self.dispatch_with_report(vm, object, event_value, |vm, error| {
+        self.dispatch_direct(vm, object, event_value, Vm::call)
+    }
+
+    pub(super) fn dispatch_scheduled(
+        &self,
+        vm: &mut Vm,
+        object: Value,
+        event_value: Value,
+    ) -> Result<bool, JsError> {
+        self.dispatch_direct(vm, object, event_value, Vm::call_at_callback_boundary)
+    }
+
+    fn dispatch_direct(
+        &self,
+        vm: &mut Vm,
+        object: Value,
+        event_value: Value,
+        call: ListenerCall,
+    ) -> Result<bool, JsError> {
+        self.dispatch_with_listener(vm, object, event_value, call, |vm, error| {
             if vm.is_callable(&self.report) {
                 vm.call(
                     self.report.clone(),
@@ -371,6 +390,17 @@ impl Events {
         vm: &mut Vm,
         object: Value,
         event_value: Value,
+        report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
+    ) -> Result<bool, JsError> {
+        self.dispatch_with_listener(vm, object, event_value, Vm::call, report)
+    }
+
+    fn dispatch_with_listener(
+        &self,
+        vm: &mut Vm,
+        object: Value,
+        event_value: Value,
+        call: ListenerCall,
         mut report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
     ) -> Result<bool, JsError> {
         let info = event(vm, &event_value)?;
@@ -382,7 +412,9 @@ impl Events {
                     break;
                 }
                 info.current(vm, &event_value, object.clone(), 2)?;
-                info.invoke(vm, &object, &event_value, capture, &mut report)?;
+                info.invoke_with_checkpoint(
+                    vm, &object, &event_value, capture, call, &mut report, |_| Ok(()),
+                )?;
             }
             Ok(!info.prevented.get())
         });
@@ -392,6 +424,8 @@ impl Events {
         result
     }
 }
+
+type ListenerCall = fn(&mut Vm, Value, Value, &[Value]) -> Result<Value, JsError>;
 
 impl EventData {
     pub(super) fn begin(
@@ -430,23 +464,14 @@ impl EventData {
         vm.set_host_slot(event, CURRENT_TARGET_SLOT, Value::Null)
     }
 
-    pub(super) fn invoke(
-        &self,
-        vm: &mut Vm,
-        object: &Value,
-        event: &Value,
-        capture: bool,
-        report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
-    ) -> Result<(), JsError> {
-        self.invoke_with_checkpoint(vm, object, event, capture, report, |_| Ok(()))
-    }
-
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn invoke_with_checkpoint(
         &self,
         vm: &mut Vm,
         object: &Value,
         event: &Value,
         capture: bool,
+        call: ListenerCall,
         mut report: impl FnMut(&mut Vm, &JsError) -> Result<(), JsError>,
         mut checkpoint: impl FnMut(&mut Vm) -> Result<(), JsError>,
     ) -> Result<(), JsError> {
@@ -479,10 +504,10 @@ impl EventData {
             }
             self.passive.set(passive);
             let invoked = if vm.is_callable(&callback) {
-                vm.call(callback, object.clone(), std::slice::from_ref(event))
+                call(vm, callback, object.clone(), std::slice::from_ref(event))
             } else {
                 vm.get_property(callback.clone(), "handleEvent")
-                    .and_then(|function| vm.call(function, callback, std::slice::from_ref(event)))
+                    .and_then(|function| call(vm, function, callback, std::slice::from_ref(event)))
             };
             let completed = match invoked {
                 Err(error) if fatal(&error) => Err(error),

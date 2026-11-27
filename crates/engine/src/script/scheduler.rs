@@ -29,6 +29,7 @@ enum Handler {
 /// Web script tasks may legitimately need many cheap VM operations.
 /// Leave the instruction counter for accounting and bound the task by elapsed
 /// CPU and wall time. Re-entrant scripts still share the outer task deadline.
+#[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
 pub(super) fn run_script_task<T>(
     vm: &mut Vm,
     run: impl FnOnce(&mut Vm) -> Result<T, JsError>,
@@ -610,6 +611,7 @@ fn report_callback(
 
 /// The outer task owns the deadline and fuel, including nested event delivery
 /// and the subsequent microtask checkpoint.
+#[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
 fn run_window_task<T>(
     vm: &mut Vm,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,

@@ -226,7 +226,7 @@ impl MessagePorts {
         self.schedule(vm, &endpoint);
         let payload = slot(vm, &packet, PACKET_PAYLOAD);
         let event = self.message_events.received(vm, payload)?;
-        self.events.dispatch(vm, target, event)?;
+        self.events.dispatch_scheduled(vm, target, event)?;
         Ok(true)
     }
 

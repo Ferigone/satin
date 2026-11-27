@@ -180,6 +180,8 @@ pub struct Vm {
     qa_work_sites: std::collections::HashMap<(&'static str, u32), u64>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_task_heap: (usize, usize),
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    qa_task_site: Option<&'static std::panic::Location<'static>>,
     task_deadline: Option<TaskDeadline>,
     interrupt: Option<Arc<AtomicBool>>,
     active: usize,
@@ -338,6 +340,8 @@ impl Vm {
             qa_work_sites: Default::default(),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_task_heap: (0, 0),
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_task_site: None,
             limits,
             interrupt: None,
             task_deadline: None,
@@ -648,6 +652,7 @@ impl Vm {
     }
     /// One browser task and callback/microtask checkpoint share one budget.
     /// Collection is deferred until this scope returns, including on an error.
+    #[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
     pub fn with_task<T, F>(&mut self, callback: F) -> Result<T, JsError>
     where
         F: FnOnce(&mut Vm) -> Result<T, JsError>,
@@ -657,6 +662,7 @@ impl Vm {
 
     /// A host may give an outer scheduled callback more work with a wall-clock
     /// deadline. Nested tasks and their microtasks always share the outer limits.
+    #[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
     pub fn with_task_limits<T, F>(
         &mut self,
         instructions: u64,
@@ -671,6 +677,7 @@ impl Vm {
 
     /// Charge only execution on this thread to the CPU allowance. The absolute
     /// wall deadline also bounds blocked callbacks. Nested work shares both limits.
+    #[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
     pub fn with_task_cpu_budget<T, F>(
         &mut self,
         instructions: u64,
@@ -688,6 +695,7 @@ impl Vm {
         )
     }
 
+    #[cfg_attr(all(windows, feature = "media-startup-diagnostics"), track_caller)]
     fn run_task<T, F>(
         &mut self,
         instructions: u64,
@@ -711,6 +719,7 @@ impl Vm {
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             {
                 self.qa_task_heap = (self.heap.live, self.estimated_heap_bytes());
+                self.qa_task_site = Some(std::panic::Location::caller());
             }
         }
         self.active += 1;
@@ -1932,7 +1941,7 @@ impl Vm {
         static TRACES: AtomicUsize = AtomicUsize::new(0);
         if TRACES.fetch_add(1, Ordering::Relaxed) < 24 {
             eprintln!(
-                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={}{}",
+                "SATIN_QA_HEAP cells={} estimated={} start_cells={} start_bytes={} limit={} codes={} strings={} calls={} bytecode={} jobs={} active={} task={}{}",
                 self.heap.live,
                 self.estimated_heap_bytes(),
                 self.qa_task_heap.0,
@@ -1944,6 +1953,7 @@ impl Vm {
                 self.execution_depth,
                 self.jobs.len(),
                 self.active,
+                self.qa_task_site.map_or_else(|| "-".into(), ToString::to_string),
                 self.diagnostic_source_site(),
             );
         }
