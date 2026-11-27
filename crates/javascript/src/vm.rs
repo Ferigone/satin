@@ -2550,9 +2550,9 @@ impl Vm {
                     let frames = self.legacy_calls.iter().rev().take(4).filter_map(|frame| {
                         let object = self.heap.object(frame.function).ok()?;
                         if let ObjectKind::Function { code, .. } = &object.kind {
-                            let prefix: String = code.source.iter().take(240)
-                                .map(|&point| char::from_u32(point).unwrap_or(char::REPLACEMENT_CHARACTER))
-                                .collect();
+                            let prefix = String::from_utf16_lossy(
+                                &code.source.utf16_range(0..code.source.len().min(240)),
+                            );
                             Some(prefix)
                         } else {
                             None
