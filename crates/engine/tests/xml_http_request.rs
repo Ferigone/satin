@@ -8,7 +8,7 @@ use rust_browser_engine::{
 };
 use rust_browser_javascript::Value;
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener},
     sync::{Arc, mpsc},
     thread::{self, JoinHandle},
@@ -31,6 +31,40 @@ fn serve(handler: impl FnOnce(String) -> Vec<u8> + Send + 'static) -> (SocketAdd
         socket.write_all(&handler(request)).unwrap();
     });
     (address, server)
+}
+
+#[test]
+fn xhr_sends_the_selected_buffer_bytes_without_a_text_content_type() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut headers = String::new();
+        while !headers.ends_with("\r\n\r\n") {
+            assert_ne!(reader.read_line(&mut headers).unwrap(), 0);
+        }
+        let mut body = [0u8; 3];
+        reader.read_exact(&mut body).unwrap();
+        reader.get_mut().write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ).unwrap();
+        (headers.to_ascii_lowercase(), body)
+    });
+    let mut runtime = realm(&format!("http://{address}/"), "");
+    let status = runtime.eval(r#"
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/binary", false);
+        const bytes = new Uint8Array([4, 0, 255, 9, 8]);
+        xhr.send(new DataView(bytes.buffer, 1, 3));
+        xhr.status
+    "#);
+    let (headers, body) = server.join().unwrap();
+    assert_eq!(status.unwrap(), Value::from(200));
+    assert!(headers.contains("content-length: 3\r\n"), "{headers}");
+    assert!(!headers.contains("content-type:"), "{headers}");
+    assert_eq!(body, [0, 255, 9]);
 }
 
 fn realm(address: &str, html: &str) -> ScriptRuntime {

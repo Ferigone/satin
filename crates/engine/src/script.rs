@@ -686,7 +686,7 @@ impl ScriptRuntime {
         // DOM callbacks can re-enter page code underneath several lexical blocks.
         // The VM checks native stack headroom before every deeper bytecode entry.
         let mut vm = Vm::with_limits(VmLimits {
-            max_bytecode_depth: 96,
+            max_bytecode_depth: 192,
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });
@@ -1381,7 +1381,7 @@ impl ScriptRuntime {
     ) -> Result<(), JsError> {
         let state = self.state.clone();
         let fetch = &self.fetch;
-        let result = self.vm.with_task(|vm| {
+        let result = scheduler::run_classic_task(&mut self.vm, |vm| {
             action(fetch, vm)?;
             drain_microtask_queue(vm, &state)
         });
@@ -1426,7 +1426,7 @@ impl ScriptRuntime {
     }
     fn drain_microtasks(&mut self) {
         let state = self.state.clone();
-        if let Err(error) = self.vm.with_task(|vm| drain_microtask_queue(vm, &state)) {
+        if let Err(error) = scheduler::run_classic_task(&mut self.vm, |vm| drain_microtask_queue(vm, &state)) {
             report_error(&state, ConsolePhase::Microtask, None, &error, || {
                 error.to_string()
             });

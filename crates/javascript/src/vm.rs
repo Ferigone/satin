@@ -38,7 +38,7 @@ mod global_reference_tests;
 const DEFAULT_EXECUTION_DEPTH: usize = 16;
 const DEFAULT_CALL_DEPTH: usize = 24;
 const MAX_NATIVE_DEPTH: usize = 64;
-const MAX_BYTECODE_DEPTH: usize = 96;
+const MAX_BYTECODE_DEPTH: usize = 192;
 const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
     MAX_NATIVE_DEPTH
 } else {

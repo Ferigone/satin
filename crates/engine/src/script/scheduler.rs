@@ -14,8 +14,6 @@ use std::{
 };
 
 const MAX_TIMERS: usize = 1024;
-const TIMER_TASK_INSTRUCTIONS: u64 = 24_000_000;
-const INPUT_TASK_INSTRUCTIONS: u64 = 32_000_000;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
 const CLASSIC_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(10);
@@ -613,11 +611,10 @@ fn report_callback(
 /// and the subsequent microtask checkpoint.
 fn run_window_task<T>(
     vm: &mut Vm,
-    instructions: u64,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
     vm.with_task_cpu_budget(
-        instructions,
+        u64::MAX,
         WINDOW_TASK_CPU_BUDGET,
         Instant::now() + WINDOW_TASK_WALL_TIMEOUT,
         callback,
@@ -628,7 +625,7 @@ pub(super) fn run_input_task<T>(
     vm: &mut Vm,
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
-    run_window_task(vm, INPUT_TASK_INSTRUCTIONS, callback)
+    run_window_task(vm, callback)
 }
 
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
@@ -642,7 +639,7 @@ pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {
         };
         // Exception reporting and the microtask checkpoint use the same fuel
         // and deadline as the callback. Return to input/rendering after a long turn.
-        let result = run_window_task(vm, TIMER_TASK_INSTRUCTIONS, |vm| {
+        let result = run_classic_task(vm, |vm| {
             if let Some(owner) = &timer.owner {
                 vm.with_realm(owner.realm, |vm| {
                     let result = run_timer(vm, &timer, vm.global(), "about:blank");
@@ -684,7 +681,7 @@ pub(super) fn run_frames(vm: &mut Vm, state: &Shared, needs_rendering: bool) -> 
         let frame = state.borrow_mut().scheduler.rendering.pop_front();
         let Some(frame) = frame else { break };
         let callback = vm.unroot(frame.callback).unwrap();
-        let result = vm.with_task(|vm| {
+        let result = run_window_task(vm, |vm| {
             let result = vm.call(callback, Value::Undefined, &[timestamp.into()]);
             report_callback(vm, state, result)?;
             drain_microtask_queue(vm, state)

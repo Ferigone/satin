@@ -18,7 +18,7 @@ pub(crate) use operations::{StringIterator, install as install_protocols, string
 pub(crate) use program::Program;
 pub(crate) use runtime::{install, literal, reject_regexp};
 
-const MAX_PATTERN_UNITS: usize = 16 * 1024;
+const MAX_PATTERN_UNITS: usize = 256 * 1024;
 const MAX_CAPTURES: usize = 256;
 const MAX_PATTERN_DEPTH: usize = 32;
 
