@@ -776,15 +776,20 @@ fn interpreted_promise_handler_collects_while_preserving_stack_and_weak_targets(
                 return local[1]();
             }
             let total = 0;
-            for (let i = 0; i < 16000; i++) total += visit(i);
+            const chunks = new Set([0]);
+            chunks.forEach(function (start, key, set) {
+                if (this.marker !== 5 || start !== key || set !== chunks) throw 'forEach arguments';
+                for (let i = start; i < start + 8000; i++) total += visit(i);
+                if (start === 0) set.add(8000);
+            }, {marker: 5});
             return this.owner + '/' + input.label + '/' + prefix + suffix +
                 '/' + weak.deref().state + '/' + total;
         }
         function viaBoundFunctions(input) {
             const first = measure.bind({owner: 'bound'}, input, 'pre');
-            return first.bind({owner: 'ignored'}, 'fix')();
+            return Function.prototype.apply.call(first.bind({owner: 'ignored'}, 'fix'), null, []);
         }
-        Promise.resolve({label: 'kept'}).then(viaBoundFunctions)
+        Promise.resolve({label: 'kept'}).then(viaBoundFunctions.bind(null))
             .then(result => { finished = result; });
     "#).unwrap();
     vm.drain_jobs_at_callback_boundary(8).unwrap();

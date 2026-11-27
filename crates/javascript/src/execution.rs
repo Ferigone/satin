@@ -6,6 +6,7 @@ mod destructuring;
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
     bytecode::{Chunk, Code, Op},
+    collections::ForEachCall,
     heap::EnvId,
     patterns::Invocation,
     promise::{PromiseCapability, ReactionPair},
@@ -27,6 +28,7 @@ struct Frame {
     delegate: Option<delegation::Delegation>,
     patterns: Vec<destructuring::ActivePattern>,
     activation: Option<CallActivation>,
+    collection: Option<ForEachCall>,
 }
 
 pub(crate) struct Execution {
@@ -62,7 +64,8 @@ pub(crate) enum RunResult {
 enum Advance {
     Keep,
     Operand(Value),
-    Call(OwnedCall),
+    Call(OwnedCall, Resume),
+    ForEach(ForEachCall),
     Finish(Completion),
     Child {
         chunk: Rc<Chunk>,
@@ -99,6 +102,7 @@ impl Frame {
             delegate: None,
             patterns: Vec::new(),
             activation: None,
+            collection: None,
         }
     }
     fn absorb(&mut self, value: Option<Value>) {
@@ -138,6 +142,9 @@ impl Frame {
         }
         if let Some(delegate) = &self.delegate {
             delegate.visit(visit);
+        }
+        if let Some(collection) = &self.collection {
+            collection.visit(visit);
         }
     }
 
@@ -531,17 +538,35 @@ impl Vm {
                     frame.waiting.take().unwrap(),
                     child,
                 )
+            } else if let Some(iteration) = frame.collection.take() {
+                Ok(Advance::ForEach(iteration))
             } else if frame.pc == frame.chunk.ops.len() {
                 completed = Some(frames.pop().unwrap().finish(self));
                 continue;
             } else {
                 self.advance_frame(frame, ordinary)
             };
+            let advance = advance.and_then(|advance| {
+                let Advance::ForEach(mut iteration) = advance else {
+                    return Ok(advance);
+                };
+                let Some(args) = iteration.next(self)? else {
+                    return Ok(Advance::Operand(Value::Undefined));
+                };
+                match self.dispatch_collection_callback(&iteration, &args)? {
+                    CallDispatch::Owned(call) => Ok(Advance::Call(call, Resume::ForEach(iteration))),
+                    CallDispatch::Value(_) => {
+                        frame.collection = Some(iteration);
+                        Ok(Advance::Keep)
+                    }
+                    CallDispatch::ForEach(_) => unreachable!("collection callback uses ordinary dispatch"),
+                }
+            });
             match advance {
                 Ok(Advance::Keep) => {}
                 Ok(Advance::Operand(value)) => frame.operands.push(Item::Value(value)),
-                Ok(Advance::Call(OwnedCall { chunk, env, activation })) => {
-                    frame.waiting = Some(Resume::Call);
+                Ok(Advance::Call(OwnedCall { chunk, env, activation }, resume)) => {
+                    frame.waiting = Some(resume);
                     if let Err(error) = reserve_one(self, frames) {
                         completed = Some(self.finish_owned_call(activation, Err(error))
                             .map(|value| Completion::Normal(Some(value))));
@@ -644,7 +669,8 @@ impl Vm {
                 CallDispatch::Value, Vm::dispatch_owned_call,
             ).map(|call| match call {
                 CallDispatch::Value(value) => Advance::Operand(value),
-                CallDispatch::Owned(call) => Advance::Call(call),
+                CallDispatch::Owned(call) => Advance::Call(call, Resume::Call),
+                CallDispatch::ForEach(iteration) => Advance::ForEach(iteration),
             });
         }
         if self.run_stack_op(

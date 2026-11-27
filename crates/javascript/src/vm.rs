@@ -235,6 +235,7 @@ pub(crate) struct CallActivation {
 pub(crate) enum CallDispatch {
     Value(Value),
     Owned(OwnedCall),
+    ForEach(crate::collections::ForEachCall),
 }
 
 #[derive(Clone)]
@@ -655,9 +656,25 @@ impl Vm {
 
     pub(crate) fn at_collectible_entry(&self) -> bool {
         self.collectible_call == Some(self.active)
-            && self.call_depth == 1
             && self.execution_depth == 0
             && self.realm_depth == 0
+    }
+
+    // Bound calls and the intrinsic call/apply adapters forward directly to
+    // their target. They do not use arguments or JS objects after it returns.
+    pub(crate) fn invoke_forwarded(
+        &mut self,
+        function: Value,
+        this: Value,
+        args: &[Value],
+    ) -> Result<Value, JsError> {
+        if !self.at_collectible_entry() {
+            return self.invoke(function, this, args);
+        }
+        let previous = self.collectible_call.replace(self.active + 1);
+        let result = self.invoke(function, this, args);
+        self.collectible_call = previous;
+        result
     }
     /// One browser task and callback/microtask checkpoint share one budget.
     /// Collection is deferred until this scope returns, including on an error.
@@ -1149,6 +1166,7 @@ impl Vm {
                 initial_name: initial_name.clone(),
                 callback,
                 construct,
+                owned_call: None,
                 realm_environment: self.realm.global_env,
             },
             Some(self.realm.function_prototype),
@@ -3332,7 +3350,7 @@ impl Vm {
             let mut all = bound_args.clone();
             all.extend_from_slice(args);
             self.call_depth += 1;
-            let result = self.invoke(target, this, &all);
+            let result = self.invoke_forwarded(target, this, &all);
             self.call_depth -= 1;
             return result;
         }
@@ -3417,11 +3435,63 @@ impl Vm {
         result
     }
 
+    pub(crate) fn mark_owned_native_call(&mut self, value: &Value, call: crate::heap::NativeCall) {
+        let id = value.as_object().expect("installed native method");
+        let ObjectKind::Native { owned_call, .. } = &mut self.heap.object_mut(id).unwrap().kind else {
+            unreachable!("installed native method");
+        };
+        *owned_call = Some(call);
+    }
+
     pub(crate) fn dispatch_owned_call(
         &mut self,
         function: Value,
         this: Value,
         args: &[Value],
+    ) -> Result<CallDispatch, JsError> {
+        self.dispatch_owned_call_inner(function, this, args, true)
+    }
+
+    pub(crate) fn dispatch_collection_callback(
+        &mut self,
+        iteration: &crate::collections::ForEachCall,
+        args: &[Value],
+    ) -> Result<CallDispatch, JsError> {
+        self.with_owned_native_call(|vm| {
+            vm.dispatch_owned_call_inner(iteration.callback.clone(), iteration.receiver.clone(), args, false)
+        })
+    }
+
+    #[inline(never)]
+    fn with_owned_native_call(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<CallDispatch, JsError>,
+    ) -> Result<CallDispatch, JsError> {
+        if !self.can_enter_call() {
+            return Err(self.call_depth_error());
+        }
+        self.active += 1;
+        self.call_depth += 1;
+        let result = body(self);
+        match result {
+            Ok(CallDispatch::Owned(mut call)) => {
+                call.activation.depth += 1;
+                Ok(CallDispatch::Owned(call))
+            }
+            other => {
+                self.call_depth -= 1;
+                self.active -= 1;
+                other
+            }
+        }
+    }
+
+    fn dispatch_owned_call_inner(
+        &mut self,
+        function: Value,
+        this: Value,
+        args: &[Value],
+        allow_collection: bool,
     ) -> Result<CallDispatch, JsError> {
         let Some(mut id) = function.as_object() else {
             return self.invoke(function, this, args).map(CallDispatch::Value);
@@ -3447,6 +3517,44 @@ impl Vm {
                             || self.environment_realm(*environment) == self.realm.global_env) =>
                 {
                     break (code.clone(), *environment, referrer.clone());
+                }
+                ObjectKind::Native {
+                    owned_call: Some(crate::heap::NativeCall::CollectionForEach(kind)),
+                    realm_environment, ..
+                }
+                    if allow_collection && prefixes.is_empty() && *realm_environment == self.realm.global_env =>
+                {
+                    let kind = *kind;
+                    self.tick()?;
+                    if !self.can_enter_call() {
+                        return Err(self.call_depth_error());
+                    }
+                    return crate::collections::ForEachCall::new(self, this, args, kind).map(CallDispatch::ForEach);
+                }
+                ObjectKind::Native { owned_call: Some(call), realm_environment, .. }
+                    if prefixes.is_empty()
+                        && *realm_environment == self.realm.global_env
+                        && matches!(call, crate::heap::NativeCall::FunctionCall | crate::heap::NativeCall::FunctionApply) =>
+                {
+                    let call = *call;
+                    self.tick()?;
+                    return self.with_owned_native_call(|vm| {
+                        let receiver = args.first().cloned().unwrap_or_default();
+                        let expanded;
+                        let args = match call {
+                            crate::heap::NativeCall::FunctionApply => {
+                                if !vm.is_callable(&this) {
+                                    return Err(JsError::type_error("Apply target is not callable"));
+                                }
+                                expanded = crate::builtins::apply_arguments(
+                                    vm, args.get(1).cloned().unwrap_or_default(),
+                                )?;
+                                expanded.as_slice()
+                            }
+                            _ => args.get(1..).unwrap_or_default(),
+                        };
+                        vm.dispatch_owned_call_inner(this, receiver, args, false)
+                    });
                 }
                 _ => return self.invoke(function, this, args).map(CallDispatch::Value),
             }

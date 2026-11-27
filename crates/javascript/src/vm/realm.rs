@@ -167,6 +167,7 @@ fn allocate_core(heap: &mut Heap) -> EnvId {
             initial_name: Default::default(),
             callback: Rc::new(|_, _, _| Ok(Value::Undefined)),
             construct: None,
+            owned_call: None,
             realm_environment: env,
         },
         prototype,

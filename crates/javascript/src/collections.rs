@@ -23,7 +23,7 @@ const INDEX_ROOT_BYTES: usize = 1536;
 const ENTRY_BYTES: usize = 384;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Map,
     Set,
 }
@@ -155,6 +155,38 @@ impl Orders {
 }
 
 pub(crate) type CollectionCloneEntry = (Value, Option<Value>);
+
+pub(crate) struct ForEachCall {
+    collection: Value,
+    pub(crate) callback: Value,
+    pub(crate) receiver: Value,
+    cursor: u64,
+}
+
+impl ForEachCall {
+    pub(crate) fn new(vm: &Vm, collection: Value, args: &[Value], kind: Kind) -> Result<Self, JsError> {
+        receiver(vm, &collection, kind)?;
+        let callback = arg(args, 0);
+        if !vm.is_callable(&callback) {
+            return Err(JsError::type_error("Collection forEach callback is not callable"));
+        }
+        Ok(Self { collection, callback, receiver: arg(args, 1), cursor: 0 })
+    }
+
+    pub(crate) fn next(&mut self, vm: &mut Vm) -> Result<Option<[Value; 3]>, JsError> {
+        let id = self.collection.as_object().expect("branded collection");
+        Ok(vm.collection_entry(id, self.cursor)?.map(|(order, key, value)| {
+            self.cursor = order + 1;
+            [value, key, self.collection.clone()]
+        }))
+    }
+
+    pub(crate) fn visit(&self, visit: &mut impl FnMut(&Value)) {
+        visit(&self.collection);
+        visit(&self.callback);
+        visit(&self.receiver);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct CollectionData {
@@ -664,32 +696,20 @@ fn install_collection(vm: &mut Vm, kind: Kind) {
         Iteration::Entries,
         iterator,
     );
-    method(
+    let for_each = method(
         vm,
         prototype.clone(),
         "forEach",
         1,
         move |vm, this, args| {
-            let id = receiver(vm, &this, kind)?;
-            let callback = arg(args, 0);
-            if !vm.is_callable(&callback) {
-                return Err(JsError::type_error(
-                    "Collection forEach callback is not callable",
-                ));
-            }
-            let callback_this = arg(args, 1);
-            let mut cursor = 0;
-            while let Some((order, key, value)) = vm.collection_entry(id, cursor)? {
-                vm.invoke(
-                    callback.clone(),
-                    callback_this.clone(),
-                    &[value, key, this.clone()],
-                )?;
-                cursor = order + 1;
+            let mut iteration = ForEachCall::new(vm, this, args, kind)?;
+            while let Some(args) = iteration.next(vm)? {
+                vm.invoke(iteration.callback.clone(), iteration.receiver.clone(), &args)?;
             }
             Ok(Value::Undefined)
         },
     );
+    vm.mark_owned_native_call(&for_each, crate::heap::NativeCall::CollectionForEach(kind));
     if kind == Kind::Map {
         iterator_method(
             vm,

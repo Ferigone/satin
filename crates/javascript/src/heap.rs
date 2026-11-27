@@ -14,6 +14,12 @@ use property_cache::PropertyCache;
 pub(crate) type NativeCallback = Rc<dyn Fn(&mut Vm, Value, &[Value]) -> Result<Value, JsError>>;
 pub(crate) type NativeConstruct =
     Rc<dyn Fn(&mut Vm, Value, &[Value], Value) -> Result<Value, JsError>>;
+#[derive(Clone, Copy)]
+pub(crate) enum NativeCall {
+    CollectionForEach(crate::collections::Kind),
+    FunctionCall,
+    FunctionApply,
+}
 #[derive(Clone)]
 pub(crate) enum PropertyKind {
     Data {
@@ -67,6 +73,7 @@ pub(crate) enum ObjectKind {
         initial_name: JsString,
         callback: NativeCallback,
         construct: Option<NativeConstruct>,
+        owned_call: Option<NativeCall>,
         // A native callback has no lexical environment to trace automatically.
         realm_environment: EnvId,
     },

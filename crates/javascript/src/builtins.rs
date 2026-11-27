@@ -756,31 +756,18 @@ fn install_function(vm: &mut Vm) {
         )
         .unwrap();
     }
-    method(vm, proto.clone(), "call", 1, |vm, this, a| {
-        vm.invoke(this, arg(a, 0), a.get(1..).unwrap_or_default())
+    let call = method(vm, proto.clone(), "call", 1, |vm, this, a| {
+        vm.invoke_forwarded(this, arg(a, 0), a.get(1..).unwrap_or_default())
     });
-    method(vm, proto.clone(), "apply", 2, |vm, this, a| {
+    vm.mark_owned_native_call(&call, crate::heap::NativeCall::FunctionCall);
+    let apply = method(vm, proto.clone(), "apply", 2, |vm, this, a| {
         if !vm.is_callable(&this) {
             return Err(JsError::type_error("Apply target is not callable"));
         }
-        let args = arg(a, 1);
-        let values = if args.is_nullish() {
-            Vec::new()
-        } else {
-            if args.as_object().is_none() {
-                return Err(JsError::type_error("Apply arguments must be an object"));
-            }
-            let len = length(vm, args.clone())?;
-            vm.reserve_allocation(len.saturating_mul(std::mem::size_of::<Value>()))?;
-            let mut values = Vec::with_capacity(len);
-            for i in 0..len {
-                vm.tick()?;
-                values.push(vm.get_property(args.clone(), &i.to_string())?);
-            }
-            values
-        };
-        vm.invoke(this, arg(a, 0), &values)
+        let values = apply_arguments(vm, arg(a, 1))?;
+        vm.invoke_forwarded(this, arg(a, 0), &values)
     });
+    vm.mark_owned_native_call(&apply, crate::heap::NativeCall::FunctionApply);
     method(vm, proto.clone(), "bind", 1, |vm, this, a| {
         if !vm.is_callable(&this) {
             return Err(JsError::type_error("Bind target is not callable"));
@@ -970,6 +957,23 @@ fn relative_index(index: f64, len: u64) -> u64 {
     } else {
         index.min(len as f64) as u64
     }
+}
+
+pub(crate) fn apply_arguments(vm: &mut Vm, args: Value) -> Result<Vec<Value>, JsError> {
+    if args.is_nullish() {
+        return Ok(Vec::new());
+    }
+    if args.as_object().is_none() {
+        return Err(JsError::type_error("Apply arguments must be an object"));
+    }
+    let len = length(vm, args.clone())?;
+    vm.reserve_allocation(len.saturating_mul(std::mem::size_of::<Value>()))?;
+    let mut values = Vec::with_capacity(len);
+    for index in 0..len {
+        vm.tick()?;
+        values.push(vm.get_property(args.clone(), &index.to_string())?);
+    }
+    Ok(values)
 }
 
 fn length(vm: &mut Vm, object: Value) -> Result<usize, JsError> {

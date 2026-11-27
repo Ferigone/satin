@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 pub(super) enum Resume {
     Call,
+    ForEach(crate::collections::ForEachCall),
     Pass,
     Label,
     Initialize,
@@ -68,6 +69,7 @@ pub(super) struct SwitchBody {
 impl Resume {
     pub(super) fn visit(&self, visit: &mut impl FnMut(&Value)) {
         match self {
+            Self::ForEach(iteration) => iteration.visit(visit),
             Self::Loop(state) => {
                 visit(&Value::Object(state.scope.0));
                 state.result.iter().for_each(visit);
@@ -220,6 +222,10 @@ pub(super) fn after_child(
     }
     match resume {
         Resume::Call => Ok(Advance::Operand(expression(completed)?)),
+        Resume::ForEach(iteration) => {
+            completed?;
+            Ok(Advance::ForEach(iteration))
+        }
         Resume::Pass => completed.map(Advance::Finish),
         Resume::Label => {
             let Op::Label(label, _) = op else {
