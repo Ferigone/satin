@@ -186,7 +186,7 @@ pub(in crate::script) fn attribute_changed(
 /// DOM insertion collects a static list before running any user code. Each
 /// candidate checks connectivity again because another script can detach it.
 pub(in crate::script) fn inserted(
-    state: &State,
+    state: &mut State,
     parent: NodeId,
     roots: Vec<NodeId>,
     mut candidates: Vec<NodeId>,
@@ -201,6 +201,8 @@ pub(in crate::script) fn inserted(
         while let Some(id) = pending.pop() {
             if is_script(doc, id) {
                 candidates.push(id);
+            } else if state.navigation_attached && super::super::link_element::is_link(doc, id) {
+                state.link_updates.insert(id);
             }
             pending.extend(doc.nodes[id.0].children.iter().rev().copied());
         }

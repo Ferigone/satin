@@ -444,35 +444,26 @@ impl ParserHost {
                     self.base_node = Some(id);
                     self.base = base_for(doc, &self.client, self.base_node);
                 }
-                "link"
-                    if doc.has_link_relation(id, "stylesheet")
-                        && !doc.has_link_relation(id, "alternate")
-                        && doc.attr(id, "disabled").is_none()
-                        && connected(doc, id) =>
-                {
+                "link" if connected(doc, id) => {
+                    let Some(href) = super::super::link_element::stylesheet_href(doc, id) else {
+                        continue;
+                    };
                     if self.sheets >= MAX_TRACKED_SHEETS {
                         self.discarded += 1;
                         continue;
                     }
-                    if doc.attr(id, "type").is_some_and(|ty| {
-                        !ty.trim().is_empty() && !ty.trim().eq_ignore_ascii_case("text/css")
-                    }) {
-                        continue;
-                    }
-                    if let Some(href) = doc.attr(id, "href") {
-                        self.sheets += 1;
-                        match resolve_resource(&self.client, &self.base, href) {
-                            Ok(url) => self.discoveries.push(Discovery::Sheet {
-                                node: id,
-                                url,
-                                cors: cors_attr(doc, id),
-                                integrity: integrity_attr(doc, id),
-                                media: Arc::from(doc.attr(id, "media").unwrap_or("")),
-                            }),
-                            Err(message) => self
-                                .discoveries
-                                .push(Discovery::Error { node: id, message }),
-                        }
+                    self.sheets += 1;
+                    match resolve_resource(&self.client, &self.base, href) {
+                        Ok(url) => self.discoveries.push(Discovery::Sheet {
+                            node: id,
+                            url,
+                            cors: cors_attr(doc, id),
+                            integrity: integrity_attr(doc, id),
+                            media: Arc::from(doc.attr(id, "media").unwrap_or("")),
+                        }),
+                        Err(message) => self
+                            .discoveries
+                            .push(Discovery::Error { node: id, message }),
                     }
                 }
                 "img" if connected(doc, id) => {
@@ -672,6 +663,7 @@ fn open(vm: &mut Vm, host: &Shared) -> Result<(), JsError> {
     state.ready_state = "loading";
     state.dynamic_scripts.pending.clear();
     state.image_updates.retain(|node| !connected.contains(node));
+    state.link_updates.clear();
     state.parser = Rc::downgrade(&parser);
     state.replacement_parser = Some(parser);
     state.parser_wakeup = true;

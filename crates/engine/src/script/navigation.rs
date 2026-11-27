@@ -44,11 +44,40 @@ pub struct ResourceLoad {
 
 enum Consumer {
     Classic(NodeId),
-    Sheet { node: NodeId, media: Arc<str> },
+    Sheet {
+        node: NodeId,
+        source: Arc<StylesheetSource>,
+        media: Arc<str>,
+        parser_inserted: bool,
+    },
     Image(Arc<str>),
     Module(ModuleKey, CredentialsMode),
     Font(FontKey),
     Media(MediaKey),
+}
+
+#[derive(PartialEq, Eq)]
+struct StylesheetSource {
+    url: Url,
+    cors: Option<CredentialsMode>,
+    integrity: Option<Arc<str>>,
+}
+
+impl StylesheetSource {
+    fn from_document(state: &State, client: &Url, node: NodeId) -> Result<Option<Self>, String> {
+        let document = &state.document;
+        let Some(href) = link_element::stylesheet_href(document, node)
+            .filter(|_| parser_host::connected(document, node))
+        else {
+            return Ok(None);
+        };
+        let base = super::document_base(state);
+        Ok(Some(Self {
+            url: parser_host::resolve_resource(client, &base, href)?,
+            cors: parser_host::cors_attr(document, node),
+            integrity: parser_host::integrity_attr(document, node),
+        }))
+    }
 }
 
 struct ResourceQueue {
@@ -143,7 +172,7 @@ impl ResourceQueue {
     }
     fn has_stylesheets(&self, viewport: (f32, f32)) -> bool {
         self.pending.values().any(|(value, _)| {
-            matches!(value, Consumer::Sheet { media, .. }
+            matches!(value, Consumer::Sheet { media, parser_inserted: true, .. }
             if css::stylesheet_media_applies(media, viewport))
         })
     }
@@ -214,7 +243,8 @@ pub struct DocumentSession {
     asynchronous: VecDeque<Scheduled>,
     ordered_dynamic: VecDeque<Scheduled>,
     messages: Vec<(NodeId, String)>,
-    cached_image_events: Vec<(NodeId, bool)>,
+    resource_events: Vec<(NodeId, bool)>,
+    sheet_sources: HashMap<NodeId, Arc<StylesheetSource>>,
     images: HashMap<Arc<str>, ImageState>,
     decoded_images: usize,
     classic_bytes: usize,
@@ -292,7 +322,8 @@ impl DocumentSession {
                 asynchronous: VecDeque::new(),
                 ordered_dynamic: VecDeque::new(),
                 messages: vec![],
-                cached_image_events: vec![],
+                resource_events: vec![],
+                sheet_sources: HashMap::new(),
                 images: HashMap::new(),
                 decoded_images,
                 classic_bytes: 0,
@@ -359,6 +390,7 @@ impl DocumentSession {
                 state.parser_wakeup = false;
                 state.dynamic_scripts.pending.clear();
                 state.image_updates.clear();
+                state.link_updates.clear();
             }
             self.module_tasks.stop_queued(realm);
         } else if let Some(parser) = &self.parser
@@ -375,7 +407,7 @@ impl DocumentSession {
         self.asynchronous.clear();
         self.ordered_dynamic.clear();
         self.messages.clear();
-        self.cached_image_events.clear();
+        self.resource_events.clear();
         self.images
             .retain(|_, state| matches!(state, ImageState::Failed));
         page.stats.skipped_resources += self.resources.pending.len();
@@ -506,9 +538,10 @@ impl DocumentSession {
         self.deferred.clear();
         self.asynchronous.clear();
         self.ordered_dynamic.clear();
-        self.cached_image_events.clear();
+        self.resource_events.clear();
         self.messages.clear();
         self.images.clear();
+        self.sheet_sources.clear();
         self.resources.discard_markup_requests();
         self.discarded = 0;
         self.dirty = true;
@@ -570,8 +603,8 @@ impl DocumentSession {
             }
             self.sync_fonts(page)?;
             self.update_resources(page, runtime);
-            if !self.cached_image_events.is_empty() {
-                let events = std::mem::take(&mut self.cached_image_events);
+            if !self.resource_events.is_empty() {
+                let events = std::mem::take(&mut self.resource_events);
                 self.deliver_events(page, runtime, viewport, events)?;
             }
             if let Some(realm) = runtime {
@@ -724,8 +757,8 @@ impl DocumentSession {
         self.flush_parser_discoveries(page, runtime, viewport)?;
         self.sync_fonts(page)?;
         self.update_resources(page, runtime);
-        if !self.cached_image_events.is_empty() {
-            let events = std::mem::take(&mut self.cached_image_events);
+        if !self.resource_events.is_empty() {
+            let events = std::mem::take(&mut self.resource_events);
             self.deliver_events(page, runtime, viewport, events)?;
         }
         page.stats.script_count = self.parser_script_count
@@ -774,6 +807,7 @@ impl DocumentSession {
         let Some(realm) = runtime else {
             return Ok(());
         };
+        self.flush_link_updates(page, realm);
         let updates = std::mem::take(&mut realm.state.borrow_mut().image_updates);
         if !updates.is_empty() {
             let mut state = realm.state.borrow_mut();
@@ -792,7 +826,7 @@ impl DocumentSession {
                     ),
                     Err(_) => {
                         state.invalid_images.insert(node);
-                        self.cached_image_events.push((node, false));
+                        self.resource_events.push((node, false));
                     }
                 }
             }
@@ -814,6 +848,71 @@ impl DocumentSession {
             }
             self.runnable = true;
         }
+        Ok(())
+    }
+
+    fn flush_link_updates(&mut self, page: &mut LoadedPage, realm: &ScriptRuntime) {
+        let updates = std::mem::take(&mut realm.state.borrow_mut().link_updates);
+        for node in updates {
+            let (source, media) = {
+                let state = realm.state.borrow();
+                (
+                    StylesheetSource::from_document(&state, &self.client, node),
+                    Arc::from(state.document.attr(node, "media").unwrap_or("")),
+                )
+            };
+            let result = match source {
+                Ok(Some(source)) => self.queue_stylesheet(page, node, source, media, false),
+                other => {
+                    self.sheet_sources.remove(&node);
+                    self.remove_stylesheet(page, node);
+                    other.map(|_| ())
+                }
+            };
+            if let Err(error) = result {
+                diagnostic(&realm.state, error);
+                page.stats.skipped_resources += 1;
+                self.resource_events.push((node, false));
+            }
+        }
+    }
+
+    fn remove_stylesheet(&mut self, page: &mut LoadedPage, node: NodeId) {
+        if let Some(old) = page.linked_stylesheets.remove(&node) {
+            self.css_bytes = self.css_bytes.saturating_sub(old.len());
+            self.resources_dirty = true;
+        }
+    }
+
+    fn queue_stylesheet(
+        &mut self,
+        page: &mut LoadedPage,
+        node: NodeId,
+        source: StylesheetSource,
+        media: Arc<str>,
+        parser_inserted: bool,
+    ) -> Result<(), String> {
+        if self.sheet_sources.get(&node).is_some_and(|old| old.as_ref() == &source) {
+            return Ok(());
+        }
+        self.sheet_sources.remove(&node);
+        self.remove_stylesheet(page, node);
+        let request = resource_request(
+            source.url.clone(),
+            &self.client,
+            ResourceKind::Stylesheet,
+            source.cors,
+            source.integrity.clone(),
+            ResourceQueue::queue_deadline(),
+        );
+        let source = Arc::new(source);
+        self.resources.queue(request, Consumer::Sheet {
+            node,
+            source: source.clone(),
+            media,
+            parser_inserted,
+        })?;
+        self.sheet_sources.insert(node, source);
         Ok(())
     }
 
@@ -883,18 +982,8 @@ impl DocumentSession {
                     integrity,
                     media,
                 } => {
-                    let request = resource_request(
-                        url,
-                        &self.client,
-                        ResourceKind::Stylesheet,
-                        cors,
-                        integrity,
-                        ResourceQueue::queue_deadline(),
-                    );
-                    if let Err(message) = self
-                        .resources
-                        .queue(request, Consumer::Sheet { node, media })
-                    {
+                    let source = StylesheetSource { url, cors, integrity };
+                    if let Err(message) = self.queue_stylesheet(page, node, source, media, true) {
                         self.messages.push((node, message));
                     }
                 }
@@ -1148,7 +1237,7 @@ impl DocumentSession {
         }
         let key = image_asset_key(url.as_str(), cors);
         if page.images.contains_key(&key) || page.svg_images.contains_key(&key) {
-            self.cached_image_events.push((node, true));
+            self.resource_events.push((node, true));
             return;
         }
         let key: Arc<str> = Arc::from(key);
@@ -1156,7 +1245,7 @@ impl DocumentSession {
             if let ImageState::Pending(waiters) = state {
                 waiters.push(node);
             } else {
-                self.cached_image_events.push((node, false));
+                self.resource_events.push((node, false));
             }
             return;
         }
@@ -1176,7 +1265,7 @@ impl DocumentSession {
                 Arc::make_mut(&mut page.image_availability)
                     .insert(key.to_string(), crate::loader::ImageAvailability::Failed);
                 self.resources_dirty = true;
-                self.cached_image_events.push((node, false));
+                self.resource_events.push((node, false));
                 self.messages.push((node, message));
             }
         }
@@ -1276,8 +1365,22 @@ impl DocumentSession {
                 }
                 Err(error) => self.modules.fail(key, error),
             },
-            Consumer::Sheet { node, media } => {
-                if let Ok(DocumentResource {
+            Consumer::Sheet { node, source: request, media, .. } => {
+                let admitted_request = self.sheet_sources.get(&node)
+                    .is_some_and(|source| Arc::ptr_eq(source, &request));
+                let (current, media) = runtime.as_ref().map_or((true, media), |realm| {
+                    let state = realm.state.borrow();
+                    let document = &state.document;
+                    let active = document.nodes.get(node.0).is_some()
+                        && parser_host::connected(document, node)
+                        && link_element::stylesheet_href(document, node).is_some();
+                    let unchanged = !state.link_updates.contains(&node)
+                        || StylesheetSource::from_document(&state, &self.client, node)
+                            .is_ok_and(|source| source.as_ref() == Some(request.as_ref()));
+                    (active && unchanged, Arc::from(document.attr(node, "media").unwrap_or("")))
+                });
+                if admitted_request && current
+                    && let Ok(DocumentResource {
                     url,
                     body: ResourceBody::Text(source),
                     ..
@@ -1299,7 +1402,11 @@ impl DocumentSession {
                     accepted = true;
                     self.resources_dirty = true;
                 }
-                events.push(node);
+                if admitted_request && current {
+                    events.push(node);
+                } else if admitted_request {
+                    self.sheet_sources.remove(&node);
+                }
             }
             Consumer::Image(key) => {
                 if let Some(ImageState::Pending(waiters)) = self.images.remove(&key) {

@@ -303,6 +303,53 @@ fn parser_and_dynamic_classic_requests_snapshot_element_or_document_encoding() {
 }
 
 #[test]
+fn inserted_stylesheets_share_the_document_loader_and_ignore_stale_completions() {
+    let (mut page, mut session, mut runtime) = start(r#"
+        <!doctype html><base href="/assets/"><script>
+        var observations = [];
+        var link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.type = 'text/css';
+        link.href = 'old.css';
+        link.onload = event => observations.push(event.isTrusted && event.target === link
+            ? 'load:' + link.href : 'unexpected event');
+        link.onerror = () => observations.push('error');
+        var fragment = document.createDocumentFragment();
+        fragment.appendChild(link);
+        </script>
+    "#);
+    assert!(session.next_resource().is_none());
+    evaluate(&mut runtime, "document.head.appendChild(fragment)");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let old = session.next_resource().expect("connected link request");
+    assert_eq!(old.request.kind, ResourceKind::Stylesheet);
+    assert_eq!(old.request.url.as_str(), "https://example.test/assets/old.css");
+
+    evaluate(&mut runtime, "link.href = 'new.css'");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let new = session.next_resource().expect("replacement stylesheet request");
+    complete(&mut page, &mut session, &mut runtime, old.id, Some(("/assets/old.css", "p { color: red }")));
+    assert!(page.linked_stylesheets.is_empty());
+    assert_eq!(evaluate(&mut runtime, "observations.length"), 0.into());
+    complete(&mut page, &mut session, &mut runtime, new.id, Some(("/assets/new.css", "p { color: green }")));
+    assert!(page.linked_stylesheets.values().any(|source| source.contains("green")));
+    assert_eq!(evaluate(&mut runtime, "observations.join()"), "load:https://example.test/assets/new.css".into());
+
+    evaluate(&mut runtime, "link.href = 'late.css'");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let late = session.next_resource().expect("late stylesheet request");
+    evaluate(&mut runtime, "link.remove()");
+    complete(&mut page, &mut session, &mut runtime, late.id, Some(("/assets/late.css", "p { color: blue }")));
+    assert_eq!(evaluate(&mut runtime, "observations.length"), 1.into());
+    assert!(page.linked_stylesheets.is_empty());
+    evaluate(&mut runtime, "document.head.appendChild(link)");
+    advance_ready(&mut page, &mut session, &mut runtime);
+    let retry = session.next_resource().expect("reconnected stylesheet request");
+    complete(&mut page, &mut session, &mut runtime, retry.id, None);
+    assert_eq!(evaluate(&mut runtime, "observations.at(-1)"), "error".into());
+}
+
+#[test]
 fn device_pixel_ratio_is_available_before_first_script_and_tracks_output_scale() {
     let started = Instant::now();
     let (mut page, mut session) = DocumentSession::start(OpenedPage {

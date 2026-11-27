@@ -121,6 +121,7 @@ struct State {
     style_element_prototype: Value,
     absolute_link_hrefs: HashMap<NodeId, rust_browser_javascript::JsString>,
     image_updates: std::collections::BTreeSet<NodeId>,
+    link_updates: std::collections::BTreeSet<NodeId>,
     invalid_images: std::collections::HashSet<NodeId>,
     character_data_prototype: Value,
     text_prototype: Value,
@@ -579,6 +580,7 @@ fn mutate_attribute(
             state.absolute_link_hrefs.remove(&id);
         }
         image_element::attribute_changed(&mut state, id, &key);
+        link_element::attribute_changed(&mut state, id, &key);
         drop(state);
         frames::attribute_changed(vm, host, id, &key);
         if key == "src" && media::is_media(&host.borrow().document, id) {
@@ -845,6 +847,7 @@ impl ScriptRuntime {
             style_element_prototype: style_element_prototype.clone(),
             absolute_link_hrefs: HashMap::new(),
             image_updates: Default::default(),
+            link_updates: Default::default(),
             invalid_images: Default::default(),
             character_data_prototype: character_data_prototype.clone(),
             window: window.clone(),
@@ -1387,7 +1390,8 @@ impl ScriptRuntime {
             && (state.parser_wakeup
                 || state.dynamic_scripts.has_pending()
                 || state.import_requests.has_pending()
-                || !state.image_updates.is_empty())
+                || !state.image_updates.is_empty()
+                || !state.link_updates.is_empty())
     }
     pub fn take_form_submissions(&self) -> Vec<FormSubmission> {
         self.forms.take_submissions()
@@ -1588,7 +1592,8 @@ impl ScriptRuntime {
             || state.navigation_attached
                 && (state.dynamic_scripts.has_pending()
                     || state.import_requests.has_pending()
-                    || !state.image_updates.is_empty())
+                    || !state.image_updates.is_empty()
+                    || !state.link_updates.is_empty())
         {
             return Some(Instant::now());
         }
