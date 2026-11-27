@@ -20,6 +20,9 @@ pub trait HostIndexedProperties {
 /// properties and properties on the prototype chain hide supported names.
 /// Getters and key enumeration must not execute author code.
 pub trait HostNamedProperties {
+    fn overrides_prototype(&self) -> bool {
+        false
+    }
     fn names(&self) -> Vec<JsString>;
     fn get(&self, name: &JsString) -> Option<Value>;
     fn set(&self, vm: &mut Vm, name: JsString, value: Value) -> Result<(), JsError>;
@@ -73,6 +76,9 @@ impl Vm {
         let object = self.heap.object(id)?;
         if object.properties.contains_key(name) {
             return Ok(false);
+        }
+        if object.named_properties.as_ref().is_some_and(|provider| provider.overrides_prototype()) {
+            return Ok(true);
         }
         let mut current = object.prototype;
         for _ in 0..1024 {

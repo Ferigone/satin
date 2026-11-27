@@ -52,6 +52,26 @@ fn typed_form_controls_expose_prototype_accessors_used_by_web_frameworks() {
             select.selectedIndex === 1 && select.value === "two" && input.checked && receiverRejected
     "#, true);
 }
+
+#[test]
+fn dataset_reflects_attributes_and_keeps_name_order_and_wrapper_identity() {
+    let (_, mut runtime) = realm("<div id='target' data-foo-bar='one' data-order='two'></div>");
+    js(&mut runtime, r#"
+        const target = document.getElementById("target");
+        const data = target.dataset;
+        const initial = Object.keys(data).join(",") === "fooBar,order" && data.fooBar === "one";
+        data.version = 123;
+        data.toString = "custom";
+        target.setAttribute("data-order", "updated");
+        delete data.fooBar;
+        let invalid = false;
+        try { data["bad-key"] = "no"; } catch (error) { invalid = error.name === "SyntaxError"; }
+        initial && data === target.dataset && data instanceof DOMStringMap &&
+            target.getAttribute("data-version") === "123" && data.order === "updated" &&
+            data.toString === "custom" && !target.hasAttribute("data-foo-bar") &&
+            Object.keys(data).join(",") === "order,version,toString" && invalid
+    "#, true);
+}
 fn js(runtime: &mut ScriptRuntime, source: &str, expected: impl Into<Value>) {
     assert_eq!(
         runtime
