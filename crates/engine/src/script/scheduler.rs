@@ -16,6 +16,8 @@ use std::{
 const MAX_TIMERS: usize = 1024;
 const WINDOW_TASK_CPU_BUDGET: Duration = Duration::from_secs(2);
 const WINDOW_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(30);
+const INPUT_TASK_CPU_TIMEOUT: Duration = Duration::from_secs(20);
+const INPUT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(45);
 const SCRIPT_TASK_WALL_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_FRAME_CALLBACKS: usize = 1024;
 const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
@@ -627,7 +629,12 @@ pub(super) fn run_input_task<T>(
     callback: impl FnOnce(&mut Vm) -> Result<T, JsError>,
 ) -> Result<T, JsError> {
     // First interaction can run a deferred script bootstrap plus its microtasks.
-    run_script_task(vm, callback)
+    vm.with_task_cpu_budget(
+        u64::MAX,
+        INPUT_TASK_CPU_TIMEOUT,
+        Instant::now() + INPUT_TASK_WALL_TIMEOUT,
+        callback,
+    )
 }
 
 pub(super) fn run_timers(vm: &mut Vm, state: &Shared) {

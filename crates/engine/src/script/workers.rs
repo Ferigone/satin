@@ -590,13 +590,13 @@ impl Workers {
                         Ok(data) => self.messages.received_from_peer(vm, "message", data)?,
                         Err(_) => self.messages.received_from_peer(vm, "messageerror", Value::Null)?,
                     };
-                    self.events.dispatch(vm, object, event)?;
+                    self.events.dispatch_scheduled(vm, object, event)?;
                 }
                 Notice::Error(message) => {
                     let event = vm.new_object_with_prototype(self.events.event_proto.clone())?;
                     let event = event_target::init_event(vm, event, "error".into(), [false, true, false], true)?;
                     vm.set_property(event.clone(), "message", Value::from(message.as_str()))?;
-                    if self.events.dispatch(vm, object, event)?
+                    if self.events.dispatch_scheduled(vm, object, event)?
                         && let Some(document) = self.document.upgrade()
                     {
                         diagnostic(&document, format!("Worker: {message}"));

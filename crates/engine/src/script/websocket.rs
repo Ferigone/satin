@@ -186,7 +186,7 @@ impl Sockets {
                             clean,
                         },
                     )?;
-                    delivery.events.dispatch(vm, object.clone(), event)?;
+                    delivery.events.dispatch_scheduled(vm, object.clone(), event)?;
                     Ok(())
                 })();
                 update_liveness(vm, &object);
@@ -204,7 +204,7 @@ impl SocketEvents {
         let event = self
             .events
             .make_event(vm, None, kind.into(), [false; 3], true)?;
-        self.events.dispatch(vm, object.clone(), event).map(|_| ())
+        self.events.dispatch_scheduled(vm, object.clone(), event).map(|_| ())
     }
 
     fn send_message(
@@ -219,7 +219,7 @@ impl SocketEvents {
             data,
             socket.url.origin().ascii_serialization(),
         )?;
-        self.events.dispatch(vm, object.clone(), event).map(|_| ())
+        self.events.dispatch_scheduled(vm, object.clone(), event).map(|_| ())
     }
 }
 

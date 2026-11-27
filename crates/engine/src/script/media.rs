@@ -4,8 +4,9 @@ mod mse;
 mod quality;
 
 use super::{
-    ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, blobs, diagnostic, dispatch_checked,
-    document_base, drain_microtask_queue, getter, mark_dirty, node, scheduler, set_attribute, webidl,
+    DispatchMode, ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, blobs, diagnostic,
+    dispatch_checked, dispatch_checked_with_mode, document_base, drain_host_microtasks, getter,
+    mark_dirty, node, scheduler, set_attribute, webidl,
 };
 use crate::{
     canvas::Frame,
@@ -467,6 +468,11 @@ fn settle(
 
 fn event(vm: &mut Vm, state: &Shared, id: NodeId, name: &str) -> Result<(), JsError> {
     dispatch_checked(vm, state, Some(id), name, false, false, &[]).map(|_| ())
+}
+
+fn queued_event(vm: &mut Vm, state: &Shared, id: NodeId, name: &str) -> Result<(), JsError> {
+    dispatch_checked_with_mode(vm, state, Some(id), name, false, false, &[], DispatchMode::Host)
+        .map(|_| ())
 }
 
 fn load(vm: &mut Vm, state: &Shared, id: NodeId) -> Result<bool, JsError> {
@@ -1082,7 +1088,7 @@ pub(super) fn run_stream_tasks(vm: &mut Vm, state: &Shared) {
             if !mse::run_next(vm, state)? {
                 return Ok(false);
             }
-            drain_microtask_queue(vm, state)?;
+            drain_host_microtasks(vm, state)?;
             Ok(true)
         });
         match result {
@@ -1387,9 +1393,9 @@ impl super::ScriptRuntime {
                 settle(vm, plays, cause)?;
             }
             for name in events {
-                event(vm, state, id, name)?;
+                queued_event(vm, state, id, name)?;
             }
-            drain_microtask_queue(vm, state)
+            drain_host_microtasks(vm, state)
         }) {
             diagnostic(state, format!("Media element: {error}"));
         }

@@ -425,7 +425,7 @@ impl Events {
     }
 }
 
-type ListenerCall = fn(&mut Vm, Value, Value, &[Value]) -> Result<Value, JsError>;
+pub(super) type ListenerCall = fn(&mut Vm, Value, Value, &[Value]) -> Result<Value, JsError>;
 
 impl EventData {
     pub(super) fn begin(

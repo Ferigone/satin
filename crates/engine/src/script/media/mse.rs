@@ -379,7 +379,7 @@ pub(super) fn run_next(vm: &mut Vm, state: &Shared) -> Result<bool, JsError> {
     match task {
         None => return Ok(false),
         Some(Task::RateChange(node)) => {
-            super::event(vm, state, node, "ratechange")?;
+            super::queued_event(vm, state, node, "ratechange")?;
         }
         Some(Task::Event(root, name)) => {
             let events = state
@@ -393,7 +393,7 @@ pub(super) fn run_next(vm: &mut Vm, state: &Shared) -> Result<bool, JsError> {
                 let target = vm.root_value(root).expect("event target rooted");
                 let event = vm.new_object_with_prototype(events.event_proto.clone())?;
                 let event = event_target::init_event(vm, event, name.into(), [false; 3], true)?;
-                events.dispatch(vm, target, event)
+                events.dispatch_scheduled(vm, target, event)
             })();
             vm.unroot(root);
             result?;

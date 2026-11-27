@@ -1272,7 +1272,7 @@ impl ScriptRuntime {
         let mode = if target.is_none() && kind == "load" {
             DispatchMode::WindowLoad
         } else {
-            DispatchMode::Lifecycle
+            DispatchMode::Host
         };
         let result = scheduler::run_script_task(&mut self.vm, |vm| {
             dispatch_checked_with_mode(vm, &state, target, kind, bubbles, false, &[], mode)?;
@@ -1635,7 +1635,7 @@ impl ScriptRuntime {
                     if !self.sockets.dispatch_next(vm, &self.socket_events)? {
                         return Ok(false);
                     }
-                    drain_microtask_queue(vm, &state)?;
+                    drain_host_microtasks(vm, &state)?;
                     Ok(true)
                 });
                 match result {
@@ -1656,7 +1656,7 @@ impl ScriptRuntime {
                     if !self.workers.dispatch_next(vm)? {
                         return Ok(false);
                     }
-                    drain_microtask_queue(vm, &state)?;
+                    drain_host_microtasks(vm, &state)?;
                     Ok(true)
                 });
                 match result {
@@ -2843,14 +2843,14 @@ fn handler_source(state: &State, target: Option<NodeId>, event: &str) -> Option<
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     Ordinary,
-    Lifecycle,
+    Host,
     WindowLoad,
 }
 
 impl DispatchMode {
     fn checkpoint(self, vm: &mut Vm, state: &Shared) -> Result<(), JsError> {
         if self != Self::Ordinary {
-            // Lifecycle events start in the host. Cleanup after a callback
+            // Host events start in the host. Cleanup after a callback
             // can run jobs before the next listener because no JS caller is
             // still on the stack (unlike dispatchEvent from a script).
             drain_microtask_queue(vm, state)?;
@@ -2986,6 +2986,11 @@ fn dispatch_prepared_with_mode(
         event_target::DispatchPath::Dom(Rc::downgrade(state), path.clone()),
     )?;
     let root = vm.root(event.clone());
+    let call: event_target::ListenerCall = if mode == DispatchMode::Ordinary {
+        Vm::call
+    } else {
+        Vm::call_at_callback_boundary
+    };
     let result = scheduler::run_script_task(vm, |vm| -> Result<(), JsError> {
         for (name, value) in properties {
             vm.define_data_property(event.clone(), name, value.clone(), false, true, true)?;
@@ -3017,7 +3022,7 @@ fn dispatch_prepared_with_mode(
                 &this,
                 &event,
                 capture,
-                Vm::call,
+                call,
                 |_, error| {
                     report_error(state, ConsolePhase::DomListener, Some(&kind), error, || {
                         format!("{kind}: {error}")
@@ -3067,7 +3072,7 @@ fn dispatch_prepared_with_mode(
                     let args = error_args
                         .as_ref()
                         .map_or(std::slice::from_ref(&event), |args| args.as_slice());
-                    match vm.call(handler, this, args) {
+                    match call(vm, handler, this, args) {
                         Ok(Value::Bool(value))
                             if info.cancelable && value == error_args.is_some() =>
                         {
