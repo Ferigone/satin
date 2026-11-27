@@ -174,7 +174,7 @@ pub struct Vm {
     #[cfg(feature = "media-startup-diagnostics")]
     qa_last_native_site: Option<&'static std::panic::Location<'static>>,
     #[cfg(feature = "media-startup-diagnostics")]
-    qa_work_sites: std::collections::HashMap<(&'static str, u32), u64>,
+    qa_work_sites: Option<std::collections::HashMap<(&'static str, u32), u64>>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_task_heap: (usize, usize),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -183,6 +183,8 @@ pub struct Vm {
     pub(crate) qa_callback_gc: (usize, usize, usize, usize),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     pub(crate) qa_callback_gc_time: Duration,
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    qa_heap_collection_times: (Duration, Duration),
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
     qa_callback_target: Option<ObjectId>,
     #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -348,7 +350,7 @@ impl Vm {
             #[cfg(feature = "media-startup-diagnostics")]
             qa_last_native_site: None,
             #[cfg(feature = "media-startup-diagnostics")]
-            qa_work_sites: Default::default(),
+            qa_work_sites: std::env::var_os("SATIN_QA_WORK_COSTS").is_some().then(Default::default),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_task_heap: (0, 0),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -357,6 +359,8 @@ impl Vm {
             qa_callback_gc: (0, 0, 0, 0),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_callback_gc_time: Duration::ZERO,
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            qa_heap_collection_times: (Duration::ZERO, Duration::ZERO),
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             qa_callback_target: None,
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
@@ -754,7 +758,9 @@ impl Vm {
             {
                 self.qa_native_work = 0;
                 self.qa_last_native_site = None;
-                self.qa_work_sites.clear();
+                if let Some(sites) = &mut self.qa_work_sites {
+                    sites.clear();
+                }
             }
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             {
@@ -762,6 +768,7 @@ impl Vm {
                 self.qa_task_site = Some(std::panic::Location::caller());
                 self.qa_callback_gc = (0, 0, 0, 0);
                 self.qa_callback_gc_time = Duration::ZERO;
+                self.qa_heap_collection_times = (Duration::ZERO, Duration::ZERO);
                 self.qa_callback_target = None;
             }
         }
@@ -1390,13 +1397,25 @@ impl Vm {
                 .values()
                 .filter_map(|(_, value)| value.as_object()),
         );
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let sweep_started = Instant::now();
         let (collected, cleanup) = self.heap.collect(roots, self.atomic_waiters.indefinite_edges());
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        {
+            self.qa_heap_collection_times.0 += sweep_started.elapsed();
+        }
         self.atomic_waiters.retain_live(&self.heap);
         self.schedule_registry_cleanup(cleanup);
         self.inactive_realms
             .retain(|realm, _| self.heap.realm_core(*realm).is_some());
         self.bigint_storage.reclaim();
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let accounting_started = Instant::now();
         self.recompute_memory(additional_roots);
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        {
+            self.qa_heap_collection_times.1 += accounting_started.elapsed();
+        }
         GcStats {
             before,
             after: self.heap.live,
@@ -1632,11 +1651,13 @@ impl Vm {
             let location = std::panic::Location::caller();
             self.qa_native_work = self.qa_native_work.saturating_add(units);
             self.qa_last_native_site = Some(location);
-            let site = (location.file(), location.line());
-            if let Some(total) = self.qa_work_sites.get_mut(&site) {
-                *total = total.saturating_add(units);
-            } else if self.qa_work_sites.len() < 128 {
-                self.qa_work_sites.insert(site, units);
+            if let Some(sites) = &mut self.qa_work_sites {
+                let site = (location.file(), location.line());
+                if let Some(total) = sites.get_mut(&site) {
+                    *total = total.saturating_add(units);
+                } else if sites.len() < 128 {
+                    sites.insert(site, units);
+                }
             }
         }
         self.remaining -= units;
@@ -1665,7 +1686,12 @@ impl Vm {
     ) {
         #[cfg(windows)]
         startup_profile::record_denial();
-        let mut sites = self.qa_work_sites.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>();
+        let mut sites = self
+            .qa_work_sites
+            .iter()
+            .flatten()
+            .map(|(&site, &units)| (site, units))
+            .collect::<Vec<_>>();
         sites.sort_unstable_by_key(|&(site, amount)| (std::cmp::Reverse(amount), site));
         sites.truncate(8);
         qa_budget_with_costs(kind, site, requested, self.remaining, self.qa_native_work, &sites, None);
@@ -2016,11 +2042,13 @@ impl Vm {
         }
         self.qa_report_work_limit("task-deadline-work", self.qa_last_native_site, 0);
         eprintln!(
-            "SATIN_QA_TASK_STATE cells={} estimated={} callback_gc={:?} callback_gc_ms={}{}",
+            "SATIN_QA_TASK_STATE cells={} estimated={} callback_gc={:?} callback_gc_ms={} heap_trace_sweep_ms={} heap_accounting_ms={}{}",
             self.heap.live,
             self.estimated_heap_bytes(),
             self.qa_callback_gc,
             self.qa_callback_gc_time.as_millis(),
+            self.qa_heap_collection_times.0.as_millis(),
+            self.qa_heap_collection_times.1.as_millis(),
             self.diagnostic_source_site(),
         );
     }

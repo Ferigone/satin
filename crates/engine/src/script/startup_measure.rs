@@ -1,6 +1,6 @@
 use super::*;
 use ring::digest::{SHA256, digest};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
 
 pub(super) fn evaluate(
     vm: &mut Vm,
@@ -9,6 +9,10 @@ pub(super) fn evaluate(
     node: NodeId,
     external: bool,
 ) -> Result<Value, JsError> {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    if *DISABLED.get_or_init(|| std::env::var_os("SATIN_QA_DISABLE_SCRIPT_PROFILE").is_some()) {
+        return vm.eval_with_identifier(source, identifier);
+    }
     let (result, measurement) = rust_browser_javascript::startup_profile::measure(|| {
         vm.eval_with_identifier(source, identifier)
     });

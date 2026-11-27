@@ -326,7 +326,13 @@ struct Function {
     function: Func,
     ty: FuncType,
     #[cfg(feature = "media-startup-diagnostics")]
-    trace_name: Option<String>,
+    trace_origin: Option<TrapOrigin>,
+}
+
+#[cfg(feature = "media-startup-diagnostics")]
+enum TrapOrigin {
+    Export(String),
+    TableSlot(usize),
 }
 
 impl Function {
@@ -397,24 +403,34 @@ impl Function {
     fn trace_trap(&self, error: &wasmi::Error) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static TRACES: AtomicUsize = AtomicUsize::new(0);
-        if let (Some(name), Some(trap)) = (&self.trace_name, error.as_trap_code())
+        if let (Some(origin), Some(trap)) = (&self.trace_origin, error.as_trap_code())
             && TRACES.fetch_add(1, Ordering::Relaxed) < 32
         {
-            eprintln!("SATIN_QA_WASM_TRAP export={name} trap={trap:?}");
+            match origin {
+                TrapOrigin::Export(name) => {
+                    eprintln!("SATIN_QA_WASM_TRAP export={name} trap={trap:?}");
+                }
+                TrapOrigin::TableSlot(index) => {
+                    eprintln!("SATIN_QA_WASM_TRAP table_slot={index} trap={trap:?}");
+                }
+            }
         }
     }
 }
 
 #[cfg(feature = "media-startup-diagnostics")]
-fn trap_trace_name(name: &str) -> Option<String> {
+fn trap_trace_origin(name: &str, table_slot: Option<usize>) -> Option<TrapOrigin> {
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
     if !*ENABLED.get_or_init(|| std::env::var_os("SATIN_QA_WASM_TRAPS").is_some()) {
         return None;
     }
+    if let Some(index) = table_slot {
+        return Some(TrapOrigin::TableSlot(index));
+    }
     let safe = !name.is_empty() && name.len() <= 32
         && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_$".contains(&byte));
-    Some(if safe { name } else { "-" }.into())
+    Some(TrapOrigin::Export(if safe { name } else { "-" }.into()))
 }
 
 fn function(
@@ -423,6 +439,7 @@ fn function(
     context: &Value,
     function: Func,
     name: &str,
+    #[cfg(feature = "media-startup-diagnostics")] table_slot: Option<usize>,
 ) -> Result<Value, JsError> {
     let ty = function.ty(&*execution.borrow());
     let length = ty.params().len();
@@ -431,7 +448,7 @@ fn function(
         function,
         ty,
         #[cfg(feature = "media-startup-diagnostics")]
-        trace_name: trap_trace_name(name),
+        trace_origin: trap_trace_origin(name, table_slot),
     });
     let callable = native.clone();
     let captured = context.clone();
@@ -507,7 +524,15 @@ pub(super) fn install_table(vm: &mut Vm, namespace: &Value) {
                 let context = vm
                     .host_slot(&this, CONTEXT)
                     .expect("initialized WebAssembly table");
-                function(vm, &data.execution, &context, func, "")
+                function(
+                    vm,
+                    &data.execution,
+                    &context,
+                    func,
+                    "",
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    Some(index),
+                )
             }
             Some(value) if value.is_null() => Ok(Value::Null),
             Some(_) => Err(JsError::type_error("Unsupported WebAssembly reference")),
@@ -615,7 +640,15 @@ pub(super) fn instantiate(
     let values = vm.new_object_with_prototype(Value::Null)?;
     for (name, export) in exports {
         let value = match export {
-            Extern::Func(func) => function(vm, &execution, &context, func, &name)?,
+            Extern::Func(func) => function(
+                vm,
+                &execution,
+                &context,
+                func,
+                &name,
+                #[cfg(feature = "media-startup-diagnostics")]
+                None,
+            )?,
             Extern::Memory(memory) => {
                 let result = vm.new_object_with_prototype(Value::Object(memory_proto))?;
                 vm.set_host_data(
