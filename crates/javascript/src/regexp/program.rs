@@ -140,12 +140,16 @@ fn disjoint_class_repeat_at(code: &[Op], pc: usize) -> Option<Op> {
     else {
         return None;
     };
-    let Op::Character(Member::Point(delimiter), delimiter_flags) = code.get(*exit)? else {
-        return None;
-    };
+    if !captures.is_empty() { return None; }
+    let next = code.get(*exit)?;
+    // Only the absolute end can satisfy this assertion. No shorter endpoint
+    // of a greedy, capture-free consuming class can match the suffix.
+    if matches!(next, Op::Assert(Assertion::End, local) if !local.has(Flags::MULTILINE)) {
+        return Some(Op::DisjointClassRepeat { minimum: *minimum, maximum: *maximum, exit: *exit });
+    }
+    let Op::Character(Member::Point(delimiter), delimiter_flags) = next else { return None; };
     let unsupported = Flags::IGNORE_CASE | Flags::UNICODE_SETS;
-    if !captures.is_empty()
-        || members.is_empty()
+    if members.is_empty()
         || *delimiter >= 128
         || flags.has(unsupported)
         || delimiter_flags.has(unsupported)
@@ -195,7 +199,12 @@ mod tests {
             (r".*!", "", false),
             (r"[^!]*?!", "", false),
             (r"[^é]*é", "u", false),
-            (r"[^!]*$", "", false),
+            (r"[^!]*$", "", true),
+            (r"[^!]*$", "m", false),
+            (r"(?m:[^!]*$)", "", false),
+            (r"(?i:[a-z]*$)", "", true),
+            (r"(?=[ab]*$)", "", false),
+            (r"([ab])*$", "", false),
         ];
         for (pattern, flags, expected) in cases {
             let program =
@@ -570,7 +579,20 @@ impl Matcher<'_> {
                     let class = &self.program.code[self.pc + 1];
                     let mut count = 0;
                     while maximum.is_none_or(|maximum| count < maximum) {
-                        // Keep the ordinary atom-dispatch and member charges.
+                        if !self.behind && let Op::Class(_, _, _, Some(mask)) = class {
+                            let room = maximum.unwrap_or(usize::MAX) - count;
+                            let end = self.input.len().min(self.cursor.saturating_add(room.min(128)));
+                            let block = &self.input[self.cursor..end];
+                            if block.is_empty() { break; }
+                            let accepted = block.iter().position(|&unit|
+                                unit >= 128 || **mask & (1u128 << unit) == 0).unwrap_or(block.len());
+                            vm.charge_buffer_work(accepted + usize::from(accepted < block.len()))?;
+                            self.cursor += accepted;
+                            count += accepted;
+                            if accepted == block.len() { continue; }
+                            if block[accepted] < 128 { break; }
+                        }
+                        // Non-ASCII points retain the full matcher semantics.
                         vm.consume_work(1)?;
                         if !self.read_class(vm, class)? {
                             break;

@@ -418,7 +418,7 @@ fn match_value(
     for span in spans() {
         vm.consume_work(1)?;
         values.push(if let Some((start, end)) = span {
-            vm.copy_string(&input.as_utf16()[start..end])?
+            vm.string_range(&input, start, end)?
         } else {
             Value::Undefined
         });

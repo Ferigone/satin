@@ -1528,6 +1528,12 @@ impl Vm {
         self.consume_work(units.len())?;
         self.checked_string(JsString::from_utf16_slice(units))
     }
+    pub(crate) fn string_range(&mut self, s: &JsString, start: usize, end: usize) -> Result<Value, JsError> {
+        if start == 0 && end == s.len() {
+            return self.checked_string(s.clone());
+        }
+        self.copy_string(&s.as_utf16()[start..end])
+    }
     pub(crate) fn get(&mut self, receiver: Value, key: &JsString) -> Result<Value, JsError> {
         self.get_string_property(receiver, key, false)
     }

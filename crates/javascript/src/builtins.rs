@@ -1094,12 +1094,12 @@ fn splice_array(vm: &mut Vm, receiver: Value, args: &[Value]) -> Result<Value, J
     Ok(removed)
 }
 
-fn reserve_sort_items(
+fn reserve_sort_items<T>(
     vm: &mut Vm,
-    items: &mut Vec<Value>,
+    items: &mut Vec<T>,
     additional: usize,
 ) -> Result<(), JsError> {
-    vm.reserve_allocation(additional.saturating_mul(size_of::<Value>()))?;
+    vm.reserve_allocation(additional.saturating_mul(size_of::<T>()))?;
     items
         .try_reserve_exact(additional)
         .map_err(|_| JsError::new(ErrorKind::HeapLimit, "Array sort allocation failed"))
@@ -1186,12 +1186,37 @@ pub(crate) fn stable_merge_sort<T: Clone>(
     // Comparisons can run JavaScript and throw. Sort the snapshot before any
     // writes, and take the left item first when two items compare equal.
     let length = items.len();
-    let mut width = 1;
-    while width < length {
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < length {
+        let mut end = start + 1;
+        if end < length {
+            let descending = compare(vm, &items[end], &items[start])? == Ordering::Less;
+            end += 1;
+            while end < length
+                && (compare(vm, &items[end], &items[end - 1])? == Ordering::Less) == descending
+            {
+                end += 1;
+            }
+            if descending {
+                // Equality terminates descending runs, preserving stability.
+                vm.consume_work(end - start)?;
+                items[start..end].reverse();
+            }
+        }
+        if runs.len() == runs.capacity() {
+            let extra = runs.capacity().max(4).min(length - runs.len());
+            reserve_sort_items(vm, &mut runs, extra)?;
+        }
+        runs.push(end);
+        start = end;
+    }
+    while runs.len() > 1 {
         scratch.clear();
-        for start in (0..length).step_by(width * 2) {
-            let end = (start + width * 2).min(length);
-            let middle = (start + width).min(end);
+        let mut start = 0;
+        for pair in (0..runs.len()).step_by(2) {
+            let middle = runs[pair];
+            let end = runs.get(pair + 1).copied().unwrap_or(middle);
             let mut left = start;
             let mut right = middle;
             while left < middle && right < end {
@@ -1206,9 +1231,11 @@ pub(crate) fn stable_merge_sort<T: Clone>(
             vm.consume_work(middle - left + end - right)?;
             scratch.extend_from_slice(&items[left..middle]);
             scratch.extend_from_slice(&items[right..end]);
+            runs[pair/2] = end;
+            start = end;
         }
+        runs.truncate(runs.len().div_ceil(2));
         std::mem::swap(&mut items, &mut scratch);
-        width *= 2;
     }
     Ok(items)
 }
@@ -1550,21 +1577,22 @@ pub(crate) fn find_units(
     if needle.len() > haystack.len() - start {
         return Ok(None);
     }
-    if let [unit] = needle {
-        const CHUNK: usize = 256;
-        for (block, units) in haystack[start..].chunks(CHUNK).enumerate() {
-            let found = units.iter().position(|candidate| candidate == unit);
-            vm.charge_buffer_work(found.map_or(units.len(), |index| index + 1))?;
-            if let Some(index) = found {
-                return Ok(Some(start + block * CHUNK + index));
+    // Only positions with the right first code unit need full comparisons.
+    // The bounded native scan is the same one used for one-unit separators.
+    let mut pos = start;
+    let stop = haystack.len() - needle.len() + 1;
+    while pos < stop {
+        let end = stop.min(pos + 256);
+        let found = haystack[pos..end].iter().position(|&unit| unit == needle[0]);
+        vm.charge_buffer_work(found.map_or(end - pos, |offset| offset + 1))?;
+        if let Some(offset) = found {
+            let i = pos + offset;
+            if equal_units(vm, &haystack[i+1..i+needle.len()], &needle[1..])? {
+                return Ok(Some(i));
             }
-        }
-        return Ok(None);
-    }
-    for i in start..=haystack.len() - needle.len() {
-        vm.tick()?;
-        if equal_units(vm, &haystack[i..i + needle.len()], needle)? {
-            return Ok(Some(i));
+            pos = i + 1;
+        } else {
+            pos = end;
         }
     }
     Ok(None)
@@ -1591,6 +1619,9 @@ pub(crate) fn join_indexed_properties(
             value = vm.invoke(formatter, value, args)?;
         }
         let string = vm.to_string(&value)?;
+        if length == 1 {
+            return vm.checked_string(string);
+        }
         append_units(vm, &mut units, string.as_utf16())?;
     }
     vm.finish_string(units)
@@ -1875,7 +1906,7 @@ fn install_string(vm: &mut Vm) {
                 std::mem::swap(&mut start, &mut end);
             }
             end = end.max(start);
-            vm.copy_string(&s.as_utf16()[start..end])
+            vm.string_range(&s, start, end)
         });
     }
     for name in [
@@ -1996,7 +2027,7 @@ fn install_string(vm: &mut Vm) {
             for _ in 0..limit {
                 vm.tick()?;
                 let end = find_units(vm, s.as_utf16(), delimiter.as_utf16(), start)?;
-                let piece = vm.copy_string(&s.as_utf16()[start..end.unwrap_or(s.len())])?;
+                let piece = vm.string_range(&s, start, end.unwrap_or(s.len()))?;
                 vm.append_array_literal(result.clone(), Some(piece))?;
                 if let Some(end) = end {
                     start = end + delimiter.len();
