@@ -612,3 +612,34 @@ fn long_string_literal_sums_preserve_utf16_and_do_not_form_directive_prologues()
     let source = format!("var s = {parts}; function f() {{ 'use '+'strict'; return this; }} s.length === 1024 && s.charCodeAt(1023) === 55296 && f() === globalThis && ('a' + '2' * 3) === 'a6'");
     assert_eq!(vm.eval(&source).unwrap(), Value::Bool(true));
 }
+
+#[test]
+fn deferred_functions_distinguish_sloppy_and_nested_strict_scopes() {
+    small_stack(|| {
+        let padding = format!("/*{}*/", " ".repeat(64 * 1024));
+        let script = format!(r#"{padding}(function() {{
+            function sloppy(a) {{
+                arguments[0] = 5;
+                with ({{ b: 4 }}) {{ return a + b; }}
+            }}
+            function localStrict() {{
+                "use strict";
+                function inherited() {{ return this; }}
+                return inherited() === undefined;
+            }}
+            function Outer(n) {{
+                this.read = function() {{ return function(value) {{ return n + value; }}; }};
+            }}
+            return sloppy(1) === 9 && localStrict() && new Outer(12).read()(3) === 15;
+        }})()"#);
+        let mut vm = Vm::new();
+        assert_eq!(vm.eval(&script).unwrap(), Value::Bool(true));
+        let invalid = format!(r#"{padding}(function() {{
+            function strictOuter() {{
+                'use strict';
+                function unused() {{ with ({{}}) {{}} }}
+            }}
+        }})()"#);
+        assert_eq!(vm.check_syntax(&invalid).unwrap_err().kind, ErrorKind::SyntaxError);
+    });
+}
