@@ -119,7 +119,7 @@ impl CloneHost {
             return Ok(Some(value));
         }
         match &self.image_data {
-            Some(image_data) => image_data.clone_image_data(vm, source),
+            Some(image_data) => Ok(image_data.clone_image_data(vm, source)?),
             None => Ok(None),
         }
     }
