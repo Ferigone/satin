@@ -624,15 +624,23 @@ fn compilation_budget_charges_syntax_density_and_retains_large_literals() {
 
 #[test]
 fn aggregate_retained_strings_stop_at_a_small_byte_budget() {
+    // Leave room for the built-ins and compilation so the loop reaches the
+    // allocation limit while retaining strings.
+    const BUDGET: usize = 2 * 1024 * 1024;
     let mut vm = Vm::with_limits(VmLimits {
-        max_heap_bytes: 1024 * 1024,
+        max_heap_bytes: BUDGET,
         ..VmLimits::default()
     });
     let error = vm
         .eval("var s='x'.repeat(1024);var kept=[];for(var i=0;i<2000;i++){kept.push(s+i);}")
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::HeapLimit);
-    assert!(vm.estimated_heap_bytes() <= 1024 * 1024 + 1024);
+    let kept = vm.get_global("kept").unwrap();
+    let Value::Number(length) = vm.get_property(kept, "length").unwrap() else {
+        panic!("expected an array length");
+    };
+    assert!(length > 0.0 && length < 2000.0);
+    assert!(vm.estimated_heap_bytes() <= BUDGET + 1024);
     vm.set_global("kept", Value::Null).unwrap();
     vm.set_global("s", Value::Null).unwrap();
     let before = vm.estimated_heap_bytes();
