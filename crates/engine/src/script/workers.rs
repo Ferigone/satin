@@ -63,13 +63,20 @@ struct Connection {
     cancelled: Arc<AtomicBool>,
     lifecycle: CancelSignal,
     done: AtomicBool,
-    budget: Budget,
+    inbound_budget: Budget,
+    outbound_budget: Budget,
     task_budget: Budget,
     wake: Arc<OnceLock<Wake>>,
 }
 
 impl Connection {
-    fn new(id: u64, budget: Budget, task_budget: Budget, wake: Arc<OnceLock<Wake>>) -> Self {
+    fn new(
+        id: u64,
+        inbound_budget: Budget,
+        outbound_budget: Budget,
+        task_budget: Budget,
+        wake: Arc<OnceLock<Wake>>,
+    ) -> Self {
         Self {
             id,
             to_worker: Mailbox::default(),
@@ -77,7 +84,8 @@ impl Connection {
             cancelled: Arc::new(AtomicBool::new(false)),
             lifecycle: CancelSignal::new(),
             done: AtomicBool::new(false),
-            budget,
+            inbound_budget,
+            outbound_budget,
             task_budget,
             wake,
         }
@@ -97,14 +105,15 @@ impl Connection {
     }
 
     fn stop(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Release);
+        self.outbound_budget.notify_cancelled();
         self.to_window.close();
         self.close_ingress();
     }
 
     fn report_error(&self, message: &str) {
         let message: String = message.chars().take(512).collect();
-        if let Ok(charge) = self.budget.reserve(message.capacity() + 128)
+        if let Some(charge) = self.outbound_budget.reserve_notice(message.capacity() + 128)
             && self.to_window.send(Envelope(Notice::Error(message), charge))
         {
             self.wake_window();
@@ -112,7 +121,7 @@ impl Connection {
     }
 
     fn report_console(&self, level: devtools_console::ConsoleLevel, text: String, truncated: bool) {
-        if let Ok(charge) = self.budget.reserve(text.capacity() + 128)
+        if let Some(charge) = self.outbound_budget.reserve_notice(text.capacity() + 128)
             && self.to_window.send(Envelope(Notice::Console { level, text, truncated }, charge))
         {
             self.wake_window();
@@ -235,7 +244,8 @@ struct Store {
     next_id: u64,
     last_dispatch: u64,
     active: BTreeMap<u64, ActiveWorker>,
-    budget: Budget,
+    inbound_budget: Budget,
+    outbound_budget: Budget,
     task_budget: Budget,
     wake: Arc<OnceLock<Wake>>,
 }
@@ -334,7 +344,7 @@ fn run_worker(
             if post(
                 vm,
                 args,
-                Some(&parent.budget),
+                Some(&parent.outbound_budget),
                 send_exception.get().expect("worker DOMException installed"),
                 Some(&parent.to_window),
                 |packet| {
@@ -383,6 +393,11 @@ fn run_worker(
                 prefer_fetch,
             )
         };
+        // Wait between turns, after releasing the ingress mailbox lock. The
+        // current turn never blocks while posting a message to the window.
+        if !connection.outbound_budget.wait_for_turn(&connection.cancelled) {
+            break;
+        }
         ran_timer = matches!(&input, Received::Deadline);
         let result = match input {
             Received::Message(Envelope(task, _charge)) => {
@@ -466,7 +481,8 @@ impl Workers {
             let id = state.next_id;
             let connection = Arc::new(Connection::new(
                 id,
-                state.budget.clone(),
+                state.inbound_budget.clone(),
+                state.outbound_budget.clone(),
                 state.task_budget.clone(),
                 state.wake.clone(),
             ));
@@ -664,8 +680,19 @@ mod worker_lifecycle_tests {
             0,
             Budget::default(),
             Budget::default(),
+            Budget::default(),
             Arc::default(),
         ))
+    }
+
+    #[test]
+    fn full_worker_output_leaves_room_for_commands_from_the_window() {
+        let connection = connection();
+        let _first = connection.outbound_budget.reserve(MAX_PACKET_BYTES).unwrap();
+        let _second = connection.outbound_budget.reserve(MAX_PACKET_BYTES).unwrap();
+
+        assert!(connection.outbound_budget.reserve(1).is_err());
+        assert!(connection.inbound_budget.reserve(MAX_PACKET_BYTES).is_ok());
     }
 
     #[test]
@@ -802,7 +829,7 @@ pub(super) fn install(
         post(
             vm,
             args,
-            link.as_ref().map(|link| &link.budget),
+            link.as_ref().map(|link| &link.inbound_budget),
             messaging.exception,
             link.as_ref().map(|link| &link.to_worker),
             |packet| {
