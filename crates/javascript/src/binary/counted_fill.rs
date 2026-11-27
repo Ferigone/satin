@@ -113,10 +113,9 @@ impl Vm {
                 .unwrap()
                 .value = Value::from(end - 1);
             self.binary_work((end - begin) * width)?;
-            let storage = self
+            let mut storage = self
                 .buffer_data_mut(view.view.buffer)?
-                .bytes
-                .as_mut()
+                .write()
                 .unwrap();
             let block = &mut storage[range.start + begin * width..range.start + end * width];
             if all_one_byte {

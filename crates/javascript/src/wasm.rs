@@ -1,6 +1,7 @@
-//! JavaScript embedding for a bounded, straight-line i32 WebAssembly core.
+//! JavaScript WebAssembly objects and execution backends.
 mod decode;
 mod memory;
+pub(crate) mod native;
 
 use crate::{
     ErrorKind, JsError, ObjectId, Value, Vm,
@@ -8,7 +9,6 @@ use crate::{
     heap::{ObjectKind, Property, PropertyKind},
     vm::to_i32,
 };
-pub(crate) use decode::Module;
 use decode::{ExportKind, ImportKind, Op, Signature, allocation_error, compile_error};
 pub(crate) use memory::Memory;
 use std::{mem::size_of, rc::Rc};
@@ -31,6 +31,20 @@ fn scratch<T>(vm: &mut Vm, capacity: usize) -> Result<Vec<T>, JsError> {
     Ok(values)
 }
 
+pub(crate) enum Module {
+    Simple(decode::Module),
+    Native(native::Module),
+}
+
+impl Module {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Simple(module) => module.retained_bytes(),
+            Self::Native(module) => module.retained_bytes(),
+        }
+    }
+}
+
 fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
     let size = vm
         .buffer_source_len(bytes)?
@@ -43,7 +57,13 @@ fn decode_source(vm: &mut Vm, bytes: &Value) -> Result<Module, JsError> {
     let bytes = vm
         .copy_buffer_source(bytes)?
         .ok_or_else(|| JsError::type_error("Expected a WebAssembly BufferSource"))?;
-    decode::decode(vm, bytes)
+    match decode::decode(vm, bytes.clone()) {
+        Ok(module) => Ok(Module::Simple(module)),
+        Err(error) if error.kind == ErrorKind::CompileError => {
+            native::Module::compile(vm, &bytes).map(Module::Native)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn create_module(vm: &mut Vm, bytes: &Value, prototype: ObjectId) -> Result<Value, JsError> {
@@ -76,7 +96,7 @@ fn validate_import_object(imports: &Value) -> Result<(), JsError> {
 
 fn link(
     vm: &mut Vm,
-    module: &Module,
+    module: &decode::Module,
     import_object: &Value,
 ) -> Result<(Value, Option<ObjectId>), JsError> {
     validate_import_object(import_object)?;
@@ -149,6 +169,9 @@ fn invoke_export(
     arguments: &[Value],
 ) -> Result<Value, JsError> {
     let module = module_data(vm, module_object).expect("traced WebAssembly module");
+    let Module::Simple(module) = module.as_ref() else {
+        unreachable!("simple WebAssembly export")
+    };
     let signature = module.signature(index);
     let function = index
         .checked_sub(module.imported_functions.len())
@@ -279,7 +302,7 @@ fn memory_range(
         })
 }
 
-fn initialize_memory(vm: &mut Vm, module: &Module, memory: ObjectId) -> Result<(), JsError> {
+fn initialize_memory(vm: &mut Vm, module: &decode::Module, memory: ObjectId) -> Result<(), JsError> {
     let buffer = current_buffer(vm, memory);
     let length = vm.wasm_buffer_bytes(buffer).len();
     // Check all writes before changing any bytes in an imported memory.
@@ -307,12 +330,18 @@ fn create_instance(
 ) -> Result<Value, JsError> {
     let module = module_data(vm, &module_object)
         .ok_or_else(|| JsError::type_error("Expected a WebAssembly.Module"))?;
-    let (imports, mut memory) = link(vm, &module, import_object)?;
+    let module = match module.as_ref() {
+        Module::Native(module) => {
+            return native::instantiate(vm, module, module_object, import_object, prototype, memory_proto);
+        }
+        Module::Simple(module) => module,
+    };
+    let (imports, mut memory) = link(vm, module, import_object)?;
     if let Some(limits) = module.defined_memory {
         memory = memory::create(vm, limits, memory_proto)?.as_object();
     }
     if let Some(memory) = memory {
-        initialize_memory(vm, &module, memory)?;
+        initialize_memory(vm, module, memory)?;
     }
     vm.ensure_allocation(384)?;
     let exports = vm.new_object_with_prototype(Value::Null)?;
@@ -518,6 +547,7 @@ pub(crate) fn install(vm: &mut Vm) {
     let namespace = vm.new_object();
     tag(vm, &namespace, "WebAssembly");
     let memory_proto = memory::install(vm, &namespace);
+    native::install_table(vm, &namespace);
     let module = vm.new_object();
     let instance = vm.new_object();
     tag(vm, &module, "WebAssembly.Module");

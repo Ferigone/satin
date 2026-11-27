@@ -460,6 +460,20 @@ pub(super) fn install(vm: &mut Vm, fetch: &Shared, page: &LoadedPage) -> Result<
                 }
                 vm.charge_buffer_work(length)?;
                 request.body = Some(Arc::new(vm.fixed_buffer_source_bytes(&body)?.to_vec()));
+            } else if let Some(blob) = crate::script::blobs::get(vm, &body) {
+                let (bytes, range) = blob.shared_bytes();
+                if range.len() > FETCH_BODY_LIMIT {
+                    return Err(JsError::type_error("XMLHttpRequest body exceeds byte limit"));
+                }
+                if !blob.mime.is_empty() {
+                    super::add_content_type(&mut request.headers, Some(&blob.mime))?;
+                }
+                request.body = Some(if range.len() == bytes.len() {
+                    bytes
+                } else {
+                    vm.charge_buffer_work(range.len())?;
+                    Arc::new(bytes[range].to_vec())
+                });
             } else {
                 if body.as_string().is_none() {
                     return Err(unsupported("XMLHttpRequest request body type is not implemented"));

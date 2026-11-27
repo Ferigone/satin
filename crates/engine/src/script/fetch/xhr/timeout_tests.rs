@@ -45,6 +45,20 @@ fn response(path: &str, text: &str) -> WebResponse {
 }
 
 #[test]
+fn send_accepts_a_blob_slice_and_keeps_its_content_type() {
+    let mut rt = realm();
+    rt.eval(r#"
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/echo");
+        xhr.send(new Blob(["-measure-"]).slice(1, 8, "text/plain"));
+    "#).unwrap();
+    let job = rt.take_network_jobs().pop().unwrap();
+    assert_eq!(job.request.body.as_deref().unwrap().as_slice(), b"measure");
+    assert!(job.request.headers.iter().any(|(name, value)|
+        name == "content-type" && value == "text/plain"));
+}
+
+#[test]
 fn timeout_setter_retains_the_original_start_and_zero_disables_an_armed_deadline() {
     let mut rt = realm();
     rt.eval(

@@ -203,14 +203,13 @@ fn parse(
     vm.binary_work(input.len())?;
     if let Some(target) = target {
         let range = vm.require_view_range(target.view, 1)?;
-        let dst = &mut vm
-            .buffer_data_mut(target.view.buffer)?
-            .bytes
-            .as_mut()
-            .unwrap()[range];
-        let (read, written) = decode(codec, input, dst.len(), |at, bytes| {
-            dst[at..at + bytes.len()].copy_from_slice(bytes)
-        })?;
+        let (read, written) = {
+            let mut data = vm.buffer_data_mut(target.view.buffer)?.write().unwrap();
+            let dst = &mut data[range];
+            decode(codec, input, dst.len(), |at, bytes| {
+                dst[at..at + bytes.len()].copy_from_slice(bytes)
+            })?
+        };
         let result = vm.new_object();
         for (key, value) in [("read", read), ("written", written)] {
             vm.define_data_property(result.clone(), key, value.into(), true, true, true)?;
@@ -246,7 +245,7 @@ fn format(vm: &mut Vm, receiver: Value, args: &[Value], base64: bool) -> Result<
     };
     vm.ensure_string_allocation(n_out)?;
     vm.binary_work(n_out)?;
-    let src = &vm.buffer_data(target.view.buffer)?.bytes.as_ref().unwrap()[range];
+    let src = &vm.buffer_data(target.view.buffer)?.read().unwrap()[range];
     let mut out = Vec::new();
     out.try_reserve_exact(n_out)
         .map_err(|_| allocation_error())?;

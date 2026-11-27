@@ -356,7 +356,7 @@ impl BlobFactory {
                 Part::Text(text) => bytes.extend_from_slice(text.as_bytes()),
                 Part::Blob(blob) => bytes.extend_from_slice(blob.bytes()),
                 Part::Buffer(buffer) => {
-                    bytes.extend_from_slice(vm.fixed_buffer_source_bytes(buffer)?);
+                    bytes.extend_from_slice(&vm.fixed_buffer_source_bytes(buffer)?);
                 }
             }
         }

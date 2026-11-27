@@ -32,6 +32,84 @@ fn flush(vm: &mut Vm) {
 }
 
 #[test]
+fn core_wasm_supports_typed_imports_tables_and_live_linear_memory() {
+    let mut vm = Vm::new();
+    let bytes = wat::parse_str(r#"
+        (module
+           (import "env" "callback" (func $callback (param i64 f64) (result i64)))
+           (type $unary (func (param i32) (result i32)))
+           (table (export "table") 1 funcref)
+           (memory (export "memory") 1 4)
+           (global $calls (mut i32) (i32.const 0))
+           (func $increment (type $unary)
+              local.get 0 i32.const 1 i32.add)
+           (elem (i32.const 0) $increment)
+           (func (export "indirect") (param i32) (result i32)
+              local.get 0 i32.const 0 call_indirect (type $unary))
+           (func (export "load") (param i32) (result i32)
+              local.get 0 i32.load8_u)
+           (func (export "run") (param i64 f64) (result i64)
+              global.get $calls i32.const 1 i32.add global.set $calls
+              i32.const 0 i32.const 42 i32.store8
+              local.get 0 local.get 1 call $callback)
+           (func (export "count") (result i32) global.get $calls)
+           (func (export "grow") (result i32) i32.const 1 memory.grow))
+    "#).unwrap();
+    let input = vm.new_uint8_array(bytes).unwrap();
+    vm.set_global("input", input).unwrap();
+    assert_eq!(vm.eval(r#"
+        var ex, memory, old, array, seen, fail = false, kept;
+        var marker = {};
+        ex = new WebAssembly.Instance(new WebAssembly.Module(input), {env: {
+            callback(a, b) {
+                if (fail) throw marker;
+                seen = [a, b, array[0], ex.count()];
+                array[1] = 99;
+                return a + 1n;
+            }
+        }}).exports;
+        memory = ex.memory;
+        old = memory.buffer;
+        array = new Uint8Array(old);
+        kept = ex.run;
+        let invoked = kept(4294967296n, 2.5);
+        let ok = invoked === 4294967297n && seen[0] === 4294967296n &&
+            seen[1] === 2.5 && seen[2] === 42 && seen[3] === 1 &&
+            ex.load(1) === 99 && ex.table instanceof WebAssembly.Table &&
+            ex.table.length === 1 && ex.table.get(0)(41) === 42 &&
+            ex.indirect(41) === 42 && memory.buffer === old;
+        var raised = false;
+        fail = true;
+        try { kept(0n, 0); } catch (error) { raised = error === marker; }
+        let entry = ex.table.get(0);
+        let grown = ex.table.grow(1) === 1 && ex.table.get(1) === null;
+        ex.table.set(0, null);
+        let cleared = ex.table.get(0) === null;
+        ex.table.set(0, entry);
+        ex.table.set(1, entry);
+        let tableWorks = grown && cleared && ex.table.get(1)(41) === 42 && ex.indirect(41) === 42;
+        ok && raised && ex.grow() === 1 && old.detached && array.length === 0 &&
+            memory.buffer.byteLength === 131072 && new Uint8Array(memory.buffer)[1] === 99 &&
+            memory.grow(0) === 2 && memory.buffer.byteLength === 131072 && tableWorks
+    "#).unwrap(), Value::Bool(true));
+    vm.collect_garbage();
+    assert_eq!(vm.eval("ex.table.get(0)(41)").unwrap(), Value::from(42));
+}
+
+#[test]
+fn core_wasm_checks_loop_fuel_in_the_current_js_task() {
+    let mut vm = Vm::new();
+    let bytes = wat::parse_str(r#"(module (func (export "spin") (loop br 0)))"#).unwrap();
+    let input = vm.new_uint8_array(bytes).unwrap();
+    vm.set_global("input", input).unwrap();
+    vm.eval("var spin = new WebAssembly.Instance(new WebAssembly.Module(input)).exports.spin")
+        .unwrap();
+    let error = vm.eval("spin()").unwrap_err();
+    assert_eq!(error.kind, rust_browser_javascript::ErrorKind::ExecutionLimit);
+    assert_eq!(vm.eval("2 + 2").unwrap(), Value::from(4));
+}
+
+#[test]
 fn bytes_use_the_visible_view_and_call_the_javascript_import() {
     let mut vm = fixture();
     vm.eval(

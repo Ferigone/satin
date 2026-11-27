@@ -44,13 +44,13 @@ impl TextDecoder {
         })?;
         output.resize(capacity, 0);
         let bytes = if input.is_undefined() {
-            &[]
+            rust_browser_javascript::BufferRead::Owned(&[])
         } else {
             vm.fixed_buffer_source_bytes(&input)?
         };
         let decoded = if self.fatal {
             let (result, _, written) =
-                decoder.decode_to_utf16_without_replacement(bytes, &mut output, !stream);
+                decoder.decode_to_utf16_without_replacement(&bytes, &mut output, !stream);
             match result {
                 DecoderResult::InputEmpty => Ok(written),
                 DecoderResult::OutputFull => Err(output_limit()),
@@ -59,12 +59,13 @@ impl TextDecoder {
                 )),
             }
         } else {
-            let (result, _, written, _) = decoder.decode_to_utf16(bytes, &mut output, !stream);
+            let (result, _, written, _) = decoder.decode_to_utf16(&bytes, &mut output, !stream);
             match result {
                 CoderResult::InputEmpty => Ok(written),
                 CoderResult::OutputFull => Err(output_limit()),
             }
         };
+        drop(bytes);
         if !stream
             || decoded
                 .as_ref()
@@ -207,7 +208,7 @@ fn install_encoder(vm: &mut Vm) -> Result<(), JsError> {
         }
         let capacity = vm.fixed_buffer_source_bytes(destination)?.len();
         vm.charge_work(text.len().min(capacity.saturating_add(2)))?;
-        let (read, written) = encode_into(&text, vm.fixed_uint8_array_bytes_mut(destination)?);
+        let (read, written) = encode_into(&text, &mut vm.fixed_uint8_array_bytes_mut(destination)?);
         let result = vm.new_object();
         vm.define_data_property(result.clone(), "read", read.into(), true, true, true)?;
         vm.define_data_property(result.clone(), "written", written.into(), true, true, true)?;

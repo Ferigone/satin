@@ -39,7 +39,7 @@ impl Vm {
         })?;
         let buffer = self.buffer_data(source)?;
         Ok((
-            buffer.bytes.as_ref().ok_or(detached())?.len(),
+            buffer.length().ok_or(detached())?,
             buffer.maximum,
             buffer.immutable,
         ))
@@ -116,6 +116,7 @@ impl Vm {
             .allocate_constructed(
                 ObjectKind::ArrayBuffer(Buffer {
                     bytes: None,
+                    linear: None,
                     maximum: None,
                     wasm: false,
                     immutable: false,
@@ -161,6 +162,7 @@ impl Vm {
             .buffer_data_mut(destination)
             .expect("preallocated transfer destination") = Buffer {
             bytes: Some(bytes),
+            linear: None,
             maximum,
             wasm: false,
             immutable: false,

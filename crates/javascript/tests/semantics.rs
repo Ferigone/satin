@@ -655,6 +655,22 @@ fn error_stack_contains_the_message_without_calling_an_installed_getter() {
     "#).unwrap(), Value::Bool(true));
 }
 #[test]
+fn error_stack_can_be_replaced_with_arbitrary_values() {
+    let mut vm = Vm::new();
+    assert_eq!(vm.eval(r#"
+        const error = new Error("first");
+        const frames = [];
+        error.stack = frames;
+        const first = error.stack === frames && !Object.keys(error).includes("stack");
+        (new TypeError()).stack = undefined;
+        error.stack = undefined;
+        const own = Object.hasOwn(error, "stack") && error.stack === undefined;
+        Error.prototype.stack = null;
+        first && own && Object.hasOwn(Error.prototype, "stack") && Error.prototype.stack === null
+    "#).unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn one_object_cannot_bypass_the_aggregate_property_budget() {
     let mut vm = Vm::with_limits(VmLimits {
         max_heap_bytes: 512 * 1024,

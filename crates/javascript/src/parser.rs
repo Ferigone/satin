@@ -18,6 +18,23 @@ const MAX_PARSER_DEPTH: usize = 24;
 const MAX_AST_DEPTH: usize = 64;
 const TOKEN_WINDOW: usize = 3;
 
+struct Nesting {
+    grammar: usize,
+    ast: usize,
+}
+
+impl Nesting {
+    fn current() -> Self {
+        // Traversal, compilation, and destruction of the AST all use the same
+        // thread. Large browser stacks can safely accept deeper provider trees.
+        if crate::vm::native_stack_available(3 * 1024 * 1024) {
+            Self { grammar: 72, ast: 192 }
+        } else {
+            Self { grammar: MAX_PARSER_DEPTH, ast: MAX_AST_DEPTH }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImportPhase {
     Evaluation,
@@ -310,6 +327,7 @@ fn script_parser(lexer: Lexer, context: EvalContext) -> Parser {
         labels: Vec::new(),
         next_label: 1,
         depth: 0,
+        nesting: Nesting::current(),
         allow_in: true,
         super_property: context.super_property,
         super_call: context.super_call,
@@ -380,6 +398,7 @@ struct Parser {
     labels: Vec<ActiveLabel>,
     next_label: u32,
     depth: usize,
+    nesting: Nesting,
     allow_in: bool,
     super_property: bool,
     super_call: bool,
@@ -554,7 +573,7 @@ impl Parser {
         {
             self.expression_statement()
         } else {
-            if self.depth >= MAX_PARSER_DEPTH {
+            if self.depth >= self.nesting.grammar {
                 return Err(self.error("Parser nesting limit exceeded"));
             }
             self.depth += 1;
@@ -806,7 +825,7 @@ impl Parser {
     fn labelled_statement(&mut self) -> Result<Stmt, JsError> {
         let mut names = Vec::new();
         while self.label_ahead() {
-            if self.depth + names.len() >= MAX_PARSER_DEPTH {
+            if self.depth + names.len() >= self.nesting.grammar {
                 return Err(self.error("Parser nesting limit exceeded"));
             }
             let name = self.name()?;
@@ -1471,7 +1490,7 @@ impl Parser {
     fn initializer_tail(&mut self, primary: Expr) -> Result<Expr, JsError> {
         // The primary expression has already passed the prefix portion of parsing.
         // Its postfix/infix suffix may recurse and still uses the grammar limit.
-        if self.depth >= MAX_PARSER_DEPTH {
+        if self.depth >= self.nesting.grammar {
             return Err(self.error("Expression nesting limit exceeded"));
         }
         self.depth += 1;
@@ -1483,7 +1502,7 @@ impl Parser {
     }
 
     fn expression(&mut self, min: u8) -> Result<Expr, JsError> {
-        if self.depth >= MAX_PARSER_DEPTH {
+        if self.depth >= self.nesting.grammar {
             return Err(self.error("Expression nesting limit exceeded"));
         }
         self.depth += 1;
@@ -1496,7 +1515,7 @@ impl Parser {
         self.checked_expression(result?)
     }
     fn check_ast(&self, root: Ast<'_>) -> Result<(), JsError> {
-        if ast_within_budget(root) {
+        if ast_within_budget_at(root, 1, self.nesting.ast) {
             Ok(())
         } else {
             Err(self.error("AST nesting limit exceeded"))
@@ -1574,7 +1593,7 @@ impl Parser {
     fn grouped_assignments_inner(&mut self, previous: bool) -> Result<(Expr, bool), JsError> {
         let mut frames = Vec::new();
         while self.grouped_assignment_ahead() {
-            if frames.len() >= MAX_AST_DEPTH {
+            if frames.len() >= self.nesting.ast {
                 return Err(self.error("AST nesting limit exceeded"));
             }
             let start = self.current().start;
@@ -1757,7 +1776,7 @@ impl Parser {
             };
             // Every unresolved operator or list contributes a node to the
             // resulting tree. Parsing its RHS does not recurse on the native stack.
-            if pending.len() + 1 >= MAX_AST_DEPTH {
+            if pending.len() + 1 >= self.nesting.ast {
                 return Err(self.error("AST nesting limit exceeded"));
             }
             pending.push((frame, min));
@@ -1785,7 +1804,7 @@ impl Parser {
                 (Expr::AddChain(mut terms), right) => {
                     // The existing operands already fit. Only the new operand
                     // gains a parent, so check it without walking the prefix again.
-                    if !ast_within_budget_at(Ast::Expression(&right), 2) {
+                    if !ast_within_budget_at(Ast::Expression(&right), 2, self.nesting.ast) {
                         return Err(self.error("AST nesting limit exceeded"));
                     }
                     terms.push(right);
@@ -1922,7 +1941,7 @@ impl Parser {
                 break Expr::NewTarget;
             }
             constructors += 1;
-            if constructors > MAX_AST_DEPTH {
+            if constructors > self.nesting.ast {
                 return Err(self.error("Constructor nesting limit exceeded"));
             }
         };
@@ -2062,7 +2081,7 @@ impl Parser {
                 Expr::AssignedMethodCalls(base, levels) => (base, levels),
                 right => (Box::new(right), Vec::new()),
             };
-            if levels.len() >= MAX_AST_DEPTH {
+            if levels.len() >= self.nesting.ast {
                 return Err(self.error("AST nesting limit exceeded"));
             }
             levels.push((name, *key, args));
@@ -2072,7 +2091,7 @@ impl Parser {
     }
     fn chain_link(&self, e: Expr, link: ChainLink) -> Result<Expr, JsError> {
         let e = if let Expr::Chain(base, mut links) = e {
-            if links.len() >= MAX_AST_DEPTH {
+            if links.len() >= self.nesting.ast {
                 return Err(self.error("Optional chain nesting limit exceeded"));
             }
             links.push(link);
@@ -2342,14 +2361,10 @@ enum Ast<'a> {
 /// Iterative inspection is intentional: a depth guard must not itself recurse.
 /// Children were checked when constructed; each wrapper can exceed the budget
 /// by only one node before it is rejected, keeping error-path destruction safe.
-fn ast_within_budget(root: Ast<'_>) -> bool {
-    ast_within_budget_at(root, 1)
-}
-
-fn ast_within_budget_at(root: Ast<'_>, depth: usize) -> bool {
+fn ast_within_budget_at(root: Ast<'_>, depth: usize, limit: usize) -> bool {
     let mut pending = vec![(root, depth)];
     while let Some((node, depth)) = pending.pop() {
-        if depth > MAX_AST_DEPTH {
+        if depth > limit {
             return false;
         }
         let child_depth = depth + 1;

@@ -2655,14 +2655,16 @@ fn install_errors(vm: &mut Vm) {
     let set_stack = vm.native("set stack", 1, false, Rc::new(|vm, this, args| {
         let id = this.as_object().ok_or_else(|| JsError::type_error("Stack receiver must be an object"))?;
         let value = arg(args, 0);
-        if id == vm.realm.error_prototype || !matches!(value, Value::String(_)) {
-            return Err(JsError::type_error("Cannot assign this error stack"));
-        }
         let key = PropertyKey::from("stack");
-        if vm.own_descriptor_key(id, &key)?.is_some() {
+        let own = vm.own_descriptor_key(id, &key)?;
+        if own.as_ref().is_some_and(|property| matches!(property.kind, PropertyKind::Data { .. })) {
             vm.set_key(this, &key, value, true)?;
         } else {
-            vm.define_data_property_key(this, key, value, true, true, true)?;
+            let enumerable = own.as_ref().map_or_else(
+                || !matches!(vm.heap.object(id).map(|object| &object.kind), Ok(ObjectKind::Error(..))),
+                |property| property.enumerable,
+            );
+            vm.define_data_property_key(this, key, value, true, enumerable, true)?;
         }
         Ok(Value::Undefined)
     }));

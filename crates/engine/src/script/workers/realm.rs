@@ -322,6 +322,12 @@ fn checkpoint(vm: &mut Vm) -> Result<(), JsError> {
             "Worker microtask checkpoint budget exhausted",
         ));
     }
+    #[cfg(feature = "media-startup-diagnostics")]
+    for reason in vm.take_unhandled_rejections() {
+        if let Some(message) = vm.diagnostic_native_error(&reason) {
+            eprintln!("SATIN_QA_WORKER_REJECTION {message}");
+        }
+    }
     first_error.map_or(Ok(()), Err)
 }
 

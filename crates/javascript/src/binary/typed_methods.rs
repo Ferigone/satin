@@ -137,10 +137,9 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
             // A species constructor can return an overlapping view. Slice reads
             // forward, so a destination byte can become the next source byte.
             vm.consume_work(from.len())?;
-            let bytes = vm
+            let mut bytes = vm
                 .buffer_data_mut(source.view.buffer)?
-                .bytes
-                .as_mut()
+                .write()
                 .unwrap();
             for (index, read) in from.enumerate() {
                 bytes[offset + index] = bytes[read];
@@ -271,8 +270,7 @@ fn fill(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, JsError> {
         vm.binary_work(range.len())?;
         let bytes = &mut vm
             .buffer_data_mut(array.view.buffer)?
-            .bytes
-            .as_mut()
+            .write()
             .unwrap()[range];
         if width == 1 {
             bytes.fill(pattern[0]);
@@ -308,8 +306,7 @@ fn reverse(vm: &mut Vm, this: Value, copy: bool) -> Result<Value, JsError> {
     vm.consume_work(length.div_ceil(4))?;
     let bytes = &mut vm
         .buffer_data_mut(destination.view.buffer)?
-        .bytes
-        .as_mut()
+        .write()
         .unwrap()[destination.relative_bytes(0, length)];
     for index in 0..length / 2 {
         for byte in 0..width {
@@ -622,12 +619,14 @@ fn sort(vm: &mut Vm, this: Value, args: &[Value], copy: bool) -> Result<Value, J
         .try_reserve_exact(length)
         .map_err(|_| allocation_error())?;
     let range = array.range(vm)?;
-    let bytes = &vm.buffer_data(array.view.buffer)?.bytes.as_ref().unwrap()[range];
-    values.extend(
-        bytes
-            .chunks_exact(array.element.width())
-            .map(|chunk| Element::load_bits(chunk, LITTLE_ENDIAN)),
-    );
+    {
+        let bytes = vm.buffer_data(array.view.buffer)?.read().unwrap();
+        values.extend(
+            bytes[range]
+                .chunks_exact(array.element.width())
+                .map(|chunk| Element::load_bits(chunk, LITTLE_ENDIAN)),
+        );
+    }
     let values = stable_merge_sort(vm, values, scratch, |vm, left, right| {
         compare(vm, &comparator, array.element, *left, *right)
     })?;

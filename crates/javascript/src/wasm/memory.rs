@@ -28,7 +28,7 @@ fn range_error() -> JsError {
     )
 }
 
-fn page_count(vm: &mut Vm, value: &Value) -> Result<usize, JsError> {
+pub(super) fn page_count(vm: &mut Vm, value: &Value) -> Result<usize, JsError> {
     let number = vm.to_number(value)?.trunc();
     if !(0.0..=f64::from(u32::MAX)).contains(&number) {
         return Err(JsError::type_error(
@@ -139,6 +139,9 @@ pub(super) fn install(vm: &mut Vm, namespace: &Value) -> ObjectId {
     tag(vm, &prototype, "WebAssembly.Memory");
     class(vm, namespace, "Memory", &prototype, false, construct);
     let read = vm.new_native_function("get buffer", |vm, this, _| {
+        if let Some(buffer) = super::native::memory_buffer(vm, &this) {
+            return buffer;
+        }
         let (_, memory) = from_value(vm, &this)?;
         Ok(Value::Object(memory.buffer))
     });
@@ -156,6 +159,10 @@ pub(super) fn install(vm: &mut Vm, namespace: &Value) -> ObjectId {
     )
     .unwrap();
     method(vm, prototype, "grow", 1, |vm, this, args| {
+        if super::native::is_memory(vm, &this) {
+            let delta = page_count(vm, &arg(args, 0))?;
+            return super::native::memory_grow(vm, &this, delta).expect("branded linear memory");
+        }
         let (object, _) = from_value(vm, &this)?;
         let delta = page_count(vm, &arg(args, 0))?;
         // Conversion can execute JS and grow this same memory.

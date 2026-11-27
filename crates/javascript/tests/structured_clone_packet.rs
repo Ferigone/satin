@@ -302,6 +302,7 @@ fn aliased_buffer_packets_charge_one_backing_at_its_retained_capacity() {
         assert_eq!(bytes.as_ptr() == address, transferred);
         assert_eq!(bytes.len(), LENGTH);
         assert_eq!(bytes[LENGTH - 1], 42);
+        drop(bytes);
         receiver.set_global("received", value).unwrap();
         assert_eq!(
             receiver
@@ -338,6 +339,7 @@ fn aliased_buffer_packets_charge_one_backing_at_its_retained_capacity() {
     let bytes = sender.fixed_buffer_source_bytes(&source).unwrap();
     assert_eq!(bytes.as_ptr(), address);
     assert_eq!(bytes[0], 42);
+    drop(bytes);
 
     let (packet, admitted_bytes) = sender
         .serialize_clone_packet_with_transfer(message, transfer, capacity + METADATA_BUDGET, Ok)

@@ -302,10 +302,7 @@ impl Vm {
         let owner = execution.owner();
         let result = self.with_function_realm(owner, |vm| {
             if !vm.can_enter_call() {
-                return Err(JsError::new(
-                    ErrorKind::ExecutionLimit,
-                    "Call depth budget exhausted",
-                ));
+                return Err(vm.call_depth_error());
             }
             let input = if rejected {
                 ResumeValue::Throw(argument)

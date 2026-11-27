@@ -13,6 +13,24 @@ fn small_stack(task: impl FnOnce() + Send + 'static) {
         .unwrap();
 }
 
+#[cfg(any(windows, target_os = "linux"))]
+#[test]
+fn nested_component_calls_fit_on_a_browser_stack() {
+    let program = format!(
+        "function render() {{ return {}null{}; }}",
+        "(0, factory.jsx)(Provider, {children:".repeat(30),
+        "})".repeat(30),
+    );
+    let narrow = program.clone();
+    small_stack(move || {
+        let error = Vm::new().check_syntax(&narrow).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::ExecutionLimit);
+    });
+    std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(move || {
+        Vm::new().check_syntax(&program).unwrap();
+    }).unwrap().join().unwrap();
+}
+
 #[test]
 fn ordinary_grammar_compile_execute_and_drop_on_one_mib_stack() {
     small_stack(|| {

@@ -533,7 +533,7 @@ fn buffer_methods(vm: &mut Vm, state: &Shared, prototype: &Value) -> Result<(), 
                 ));
             }
             vm.charge_work(length.div_ceil(64))?;
-            let bytes = Arc::from(vm.fixed_buffer_source_bytes(&value)?);
+            let bytes = Arc::from(&*vm.fixed_buffer_source_bytes(&value)?);
             edit(vm, &host, this, buffer, Edit::Append(bytes))
         },
     )?;

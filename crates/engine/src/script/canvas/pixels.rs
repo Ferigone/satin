@@ -137,7 +137,7 @@ pub(super) fn image_data_source(
     let size = [record.size.width, record.size.height];
     let mut bytes = rgba_storage(size[0] as usize * size[1] as usize * 4)?;
     if direct {
-        bytes.extend_from_slice(input);
+        bytes.extend_from_slice(&input);
     } else {
         for pixel in input.chunks_exact(record.settings.format.bytes_per_pixel()) {
             bytes.extend_from_slice(&record.settings.decode_srgb(pixel));

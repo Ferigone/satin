@@ -17,7 +17,7 @@ use crate::{
 };
 use element::Element;
 pub use host_views::{ArrayBufferView, ArrayBufferViewKind};
-use std::{ops::Range, rc::Rc};
+use std::{cell::{Ref, RefMut}, ops::{Deref, DerefMut, Range}, rc::Rc};
 pub(crate) use structured_clone::ViewLayout;
 pub(crate) use typed_array::{NumericIndex, TypedDescriptor, numeric_index};
 
@@ -38,6 +38,7 @@ pub(crate) struct Intrinsics {
 
 pub(crate) struct Buffer {
     bytes: Option<Vec<u8>>,
+    linear: Option<crate::wasm::native::Buffer>,
     maximum: Option<usize>,
     wasm: bool,
     immutable: bool,
@@ -46,6 +47,92 @@ pub(crate) struct Buffer {
 impl Buffer {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.bytes.as_ref().map_or(0, Vec::capacity)
+    }
+
+    fn length(&self) -> Option<usize> {
+        match &self.linear {
+            Some(memory) => memory.length(),
+            None => self.bytes.as_ref().map(Vec::len),
+        }
+    }
+
+    fn read(&self) -> Option<BufferRead<'_>> {
+        match &self.linear {
+            Some(memory) => memory.read().map(BufferRead::Linear),
+            None => self.bytes.as_deref().map(BufferRead::Owned),
+        }
+    }
+
+    fn write(&mut self) -> Option<BufferWrite<'_>> {
+        match &self.linear {
+            Some(memory) => memory.write().map(BufferWrite::Linear),
+            None => self.bytes.as_deref_mut().map(BufferWrite::Owned),
+        }
+    }
+}
+
+/// A temporary borrow of browser-owned bytes or WebAssembly linear memory.
+pub enum BufferRead<'a> {
+    Owned(&'a [u8]),
+    Linear(Ref<'a, [u8]>),
+}
+
+impl Deref for BufferRead<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Linear(bytes) => bytes,
+        }
+    }
+}
+
+impl SelfRange for BufferRead<'_> {
+    fn visible(self, range: Range<usize>) -> Self {
+        match self {
+            Self::Owned(bytes) => Self::Owned(&bytes[range]),
+            Self::Linear(bytes) => Self::Linear(Ref::map(bytes, |bytes| &bytes[range])),
+        }
+    }
+}
+
+/// A writable borrow that excludes execution while linear memory is borrowed.
+pub enum BufferWrite<'a> {
+    Owned(&'a mut [u8]),
+    Linear(RefMut<'a, [u8]>),
+}
+
+impl Deref for BufferWrite<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Linear(bytes) => bytes,
+        }
+    }
+}
+
+impl DerefMut for BufferWrite<'_> {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Linear(bytes) => bytes,
+        }
+    }
+}
+
+trait SelfRange: Sized {
+    fn visible(self, range: Range<usize>) -> Self;
+}
+
+impl SelfRange for BufferWrite<'_> {
+    fn visible(self, range: Range<usize>) -> Self {
+        match self {
+            Self::Owned(bytes) => Self::Owned(&mut bytes[range]),
+            Self::Linear(bytes) => Self::Linear(RefMut::map(bytes, |bytes| &mut bytes[range])),
+        }
     }
 }
 
@@ -202,6 +289,7 @@ impl Vm {
         self.allocate_constructed(
             ObjectKind::ArrayBuffer(Buffer {
                 bytes: Some(bytes),
+                linear: None,
                 maximum,
                 wasm: false,
                 immutable: false,
@@ -228,10 +316,10 @@ impl Vm {
     }
 
     fn view_range(&self, view: View, alignment: usize) -> Result<Option<Range<usize>>, JsError> {
-        let Some(buffer) = &self.buffer_data(view.buffer)?.bytes else {
+        let Some(length) = self.buffer_data(view.buffer)?.length() else {
             return Ok(None);
         };
-        let Some(available) = buffer.len().checked_sub(view.offset) else {
+        let Some(available) = length.checked_sub(view.offset) else {
             return Ok(None);
         };
         let length = view.bytes.unwrap_or(available / alignment * alignment);
@@ -251,8 +339,8 @@ impl Vm {
         };
         match &self.heap.object(id)?.kind {
             ObjectKind::ArrayBuffer(data) => {
-                let bytes = data.bytes.as_ref().ok_or_else(type_error)?;
-                Ok(Some((id, 0..bytes.len())))
+                let length = data.length().ok_or_else(type_error)?;
+                Ok(Some((id, 0..length)))
             }
             ObjectKind::TypedArray(data) => {
                 let range = self.require_view_range(data.view, data.element.width())?;
@@ -268,6 +356,20 @@ impl Vm {
     /// Moves host bytes into a fixed-length native ArrayBuffer.
     pub fn new_array_buffer(&mut self, bytes: Vec<u8>) -> Result<Value, JsError> {
         self.create_buffer(bytes, None, self.array_buffer_prototype())
+    }
+
+    pub(crate) fn new_linear_buffer(&mut self, linear: crate::wasm::native::Buffer) -> Result<Value, JsError> {
+        self.check_binary_allocation(0, 1)?;
+        self.allocate_constructed(
+            ObjectKind::ArrayBuffer(Buffer {
+                bytes: None,
+                linear: Some(linear),
+                maximum: None,
+                wasm: true,
+                immutable: false,
+            }),
+            self.array_buffer_prototype(),
+        )
     }
 
     pub(crate) fn new_wasm_buffer(&mut self, length: usize) -> Result<ObjectId, JsError> {
@@ -292,6 +394,7 @@ impl Vm {
         let bytes = self.buffer_data_mut(id)?.bytes.take().unwrap();
         *self.buffer_data_mut(replacement)? = Buffer {
             bytes: Some(bytes),
+            linear: None,
             maximum: None,
             wasm: true,
             immutable: false,
@@ -452,7 +555,7 @@ impl Vm {
 
     /// Borrows a fixed-length Web IDL BufferSource. Detachment means an empty
     /// input. Callers that require live buffers can use buffer_source_len.
-    pub fn fixed_buffer_source_bytes(&self, value: &Value) -> Result<&[u8], JsError> {
+    pub fn fixed_buffer_source_bytes(&self, value: &Value) -> Result<BufferRead<'_>, JsError> {
         let id = kind_id(self, value, "Expected a BufferSource")?;
         let (buffer, view) = match self.heap.object(id)?.kind {
             ObjectKind::ArrayBuffer(_) => (id, None),
@@ -465,12 +568,12 @@ impl Vm {
         if data.maximum.is_some() {
             return Err(JsError::type_error("Resizable BufferSource is not allowed"));
         }
-        let Some(bytes) = &data.bytes else {
-            return Ok(&[]);
+        let Some(bytes) = data.read() else {
+            return Ok(BufferRead::Owned(&[]));
         };
         if let Some(view) = view {
             let range = self.require_view_range(view, 1)?;
-            Ok(&bytes[range])
+            Ok(bytes.visible(range))
         } else {
             Ok(bytes)
         }
@@ -478,7 +581,7 @@ impl Vm {
 
     /// Borrows the writable extent of a fixed-length native Uint8Array.
     /// An empty slice is returned after detachment.
-    pub fn fixed_uint8_array_bytes_mut(&mut self, value: &Value) -> Result<&mut [u8], JsError> {
+    pub fn fixed_uint8_array_bytes_mut(&mut self, value: &Value) -> Result<BufferWrite<'_>, JsError> {
         let id = kind_id(self, value, "Expected a Uint8Array")?;
         let array = self.array_data(id)?;
         if array.element != Element::Uint8 {
@@ -489,13 +592,9 @@ impl Vm {
             return Err(JsError::type_error("Resizable Uint8Array is not allowed"));
         }
         let Some(range) = self.view_range(array.view, 1)? else {
-            return Ok(&mut []);
+            return Ok(BufferWrite::Owned(&mut []));
         };
-        Ok(&mut self
-            .buffer_data_mut(array.view.buffer)?
-            .bytes
-            .as_mut()
-            .unwrap()[range])
+        Ok(self.buffer_data_mut(array.view.buffer)?.write().unwrap().visible(range))
     }
 
     /// Returns the size of a view's visible bytes. Detached and out-of-bounds
@@ -520,11 +619,7 @@ impl Vm {
     fn copy_binary_range(&mut self, id: ObjectId, range: Range<usize>) -> Result<Vec<u8>, JsError> {
         self.ensure_allocation(range.len())?;
         self.binary_work(range.len())?;
-        let bytes = self
-            .buffer_data(id)?
-            .bytes
-            .as_ref()
-            .ok_or_else(type_error)?;
+        let bytes = self.buffer_data(id)?.read().ok_or_else(type_error)?;
         let source = bytes.get(range).ok_or_else(type_error)?;
         let mut output = Vec::new();
         output
@@ -547,11 +642,7 @@ impl Vm {
         self.binary_work(range.len())?;
         let end = offset.checked_add(range.len()).ok_or_else(type_error)?;
         if source == target {
-            let buffer = self
-                .buffer_data_mut(source)?
-                .bytes
-                .as_mut()
-                .ok_or_else(type_error)?;
+            let mut buffer = self.buffer_data_mut(source)?.write().ok_or_else(type_error)?;
             if end > buffer.len() || range.end > buffer.len() {
                 return Err(type_error());
             }
@@ -563,16 +654,10 @@ impl Vm {
             else {
                 return Err(JsError::type_error("Expected two ArrayBuffers"));
             };
-            let data = source
-                .bytes
-                .as_ref()
-                .and_then(|bytes| bytes.get(range))
-                .ok_or_else(type_error)?;
-            let destination = target
-                .bytes
-                .as_mut()
-                .and_then(|bytes| bytes.get_mut(offset..end))
-                .ok_or_else(type_error)?;
+            let bytes = source.read().ok_or_else(type_error)?;
+            let data = bytes.get(range).ok_or_else(type_error)?;
+            let mut destination = target.write().ok_or_else(type_error)?;
+            let destination = destination.get_mut(offset..end).ok_or_else(type_error)?;
             destination.copy_from_slice(data);
         }
         Ok(())

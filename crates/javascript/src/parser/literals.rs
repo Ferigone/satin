@@ -1,5 +1,5 @@
 use super::{
-    Expr, FunctionKind, JsError, JsString, KeywordContext, MAX_AST_DEPTH,
+    Expr, FunctionKind, JsError, JsString, KeywordContext,
     MethodKind, ObjectEntry, Parser, TokenKind, Value, reserved,
 };
 
@@ -112,7 +112,7 @@ impl Parser {
                 if self.at("[") || self.at("{") {
                     // Each saved container contributes at least one AST node.
                     // No native recursion or token lookahead is needed on this edge.
-                    if parents.len() + 1 >= MAX_AST_DEPTH {
+                    if parents.len() + 1 >= self.nesting.ast {
                         return Err(self.error("AST nesting limit exceeded"));
                     }
                     parents.push((literal, slot));

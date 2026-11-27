@@ -54,18 +54,18 @@ impl Vm {
     ) -> Result<Value, JsError> {
         self.require_unshared(id)?;
         let length = if length.is_undefined() {
-            self.buffer_data(id)?.bytes.as_ref().map_or(0, Vec::len)
+            self.buffer_data(id)?.length().unwrap_or(0)
         } else {
             to_index(self, &length)?
         };
         let buffer = self.buffer_data(id)?;
-        let bytes = buffer.bytes.as_ref().ok_or_else(type_error)?;
         if buffer.immutable {
             return Err(JsError::type_error("Cannot transfer immutable ArrayBuffer"));
         }
         if buffer.wasm {
             return Err(JsError::type_error("Cannot transfer a WebAssembly buffer"));
         }
+        let bytes = buffer.bytes.as_ref().ok_or_else(type_error)?;
         let maximum = if fixed { None } else { buffer.maximum };
         if maximum.is_some_and(|maximum| length > maximum) {
             return Err(range_error("Transfer exceeds the ArrayBuffer maximum"));
@@ -127,13 +127,11 @@ pub(super) fn install(vm: &mut Vm) {
     species_getter(vm, constructor);
     let getters: [BufferGetter; 5] = [
         ("byteLength", "get byteLength", |buffer| {
-            buffer.bytes.as_ref().map_or(0, Vec::len).into()
+            buffer.length().unwrap_or(0).into()
         }),
         ("maxByteLength", "get maxByteLength", |buffer| {
             buffer
-                .bytes
-                .as_ref()
-                .map_or(0, |bytes| buffer.maximum.unwrap_or(bytes.len()))
+                .length().map_or(0, |length| buffer.maximum.unwrap_or(length))
                 .into()
         }),
         ("resizable", "get resizable", |buffer| {
@@ -143,7 +141,7 @@ pub(super) fn install(vm: &mut Vm) {
             buffer.immutable.into()
         }),
         ("detached", "get detached", |buffer| {
-            buffer.bytes.is_none().into()
+            buffer.length().is_none().into()
         }),
     ];
     for (key, name, read) in getters {
@@ -167,7 +165,7 @@ pub(super) fn install(vm: &mut Vm) {
             .maximum
             .ok_or_else(|| JsError::type_error("ArrayBuffer is fixed length"))?;
         let length = to_index(vm, &arg(args, 0))?;
-        if vm.buffer_data(id)?.bytes.is_none() {
+        if vm.buffer_data(id)?.length().is_none() {
             return Err(type_error());
         }
         if length > maximum {
@@ -181,10 +179,7 @@ pub(super) fn install(vm: &mut Vm) {
         vm.require_unshared(id)?;
         let length = vm
             .buffer_data(id)?
-            .bytes
-            .as_ref()
-            .ok_or_else(type_error)?
-            .len();
+            .length().ok_or_else(type_error)?;
         let start = clamped_index(vm, &arg(args, 0), length)?;
         let end = arg(args, 1);
         let end = if end.is_undefined() {
@@ -201,20 +196,14 @@ pub(super) fn install(vm: &mut Vm) {
         if id == destination
             || vm
                 .buffer_data(destination)?
-                .bytes
-                .as_ref()
-                .ok_or_else(type_error)?
-                .len()
+                .length().ok_or_else(type_error)?
                 < count
         {
             return Err(JsError::type_error("Invalid ArrayBuffer species result"));
         }
         let current = vm
             .buffer_data(id)?
-            .bytes
-            .as_ref()
-            .ok_or_else(type_error)?
-            .len();
+            .length().ok_or_else(type_error)?;
         let copy = count.min(current.saturating_sub(start));
         if copy > 0 {
             vm.copy_binary_between(id, start..start + copy, destination, 0)?;
@@ -231,10 +220,7 @@ pub(super) fn install(vm: &mut Vm) {
             vm.require_unshared(source)?;
             let length = vm
                 .buffer_data(source)?
-                .bytes
-                .as_ref()
-                .ok_or_else(type_error)?
-                .len();
+                .length().ok_or_else(type_error)?;
             let start = clamped_index(vm, &arg(args, 0), length)?;
             let end = if arg(args, 1).is_undefined() {
                 length
@@ -243,10 +229,7 @@ pub(super) fn install(vm: &mut Vm) {
             };
             let current = vm
                 .buffer_data(source)?
-                .bytes
-                .as_ref()
-                .ok_or_else(type_error)?
-                .len();
+                .length().ok_or_else(type_error)?;
             if end > current {
                 return Err(range_error("ArrayBuffer shrank below the requested slice"));
             }

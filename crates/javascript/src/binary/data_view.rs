@@ -27,8 +27,7 @@ pub(super) fn install(vm: &mut Vm) {
         let offset = to_index(vm, &arg(args, 1))?;
         let data = vm.buffer_data(buffer)?;
         let available = data
-            .bytes
-            .as_ref()
+            .read()
             .ok_or_else(type_error)?
             .len()
             .checked_sub(offset)
@@ -50,7 +49,7 @@ pub(super) fn install(vm: &mut Vm) {
             offset,
             bytes,
         };
-        if vm.buffer_data(buffer)?.bytes.is_none() {
+        if vm.buffer_data(buffer)?.length().is_none() {
             return Err(type_error());
         }
         if vm.view_range(view, 1)?.is_none() {
@@ -100,7 +99,7 @@ pub(super) fn install(vm: &mut Vm) {
             let view = receiver(vm, &this)?;
             let offset = to_index(vm, &arg(args, 0))?;
             let range = access_range(vm, view, offset, element.width())?;
-            let bytes = &vm.buffer_data(view.buffer)?.bytes.as_ref().unwrap()[range];
+            let bytes = &vm.buffer_data(view.buffer)?.read().unwrap()[range];
             Ok(element.value(Element::load_bits(bytes, arg(args, 1).is_truthy())))
         });
         method(vm, prototype.clone(), set, 2, move |vm, this, args| {
@@ -110,7 +109,7 @@ pub(super) fn install(vm: &mut Vm) {
             let bits = element.coerce_bits(vm, &arg(args, 1))?;
             let range = access_range(vm, view, offset, element.width())?;
             let data = element.store_bits(bits, arg(args, 2).is_truthy());
-            vm.buffer_data_mut(view.buffer)?.bytes.as_mut().unwrap()[range]
+            vm.buffer_data_mut(view.buffer)?.write().unwrap()[range]
                 .copy_from_slice(&data[..element.width()]);
             Ok(Value::Undefined)
         });

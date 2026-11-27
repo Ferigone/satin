@@ -79,6 +79,7 @@ pub(crate) struct RealmState {
     pub(crate) inherit_dynamic_import_hook: bool,
     pub(crate) dynamic_import_hook: Option<DynamicImportHook>,
     pub(crate) wasm_compilation_allowed: bool,
+    pub(crate) wasm_table_prototype: Option<ObjectId>,
 }
 
 impl RealmState {
@@ -139,6 +140,7 @@ impl RealmState {
             inherit_dynamic_import_hook: false,
             dynamic_import_hook: None,
             wasm_compilation_allowed,
+            wasm_table_prototype: None,
         }
     }
 }

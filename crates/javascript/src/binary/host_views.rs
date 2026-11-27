@@ -93,9 +93,7 @@ impl Vm {
     pub fn array_buffer_byte_length(&self, value: &Value) -> Result<usize, JsError> {
         let id = kind_id(self, value, "Expected an ArrayBuffer")?;
         self.buffer_data(id)?
-            .bytes
-            .as_ref()
-            .map(Vec::len)
+            .length()
             .ok_or_else(type_error)
     }
 
@@ -138,12 +136,8 @@ impl Vm {
         let id = kind_id(self, target, "Expected a target ArrayBuffer")?;
         let end = offset.checked_add(source.len()).ok_or_else(type_error)?;
         self.binary_work(source.len())?;
-        let destination = self
-            .buffer_data_mut(id)?
-            .bytes
-            .as_mut()
-            .and_then(|bytes| bytes.get_mut(offset..end))
-            .ok_or_else(type_error)?;
+        let mut bytes = self.buffer_data_mut(id)?.write().ok_or_else(type_error)?;
+        let destination = bytes.get_mut(offset..end).ok_or_else(type_error)?;
         destination.copy_from_slice(source);
         Ok(())
     }

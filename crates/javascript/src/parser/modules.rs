@@ -59,6 +59,7 @@ pub(crate) fn parse(source: &str, compilation_bytes: usize) -> Result<Module, Js
         labels: Vec::new(),
         next_label: 1,
         depth: 0,
+        nesting: Nesting::current(),
         allow_in: true,
         super_property: false,
         super_call: false,

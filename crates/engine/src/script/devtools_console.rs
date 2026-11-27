@@ -429,8 +429,13 @@ fn record_error_at_node(
     });
 }
 
-pub(super) fn report_rejection(state: &Shared, value: &Value) {
+pub(super) fn report_rejection(state: &Shared, _vm: &Vm, value: &Value) {
     let make_preview = || {
+        #[cfg(feature = "media-startup-diagnostics")]
+        if let Some(error) = _vm.diagnostic_native_error(value) {
+            let end = error.floor_char_boundary(DIAGNOSTIC_CHAR_LIMIT.min(error.len()));
+            return (error[..end].to_owned(), end < error.len());
+        }
         if matches!(value, Value::Object(_)) {
             ("object".into(), false)
         } else {

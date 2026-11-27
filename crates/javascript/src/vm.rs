@@ -52,6 +52,11 @@ const MAX_CALL_DEPTH: usize = if cfg!(any(windows, target_os = "linux")) {
 
 #[inline]
 fn native_stack_headroom() -> bool {
+    native_stack_available(256 * 1024)
+}
+
+#[inline]
+pub(crate) fn native_stack_available(bytes: usize) -> bool {
     #[cfg(windows)]
     {
         // The next interpreter/host frame may run author code through a
@@ -64,7 +69,7 @@ fn native_stack_headroom() -> bool {
             windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(&mut low, &mut high);
         }
         let current = std::ptr::addr_of!(low).addr();
-        (low..high).contains(&current) && current - low >= 256 * 1024
+        (low..high).contains(&current) && current - low >= bytes
     }
     #[cfg(target_os = "linux")]
     {
@@ -93,12 +98,13 @@ fn native_stack_headroom() -> bool {
         let current = std::ptr::addr_of!(marker).addr();
         STACK.with(|bounds| {
             bounds.is_some_and(|(low, high)| {
-                (low..high).contains(&current) && current - low >= 256 * 1024
+                (low..high).contains(&current) && current - low >= bytes
             })
         })
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
+        let _ = bytes;
         false
     }
 }
@@ -160,6 +166,7 @@ pub struct Vm {
     realm_bootstrap_bytes: usize,
     realm_bootstrap_cells: usize,
     pub(crate) bigint_storage: crate::bigint::Storage,
+    pub(crate) wasm_linear_pool: Rc<crate::wasm::native::Pool>,
     roots: BTreeMap<RootId, Value>,
     next_root: u64,
     pub(crate) next_private_id: u64,
@@ -296,6 +303,7 @@ impl Vm {
             realm_bootstrap_bytes: 0,
             realm_bootstrap_cells: 0,
             bigint_storage: crate::bigint::Storage::default(),
+            wasm_linear_pool: Rc::default(),
             roots: BTreeMap::new(),
             next_root: 1,
             next_private_id: 1,
@@ -828,6 +836,7 @@ impl Vm {
             .saturating_add(self.live_large_string_bytes.get())
             .saturating_add(self.code_bytes)
             .saturating_add(self.bigint_storage.bytes)
+            .saturating_add(self.wasm_linear_pool.bytes())
     }
     #[cfg_attr(feature = "media-startup-diagnostics", track_caller)]
     pub(crate) fn ensure_allocation(&self, bytes: usize) -> Result<(), JsError> {
@@ -3112,10 +3121,7 @@ impl Vm {
     ) -> Result<Value, JsError> {
         self.tick()?;
         if !self.can_enter_call() {
-            return Err(JsError::new(
-                ErrorKind::ExecutionLimit,
-                "Call depth budget exhausted",
-            ));
+            return Err(self.call_depth_error());
         }
         let id = function
             .as_object()
@@ -3603,6 +3609,15 @@ impl Vm {
             && (self.call_depth < DEFAULT_CALL_DEPTH || native_stack_headroom())
     }
 
+    pub(crate) fn call_depth_error(&self) -> JsError {
+        let reason = if self.call_depth >= self.limits.max_call_depth {
+            "Call depth budget exhausted"
+        } else {
+            "Native stack headroom exhausted during a call"
+        };
+        self.depth_error(reason)
+    }
+
     #[inline]
     pub(crate) fn permits_bytecode_depth(&self, depth: usize) -> bool {
         depth <= self.limits.max_bytecode_depth
@@ -3632,11 +3647,19 @@ impl Vm {
         result
     }
     pub(crate) fn bytecode_depth_error(&self, depth: usize) -> JsError {
-        if depth > self.limits.max_bytecode_depth {
-            JsError::new(ErrorKind::ExecutionLimit, "Nested bytecode depth budget exhausted")
+        let reason = if depth > self.limits.max_bytecode_depth {
+            "Nested bytecode depth budget exhausted"
         } else {
-            JsError::new(ErrorKind::ExecutionLimit, "Native stack headroom exhausted during bytecode evaluation")
-        }
+            "Native stack headroom exhausted during bytecode evaluation"
+        };
+        self.depth_error(reason)
+    }
+
+    fn depth_error(&self, reason: &str) -> JsError {
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let reason = format!("{reason} [calls={} bytecode={}]{}",
+            self.call_depth, self.execution_depth, self.diagnostic_source_site());
+        JsError::new(ErrorKind::ExecutionLimit, reason)
     }
     fn run_chunk_inner(
         &mut self,

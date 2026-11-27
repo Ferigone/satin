@@ -295,7 +295,7 @@ impl Vm {
         }
         let offset = range.start + index * width;
         let data =
-            &self.buffer_data(array.view.buffer)?.bytes.as_ref().unwrap()[offset..offset + width];
+            &self.buffer_data(array.view.buffer)?.read().unwrap()[offset..offset + width];
         Ok(Some(Element::load_bits(data, LITTLE_ENDIAN)))
     }
 
@@ -323,8 +323,7 @@ impl Vm {
             let offset = range.start + index * width;
             let data = array.element.store_bits(bits, LITTLE_ENDIAN);
             self.buffer_data_mut(array.view.buffer)?
-                .bytes
-                .as_mut()
+                .write()
                 .unwrap()[offset..offset + width]
                 .copy_from_slice(&data[..width]);
         }
@@ -358,7 +357,7 @@ fn from_buffer(
         Some(byte_count(to_index(vm, &length)?, element)?)
     };
     let data = vm.buffer_data(buffer)?;
-    let len = data.bytes.as_ref().ok_or_else(type_error)?.len();
+    let len = data.length().ok_or_else(type_error)?;
     let available = len
         .checked_sub(offset)
         .ok_or_else(|| range_error("TypedArray offset exceeds buffer length"))?;
