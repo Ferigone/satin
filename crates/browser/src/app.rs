@@ -3708,7 +3708,7 @@ impl App {
             return;
         }
         let tab = &self.tabs[self.active];
-        if let Some(SmokeAction::SampleMedia { after_ms }) = self.smoke_actions.front() {
+        if let Some(SmokeAction::SampleMedia { after_ms, count_selector }) = self.smoke_actions.front() {
             let Some(page) = tab.inspected_page() else { return };
             let now = Instant::now();
             let delay = Duration::from_millis(*after_ms);
@@ -3723,13 +3723,17 @@ impl App {
                 }
                 return;
             }
-            self.smoke_media_samples.push(serde_json::json!({
+            let mut sample = serde_json::json!({
                 "navigation": tab.document_navigation,
                 "timestampMs": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_millis() as u64,
                 "videoElements": page.document.html_elements("video").count(),
                 "media": tab.runtime.as_ref().map(ScriptRuntime::media_status).unwrap_or_default(),
-            }));
+            });
+            if let Some(selector) = count_selector {
+                sample["selected"] = crate::testing::count_selected(&page.document, tab.layout.as_deref(), selector);
+            }
+            self.smoke_media_samples.push(sample);
             self.smoke_actions.pop_front();
             self.smoke_wait_deadline = None;
             event_loop.set_control_flow(ControlFlow::Poll);

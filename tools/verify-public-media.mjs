@@ -140,7 +140,11 @@ async function sample(page, site) {
 async function windowCase(exe, { site, url }, dir) {
   const started = new Date();
   const actions = join(dir, 'actions.json');
-  await writeFile(actions, JSON.stringify([8000, 5000].map(after_ms => ({ action: 'sample_media', after_ms }))));
+  const selector = '[data-a-target="chat-line-message"],[data-test-selector="chat-line-message"],.chat-line__message';
+  await writeFile(actions, JSON.stringify([8000, 5000].map(after_ms => ({
+    action: 'sample_media', after_ms,
+    ...(site === 'twitch' && process.env.SATIN_QA_COUNT_CHAT === '1' ? { count_selector: selector } : {}),
+  }))));
   const outcome = await run(exe, ['--url', url, '--profile', join(dir, 'profile'),
     '--smoke-window', join(dir, 'frame.png'), '--smoke-actions', actions,
     '--width', String(viewport.width), '--height', String(viewport.height)], 120000);
