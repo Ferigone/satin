@@ -1472,6 +1472,8 @@ impl Vm {
         site: Option<&'static std::panic::Location<'static>>,
         requested: u64,
     ) {
+        #[cfg(windows)]
+        startup_profile::record_denial();
         let mut sites = self.qa_work_sites.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>();
         sites.sort_unstable_by_key(|&(site, amount)| (std::cmp::Reverse(amount), site));
         sites.truncate(8);
@@ -3116,6 +3118,8 @@ impl Vm {
         } else {
             let (code, parent, referrer) = interpreted.unwrap();
             #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+            let _function = startup_profile::function(&code.source);
+            #[cfg(all(windows, feature = "media-startup-diagnostics"))]
             let _scope = startup_profile::enter(startup_profile::Area::Other);
             self.active_calls.push(code.name.clone());
             self.enter_legacy_call(id, &code);
@@ -3298,6 +3302,8 @@ impl Vm {
         };
         self.call_depth += 1;
         self.enter_legacy_call(id, &code);
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _function = startup_profile::function(&code.source);
         let result = self.with_referrer(referrer, |vm| {
             let (env, body) = vm.function_environment(
                 &code,

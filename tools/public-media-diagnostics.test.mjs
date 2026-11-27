@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { budgetTrace, executionProfiles, safeDiagnostic } from './public-media-diagnostics.mjs';
+import { budgetTrace, executionProfiles, functionProfiles, safeDiagnostic } from './public-media-diagnostics.mjs';
+
+test('function work retains bounded numeric source spans and omits script data', () => {
+  const data = { sha256: 'b'.repeat(64), top: [[800, 12, 50, 5000, 7, 130]], stack: [[800,12,50,5000]], unassignedWork: 20 };
+  const line = p => 'SATIN_QA_FUNCTIONS ' + JSON.stringify(p);
+  assert.deepEqual(functionProfiles([line({ ...data, private: 'text' }),
+    line({ ...data, top: [[10,0,11,1,1,2]] }), line({ ...data, stack: [['hello']] }),
+    line({ ...data, unassignedWork: NaN })].join('\n')), [data]);
+});
 
 test('CPU profiles accept fixed counters and discard arbitrary data and malformed buckets', () => {
   const data = { node: 1, bytes: 20, sha256: 'a'.repeat(64), external: false,

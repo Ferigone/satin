@@ -735,6 +735,8 @@ impl Vm {
         } else {
             unreachable!()
         };
+        #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+        let _function = crate::vm::startup_profile::function(&code.source);
         let (body, chunk) = self.function_environment(
             &code,
             parent,

@@ -55,6 +55,21 @@ impl SourceSpan {
         self.range.len()
     }
 
+    /// A diagnostic can match a call to identical source without exporting text.
+    #[cfg(all(windows, feature = "media-startup-diagnostics"))]
+    pub(crate) fn profile_site(&self) -> [u64; 4] {
+        let total = match &self.buffer {
+            SourceStorage::Ascii(data) => data.len(),
+            SourceStorage::Packed(data) => data.len(),
+            SourceStorage::CodePoints(data) => data.len(),
+        };
+        let end = self.len();
+        let sample = self.points(0..end.min(8)).chain(self.points(end.saturating_sub(8)..end));
+        let signature = sample.fold(2166136261u32, |hash, point|
+            (hash ^ point).wrapping_mul(16777619));
+        [total as u64, self.range.start as u64, self.range.end as u64, u64::from(signature)]
+    }
+
     pub(super) fn range(&self) -> Range<usize> {
         self.range.clone()
     }

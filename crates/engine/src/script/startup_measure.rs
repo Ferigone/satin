@@ -33,6 +33,10 @@ pub(super) fn evaluate(
                 "cycles": m.cycles, "work": m.work,
             })
         );
+        eprintln!("SATIN_QA_FUNCTIONS {}", serde_json::json!({
+            "sha256": hash, "top": m.top_functions, "stack": m.denied_stack,
+            "unassignedWork": m.unassigned_work,
+        }));
     }
     result
 }

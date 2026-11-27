@@ -17,6 +17,10 @@ compiler-qa = []
 name = "profile_compiler"
 required-features = ["compiler-qa"]
 
+[[example]]
+name = "profile_work"
+required-features = ["media-startup-diagnostics"]
+
 [dependencies]
 icu_normalizer = "=2.4.0"
 regex-automata = { version = "=0.4.13", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }

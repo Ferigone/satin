@@ -101,3 +101,24 @@ export function budgetTrace(stderr) {
   }
   return records;
 }
+
+// A site is measured in code points. The tag matches eight points from each
+// end of the function. Neither source text nor callable names leave the VM.
+export function functionProfiles(stderr) {
+  const uint = value => Number.isSafeInteger(value) && value >= 0;
+  const site = r => r.slice(0, 4).every(uint) && r[1] <= r[2] && r[2] <= r[0] && r[3] <= 0xffffffff;
+  const fixed = (r, n) => Array.isArray(r) && r.length === n && site(r);
+  const records = [];
+  for (const line of String(stderr).split(/\r?\n/)) {
+    if (!line.startsWith('SATIN_QA_FUNCTIONS ') || line.length > 8192) continue;
+    let p;
+    try { p = JSON.parse(line.slice('SATIN_QA_FUNCTIONS '.length)); } catch { continue; }
+    if (!p || typeof p.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(p.sha256)
+      || !uint(p.unassignedWork) || !Array.isArray(p.top) || p.top.length > 24
+      || !p.top.every(r => fixed(r, 6) && uint(r[4]) && r[4] > 0 && uint(r[5]))
+      || !Array.isArray(p.stack) || p.stack.length > 24 || !p.stack.every(r => fixed(r, 4))) continue;
+    records.push({ sha256: p.sha256, top: p.top, stack: p.stack, unassignedWork: p.unassignedWork });
+    if (records.length >= 128) break;
+  }
+  return records;
+}

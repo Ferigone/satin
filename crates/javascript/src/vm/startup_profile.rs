@@ -1,5 +1,8 @@
 //! Exclusive work and thread-cycle counters for the diagnostic Windows binary.
 //! No JS data is captured. The outer classic script owns any synchronous reentry.
+mod functions;
+pub(crate) use functions::{function, record_denial};
+use functions::Functions;
 use std::{cell::RefCell, time::Instant};
 use windows_sys::Win32::System::{
     Threading::GetCurrentThread, WindowsProgramming::QueryThreadCycleTime,
@@ -24,12 +27,16 @@ pub struct Measurement {
     pub cpu_us: Option<u64>,
     pub cycles: Option<[u64; COUNT]>,
     pub work: [u64; COUNT],
+    pub top_functions: Vec<[u64; 6]>,
+    pub denied_stack: Vec<[u64; 4]>,
+    pub unassigned_work: u64,
 }
 
 struct Active {
     area: Area,
     last: Option<u64>,
     sample: Measurement,
+    functions: Functions,
 }
 
 thread_local! {
@@ -88,6 +95,7 @@ pub(crate) fn charge(units: u64) {
     ACTIVE.with_borrow_mut(|state| {
         if let Some(active) = state {
             active.sample.work[active.area as usize] += units;
+            active.functions.charge(units);
         }
     });
 }
@@ -116,6 +124,7 @@ pub fn measure<T>(run: impl FnOnce() -> T) -> (T, Option<Measurement>) {
     ACTIVE.replace(Some(Active {
         area: Area::Other,
         last,
+        functions: Functions::default(),
         sample: Measurement {
             cycles: last.map(|_| [0; COUNT]),
             ..Default::default()
@@ -130,5 +139,6 @@ pub fn measure<T>(run: impl FnOnce() -> T) -> (T, Option<Measurement>) {
         .and_then(|(a, b)| b.checked_sub(a))
         .map(|t| t.as_micros() as u64);
     active.sample.wall_us = wall.elapsed().as_micros() as u64;
+    active.functions.finish(&mut active.sample);
     (result, Some(active.sample))
 }
