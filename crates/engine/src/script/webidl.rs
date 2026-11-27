@@ -62,7 +62,7 @@ pub(super) fn sequence<T>(
         if out.len() >= limit {
             return Err(JsError::new(
                 ErrorKind::ExecutionLimit,
-                "Web IDL sequence exceeds its item budget",
+                format!("Web IDL sequence exceeds its {limit}-item budget"),
             ));
         }
         match convert(vm, item) {

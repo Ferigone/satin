@@ -127,6 +127,7 @@ struct State {
     event_prototype: Value,
     mouse_event_prototype: Value,
     keyboard_event_prototype: Value,
+    focus_event_prototype: Value,
     error_event_prototype: Value,
     reporting_error: bool,
     handlers: HashMap<(Option<NodeId>, String), (Value, RootId)>,
@@ -801,6 +802,7 @@ impl ScriptRuntime {
             event_prototype: Value::Undefined,
             mouse_event_prototype: Value::Undefined,
             keyboard_event_prototype: Value::Undefined,
+            focus_event_prototype: Value::Undefined,
             error_event_prototype: Value::Undefined,
             text_prototype,
             comment_prototype,
@@ -2716,6 +2718,7 @@ fn dispatch_checked_with_mode(
     mode: DispatchMode,
 ) -> Result<bool, JsError> {
     let keyboard = matches!(kind, "keydown" | "keyup" | "keypress");
+    let focus = matches!(kind, "focus" | "blur" | "focusin" | "focusout");
     let object = if kind == "click" {
         let prototype = state.borrow().mouse_event_prototype.clone();
         let object = vm.new_object_with_prototype(prototype)?;
@@ -2726,12 +2729,19 @@ fn dispatch_checked_with_mode(
         let object = vm.new_object_with_prototype(prototype)?;
         ui_events::initialize_key_input(vm, &object, properties)?;
         object
+    } else if focus {
+        let prototype = state.borrow().focus_event_prototype.clone();
+        let object = vm.new_object_with_prototype(prototype)?;
+        let related = properties.iter().find(|(name, _)| *name == "relatedTarget")
+            .map_or(Value::Null, |(_, value)| value.clone());
+        ui_events::initialize_focus_input(vm, &object, related)?;
+        object
     } else {
         vm.new_object_with_prototype(state.borrow().event_prototype.clone())?
     };
     let event =
-        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, keyboard], true)?;
-    let properties = if keyboard { &[] } else { properties };
+        event_target::init_event(vm, object, kind.into(), [bubbles, cancelable, keyboard || focus], true)?;
+    let properties = if keyboard || focus { &[] } else { properties };
     dispatch_prepared_with_mode(vm, state, target, event, properties, mode)
 }
 

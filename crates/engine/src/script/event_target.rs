@@ -993,13 +993,15 @@ fn install_with_receiver(
         },
     )?;
     if let Some(dom) = &events.dom {
-        let (ui_proto, mouse_proto, keyboard_proto) =
+        let (ui_proto, mouse_proto, keyboard_proto, focus_proto) =
             super::ui_events::install(vm, &dom.state, proto, constructor, set_prototype)?;
         vm.root(ui_proto.clone());
         vm.root(mouse_proto.clone());
         vm.root(keyboard_proto.clone());
+        vm.root(focus_proto.clone());
         dom.state.borrow_mut().mouse_event_prototype = mouse_proto.clone();
         dom.state.borrow_mut().keyboard_event_prototype = keyboard_proto.clone();
+        dom.state.borrow_mut().focus_event_prototype = focus_proto;
         let root = dom.state.borrow().document.root;
         let document = super::wrap(vm, &dom.state, Some(root))?;
         let state = dom.state.clone();

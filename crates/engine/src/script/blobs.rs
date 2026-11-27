@@ -12,7 +12,7 @@ use std::{
 
 pub(super) const BLOB_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const LIVE_BYTES: usize = 32 * 1024 * 1024;
-const PARTS: usize = 4096;
+const PARTS: usize = 256 * 1024;
 const TYPE_BYTES: usize = 64 * 1024;
 pub(super) const NAME_BYTES: usize = 64 * 1024;
 

@@ -9,6 +9,7 @@ const UI_FIELDS: u32 = 201;
 const MOUSE_BRAND: u32 = 202;
 const WINDOW_VIEWPORT: u32 = 203;
 const KEYBOARD_BRAND: u32 = 204;
+const FOCUS_BRAND: u32 = 205;
 const UI: &[&str] = &["detail", "view"];
 const MODIFIERS: &[(&str, &str)] = &[
     ("Alt", "altKey"),
@@ -199,6 +200,49 @@ pub(super) fn initialize_key_input(
     Ok(())
 }
 
+fn initialize_focus(vm: &mut Vm, event: &Value) -> Result<Value, JsError> {
+    initialize_empty(vm, event, false)?;
+    let data = fields(vm, event, false)?;
+    vm.set_host_slot(event.clone(), FOCUS_BRAND, data.clone())?;
+    Ok(data)
+}
+
+pub(super) fn initialize_focus_input(vm: &mut Vm, event: &Value, related: Value) -> Result<(), JsError> {
+    let data = initialize_focus(vm, event)?;
+    set(vm, &data, "view", vm.global())?;
+    set(vm, &data, "relatedTarget", related)
+}
+
+fn install_focus(vm: &mut Vm, dom: &Shared, ui: &Value, set_proto: Value) -> Result<Value, JsError> {
+    let prototype = vm.new_object_with_prototype(ui.clone())?;
+    let intrinsic = prototype.clone();
+    let state = dom.clone();
+    let constructor = webidl::interface(vm, prototype.clone(), "FocusEvent", 1, move |vm, _, args, target| {
+        let target = target.ok_or_else(|| JsError::type_error("FocusEvent requires new"))?;
+        webidl::required(args, 1, "FocusEvent")?;
+        let kind = event_target::kind(vm, &args[0])?;
+        let options = arg(args, 1);
+        let flags = event_target::flags(vm, &options)?;
+        let event = webidl::instance(vm, target, &intrinsic)?;
+        let data = initialize_focus(vm, &event)?;
+        for &member in UI.iter().chain(&["relatedTarget"]) {
+            let value = event_target::option(vm, &options, member)?;
+            let value = convert(vm, &state, member, value)?;
+            set(vm, &data, member, value)?;
+        }
+        event_target::init_event(vm, event, kind, flags, false)
+    })?;
+    let ui_constructor = vm.get_global("UIEvent")?;
+    vm.call(set_proto, Value::Undefined, &[constructor, ui_constructor])?;
+    getter(vm, prototype.clone(), "relatedTarget", |vm, receiver, _| {
+        if vm.host_slot(&receiver, FOCUS_BRAND).is_none() {
+            return Err(JsError::type_error("Illegal FocusEvent receiver"));
+        }
+        field(vm, &receiver, "relatedTarget", false)
+    })?;
+    Ok(prototype)
+}
+
 fn key_data(vm: &Vm, event: &Value) -> Result<Value, JsError> {
     vm.host_slot(event, KEYBOARD_BRAND)
         .ok_or_else(|| JsError::type_error("Illegal KeyboardEvent receiver"))
@@ -275,7 +319,7 @@ pub(super) fn install(
     event_proto: Value,
     event_ctor: Value,
     set_proto: Value,
-) -> Result<(Value, Value, Value), JsError> {
+) -> Result<(Value, Value, Value, Value), JsError> {
     let ui_proto = vm.new_object_with_prototype(event_proto)?;
     let mouse_proto = vm.new_object_with_prototype(ui_proto.clone())?;
     let mut parent = event_ctor;
@@ -397,6 +441,7 @@ pub(super) fn install(
             modifier_value(vm, fields(vm, &this, true)?, args)
         },
     )?;
-    let keyboard_proto = install_keyboard(vm, dom, &ui_proto, set_proto)?;
-    Ok((ui_proto, mouse_proto, keyboard_proto))
+    let keyboard_proto = install_keyboard(vm, dom, &ui_proto, set_proto.clone())?;
+    let focus_proto = install_focus(vm, dom, &ui_proto, set_proto)?;
+    Ok((ui_proto, mouse_proto, keyboard_proto, focus_proto))
 }

@@ -2071,8 +2071,9 @@ impl FormHost {
             if changed {
                 dispatch_checked(vm, &self.dom, Some(old), "change", true, false, &[])?;
             }
-            dispatch_checked(vm, &self.dom, Some(old), "blur", false, false, &[])?;
-            dispatch_checked(vm, &self.dom, Some(old), "focusout", true, false, &[])?;
+            let related = [("relatedTarget", wrap(vm, &self.dom, target)?)];
+            dispatch_checked(vm, &self.dom, Some(old), "blur", false, false, &related)?;
+            dispatch_checked(vm, &self.dom, Some(old), "focusout", true, false, &related)?;
         }
         // A blur handler may have synchronously focused another element.
         if self.data.borrow().focused.is_some() {
@@ -2098,8 +2099,9 @@ impl FormHost {
                 data.focus_value = value;
             }
             self.mark();
-            dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &[])?;
-            dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &[])?;
+            let related = [("relatedTarget", wrap(vm, &self.dom, old)?)];
+            dispatch_checked(vm, &self.dom, Some(id), "focus", false, false, &related)?;
+            dispatch_checked(vm, &self.dom, Some(id), "focusin", true, false, &related)?;
         }
         Ok(target.is_some())
     }

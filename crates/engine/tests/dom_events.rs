@@ -414,6 +414,22 @@ fn keyboard_event_construction_and_native_keydown_share_the_ui_event_interface()
 }
 
 #[test]
+fn focus_events_report_the_other_element_in_the_focus_transition() {
+    let page = LoadedPage::from_html("https://events.test/", "<input id='left'><input id='right'>");
+    let mut runtime = ScriptRuntime::new(&page).unwrap();
+    assert_eq!(runtime.eval(r#"
+        const left = document.getElementById("left"), right = document.getElementById("right");
+        const events = [];
+        left.addEventListener("blur", e => events.push(e instanceof FocusEvent && e.relatedTarget === right));
+        right.addEventListener("focus", e => events.push(e instanceof UIEvent && e.relatedTarget === left));
+        left.focus(); right.focus();
+        events.length === 2 && events.every(Boolean) &&
+            new FocusEvent("blur", {relatedTarget: right}).relatedTarget === right &&
+            new FocusEvent("focus").relatedTarget === null
+    "#).unwrap(), Value::Bool(true));
+}
+
+#[test]
 fn dom_listeners_share_a_bounded_document_quota_and_reuse_removed_slots() {
     let page = LoadedPage::from_html("https://events.test/listeners", "<body>");
     let mut runtime = ScriptRuntime::new(&page).unwrap();
