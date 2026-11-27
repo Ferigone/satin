@@ -3069,21 +3069,32 @@ mod tests {
             "<!doctype html><button id='button'>Go</button>",
         );
         let mut runtime = ScriptRuntime::new(&page).unwrap();
-        // Each callback copies 320,000 code units. A single callback fits both
-        // task budgets; all 128 exceed even the native input allowance.
+        // Supply a deterministic outer fuel budget to test inheritance. Real
+        // window tasks now use the duration watchdog for the same boundary.
+        let work = runtime.vm.new_native_function("chargeWork", |vm, _, _| {
+            vm.charge_work(16_000)?;
+            Ok(Value::Undefined)
+        });
+        runtime.vm.set_global("chargeWork", work).unwrap();
         runtime.eval(r#"
-            var calls = 0, s = 'a'.repeat(200), b = document.getElementById('button');
-            function work() { calls++; s.repeat(1600); }
+            var calls = 0, b = document.getElementById('button');
+            function work() { calls++; chargeWork(); }
             for (var i = 0; i < 128; i++) b.addEventListener('click', function() { work(); });
         "#).unwrap();
-        runtime.click(page.document.elements("button").next().unwrap());
+        let state = runtime.state.clone();
+        let target = page.document.elements("button").next().unwrap();
+        assert!(runtime.vm.with_task_limits(1_000_000, None, |vm| {
+            dispatch_checked(vm, &state, Some(target), "click", true, true, &[])
+        }).is_err());
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(
             calls > 1. && calls < 128.,
             "separate callbacks reset the budget: {calls}"
         );
         runtime.eval("calls = 0; for (var i = 0; i < 128; i++) queueMicrotask(work);").unwrap();
-        runtime.pump();
+        assert!(runtime.vm.with_task_limits(1_000_000, None, |vm| {
+            drain_microtask_queue(vm, &state)
+        }).is_err());
         let calls = runtime.eval("calls").unwrap().as_number().unwrap();
         assert!(
             calls > 1. && calls < 128.,
