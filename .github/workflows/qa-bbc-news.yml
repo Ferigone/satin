@@ -1,7 +1,7 @@
 name: Public BBC News native baseline
 on:
   push:
-    branches: [qa/bbc-news-baseline]
+    branches: [qa/bbc-news-baseline, qa/bbc-alpha37-retest]
 permissions:
   contents: read
 jobs:
@@ -12,11 +12,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Verify independently downloaded alpha.34 and alpha.35 assets
+      - name: Verify independently downloaded alpha.34, alpha.35 and alpha.37 assets
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target/bbc-evidence | Out-Null
-          $versions = @('v0.1.0-alpha.34','v0.1.0-alpha.35')
+          $versions = @('v0.1.0-alpha.34','v0.1.0-alpha.35','v0.1.0-alpha.37')
           $records = foreach ($version in $versions) {
             $meta = Invoke-RestMethod "https://api.github.com/repos/Ferigone/satin/releases/tags/$version"
             foreach ($asset in $meta.assets | Where-Object { $_.name -match '\.(exe|zip)$' }) {
@@ -29,7 +29,7 @@ jobs:
           }
           $records | ConvertTo-Json | Set-Content target/bbc-evidence/release-hashes.json
           Get-Content target/bbc-evidence/release-hashes.json
-          if (@($records | Where-Object { -not $_.match }).Count -ne 0 -or @($records).Count -ne 4) { throw 'Release digest mismatch or incomplete assets' }
+          if (@($records | Where-Object { -not $_.match }).Count -ne 0 -or @($records).Count -ne 6) { throw 'Release digest mismatch or incomplete assets' }
       - name: Ensure Media Foundation is available
         shell: pwsh
         run: |
