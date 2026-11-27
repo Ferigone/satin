@@ -83,3 +83,37 @@ fn cached_primitive_methods_observe_new_descriptors_and_string_virtual_propertie
         length("one")===3 && length("different")===9
     "#).unwrap(), Value::Bool(true));
 }
+
+#[test]
+fn primitive_return_uses_normal_coercion_for_objects_and_respects_parameter_scope() {
+    let mut vm = Vm::new();
+    let result = vm.eval(r#"
+        const pick=(x,y)=>x<y?1:-1, add=(a,b)=>a+b, or=(a,b)=>a|b;
+        let log=""; const value=n=>({valueOf(){log+=n;return n}});
+        function duplicate(x,x){return x+1}
+        function defaults(a=4,b=2){return a+b}
+        let bad=false; try{add(1n,1)}catch(e){bad=e instanceof TypeError}
+        pick("a","b")===1 && pick(2,1)===-1 && pick(value(1),value(2))===1 &&
+        log==="12" && or(4,1)===5 && add("a",3)==="a3" && add(2n,3n)===5n &&
+        add(null,2)===2 && Number.isNaN(add(1)) && duplicate(3,5)===6 &&
+        defaults()===6 && bad
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn compound_updates_hold_the_canonical_reference_across_rhs_and_yield() {
+    let result = Vm::new().eval(r#"
+        let log="", backing=12;
+        const obj={ get x(){log+="g";return backing}, set x(n){log+="s";backing=n} };
+        const key={toString(){log+="k";return "x"}};
+        function* test(){return obj[key]>>=yield 1}
+        const it=test();const first=it.next();
+        const before=log;backing=64;const last=it.next(2);
+        const y=(obj[key] ||= 20);
+        const n=(1<<30)>>>1;
+        before==="kg" && last.value===3 && last.done && backing===3 && y===3 &&
+        log==="kgskg" && n===536870912
+    "#).unwrap();
+    assert_eq!(result, Value::Bool(true));
+}

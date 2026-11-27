@@ -3127,6 +3127,13 @@ impl Vm {
             self.active_calls.push(code.name.clone());
             self.enter_legacy_call(id, &code);
             let mut result = self.with_referrer(referrer, |vm| {
+                // The first invocation of a discarded body still materializes
+                // and accounts it. Primitive leaf calls need no local bindings.
+                if code.body.get().is_some() && let Some(leaf) = &code.leaf
+                    && let Some(result) = leaf.evaluate(vm, args)
+                {
+                    return result;
+                }
                 let invocation = Invocation {
                     function,
                     this,
@@ -3637,14 +3644,15 @@ impl Vm {
             | Op::NamedProperty(..)
             | Op::LoadProperty(..)
             | Op::Get
-            | Op::NormalizeReference
+            | Op::ReadForUpdate
+            | Op::ApplyUpdate(..)
             | Op::InvalidCallAssignment
             | Op::Set
             | Op::Delete
             | Op::Update { .. }
             | Op::TypeofReference
             | Op::Unary(..)
-            | Op::Binary(..)) => self.run_reference_op(op, stack, strict)?,
+            | Op::Binary(..) | Op::BinaryNumber(..)) => self.run_reference_op(op, stack, strict)?,
             Op::Dup => stack.push(stack.last().unwrap().clone()),
             Op::Swap => {
                 let len = stack.len();
@@ -3811,14 +3819,20 @@ impl Vm {
             Op::InvalidCallAssignment => {
                 return Err(JsError::new(ErrorKind::ReferenceError, "Cannot assign to a call result"));
             }
-            Op::NormalizeReference => {
+            Op::ReadForUpdate => {
                 let Some(Item::Reference(reference)) = stack.last_mut() else {
                     unreachable!()
                 };
                 self.normalize_reference(reference)?;
+                let old = self.read_reference(reference.clone())?;
+                stack.push(Item::Value(old));
             }
-            Op::Set => {
-                let v = self.pop_value(stack)?;
+            Op::Set | Op::ApplyUpdate(_) => {
+                let mut v = self.pop_value(stack)?;
+                if let Op::ApplyUpdate(operator) = op {
+                    let left = self.pop_value(stack)?;
+                    v = self.binary(operator, left, v)?;
+                }
                 let Some(Item::Reference(reference)) = stack.pop() else {
                     return Err(JsError::new(ErrorKind::InternalError, "Expected reference"));
                 };
@@ -3893,10 +3907,12 @@ impl Vm {
                 let value = self.unary(op, value)?;
                 stack.push(Item::Value(value));
             }
-            Op::Binary(op) => {
-                let right = self.pop_value(stack)?;
+            Op::Binary(operator) | Op::BinaryNumber(operator, _) => {
+                let right = if let Op::BinaryNumber(_, n) = op {
+                    Value::Number(*n)
+                } else { self.pop_value(stack)? };
                 let left = self.pop_value(stack)?;
-                let value = self.binary(op, left, right)?;
+                let value = self.binary(operator, left, right)?;
                 stack.push(Item::Value(value));
             }
             _ => unreachable!(),
@@ -4502,7 +4518,7 @@ impl Vm {
             }
         })
     }
-    fn binary(&mut self, op: &str, left: Value, right: Value) -> Result<Value, JsError> {
+    pub(crate) fn binary(&mut self, op: &str, left: Value, right: Value) -> Result<Value, JsError> {
         if matches!(op, "===" | "!==") {
             self.charge_bigint_comparison(&left, &right)?;
             if let (Value::String(a), Value::String(b)) = (&left, &right) {

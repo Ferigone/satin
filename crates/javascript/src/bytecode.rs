@@ -2,6 +2,7 @@
 //! chunks; expressions use a conventional operand/reference stack and jumps.
 mod classes;
 mod assignment_patterns;
+mod leaf;
 pub(crate) use assignment_patterns::PatternStep;
 use crate::{
     ErrorKind, JsError, JsString, Value,
@@ -87,6 +88,7 @@ impl Chunk {
 #[derive(Clone, Debug)]
 pub(crate) struct Code {
     pub source: Rc<crate::lexer::SourceSpan>,
+    pub leaf: Option<Box<leaf::LeafReturn>>,
     pub name: Option<JsString>,
     pub params: Vec<ParameterCode>,
     pub param_names: Vec<JsString>,
@@ -148,7 +150,8 @@ pub(crate) enum Op {
     PrivateProperty(JsString),
     PrivateIn(JsString),
     Get,
-    NormalizeReference,
+    ReadForUpdate,
+    ApplyUpdate(&'static str),
     InvalidCallAssignment,
     Set,
     Delete,
@@ -158,6 +161,7 @@ pub(crate) enum Op {
     },
     Unary(&'static str),
     Binary(&'static str),
+    BinaryNumber(&'static str, f64),
     TypeofReference,
     Pop,
     Dup,
@@ -389,6 +393,7 @@ pub(crate) fn retained_size(
                     + vector_storage(&code.params)
                     + vector_storage(&code.param_names)
                     + vector_storage(&code.mapped_indices)
+                    + code.leaf.as_deref().map_or(0, std::mem::size_of_val)
                     + code.param_names.iter().map(JsString::allocation_bytes).sum::<usize>()
                     + code.name.as_ref().map_or(0, JsString::allocation_bytes),
             );
@@ -904,6 +909,7 @@ fn compile_function(f: &Function, inherited_strict: bool) -> Result<Rc<Code>, Js
         }
     }
     Ok(Rc::new(Code {
+        leaf: leaf::LeafReturn::compile(f, &names, simple),
         mapped_indices,
         source: f.source.clone(),
         name: f.name.clone(),
@@ -1420,7 +1426,7 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                 }
             }
             Emit::Logical(op, right, name) => {
-                out.extend([Op::NormalizeReference, Op::Dup, Op::Get, Op::Dup]);
+                out.extend([Op::ReadForUpdate, Op::Dup]);
                 let branch = out.len();
                 out.push(Op::Jump(0));
                 out.push(Op::Pop);
@@ -1811,7 +1817,11 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                     pending.extend([Emit::ShortCircuit(op, right), E(left)])
                 }
                 Expr::Binary(op, left, right) => {
-                    pending.extend([I(Op::Binary(op)), E(right), E(left)])
+                    if let Expr::Literal(Value::Number(n)) = ungroup(right) {
+                        pending.extend([I(Op::BinaryNumber(op, *n)), E(left)]);
+                    } else {
+                        pending.extend([I(Op::Binary(op)), E(right), E(left)]);
+                    }
                 }
                 Expr::Assign(op, left, right) => {
                     if matches!(*op, "&&=" | "||=" | "??=") {
@@ -1830,7 +1840,6 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                         pending.extend([Emit::Logical(op, right, name), R(left, true)]);
                         continue;
                     }
-                    pending.push(I(Op::Set));
                     let right_evaluation = if *op == "="
                         && anonymous(right)
                         && let Expr::Identifier(name) = left.as_ref()
@@ -1855,11 +1864,9 @@ fn expr(e: &Expr, out: &mut Vec<Op>, strict: bool) -> Result<(), JsError> {
                             "^=" => "^",
                             _ => unreachable!(),
                         };
-                        pending.push(I(Op::Binary(binary)));
-                    }
-                    pending.push(right_evaluation);
-                    if *op != "=" {
-                        pending.extend([I(Op::Get), I(Op::Dup), I(Op::NormalizeReference)]);
+                        pending.extend([I(Op::ApplyUpdate(binary)), right_evaluation, I(Op::ReadForUpdate)]);
+                    } else {
+                        pending.extend([I(Op::Set), right_evaluation]);
                     }
                     pending.push(R(left, true));
                 }
