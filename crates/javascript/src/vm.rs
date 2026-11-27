@@ -2358,6 +2358,28 @@ impl Vm {
         key: &Value,
     ) -> Result<PropertyKey, JsError> {
         if base.is_nullish() {
+            // Temporary public-site QA instrumentation. Do not merge into master.
+            static QA_NULL_ACCESS_COUNT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            if QA_NULL_ACCESS_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                let property = match key {
+                    Value::String(s) => s.to_string_lossy().chars().take(64).collect::<String>(),
+                    _ => String::from("<non-string key>"),
+                };
+                let frames = self.legacy_calls.iter().rev().take(3).filter_map(|frame| {
+                    let object = self.heap.object(frame.function).ok()?;
+                    if let ObjectKind::Function { code, .. } = &object.kind {
+                        let prefix: String = code.source.iter().take(200)
+                            .map(|&point| char::from_u32(point).unwrap_or(char::REPLACEMENT_CHARACTER))
+                            .collect();
+                        Some(prefix)
+                    } else {
+                        None
+                    }
+                }).collect::<Vec<_>>();
+                eprintln!("QA_NULL_ACCESS property={property:?} base={} frames={frames:?}",
+                    if matches!(base, Value::Null) { "null" } else { "undefined" });
+            }
             return Err(JsError::type_error(
                 "Cannot access a property of null or undefined",
             ));
