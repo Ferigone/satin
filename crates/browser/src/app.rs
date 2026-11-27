@@ -1394,6 +1394,14 @@ impl App {
         }
     }
 
+    fn advance_document_after_network_event(&mut self, index: usize) -> bool {
+        // Another notification in the batch can run a long script checkpoint.
+        self.dispatch_resources(index);
+        let changed = self.advance_page(index);
+        self.dispatch_resources(index);
+        changed
+    }
+
     fn apply_media_updates(&mut self) -> bool {
         let mut redraw = false;
         for update in self.media.drain() {
@@ -5333,7 +5341,8 @@ impl ApplicationHandler<()> for App {
                         self.status = error.to_string();
                     }
                 }
-                let changed = self.sync_runtime(index);
+                let changed =
+                    self.advance_document_after_network_event(index) | self.sync_runtime(index);
                 self.dispatch_fetches(index);
                 self.dispatch_forms(index);
                 if changed && index == self.active {
@@ -5354,6 +5363,10 @@ impl ApplicationHandler<()> for App {
                 Payload::Resource { id, result } => {
                     self.deliver_resource(index, id, result);
                     if self.tabs[index].document_session.is_some() {
+                        if self.advance_document_after_network_event(index) && index == self.active {
+                            self.set_title();
+                            self.redraw();
+                        }
                         continue;
                     }
                 }
