@@ -698,7 +698,7 @@ impl ScriptRuntime {
         // DOM callbacks can re-enter page code underneath several lexical blocks.
         // The VM checks native stack headroom before every deeper bytecode entry.
         let mut vm = Vm::with_limits(VmLimits {
-            max_bytecode_depth: 512,
+            max_bytecode_depth: 4096,
             max_source_bytes: crate::loader::CLASSIC_SCRIPT_LIMIT,
             ..web_vm_limits()
         });

@@ -5,7 +5,7 @@ mod quality;
 
 use super::{
     ErrorKind, JsError, RootId, Shared, Value, Vm, abort, arg, blobs, diagnostic, dispatch_checked,
-    document_base, drain_microtask_queue, getter, mark_dirty, node, set_attribute, webidl,
+    document_base, drain_microtask_queue, getter, mark_dirty, node, scheduler, set_attribute, webidl,
 };
 use crate::{
     canvas::Frame,
@@ -1018,7 +1018,7 @@ pub(super) fn run_stream_tasks(vm: &mut Vm, state: &Shared) {
         return;
     }
     for _ in 0..32 {
-        let result = vm.with_task(|vm| {
+        let result = scheduler::run_script_task(vm, |vm| {
             if !mse::run_next(vm, state)? {
                 return Ok(false);
             }
@@ -1295,7 +1295,7 @@ impl super::ScriptRuntime {
             return frame_updated;
         }
         let state = &self.state;
-        if let Err(error) = self.vm.with_task(|vm| {
+        if let Err(error) = scheduler::run_script_task(&mut self.vm, |vm| {
             if rejected.is_some() {
                 state.borrow_mut().media.mse.detach(vm, key)?;
             }
