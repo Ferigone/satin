@@ -233,6 +233,8 @@ enum Action {
     Maximize,
     CloseWindow,
     #[cfg(all(windows, target_arch = "x86_64"))]
+    CheckUpdates,
+    #[cfg(all(windows, target_arch = "x86_64"))]
     UpdatePanel,
     #[cfg(all(windows, target_arch = "x86_64"))]
     UpdatePrimary(crate::updater::UpdateAction),
@@ -279,6 +281,8 @@ const MENU_ITEMS: &[(Action, &str)] = &[
     (Action::StartShortcuts, "Skróty startowe"),
     (Action::Downloads, "Pobrane pliki"),
     (Action::QuietMode, "Tryb skupienia"),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    (Action::CheckUpdates, "Sprawdź aktualizacje"),
 ];
 
 struct ActiveDownload {
@@ -687,8 +691,7 @@ pub(crate) fn run(
                         }
                     }),
                 )
-            })
-            .flatten(),
+            }),
         #[cfg(all(windows, target_arch = "x86_64"))]
         update_panel: false,
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -1856,6 +1859,15 @@ impl App {
             self.chrome_menu = None;
         }
         match action {
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            Action::CheckUpdates => {
+                if let Some(updater) = &mut self.updater {
+                    updater.start_job(crate::updater::UpdateAction::Check);
+                    self.toggle_update_panel();
+                } else {
+                    self.open_tab(crate::updater::RELEASES_PAGE.into(), false);
+                }
+            }
             #[cfg(all(windows, target_arch = "x86_64"))]
             Action::UpdatePanel => self.toggle_update_panel(),
             #[cfg(all(windows, target_arch = "x86_64"))]

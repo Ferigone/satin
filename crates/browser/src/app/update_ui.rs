@@ -126,7 +126,7 @@ impl App {
     pub(super) fn toggle_update_panel(&mut self) {
         if self.update_panel {
             self.dismiss_update_panel();
-        } else if self.settings_panel.is_none() && self.update_view().is_some() {
+        } else if self.settings_panel.is_none() && self.updater.is_some() {
             self.dismiss_site_info();
             self.update_panel = true;
             self.chrome_keys.capture_held();
@@ -187,7 +187,7 @@ impl App {
         self.modifiers == ModifiersState::ALT
             && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("u"))
             && self.settings_panel.is_none()
-            && self.update_view().is_some()
+            && self.updater.is_some()
     }
 
     pub(super) fn update_owns_key(&self, key: &Key) -> bool {
@@ -234,12 +234,17 @@ impl App {
     }
 
     pub(super) fn update_command(&mut self, action: UpdateAction) {
-        if self.presented_update_primary() != Some(action)
-            || !self
-                .updater
-                .as_ref()
-                .is_some_and(|updates| updates.can_start(action))
-        {
+        if self.presented_update_primary() != Some(action) {
+            return;
+        }
+        if action == UpdateAction::OpenRelease {
+            if let Some(url) = self.updater.as_ref().and_then(Updates::portable_release_page) {
+                self.dismiss_update_panel();
+                self.open_tab(url, false);
+            }
+            return;
+        }
+        if !self.updater.as_ref().is_some_and(|updates| updates.can_start(action)) {
             return;
         }
         self.clear_update_primary();

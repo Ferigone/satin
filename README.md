@@ -171,7 +171,9 @@ The Test262 run used a Rust 1.99.1 release worker with Node 24.22.3 supervising 
 2. Extract the archive and run `Install.cmd`.
 3. Open **Satin** from the desktop.
 
-On startup, installed copies of Satin check for a newer release. If one is available, open the update icon next to the address bar (or press **Alt+U**) and choose **Download update**. Once Satin verifies the download, choose **Restart and update** to switch versions and reopen the same profile.
+Satin checks for a newer release on startup. Open the update icon next to the address bar, press **Alt+U**, or choose **Sprawdź aktualizacje** in the browser menu. The menu works even when the update icon is hidden.
+
+Installed copies offer **Download update** and **Restart and update** once the verified download is ready. If you run the browser directly from an extracted folder, choose **Open release page**, download the Windows ZIP, and run `Install.cmd` from the extracted files to set up the managed installation.
 
 ## Try the built-in pages
 

@@ -27,11 +27,11 @@ impl Updates {
         // A pending in-memory discovery result exercises the production poll
         // transition without executing a Check, including at startup.
         Self {
-            install: Installation {
+            install: Some(Installation {
                 root: profile.join("not-an-install"),
                 running: profile.join("not-an-executable"),
                 profile: profile.to_owned(),
-            },
+            }),
             wake: Arc::new(|| {}),
             phase: Phase::Checking,
             job: Some(job),
@@ -57,6 +57,7 @@ impl Updates {
             // Record the fully routed action; don't issue or simulate a
             // Prepared(Restart) outcome or change installation state.
             UpdateAction::Restart => transport.commands[2] += 1,
+            UpdateAction::OpenRelease => unreachable!("opening a release is not a job"),
         }
     }
 

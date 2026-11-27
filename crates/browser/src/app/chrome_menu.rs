@@ -43,7 +43,7 @@ const ANCHOR_GAP: f32 = 5.;
 const PADDING: f32 = 7.; // 1 px border plus 6 px internal padding.
 const ROW_HEIGHT: f32 = 35.;
 const MIN_ROW_HEIGHT: f32 = 22.;
-const DIVIDER_HEIGHT: f32 = 11.;
+const DIVIDER_HEIGHT: f32 = 10.;
 const ZOOM_BUTTON: f32 = 31.;
 const ZOOM_HEIGHT: f32 = ZOOM_BUTTON + 2. * 7.;
 const ROW_INSET: f32 = 8.;
@@ -192,6 +192,13 @@ const ROWS: &[Row] = &[
         Target::Browser(Action::Version),
         Glyph::Info,
         "O Satin",
+        None,
+    ),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    Row::Item(
+        Target::Browser(Action::CheckUpdates),
+        Glyph::Download,
+        "Sprawdź aktualizacje",
         None,
     ),
     Row::Item(
@@ -585,7 +592,11 @@ mod tests {
                 x: 917.,
                 y: 87.5,
                 width: 352.,
-                height: 512.,
+                height: if cfg!(all(windows, target_arch = "x86_64")) {
+                    544.
+                } else {
+                    509.
+                },
             }
         );
         assert_eq!(normal.density, 1.);

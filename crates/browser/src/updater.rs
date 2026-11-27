@@ -29,6 +29,7 @@ mod ui_qa;
 pub(crate) use restart::{Restart, StartupSignal};
 
 const RELEASES: &str = "https://api.github.com/repos/Ferigone/satin/releases";
+pub(crate) const RELEASES_PAGE: &str = "https://github.com/Ferigone/satin/releases";
 // Releases in this channel must not match alpha.44's automatic updater.
 const ASSET_NAME: &str = "satin-windows-x64-opt-in.exe";
 const BINARY_NAME: &str = "rust-browser.exe";
@@ -87,6 +88,7 @@ pub(crate) enum UpdateAction {
     Check,
     Download,
     Restart,
+    OpenRelease,
 }
 
 enum Phase {
@@ -182,7 +184,7 @@ impl Drop for Reply {
 }
 
 pub(crate) struct Updates {
-    install: Installation,
+    install: Option<Installation>,
     wake: Arc<dyn Fn() + Send + Sync>,
     phase: Phase,
     job: Option<Job>,
@@ -211,15 +213,12 @@ fn install_root() -> Option<PathBuf> {
 }
 
 impl Updates {
-    pub(crate) fn start(profile: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Self> {
-        let (root, running) = installed_running()?;
-        let profile = profile.canonicalize().ok()?;
+    pub(crate) fn start(profile: &Path, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        let install = installed_running()
+            .zip(profile.canonicalize().ok())
+            .map(|((root, running), profile)| Installation { root, running, profile });
         let mut updates = Self {
-            install: Installation {
-                root,
-                running,
-                profile,
-            },
+            install,
             wake,
             phase: Phase::Current,
             job: None,
@@ -227,7 +226,7 @@ impl Updates {
             ui_qa: None,
         };
         updates.start_job(UpdateAction::Check);
-        Some(updates)
+        updates
     }
 
     pub(crate) fn view(&self, panel_open: bool) -> Option<View> {
@@ -239,13 +238,22 @@ impl Updates {
         };
         match &self.phase {
             Phase::Current if !panel_open => return None,
-            Phase::Current => view.title = "Satin is up to date",
+            Phase::Current => {
+                view.title = "Satin is up to date";
+                view.detail = format!("Version {}", env!("CARGO_PKG_VERSION"));
+                view.button = Some((UpdateAction::Check, "Check again"));
+            }
             Phase::Checking if !panel_open => return None,
             Phase::Checking => view.title = "Checking for updates…",
             Phase::Available(candidate) => {
                 view.title = "Satin update available";
                 view.detail = format!("Version {}", candidate.version);
-                view.button = Some((UpdateAction::Download, "Download update"));
+                view.button = Some(if self.install.is_some() {
+                    (UpdateAction::Download, "Download update")
+                } else {
+                    view.detail.push_str(" · Windows ZIP installer");
+                    (UpdateAction::OpenRelease, "Open release page")
+                });
             }
             Phase::Downloading(candidate) => {
                 let bytes = self.job.as_ref().map_or(0, |job| job.bytes.load(Relaxed));
@@ -284,6 +292,7 @@ impl Updates {
                         "You can keep browsing and try again.".into(),
                         Some((UpdateAction::Restart, "Retry restart")),
                     ),
+                    UpdateAction::OpenRelease => unreachable!("opening a release is not a job"),
                 };
             }
             Phase::Superseded(Superseded::ActiveInstallation) => {
@@ -305,6 +314,8 @@ impl Updates {
 
     pub(crate) fn can_start(&self, action: UpdateAction) -> bool {
         self.job.is_none()
+            && action != UpdateAction::OpenRelease
+            && (action == UpdateAction::Check || self.install.is_some())
             && match &self.phase {
                 Phase::Current => action == UpdateAction::Check,
                 Phase::Available(_) => action == UpdateAction::Download,
@@ -313,6 +324,17 @@ impl Updates {
                 Phase::Superseded(Superseded::RollbackFloor) => action == UpdateAction::Check,
                 _ => false,
             }
+    }
+
+    pub(crate) fn portable_release_page(&self) -> Option<String> {
+        if self.install.is_some() {
+            return None;
+        }
+        let Phase::Available(candidate) = &self.phase else {
+            return None;
+        };
+        let tag = candidate.url.path_segments()?.nth(4)?;
+        Some(format!("{RELEASES_PAGE}/tag/{tag}"))
     }
 
     fn offered(&self) -> Option<Arc<Candidate>> {
@@ -391,6 +413,7 @@ impl Updates {
             UpdateAction::Check => Phase::Checking,
             UpdateAction::Download => Phase::Downloading(self.offered().expect("offered update")),
             UpdateAction::Restart => Phase::Applying(self.offered().expect("staged update")),
+            UpdateAction::OpenRelease => unreachable!("opening a release is not a job"),
         };
     }
 
@@ -452,7 +475,7 @@ fn mib(bytes: u64) -> String {
 }
 
 fn run_worker(
-    install: Installation,
+    install: Option<Installation>,
     action: UpdateAction,
     candidate: Option<&Candidate>,
     wake: &Arc<dyn Fn() + Send + Sync>,
@@ -466,12 +489,16 @@ fn run_worker(
     let operation = async {
         match action {
             UpdateAction::Check => {
-                let (current, _) = current_for_update(&install.root, &install.running)?;
-                Ok(Outcome::Discovered(
-                    discover(&client()?, &install.root, &current.version).await?,
-                ))
+                let floor = if let Some(install) = &install {
+                    let (current, _) = current_for_update(&install.root, &install.running)?;
+                    update_floor(&install.root, parse_version(&current.version)?)?
+                } else {
+                    parse_version(env!("CARGO_PKG_VERSION"))?
+                };
+                Ok(Outcome::Discovered(newest(&client()?, &floor).await?))
             }
             UpdateAction::Download => {
+                let install = install.as_ref().ok_or("Satin is not installed")?;
                 let candidate = candidate.expect("offered update");
                 let mut shown = 0;
                 stage(
@@ -491,7 +518,11 @@ fn run_worker(
                 .await?;
                 Ok(Outcome::Staged)
             }
-            UpdateAction::Restart => apply(install, candidate.expect("staged update")).await,
+            UpdateAction::Restart => {
+                let install = install.ok_or("Satin is not installed")?;
+                apply(install, candidate.expect("staged update")).await
+            }
+            UpdateAction::OpenRelease => unreachable!("opening a release is not a job"),
         }
     };
     runtime.block_on(async {
@@ -669,13 +700,8 @@ fn executable_path(build_id: &str) -> String {
     format!("versions/{build_id}/{BINARY_NAME}")
 }
 
-async fn discover(
-    client: &Client,
-    root: &Path,
-    current: &str,
-) -> Result<Option<Candidate>, String> {
-    let current = Version::parse(current).map_err(|error| error.to_string())?;
-    newest(client, &update_floor(root, current)?).await
+fn parse_version(version: &str) -> Result<Version, String> {
+    Version::parse(version).map_err(|error| error.to_string())
 }
 
 fn stage_manifest(candidate: &Candidate) -> Result<Manifest, String> {
@@ -942,9 +968,6 @@ async fn newest(client: &Client, current: &Version) -> Result<Option<Candidate>,
             RELEASE_RETRY_DELAYS,
         )
         .await?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
         let releases: Vec<Release> = serde_json::from_slice(&metadata(response).await?)
             .map_err(|error| error.to_string())?;
         let done = releases.len() < RELEASES_PER_PAGE;
@@ -1351,7 +1374,7 @@ mod tests {
         let fixture = Fixture::new();
         let (install, prior) = fixture.setup();
         let mut updates = Updates {
-            install,
+            install: Some(install),
             wake: Arc::new(|| {}),
             phase: Phase::Checking,
             job: None,
@@ -1396,11 +1419,55 @@ mod tests {
     }
 
     #[test]
+    fn portable_launch_offers_the_public_release_without_install_commands() {
+        let mut updates = Updates {
+            install: None,
+            wake: Arc::new(|| {}),
+            phase: Phase::Checking,
+            job: None,
+            ui_qa: None,
+        };
+        let tag = "v0.1.0-alpha.99";
+        let candidate = Candidate {
+            url: Url::parse(&format!("{RELEASES_PAGE}/download/{tag}/{ASSET_NAME}")).unwrap(),
+            version: Version::parse(&tag[1..]).unwrap(),
+            size: 512,
+            hash: [0; 32],
+        };
+        assert!(updates.portable_release_page().is_none());
+        attach_test_job(&mut updates)
+            .send(Ok(Outcome::Discovered(Some(candidate))))
+            .unwrap();
+        assert!(updates.poll().0);
+        assert!(matches!(
+            updates.view(false).unwrap().button,
+            Some((UpdateAction::OpenRelease, _))
+        ));
+        assert_eq!(
+            updates.portable_release_page(),
+            Some(format!("{RELEASES_PAGE}/tag/{tag}"))
+        );
+        assert!(!updates.can_start(UpdateAction::Download));
+        assert!(!updates.can_start(UpdateAction::Restart));
+        assert!(!updates.can_start(UpdateAction::OpenRelease));
+        assert!(updates.job.is_none());
+
+        updates.phase = Phase::Current;
+        assert!(updates.view(false).is_none());
+        assert!(matches!(
+            updates.view(true).unwrap().button,
+            Some((UpdateAction::Check, _))
+        ));
+        assert!(updates.can_start(UpdateAction::Check));
+        assert!(updates.portable_release_page().is_none());
+    }
+
+    #[test]
     fn startup_or_download_failure_allows_retry_without_a_restart() {
         let fixture = Fixture::new();
         let (install, prior) = fixture.setup();
         let mut updates = Updates {
-            install,
+            install: Some(install),
             wake: Arc::new(|| {}),
             phase: Phase::Checking,
             job: None,
@@ -1429,7 +1496,7 @@ mod tests {
         let (install, _) = fixture.setup();
         let candidate = Arc::new(sample_candidate(&sample_payload()));
         let mut updates = Updates {
-            install,
+            install: Some(install),
             wake: Arc::new(|| {}),
             phase: Phase::Applying(candidate.clone()),
             job: None,
