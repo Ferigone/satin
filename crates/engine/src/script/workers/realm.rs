@@ -54,7 +54,8 @@ impl WorkerRealm {
         let set_prototype = vm.get_property(object.clone(), "setPrototypeOf")?;
         let target_constructor = vm.get_global("EventTarget")?;
         let cloning = CloneHost::new_worker(&mut vm)?;
-        let messages = message_ports::install(&mut vm, events.clone(), cloning)?;
+        let messages = message_ports::install(&mut vm, events.clone(), cloning.clone())?;
+        cloning.install(&mut vm, global.clone(), messages.clone())?;
 
         let worker_proto = vm.new_object_with_prototype(events.target_proto.clone())?;
         let worker = webidl::interface(
