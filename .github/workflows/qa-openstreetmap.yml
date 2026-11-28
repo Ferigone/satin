@@ -55,6 +55,7 @@ jobs:
           const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,buildFeatures:['media-startup-diagnostics'],productionBase:'ec959854ede88bd51e7cbf1799f9d8c7b90f113b',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
+          const sample = (after_ms,count_selector) => ({action:'sample_media',after_ms,count_selector});
           async function satinCase(url,index,phase,actions){
             const result={phase};const start=performance.now();
             const common=['--url',url,'--profile',join(tmp,'satin-'+index+'-'+phase)];
@@ -68,7 +69,7 @@ jobs:
             }
             try{
               const {stdout,stderr}=await run(satin,args,{timeout:180000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp'),SATIN_QA_FETCH_TARGET:'https://www.openstreetmap.org/search'}});
-              try{const j=JSON.parse(stdout.trim());result.receipt={version:j.version,url:j.url,title:j.title,frames:j.frames_presented,windowSmoke:j.window_smoke,layoutLimited:j.layout_limited,paintLimited:j.paint_limited,documentHeight:j.document_height,diagnostics:j.javascript?.diagnostics?.slice(0,40).map(safe)};}catch(e){result.parseError=safe(e.message)}
+              try{const j=JSON.parse(stdout.trim());result.receipt={version:j.version,url:j.url,title:j.title,frames:j.frames_presented,windowSmoke:j.window_smoke,layoutLimited:j.layout_limited,paintLimited:j.paint_limited,documentHeight:j.document_height,domSamples:j.media_samples??[],diagnostics:j.javascript?.diagnostics?.slice(0,40).map(safe)};}catch(e){result.parseError=safe(e.message)}
               result.fetchTrace=stderr.split(/\r?\n/).filter(line=>line.startsWith('SATIN_QA_FETCH_')).slice(0,40).map(safe);result.stderr=safe(stderr);result.exit=0;
             }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code;result.killed=e.killed}
             result.elapsedMs=Math.round(performance.now()-start);
@@ -119,8 +120,8 @@ jobs:
                   item.chrome.status=(await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000}))?.status();
                   item.chrome.navigationMs=Math.round(performance.now()-start);
                   await page.waitForTimeout(8000);
-                  const sample=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:[...document.querySelectorAll('input#query')].find(i=>i.getClientRects().length>0)?.value??null}));
-                  item.chrome.initial=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-initial.png')});
+                  const samplePage=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:[...document.querySelectorAll('input#query')].find(i=>i.getClientRects().length>0)?.value??null}));
+                  item.chrome.initial=await samplePage();await page.screenshot({path:join(out,'chrome-'+index+'-initial.png')});
                   item.chrome.controls=await page.evaluate(()=>[...document.querySelectorAll('#map a, #map button')].filter(e=>e.getClientRects().length&&e.getBoundingClientRect().width>0).slice(0,30).map(e=>({title:e.title,aria:e.getAttribute('aria-label'),class:e.className,tag:e.tagName,text:e.textContent.slice(0,60)})));
                   if(index===0){
                     try {
@@ -139,7 +140,7 @@ jobs:
                     const input=page.locator('input#query:visible').first();
                     if(await input.isVisible()){
                       await input.click();await input.fill('Warszawa');await input.press('Enter');await page.waitForTimeout(5000);
-                      item.chrome.search=await sample();await Promise.allSettled(frameTasks);await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
+                      item.chrome.search=await samplePage();await Promise.allSettled(frameTasks);await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
                     }else item.chrome.searchError='Search input not visible';
                   }else{
                     const zoom=page.locator('.leaflet-control-zoom-in:visible, [title="Zoom In"]:visible, [title="Zoom in"]:visible, [aria-label="Zoom In"]:visible, [aria-label="Zoom in"]:visible').first();
@@ -147,7 +148,7 @@ jobs:
                       const box=await zoom.boundingBox();item.chrome.zoomPoint=box;
                       const t=performance.now();await zoom.click({timeout:5000});await page.waitForTimeout(1800);
                       item.chrome.zoomElapsedMs=Math.round(performance.now()-t);
-                      item.chrome.zoom=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-zoom.png')});
+                      item.chrome.zoom=await samplePage();await page.screenshot({path:join(out,'chrome-'+index+'-zoom.png')});
                     }else item.chrome.zoomError='Zoom control not visible';
                   }
                 }catch(e){item.chrome.error=safe(e.message)}finally{await ctx.close()}
@@ -155,13 +156,19 @@ jobs:
               item.satin.push(await satinCase(url,index,'headless',[]));await save();
               item.satin.push(await satinCase(url,index,'native-initial',[]));await save();
               if(index===0){
-                item.satin.push(await satinCase(url,index,'native-search',[{action:'click_at',x:70,y:203},{action:'text',value:'Warszawa'},key('Enter')]));await save();
+                // Allow the same pre-input and post-input settling time as Chromium.
+                // Count actual connected result nodes and layout, not just the URL.
+                const selector='.search_results_entry';
+                item.satin.push(await satinCase(url,index,'native-search',[
+                  sample(8000,selector),{action:'click_at',x:70,y:203},{action:'text',value:'Warszawa'},key('Enter'),
+                  sample(5000,selector),sample(0,'#sidebar_content_frame'),sample(10000,selector),sample(0,'#sidebar_content_frame')
+                ]));await save();
               }else if(item.chrome.zoomPoint){
                 const {x,y,width,height}=item.chrome.zoomPoint;
                 // Previous native screenshot has a 121 px top chrome and 23 px footer.
                 // This is an exploratory click; verify the target in Satin's screenshot.
                 item.satinZoomAttempt={x:x+width/2,y:y+height/2+121};
-                item.satin.push(await satinCase(url,index,'native-zoom',[{action:'click_at',...item.satinZoomAttempt}]));await save();
+                item.satin.push(await satinCase(url,index,'native-zoom',[sample(8000,'.search_results_entry'),{action:'click_at',...item.satinZoomAttempt},sample(1800,'.search_results_entry')]));await save();
               }
             }
             if(report.bundle){
