@@ -19,7 +19,7 @@ jobs:
             Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
           }
       - name: Test document, form, and attribute regressions
-        run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console --test document --test fetch_integration_audit
+        run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console --test document --test fetch_integration_audit --test dom_mutations
       - name: Test layout geometry and SVG regressions
         run: cargo test --locked -p rust-browser-engine --test layout_geometry --test svg_rendering
       - name: Test worker realm and worker event loop
@@ -122,6 +122,15 @@ jobs:
                   await page.waitForTimeout(8000);
                   const samplePage=()=>page.evaluate(()=>({title:document.title,url:location.href,viewport:[innerWidth,innerHeight],map:!!document.querySelector('#map'),tiles:[...document.querySelectorAll('.leaflet-tile')].filter(i=>i.complete&&i.naturalWidth>0).length,results:document.querySelectorAll('.search_results_entry').length,query:[...document.querySelectorAll('input#query')].find(i=>i.getClientRects().length>0)?.value??null}));
                   item.chrome.initial=await samplePage();await page.screenshot({path:join(out,'chrome-'+index+'-initial.png')});
+                  item.chrome.iconStyles=await page.evaluate(async()=>{
+                    await document.fonts.ready;
+                    return [...document.querySelectorAll('#map .control-button i')].slice(0,20).map(e=>{
+                      const p=getComputedStyle(e,'::before');
+                      const content=p.content;
+                      return {class:e.className,content,fontFamily:p.fontFamily,fontSize:p.fontSize,display:p.display,color:p.color,rect:[e.getBoundingClientRect().width,e.getBoundingClientRect().height],fontLoaded:document.fonts.check(p.fontSize+' '+p.fontFamily,content.replace(/^"|"$/g,''))};
+                    });
+                  });
+                  item.chrome.fontResources=await page.evaluate(()=>performance.getEntriesByType('resource').filter(e=>/\.woff2?(?:[?#]|$)/i.test(e.name)).map(e=>({url:e.name,transferSize:e.transferSize,duration:e.duration})));
                   item.chrome.controls=await page.evaluate(()=>[...document.querySelectorAll('#map a, #map button')].filter(e=>e.getClientRects().length&&e.getBoundingClientRect().width>0).slice(0,30).map(e=>({title:e.title,aria:e.getAttribute('aria-label'),class:e.className,tag:e.tagName,text:e.textContent.slice(0,60)})));
                   if(index===0){
                     try {
@@ -210,6 +219,9 @@ jobs:
             cargo test --locked -p rust-browser-engine --test fetch_integration_audit fetched_html_fragment_selects_frame_from_public_response_shape -- --exact
             if ($LASTEXITCODE -ne 0) { throw 'Live response fragment regression failed' }
           } finally { Remove-Item -LiteralPath $env:SATIN_QA_FRAME_FIXTURE -ErrorAction SilentlyContinue }
+      - name: Run generated icon font regression (must pass before release)
+        if: always()
+        run: cargo test --locked -p rust-browser-engine --test font_faces
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
