@@ -24,8 +24,8 @@ jobs:
         run: cargo test --locked -p rust-browser-engine --test layout_geometry --test svg_rendering
       - name: Test worker realm and worker event loop
         run: cargo test --locked -p rust-browser-engine --lib worker
-      - name: Build actual Satin
-        run: cargo build --release --locked -p rust-browser
+      - name: Build actual Satin with existing call-site diagnostics (QA only)
+        run: cargo build --release --locked -p rust-browser --features media-startup-diagnostics
       - name: Install pinned reference driver
         run: npm install --prefix "$env:RUNNER_TEMP/osm-reference" --ignore-scripts --no-audit --no-fund playwright-core@1.56.1 acorn@8.15.0
       - name: Capture public map retest
@@ -52,7 +52,7 @@ jobs:
           const viewport = {width:1280,height:800};
           const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
           const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
-          const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,productionBase:'ad4dfb4692b9e70b87ee27cfcb99256734caf423',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,buildFeatures:['media-startup-diagnostics'],productionBase:'ad4dfb4692b9e70b87ee27cfcb99256734caf423',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
           async function satinCase(url,index,phase,actions){
