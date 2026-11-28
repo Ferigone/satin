@@ -210,6 +210,130 @@ jobs:
           $script | Set-Content -LiteralPath $scriptPath -Encoding utf8
           node $scriptPath
           if ($LASTEXITCODE -ne 0) { throw 'QA runner failed' }
+      - name: Attempt real visible Windows input and capture screen pixels
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = (Resolve-Path target/osm-evidence).Path
+          $record = [ordered]@{ status='not_verified'; input='Windows desktop mouse and keyboard'; steps=@(); viewport=$null; limitation=$null }
+          $p = $null
+          try {
+            Add-Type -AssemblyName System.Windows.Forms
+            Add-Type -AssemblyName System.Drawing
+            Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class OsmDesktop {
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left,Top,Right,Bottom; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
+            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+            [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x,int y,int w,int z,uint flags);
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h,int cmd);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint flags,uint dx,uint dy,uint data,UIntPtr extra);
+          }
+          '@
+            [void][OsmDesktop]::SetProcessDPIAware()
+            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $record.screen = @{x=$screen.X;y=$screen.Y;width=$screen.Width;height=$screen.Height}
+            if (-not [Environment]::UserInteractive -or $screen.Width -lt 1000 -or $screen.Height -lt 700) { throw 'No sufficiently large interactive desktop' }
+            $w = [Math]::Min(1280,$screen.Width-24)
+            $h = [Math]::Min(944,$screen.Height-48)
+            $profile = Join-Path $env:RUNNER_TEMP ('osm-desktop-'+[Guid]::NewGuid())
+            $p = Start-Process -FilePath (Resolve-Path target/release/rust-browser.exe).Path -ArgumentList @('--url','https://www.openstreetmap.org/','--profile',('"' + $profile + '"')) -PassThru
+            $deadline = [DateTime]::UtcNow.AddSeconds(45)
+            do {
+              Start-Sleep -Milliseconds 300
+              $p.Refresh()
+              if ($p.HasExited) { throw 'Satin exited before creating a visible window' }
+              $hwnd = $p.MainWindowHandle
+            } until ($hwnd -ne [IntPtr]::Zero -or [DateTime]::UtcNow -ge $deadline)
+            if ($hwnd -eq [IntPtr]::Zero) { throw 'No native window handle' }
+            [void][OsmDesktop]::ShowWindow($hwnd,9)
+            $cr = New-Object OsmDesktop+RECT
+            $wr = New-Object OsmDesktop+RECT
+            if (-not [OsmDesktop]::GetClientRect($hwnd,[ref]$cr) -or -not [OsmDesktop]::GetWindowRect($hwnd,[ref]$wr)) { throw 'Cannot measure window' }
+            $extraW = ($wr.Right-$wr.Left)-($cr.Right-$cr.Left)
+            $extraH = ($wr.Bottom-$wr.Top)-($cr.Bottom-$cr.Top)
+            if (-not [OsmDesktop]::SetWindowPos($hwnd,[IntPtr]::Zero,$screen.X+4,$screen.Y+4,$w+$extraW,$h+$extraH,0x0040)) { throw 'Cannot size visible window' }
+            [void][OsmDesktop]::SetForegroundWindow($hwnd)
+            Start-Sleep -Seconds 12
+            function Assert-Foreground {
+              if ([OsmDesktop]::GetForegroundWindow() -ne $hwnd) { throw 'Satin is not the foreground window; no input delivered' }
+            }
+            function Get-Client {
+              $r = New-Object OsmDesktop+RECT
+              $o = New-Object OsmDesktop+POINT
+              if (-not [OsmDesktop]::GetClientRect($hwnd,[ref]$r) -or -not [OsmDesktop]::ClientToScreen($hwnd,[ref]$o)) { throw 'Cannot measure client area' }
+              if ($o.X -lt $screen.X -or $o.Y -lt $screen.Y -or ($o.X+$r.Right) -gt $screen.Right -or ($o.Y+$r.Bottom) -gt $screen.Bottom) { throw 'Client area is not completely visible' }
+              @{ x=$o.X;y=$o.Y;width=$r.Right;height=$r.Bottom }
+            }
+            function Capture([string]$name) {
+              Assert-Foreground
+              $c = Get-Client
+              $bitmap = New-Object System.Drawing.Bitmap($c.width,$c.height)
+              $g = [System.Drawing.Graphics]::FromImage($bitmap)
+              try {
+                $g.CopyFromScreen($c.x,$c.y,0,0,$bitmap.Size)
+                $bitmap.Save((Join-Path $out $name),[System.Drawing.Imaging.ImageFormat]::Png)
+              } finally { $g.Dispose(); $bitmap.Dispose() }
+            }
+            function Click-Client([int]$x,[int]$y) {
+              Assert-Foreground
+              $c = Get-Client
+              if ($x -lt 0 -or $y -lt 0 -or $x -ge $c.width -or $y -ge $c.height) { throw 'Click would be outside visible client' }
+              if (-not [OsmDesktop]::SetCursorPos($c.x+$x,$c.y+$y)) { throw 'Cannot move system pointer' }
+              [OsmDesktop]::mouse_event(2,0,0,0,[UIntPtr]::Zero)
+              [OsmDesktop]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+              $record.steps += @{action='mouse click';x=$x;y=$y;utc=[DateTime]::UtcNow.ToString('o')}
+            }
+            function Read-Address {
+              Assert-Foreground
+              [System.Windows.Forms.Clipboard]::Clear()
+              [System.Windows.Forms.SendKeys]::SendWait('^l')
+              [System.Windows.Forms.SendKeys]::SendWait('^c')
+              Start-Sleep -Milliseconds 300
+              $url = [System.Windows.Forms.Clipboard]::GetText()
+              [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+              if ($url -notmatch '^https://www\.openstreetmap\.org/') { throw 'Could not read the current site URL from Satin address bar' }
+              return $url
+            }
+            $c = Get-Client
+            $record.client = $c
+            $record.viewport = @{width=$c.width;height=$c.height-144;basis='121px top chrome + 23px footer; review actual capture'}
+            Capture 'desktop-0-initial.png'
+            Click-Client 70 203
+            Assert-Foreground
+            [System.Windows.Forms.SendKeys]::SendWait('Warszawa')
+            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+            $record.steps += @{action='keyboard text and Enter';value='Warszawa';utc=[DateTime]::UtcNow.ToString('o')}
+            Start-Sleep -Seconds 15
+            Capture 'desktop-1-search.png'
+            $record.searchUrl = Read-Address
+            if ($record.searchUrl -notmatch '[?&]query=Warszawa(?:[&#]|$)') { throw 'Address does not confirm search navigation' }
+            Click-Client ($c.width-20) 206
+            Start-Sleep -Seconds 5
+            Capture 'desktop-2-zoom.png'
+            $record.zoomUrl = Read-Address
+            $before = [regex]::Match($record.searchUrl,'#map=(\d+)/')
+            $after = [regex]::Match($record.zoomUrl,'#map=(\d+)/')
+            if (-not $before.Success -or -not $after.Success -or ([int]$after.Groups[1].Value -ne ([int]$before.Groups[1].Value+1))) { throw 'Address does not confirm one zoom-in step' }
+            $record.status = 'url_checks_passed_visual_review_required'
+          } catch {
+            $record.limitation = $_.Exception.Message
+          } finally {
+            if ($p -and -not $p.HasExited) {
+              [void]$p.CloseMainWindow()
+              if (-not $p.WaitForExit(5000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            }
+            $record | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $out 'desktop-input.json')
+            Get-Content (Join-Path $out 'desktop-input.json')
+          }
       - name: Replay the exact public response fragment in Satin
         shell: pwsh
         run: |
@@ -228,6 +352,28 @@ jobs:
           name: openstreetmap-alpha47-retest
           path: target/osm-evidence/
           if-no-files-found: warn
+
+  workspace-verify:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Ensure Media Foundation is available
+        shell: powershell
+        run: |
+          if (-not (Test-Path -LiteralPath "$env:WINDIR/System32/mfplat.dll")) {
+            $feature = Install-WindowsFeature -Name Server-Media-Foundation -ErrorAction Stop
+            if (-not $feature.Success) { throw 'Media Foundation installation failed.' }
+          }
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+      - name: Build production workspace without QA features
+        run: cargo build --workspace --release --locked
 
   public-release-hashes:
     runs-on: windows-2022
