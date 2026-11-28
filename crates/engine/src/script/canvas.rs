@@ -18,6 +18,14 @@ pub(super) use image_bitmap::{
 pub(super) use pixels::ImageDataFactory;
 use pixels::{ImageStatus, Source};
 
+// ImageData is exposed in both Window and Worker realms. Reuse the
+// same branded, bounded backing store without installing canvas elements.
+pub(super) fn install_worker_image_data(vm: &mut Vm) -> Result<ImageDataFactory, JsError> {
+    let exception = vm.get_global("DOMException")?;
+    let errors = Exceptions(vm.root(exception));
+    pixels::install_worker_image_data(vm, errors)
+}
+
 const CONTEXT_LIMIT: usize = 4096;
 
 #[derive(Clone, Copy)]

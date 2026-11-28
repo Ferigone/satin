@@ -559,6 +559,13 @@ fn draw_image(
     Ok(())
 }
 
+pub(super) fn install_worker_image_data(
+    vm: &mut Vm,
+    errors: Exceptions,
+) -> Result<ImageDataFactory, JsError> {
+    data::Factory::install(vm, errors)
+}
+
 pub(super) fn install(
     vm: &mut Vm,
     state: &Shared,

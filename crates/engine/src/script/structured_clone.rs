@@ -46,9 +46,9 @@ impl CloneHost {
         })
     }
 
-    // Workers have their own VM and DOMException, but do not yet expose
-    // the document-specific factories. Their local ports still clone JS
-    // values and transfer buffers/ports within that VM.
+    // Workers have their own VM, DOMException and ImageData prototype.
+    // Document-specific factories remain absent; local ports clone ImageData
+    // using the same graph hooks as Window.
     pub(super) fn new_worker(vm: &mut Vm) -> Result<Self, JsError> {
         let dom_exception = vm.get_global("DOMException")?;
         vm.root(dom_exception.clone());
@@ -56,7 +56,7 @@ impl CloneHost {
         vm.root(exception_prototype.clone());
         Ok(Self {
             blobs: None,
-            image_data: None,
+            image_data: Some(super::canvas::install_worker_image_data(vm)?),
             image_bitmap: None,
             file_lists: None,
             dom_exception,

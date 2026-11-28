@@ -497,6 +497,46 @@ mod tests {
     }
 
     #[test]
+    fn worker_image_data_is_branded_bounded_and_locally_cloneable() {
+        let output = Rc::default();
+        let mut realm = realm(&output, &Rc::default());
+        realm.evaluate(
+            r#"
+            const blank = new ImageData(2, 3);
+            const bytes = new Uint8ClampedArray([5, 10, 15, 255]);
+            const image = new ImageData(bytes, 1);
+            const copy = structuredClone({image, bytes});
+            let errors = [];
+            for (const size of [[0, 1], [8192, 8192]]) {
+                try { new ImageData(size[0], size[1]); }
+                catch (e) { errors.push(e.name); }
+            }
+            postMessage([blank.width, blank.height, blank.data.length,
+                blank.data[0], blank.data instanceof Uint8ClampedArray,
+                image instanceof ImageData, image.data === bytes,
+                copy.image instanceof ImageData, copy.image.data === copy.bytes,
+                copy.bytes !== bytes, copy.bytes[2], errors.join(',')].join('|'));
+            const channel = new MessageChannel();
+            channel.port2.onmessage = e => postMessage([
+                e.data instanceof ImageData, e.data.width, e.data.data[0]
+            ].join('|'));
+            channel.port1.postMessage(image);
+            bytes[0] = 99;
+            "#,
+            URL,
+        ).unwrap();
+        assert_eq!(*output.borrow(), [
+            "2|3|24|0|true|true|true|true|true|true|15|IndexSizeError,RangeError"
+        ]);
+        let event = realm.next_event().expect("queued ImageData message");
+        realm.dispatch_event(event).unwrap();
+        assert_eq!(*output.borrow(), [
+            "2|3|24|0|true|true|true|true|true|true|15|IndexSizeError,RangeError",
+            "true|1|5",
+        ]);
+    }
+
+    #[test]
     fn a_throwing_listener_reports_the_error_and_finishes_the_checkpoint() {
         let output = Rc::default();
         let mut realm = realm(&output, &Rc::default());
