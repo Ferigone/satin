@@ -243,6 +243,8 @@ pub struct ElementBox {
 pub struct ComputedStyles {
     by_node: Vec<usize>,
     entries: Vec<Style>,
+    // Formatting-only nodes are not part of the DOM-facing geometry APIs.
+    generated_origins: Vec<NodeId>,
 }
 
 impl ComputedStyles {
@@ -250,20 +252,27 @@ impl ComputedStyles {
         Self {
             by_node: vec![0; node_count],
             entries: vec![Style::default()],
+            generated_origins: vec![],
         }
     }
 
     pub fn len(&self) -> usize {
-        self.by_node.len()
+        self.by_node.len() - self.generated_origins.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.by_node.is_empty()
+        self.len() == 0
     }
     pub fn get(&self, id: usize) -> Option<&Style> {
-        self.by_node.get(id).map(|&entry| &self.entries[entry])
+        (id < self.len()).then(|| &self.entries[self.by_node[id]])
     }
     pub fn iter(&self) -> impl Iterator<Item = &Style> {
-        self.by_node.iter().map(|&entry| &self.entries[entry])
+        self.by_node[..self.len()].iter().map(|&entry| &self.entries[entry])
+    }
+
+    fn originating_node(&self, id: NodeId) -> NodeId {
+        id.0.checked_sub(self.len())
+            .and_then(|offset| self.generated_origins.get(offset).copied())
+            .unwrap_or(id)
     }
 }
 
@@ -420,7 +429,7 @@ impl Layout {
             .enumerate()
             .filter(|(i, _)| page.stylesheet_applies(*i, (width, viewport.height)))
             .map(|(_, sheet)| sheet.as_ref());
-        let rules = css::parse_stylesheets(sheets, (width, viewport.height));
+        let rules = css::parse_stylesheets_with_generated(sheets, (width, viewport.height));
         let stylesheet = css::Stylesheet::with_viewport(rules, width, viewport.height);
         let form_state = |node, pseudo| page.matches_form_pseudo(node, pseudo);
         let mut selector_context = css::SelectorContext::new(&form_state);
@@ -428,6 +437,9 @@ impl Layout {
         // HTML recovery and DOM reparenting can allocate parents after children.
         let mut stack = vec![page.document.root];
         let mut root_font = 16.;
+        let mut generated = Vec::new();
+        // Bound the extra formatting nodes and generated string storage.
+        let mut generated_bytes = 0usize;
         while let Some(id) = stack.pop() {
             let n = &page.document.nodes[id.0];
             let parent = n.parent.map_or(0, |p| styles.by_node[p.0]);
@@ -447,9 +459,59 @@ impl Layout {
             if n.parent == Some(page.document.root) && matches!(n.kind, NodeKind::Element { .. }) {
                 root_font = styles[id.0].font_size;
             }
+            if matches!(n.kind, NodeKind::Element { .. })
+                && page.document.namespace(id) == crate::dom::Namespace::Html
+                && !matches!(page.document.tag(id),
+                    "img" | "input" | "textarea" | "select" | "video" | "audio"
+                    | "canvas" | "iframe" | "embed" | "object" | "br" | "hr"
+                    | "script" | "style" | "template" | "link" | "meta" | "head")
+            {
+                for pseudo in [css::PseudoElement::Before, css::PseudoElement::After] {
+                    if generated.len() >= 2048 || generated_bytes >= 256 * 1024 {
+                        break;
+                    }
+                    if let Some((style, text)) = stylesheet.compute_generated(
+                        &page.document, id, &styles[id.0], root_font, &mut selector_context, pseudo,
+                    ) {
+                        if generated_bytes.saturating_add(text.len()) <= 256 * 1024 {
+                            generated_bytes += text.len();
+                            generated.push((id, pseudo, style, text));
+                        }
+                    }
+                }
+            }
             stack.extend(n.children.iter().rev().copied());
         }
         check_text(&styles)?;
+
+        // Match against the real tree before inserting any formatting nodes:
+        // :empty, sibling and child selectors retain their DOM semantics.
+        let projected_page = if generated.is_empty() {
+            None
+        } else {
+            let mut projected = page.clone();
+            let doc = Arc::make_mut(&mut projected.document);
+            for (origin, pseudo, style, text) in generated {
+                let box_id = doc.append(origin, NodeKind::Element {
+                    tag: "span".into(),
+                    attrs: Default::default(),
+                });
+                if pseudo == css::PseudoElement::Before {
+                    let children = &mut doc.nodes[origin.0].children;
+                    children.pop();
+                    children.insert(0, box_id);
+                }
+                let text_id = doc.append(box_id, NodeKind::Text(text));
+                debug_assert_eq!(box_id.0, styles.by_node.len());
+                debug_assert_eq!(text_id.0, box_id.0 + 1);
+                let style_index = styles.entries.len();
+                styles.entries.push(style);
+                styles.by_node.extend([style_index, style_index]);
+                styles.generated_origins.extend([origin, origin]);
+            }
+            Some(projected)
+        };
+        let page = projected_page.as_ref().unwrap_or(page);
         let background = page
             .document
             .elements("html")
@@ -554,7 +616,8 @@ impl Layout {
             .find_map(|hit| hit.target(&self.clips, x, y))
     }
     /// Visual AABB union, including positioning/transforms and element scroll,
-    /// without clipping. Generated content remains outside this layout subset.
+    /// without clipping. Generated boxes participate in formatting but are
+    /// not separately exposed as DOM element rectangles.
     pub fn rect_for(&self, node: NodeId) -> Option<Rect> {
         self.elements
             .iter()
@@ -1046,6 +1109,28 @@ impl<'a> Builder<'a> {
         self.layout_positioned();
         let (page, fonts) = (self.page, self.fonts);
         let mut layout = self.finish_visual(background, scroll, observe_intersections);
+        // Generated boxes participate in formatting and clipping, but hit
+        // testing resolves them to the originating real element.
+        let styles = Arc::clone(&layout.computed_styles);
+        if !styles.generated_origins.is_empty() {
+            let count = styles.len();
+            layout.elements.retain(|e| e.node.0 < count);
+            layout.flow_elements.retain(|e| e.node.0 < count);
+            layout.scroll_regions.retain(|e| e.node.0 < count);
+            layout.node_links.truncate(count);
+            layout.scroll_sizes.truncate(count);
+            layout.sticky_inset_sizes.retain(|node, _| node.0 < count);
+            layout.subgrid_spans.retain(|(node, _), _| node.0 < count);
+            if let Some(boxes) = &mut layout.observation_boxes {
+                boxes.truncate(count);
+            }
+            for hit in &mut layout.hit_elements {
+                hit.node = styles.originating_node(hit.node);
+            }
+            for link in &mut layout.links {
+                link.node = styles.originating_node(link.node);
+            }
+        }
         if let Some(json) = &page.raw_json {
             json.lock().unwrap().paint_rows(&mut layout, fonts);
         }
