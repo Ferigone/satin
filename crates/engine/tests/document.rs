@@ -245,3 +245,30 @@ fn element_navigation_mixins_skip_non_elements_and_track_mutations() {
         "#,
     );
 }
+
+#[test]
+fn css_escape_serializes_domstrings_as_identifiers() {
+    check(
+        r#"
+        (() => {
+            const assert = (ok, label) => { if (!ok) throw Error(label); };
+            for (const [input, expected] of [
+                ['', ''], ['\0', '\uFFFD'], ['\x01\x7f', '\\1 \\7f '],
+                ['0a', '\\30 a'], ['-1a', '-\\31 a'], ['-', '\\-'],
+                ['--', '--'], ['a b#', 'a\\ b\\#'], ['a_b-9', 'a_b-9'],
+                ['é😀', 'é😀'], ['\ud800', '\ud800'],
+                [undefined, 'undefined'], [null, 'null'], [42, '\\34 2'],
+            ]) {
+                assert(CSS.escape(input) === expected, 'serialization: ' + input);
+            }
+            assert(CSS.escape.length === 1 && CSS.escape.call(null, 'a:b') === 'a\\:b', 'operation');
+            assert(CSS.escape({toString(){return 'a.b'}}) === 'a\\.b', 'DOMString conversion');
+            let missing = false, symbol = false;
+            try { CSS.escape(); } catch(e) { missing = e instanceof TypeError; }
+            try { CSS.escape(Symbol()); } catch(e) { symbol = e instanceof TypeError; }
+            assert(missing && symbol, 'required argument and symbol rejection');
+            return 'ok';
+        })()
+    "#,
+    );
+}

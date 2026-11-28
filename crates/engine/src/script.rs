@@ -2566,6 +2566,59 @@ fn install_css_namespace(vm: &mut Vm, window: Value) -> Result<(), JsError> {
         };
         Ok(supported.into())
     })?;
+    webidl::operation(vm, namespace.clone(), "escape", 1, |vm, _, args| {
+        webidl::required(args, 1, "CSS.escape")?;
+        let source = vm.to_string(&args[0])?;
+        let units = source.as_utf16();
+        // CSSOM serializes a DOMString as an identifier. Work on UTF-16
+        // units so that even isolated surrogates survive DOMString conversion.
+        let escape = |index: usize, unit: u16| -> ([u16; 4], usize) {
+            let digit = (0x30..=0x39).contains(&unit);
+            let leading_digit = digit && (index == 0 || (index == 1 && units[0] == 0x2d));
+            if unit == 0 {
+                ([0xfffd, 0, 0, 0], 1)
+            } else if unit <= 0x1f || unit == 0x7f || leading_digit {
+                let hex = |n: u16| if n < 10 { 0x30 + n } else { 0x61 + n - 10 };
+                if unit < 16 {
+                    ([0x5c, hex(unit), 0x20, 0], 3)
+                } else {
+                    ([0x5c, hex(unit >> 4), hex(unit & 15), 0x20], 4)
+                }
+            } else if unit == 0x2d && units.len() == 1 {
+                ([0x5c, unit, 0, 0], 2)
+            } else if unit >= 0x80
+                || unit == 0x2d
+                || unit == 0x5f
+                || digit
+                || (0x41..=0x5a).contains(&unit)
+                || (0x61..=0x7a).contains(&unit)
+            {
+                ([unit, 0, 0, 0], 1)
+            } else {
+                ([0x5c, unit, 0, 0], 2)
+            }
+        };
+        vm.charge_work(units.len().saturating_mul(2))?;
+        let size = units
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, unit)| escape(index, unit).1)
+            .fold(0usize, usize::saturating_add);
+        vm.ensure_string_allocation(size)?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(size).map_err(|_| {
+            JsError::new(
+                rust_browser_javascript::ErrorKind::HeapLimit,
+                "CSS.escape output allocation failed",
+            )
+        })?;
+        for (index, unit) in units.iter().copied().enumerate() {
+            let (escaped, len) = escape(index, unit);
+            output.extend_from_slice(&escaped[..len]);
+        }
+        vm.finish_string(output)
+    })?;
     vm.define_data_property(window, "CSS", namespace, true, false, true)
 }
 
