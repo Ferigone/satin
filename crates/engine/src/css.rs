@@ -942,6 +942,23 @@ pub(crate) fn parse_stylesheets<'a>(
     sources: impl IntoIterator<Item = &'a str>,
     viewport: (f32, f32),
 ) -> Vec<Rule> {
+    parse_stylesheets_impl(sources, viewport, false)
+}
+
+// Generated boxes need the original selector specificity and layer order,
+// but the ordinary element/CSSOM subset must not treat them as element rules.
+pub(crate) fn parse_stylesheets_with_generated<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    viewport: (f32, f32),
+) -> Vec<Rule> {
+    parse_stylesheets_impl(sources, viewport, true)
+}
+
+fn parse_stylesheets_impl<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    viewport: (f32, f32),
+    generated: bool,
+) -> Vec<Rule> {
     let mut out = vec![];
     let mut layers = layers::Layers::new();
     for source in sources {
@@ -955,6 +972,7 @@ pub(crate) fn parse_stylesheets<'a>(
             &mut declaration_budget,
             &mut layers,
             0,
+            generated,
         );
         if out.len() >= 8192 {
             break;
@@ -1407,6 +1425,7 @@ fn parse_rules(
     declaration_budget: &mut usize,
     layers: &mut layers::Layers,
     layer: usize,
+    generated: bool,
 ) {
     if depth > 32 || out.len() >= 8192 {
         return;
@@ -1440,6 +1459,7 @@ fn parse_rules(
                         declaration_budget,
                         layers,
                         child,
+                        generated,
                     );
                 }
             } else if group_applies(header, viewport) {
@@ -1451,6 +1471,7 @@ fn parse_rules(
                     declaration_budget,
                     layers,
                     layer,
+                    generated,
                 );
             }
         } else {
@@ -1465,13 +1486,11 @@ fn parse_rules(
                 selectors.iter().map(|s| compile_selector(s, 0)).collect();
             if let Some(compiled) = compiled {
                 for (selector, compiled) in selectors.into_iter().zip(compiled) {
-                    // Pseudo-elements are valid siblings of element selectors in
-                    // resets, but cannot contribute to the originating element's style.
-                    if compiled.parts.last().is_some_and(|part| {
-                        part.tests
-                            .iter()
-                            .any(|test| matches!(test, Test::PseudoElement))
-                    }) {
+                    // Pseudo-elements remain valid siblings of ordinary selectors.
+                    // Only the layout cascade consumes the supported generated boxes.
+                    if let Some(pseudo) = compiled.pseudo_element()
+                        && (!generated || pseudo == PseudoElement::Other)
+                    {
                         continue;
                     }
                     if out.len() >= 8192 {
@@ -1698,6 +1717,13 @@ struct Compound {
     tag: Option<String>,
     tests: Vec<Test>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PseudoElement {
+    Before,
+    After,
+    Other,
+}
+
 #[derive(Clone, Debug)]
 enum Test {
     Id(String),
@@ -1711,7 +1737,7 @@ enum Test {
     Root,
     Scope,
     ShadowHost,
-    PseudoElement,
+    PseudoElement(PseudoElement),
     Empty,
     Link,
     Focus,
@@ -1913,7 +1939,11 @@ fn compile_selector_in(
                             return None;
                         }
                         specificity.add(Specificity(0, 0, 1));
-                        Test::PseudoElement
+                        Test::PseudoElement(match name.as_str() {
+                            "before" => PseudoElement::Before,
+                            "after" => PseudoElement::After,
+                            _ => PseudoElement::Other,
+                        })
                     } else if name == "has" {
                         if inside_has {
                             return None;
@@ -2163,6 +2193,55 @@ fn unescape_string(source: &str) -> Option<String> {
     }
     Some(result)
 }
+
+enum GeneratedPart {
+    Text(String),
+    Attr(String),
+}
+
+// Supported generated-content grammar: strings and plain attr(name).
+// Distinguish a valid suppressing value from an invalid declaration.
+fn generated_content(source: &str) -> Option<Option<Vec<GeneratedPart>>> {
+    let clean = without_comments(source);
+    let mut rest = trim_boundary(&clean);
+    if ["none", "normal", "initial", "unset", "inherit"].iter()
+        .any(|keyword| rest.eq_ignore_ascii_case(keyword))
+    {
+        return Some(None);
+    }
+    let mut parts = Vec::new();
+    while !rest.is_empty() && parts.len() < 256 {
+        let first = rest.as_bytes()[0];
+        if matches!(first, b'\'' | b'"') {
+            let end = quoted_end(rest.as_bytes(), 0).ok()?;
+            if end < 2 || rest.as_bytes().get(end - 1) != Some(&first)
+                || rest.as_bytes()[..end - 1].iter().rev().take_while(|&&b| b == b'\\').count() % 2 != 0
+            {
+                return None;
+            }
+            parts.push(GeneratedPart::Text(unescape_string(&rest[1..end - 1])?));
+            rest = trim_boundary(&rest[end..]);
+        } else if rest.as_bytes().get(..5).is_some_and(|s| s.eq_ignore_ascii_case(b"attr(")) {
+            let end = matching_close(rest, 4, b'(', b')')?;
+            let name = trim_boundary(&rest[5..end]);
+            let mut offset = 0;
+            let name_value = identifier(name, &mut offset)?;
+            if offset != name.len() {
+                return None;
+            }
+            parts.push(GeneratedPart::Attr(name_value));
+            rest = trim_boundary(&rest[end + 1..]);
+        } else {
+            return None;
+        }
+    }
+    if rest.is_empty() && !parts.is_empty() {
+        Some(Some(parts))
+    } else {
+        None
+    }
+}
+
 fn nth_expression(source: &str) -> Option<(i32, i32)> {
     // CSS Syntax §6.2 distinguishes an integer dimension (2n), an ident
     // (n-3), and a sign followed by an unsigned integer (n + 3). Preserve
@@ -2318,6 +2397,13 @@ impl DomSelectorList {
 }
 
 impl Selector {
+    fn pseudo_element(&self) -> Option<PseudoElement> {
+        self.parts.last()?.tests.iter().find_map(|test| match test {
+            Test::PseudoElement(pseudo) => Some(*pseudo),
+            _ => None,
+        })
+    }
+
     fn matches(&self, doc: &Document, id: NodeId, context: &mut SelectorContext<'_>) -> bool {
         self.matches_part(doc, id, self.parts.len() - 1, &mut 16384, context)
     }
@@ -2636,7 +2722,7 @@ impl Compound {
                     .is_some_and(|parent| doc.is_document(parent)),
             },
             // The stylesheet is evaluated in the document tree, outside a shadow root.
-            Test::ShadowHost | Test::PseudoElement => false,
+            Test::ShadowHost | Test::PseudoElement(_) => false,
             Test::Empty => doc.nodes[id.0]
                 .children
                 .iter()
@@ -3097,6 +3183,8 @@ struct CompiledDeclaration {
 struct CompiledRule {
     layer_rank: usize,
     selector: Selector,
+    pseudo: Option<PseudoElement>,
+    content: Vec<(usize, Declaration)>,
     declarations: Vec<CompiledDeclaration>,
     custom: Vec<Declaration>,
     svg: Vec<SvgDeclaration>,
@@ -3205,6 +3293,7 @@ pub struct Stylesheet {
     classes: HashMap<String, Vec<usize>>,
     tags: HashMap<String, Vec<usize>>,
     universal: Vec<usize>,
+    has_generated: bool,
     viewport: [f32; 2],
 }
 impl Stylesheet {
@@ -3219,12 +3308,24 @@ impl Stylesheet {
             classes: HashMap::new(),
             tags: HashMap::new(),
             universal: vec![],
+            has_generated: false,
             viewport: [width, height],
         };
         for rule in rules.into_iter().take(8192) {
-            let Some(selector) = compile_selector(&without_comments(&rule.selector), 0) else {
+            let Some(mut selector) = compile_selector(&without_comments(&rule.selector), 0) else {
                 continue;
             };
+            let pseudo = selector.pseudo_element();
+            if pseudo == Some(PseudoElement::Other) {
+                continue;
+            }
+            // Match the originating element, retaining the pseudo-element's
+            // original specificity. DOM selector APIs still never match it.
+            if pseudo.is_some() {
+                selector.parts.last_mut().unwrap().tests.retain(
+                    |test| !matches!(test, Test::PseudoElement(_))
+                );
+            }
             let index = result.rules.len();
             let right = selector.parts.last().unwrap();
             if let Some(id) = right
@@ -3251,6 +3352,15 @@ impl Stylesheet {
                 result.universal.push(index);
             }
             let declarations = compile_declarations(&rule.declarations);
+            let content: Vec<_> = if pseudo.is_some() {
+                rule.declarations.iter().enumerate().filter(|(_, d)| {
+                    d.name == "content" && d.value.len() <= 16384
+                        && (contains_variable(&d.value) || generated_content(&d.value).is_some())
+                }).map(|(order, d)| (order, d.clone())).collect()
+            } else {
+                vec![]
+            };
+            result.has_generated |= !content.is_empty();
             let svg = svg_declarations(&rule.declarations);
             let custom = rule
                 .declarations
@@ -3260,6 +3370,8 @@ impl Stylesheet {
             result.rules.push(CompiledRule {
                 layer_rank: rule.layer_rank,
                 selector,
+                pseudo,
+                content,
                 declarations,
                 custom,
                 svg,
@@ -3315,10 +3427,59 @@ impl Stylesheet {
         root_font: f32,
         context: &mut SelectorContext<'_>,
     ) -> Style {
-        let mut style = user_agent_style(doc, id, parent);
-        let is_root = doc.nodes[id.0].parent == Some(doc.root);
-        let is_svg = doc.namespace(id) == crate::dom::Namespace::Svg;
-        let inline = doc.attr(id, "style").map(declarations).unwrap_or_default();
+        self.compute_target(doc, id, parent, root_font, context, None).0
+    }
+
+    pub(crate) fn compute_generated(
+        &self,
+        doc: &Document,
+        id: NodeId,
+        parent: &Style,
+        root_font: f32,
+        context: &mut SelectorContext<'_>,
+        pseudo: PseudoElement,
+    ) -> Option<(Style, String)> {
+        if !self.has_generated || parent.display == Display::None {
+            return None;
+        }
+        let mut possible = false;
+        self.candidates(doc, id, |index| {
+            let rule = &self.rules[index];
+            possible |= rule.pseudo == Some(pseudo) && !rule.content.is_empty();
+        });
+        if !possible {
+            return None;
+        }
+        let (style, content) =
+            self.compute_target(doc, id, parent, root_font, context, Some(pseudo));
+        if style.display == Display::None {
+            None
+        } else {
+            content.map(|text| (style, text))
+        }
+    }
+
+    fn compute_target(
+        &self,
+        doc: &Document,
+        id: NodeId,
+        parent: &Style,
+        root_font: f32,
+        context: &mut SelectorContext<'_>,
+        pseudo: Option<PseudoElement>,
+    ) -> (Style, Option<String>) {
+        let mut style = if pseudo.is_some() {
+            inherited_style(parent)
+        } else {
+            user_agent_style(doc, id, parent)
+        };
+        let is_root = pseudo.is_none() && doc.nodes[id.0].parent == Some(doc.root);
+        let is_svg = pseudo.is_none() && doc.namespace(id) == crate::dom::Namespace::Svg;
+        let inline = if pseudo.is_none() {
+            doc.attr(id, "style").map(declarations).unwrap_or_default()
+        } else {
+            vec![]
+        };
         let inline_svg = if is_svg {
             svg_declarations(&inline)
         } else {
@@ -3328,9 +3489,10 @@ impl Stylesheet {
         let inline_declarations = compile_declarations(&inline);
         let mut winners: [Option<Winner<'_>>; PROPERTY_COUNT] = [None; PROPERTY_COUNT];
         let mut custom: HashMap<&str, (&Declaration, Priority)> = HashMap::new();
+        let mut content: Option<(&Declaration, Priority)> = None;
         self.candidates(doc, id, |index| {
             let rule = &self.rules[index];
-            if !rule.selector.matches(doc, id, context) {
+            if rule.pseudo != pseudo || !rule.selector.matches(doc, id, context) {
                 return;
             }
             let source = CascadeSource {
@@ -3346,6 +3508,12 @@ impl Stylesheet {
                 choose(&mut winners, declaration, source);
             }
             choose_custom(&mut custom, &rule.custom, source);
+            for (order, declaration) in &rule.content {
+                let priority = source.priority(declaration.important, *order);
+                if content.is_none_or(|(_, old)| priority >= old) {
+                    content = Some((declaration, priority));
+                }
+            }
         });
         let source = CascadeSource {
             inline: true,
@@ -3549,7 +3717,7 @@ impl Stylesheet {
         let borders = style.borders();
         style.border = borders.into_iter().fold(0., f32::max);
         style.border_color = style.border_colors[0].unwrap_or(style.color);
-        if doc.namespace(id) == crate::dom::Namespace::Html {
+        if pseudo.is_none() && doc.namespace(id) == crate::dom::Namespace::Html {
             // These HTML rendering rules have UA-important precedence.
             let hidden = match doc.tag(id) {
                 "noscript" => doc.scripting_enabled,
@@ -3562,7 +3730,27 @@ impl Stylesheet {
                 style.display = Display::None;
             }
         }
-        style
+        let content = content.and_then(|(declaration, _)| {
+            let value = if contains_variable(&declaration.value) {
+                Cow::Owned(resolve_variables(&declaration.value, &style.custom, 0)?)
+            } else {
+                Cow::Borrowed(declaration.value.as_str())
+            };
+            let parts = generated_content(&value)??;
+            let mut text = String::new();
+            for part in parts {
+                let value = match &part {
+                    GeneratedPart::Text(text) => text.as_str(),
+                    GeneratedPart::Attr(name) => doc.attr(id, name).unwrap_or(""),
+                };
+                if text.len().saturating_add(value.len()) > 16384 {
+                    return None;
+                }
+                text.push_str(value);
+            }
+            Some(text)
+        });
+        (style, content)
     }
 }
 #[derive(Clone, Copy)]
@@ -3655,13 +3843,22 @@ fn inherited(property: Property) -> bool {
             | Property::Visibility
     )
 }
-fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
+fn inherited_style(parent: &Style) -> Style {
     let mut style = Style::default();
     for property in PROPERTIES {
         if inherited(property) {
             copy_property(&mut style, parent, property, property);
         }
     }
+    style.rtl = parent.rtl;
+    style.custom = parent.custom.clone();
+    // Decoration propagates to descendant inline text in this renderer.
+    style.underline = parent.underline;
+    style
+}
+
+fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
+    let mut style = inherited_style(parent);
     style.rtl = doc
         .attr(id, "dir")
         .filter(|_| doc.namespace(id) == crate::dom::Namespace::Html)
@@ -3671,9 +3868,6 @@ fn user_agent_style(doc: &Document, id: NodeId, parent: &Style) -> Style {
             _ => None,
         })
         .unwrap_or(parent.rtl);
-    style.custom = parent.custom.clone();
-    // Decoration propagates to descendant inline text in this renderer.
-    style.underline = parent.underline;
     let tag = doc.tag(id);
     // HTML widget defaults are overridden by the ordinary author cascade.
     if doc.namespace(id) == crate::dom::Namespace::Html
