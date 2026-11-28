@@ -472,7 +472,7 @@ impl Builder<'_> {
             return;
         }
         let (abs, fixed) = containing_blocks(self);
-        let mut boxes = vec![None; self.styles.len()];
+        let mut boxes = vec![None; self.styles.by_node.len()];
         for e in &self.elements {
             boxes[e.node.0] = Some(boxes[e.node.0].map_or(e.rect, |r: Rect| r.union(e.rect)));
         }
