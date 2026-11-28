@@ -155,3 +155,50 @@ fn dom_parser_creates_inert_independent_html_documents() {
         "#,
     );
 }
+
+#[test]
+fn array_like_map_preserves_dom_callback_receiver() {
+    // Reduced from the DOM traversal and callback shape of jQuery wrapAll.
+    // Reference: Chromium, including the detached HTML document and adoption.
+    check(
+        r#"
+        (() => {
+            const assert = (ok, label) => { if (!ok) throw Error(label); };
+            const subject = document.getElementById('live');
+            const inert = document.implementation.createHTMLDocument('');
+            const container = inert.createElement('div');
+            container.innerHTML = '<section><div><span></span></div></section>';
+            const parsed = container.childNodes[0];
+            assert(parsed && parsed.firstElementChild.localName === 'div', 'parsed wrapper');
+            const wrapper = parsed.cloneNode(true);
+            assert(wrapper !== parsed &&
+                   wrapper.firstElementChild.firstElementChild.localName === 'span', 'deep clone');
+            subject.parentNode.insertBefore(wrapper, subject);
+            assert(wrapper.ownerDocument === document &&
+                   wrapper.parentNode === subject.parentNode, 'wrapper adoption');
+            const collection = {0: wrapper, length: 1};
+            function staticMap(obj, callback, arg) {
+                var length = obj.length, result = [];
+                for (var i = 0; i < length; i++) {
+                    var value = callback(obj[i], i, arg);
+                    if (value != null) result.push(value);
+                }
+                return result;
+            }
+            function collectionMap(callback) {
+                return staticMap(this, function(elem, i) { return callback.call(elem, i, elem); });
+            }
+            const result = collectionMap.call(collection, function(i, elem) {
+                'use strict';
+                assert(this === wrapper && elem === wrapper && i === 0, 'map callback receiver');
+                for (var t = this; t.firstElementChild;) t = t.firstElementChild;
+                return t;
+            });
+            assert(result.length === 1 && result[0].localName === 'span', 'deepest element');
+            result[0].appendChild(subject);
+            assert(subject.parentNode === result[0] && subject.ownerDocument === document, 'wrapped subject');
+            return 'ok';
+        })()
+        "#,
+    );
+}
