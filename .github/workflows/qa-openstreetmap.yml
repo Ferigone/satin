@@ -19,7 +19,7 @@ jobs:
             Install-WindowsFeature Server-Media-Foundation -ErrorAction Stop
           }
       - name: Test document, form, and attribute regressions
-        run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console --test document
+        run: cargo test --locked -p rust-browser-engine --test forms --test attributes --test devtools_console --test document --test fetch_integration_audit
       - name: Test layout geometry and SVG regressions
         run: cargo test --locked -p rust-browser-engine --test layout_geometry --test svg_rendering
       - name: Test worker realm and worker event loop
@@ -52,7 +52,7 @@ jobs:
           const viewport = {width:1280,height:800};
           const urls = ['https://www.openstreetmap.org/','https://www.openstreetmap.org/search?query=Warszawa'];
           const safe = x => String(x ?? '').replace(/https?:\/\/[^\s"'<>]+/g, v => {try{const u=new URL(v);return u.origin+u.pathname;}catch{return '[url]'}}).slice(0,1600);
-          const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,buildFeatures:['media-startup-diagnostics'],productionBase:'ad4dfb4692b9e70b87ee27cfcb99256734caf423',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
+          const report = {commit:process.env.GITHUB_SHA,sourceCommit:process.env.GITHUB_SHA,buildFeatures:['media-startup-diagnostics'],productionBase:'ec959854ede88bd51e7cbf1799f9d8c7b90f113b',sha256:createHash('sha256').update(await readFile(satin)).digest('hex'),viewport,startedUtc:new Date().toISOString(),cases:[],limitations:['Chromium headless and Satin headless share the requested viewport; native smoke is a hidden-window renderer, not OS input. Native content viewport is not returned by this Satin build; review screenshot geometry before comparing.']};
           const save=async()=>{await writeFile(join(out,'summary.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));};
           const key = value => ({action:'key',value});
           async function satinCase(url,index,phase,actions){
@@ -88,6 +88,32 @@ jobs:
                   page.on('console',m=>{if(m.type()==='error'&&item.chrome.console.length<40)item.chrome.console.push(safe(m.text()))});
                   page.on('requestfailed',r=>{if(item.chrome.networkErrors.length<40)item.chrome.networkErrors.push({url:safe(r.url()),error:safe(r.failure()?.errorText)})});
                   page.on('response',r=>{if(r.status()>=400&&item.chrome.networkErrors.length<40)item.chrome.networkErrors.push({url:safe(r.url()),status:r.status()})});
+                  const frameTasks=[];
+                  item.chrome.frameResponses=[];
+                  page.on('response',response=>{
+                    if(index!==0 || frameTasks.length>=12)return;
+                    const request=response.request();
+                    const headers=request.headers();
+                    if(!headers['turbo-frame'])return;
+                    frameTasks.push((async()=>{
+                      const u=new URL(response.url());
+                      const record={path:u.pathname,status:response.status(),method:request.method(),frameHeader:headers['turbo-frame'],accept:headers.accept??null,contentType:response.headers()['content-type']??null};
+                      try{
+                        const body=await response.body();
+                        record.bytes=body.length;
+                        if(body.length<=2*1024*1024){
+                          record.sha256=createHash('sha256').update(body).digest('hex');
+                          const source=body.toString('utf8');
+                          record.parsed=await page.evaluate(markup=>{
+                            const doc=new DOMParser().parseFromString(markup,'text/html');
+                            const frames=[...doc.querySelectorAll('turbo-frame')];
+                            return {frameIds:frames.slice(0,30).map(e=>e.id),expectedFrame:!!doc.body.querySelector('turbo-frame#sidebar_content_frame')};
+                          },source);
+                        }
+                      }catch(e){record.error=safe(e.message);}
+                      item.chrome.frameResponses.push(record);
+                    })());
+                  });
                   const start=performance.now();
                   item.chrome.status=(await page.goto(url,{waitUntil:'domcontentloaded',timeout:25000}))?.status();
                   item.chrome.navigationMs=Math.round(performance.now()-start);
@@ -112,7 +138,7 @@ jobs:
                     const input=page.locator('input#query:visible').first();
                     if(await input.isVisible()){
                       await input.click();await input.fill('Warszawa');await input.press('Enter');await page.waitForTimeout(5000);
-                      item.chrome.search=await sample();await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
+                      item.chrome.search=await sample();await Promise.allSettled(frameTasks);await page.screenshot({path:join(out,'chrome-'+index+'-search.png')});
                     }else item.chrome.searchError='Search input not visible';
                   }else{
                     const zoom=page.locator('.leaflet-control-zoom-in:visible, [title="Zoom In"]:visible, [title="Zoom in"]:visible, [aria-label="Zoom In"]:visible, [aria-label="Zoom in"]:visible').first();
@@ -182,7 +208,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $versions = @('v0.1.0-alpha.46', 'v0.1.0-alpha.47')
+          $versions = @('v0.1.0-alpha.48', 'v0.1.0-alpha.49')
           $records = foreach ($version in $versions) {
             $meta = Invoke-RestMethod "https://api.github.com/repos/Ferigone/satin/releases/tags/$version"
             if ($meta.draft) { throw "Release is draft: $version" }
@@ -204,6 +230,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: alpha46-alpha47-public-package-hashes
+          name: alpha48-alpha49-public-package-hashes
           path: target/release-hash-evidence/
           if-no-files-found: warn

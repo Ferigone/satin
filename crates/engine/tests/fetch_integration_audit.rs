@@ -340,3 +340,42 @@ fn native_fetch_consumers_accept_the_maximum_decoded_body() {
         );
     }
 }
+
+
+#[test]
+fn fetched_html_custom_element_can_be_selected_and_imported() {
+    let (_, mut runtime) = realm();
+    runtime.eval(r#"
+        var outcome = 'pending';
+        const headers = new Headers({Accept: 'text/html, application/xhtml+xml'});
+        headers.set('Turbo-Frame', 'sidebar_content_frame');
+        fetch('/frame', {headers, credentials: 'same-origin', redirect: 'follow'})
+          .then(response => {
+            if (!response.ok || !response.headers.get('content-type').startsWith('text/html'))
+                throw Error('response metadata');
+            return response.clone().text();
+          })
+          .then(markup => {
+            const parsed = new DOMParser().parseFromString(markup, 'text/html');
+            const id = CSS.escape('sidebar_content_frame');
+            const frame = parsed.body.querySelector('turbo-frame#' + id);
+            if (!frame || frame !== parsed.getElementById(id)) throw Error('foreign frame selector');
+            if (frame.ownerDocument !== parsed || frame.firstElementChild.localName !== 'ul')
+                throw Error('foreign tree');
+            const copy = document.importNode(frame, true);
+            if (copy.ownerDocument !== document || copy.firstElementChild.textContent !== 'Warszawa')
+                throw Error('imported tree');
+            document.getElementById('output').append(copy);
+            outcome = 'ok';
+          }).catch(error => { outcome = error.name + ': ' + error.message; });
+    "#).unwrap();
+    let (id, request) = runtime.take_network_requests().remove(0);
+    assert!(request.headers.iter().any(|(name, value)| name == "turbo-frame" && value == "sidebar_content_frame"));
+    assert!(request.headers.iter().any(|(name, value)| name == "accept" && value.starts_with("text/html")));
+    let mut response = reply(request.url.as_str(),
+        "<!doctype html><html><body><turbo-frame id='sidebar_content_frame'><ul><li>Warszawa</li></ul></turbo-frame></body></html>");
+    response.headers = vec![("content-type".into(), "text/html; charset=utf-8".into())];
+    runtime.complete_network(id, Ok(response)).unwrap();
+    runtime.pump();
+    assert_eq!(runtime.eval("outcome").unwrap(), Value::from("ok"));
+}
