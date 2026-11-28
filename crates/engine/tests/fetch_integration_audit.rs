@@ -415,3 +415,40 @@ fn fetched_html_fragment_selects_frame_from_public_response_shape() {
     runtime.pump();
     assert_eq!(runtime.eval("outcome").unwrap(), Value::from("ok"));
 }
+
+
+#[test]
+fn imported_custom_elements_upgrade_before_insertion() {
+    let (_, mut runtime) = realm();
+    runtime.eval(r#"
+        var events = [];
+        class QaFrame extends HTMLElement {
+            constructor() { super(); events.push('ctor:' + this.id); }
+            static get observedAttributes() { return ['id']; }
+            attributeChangedCallback(name, oldValue, value) { events.push('attr:' + value); }
+            connectedCallback() { events.push('connected:' + this.id); }
+        }
+        customElements.define('qa-frame', QaFrame);
+        var parsed = new DOMParser().parseFromString(
+            '<qa-frame id="outer"><qa-frame id="inner"></qa-frame><template><qa-frame id="inert"></qa-frame></template></qa-frame>',
+            'text/html');
+        var source = parsed.body.firstElementChild;
+        var copy = document.importNode(source, true);
+        var inertCopy = parsed.importNode(source, true);
+        var detachedOk = !(source instanceof QaFrame) &&
+            copy instanceof QaFrame &&
+            copy.firstElementChild instanceof QaFrame &&
+            !(copy.querySelector('template').content.firstElementChild instanceof QaFrame) &&
+            !(inertCopy instanceof QaFrame) && !copy.isConnected &&
+            events.join(',') === 'ctor:outer,attr:outer,ctor:inner,attr:inner';
+        document.getElementById('output').append(copy);
+        var connectedOk = events.join(',') ===
+            'ctor:outer,attr:outer,ctor:inner,attr:inner,connected:outer,connected:inner';
+        var cloned = copy.cloneNode(false);
+        var cloneOk = cloned instanceof QaFrame && !cloned.isConnected &&
+            events.join(',').endsWith('ctor:outer,attr:outer');
+    "#).unwrap();
+    for assertion in ["detachedOk", "connectedOk", "cloneOk"] {
+        assert_eq!(runtime.eval(assertion).unwrap(), Value::Bool(true), "{assertion}");
+    }
+}

@@ -1574,6 +1574,7 @@ fn clone_local_node(
     let clone = staged.commit(&mut state)[0];
     state.document.adopt(clone, destination);
     drop(state);
+    custom_elements::upgrade_cloned_tree(vm, host, clone)?;
     wrap(vm, host, Some(clone))
 }
 
@@ -1642,6 +1643,7 @@ fn import_frame_node(
     })?;
     let clone = staged.commit(&mut host.borrow_mut())[0];
     host.borrow_mut().document.adopt(clone, destination);
+    custom_elements::upgrade_cloned_tree(vm, host, clone)?;
     wrap(vm, host, Some(clone))
 }
 

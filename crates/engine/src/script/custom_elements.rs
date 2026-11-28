@@ -317,6 +317,37 @@ fn upgrade(vm: &mut Vm, host: &Shared, id: NodeId) -> Result<(), JsError> {
     Ok(())
 }
 
+// Cloning/importing into the active document uses its custom element registry.
+// Parsed and other inert documents have no active registry. Template contents
+// are excluded by the shadow-including traversal; they remain inert.
+pub(super) fn upgrade_cloned_tree(
+    vm: &mut Vm,
+    host: &Shared,
+    root: NodeId,
+) -> Result<(), JsError> {
+    let candidates = {
+        let state = host.borrow();
+        if state.document.node_document(root) != state.document.root
+            || !state.custom_elements.borrow().has_definitions()
+        {
+            return Ok(());
+        }
+        let mut candidates = Vec::new();
+        for id in state.document.shadow_including_nodes(root) {
+            vm.charge_work(1)?;
+            if definition(&state, id).is_some() {
+                candidates.push(id);
+            }
+        }
+        candidates
+    };
+    for id in candidates {
+        vm.charge_work(1)?;
+        upgrade(vm, host, id)?;
+    }
+    Ok(())
+}
+
 pub(super) fn connection(state: &State, parent: NodeId, subtree: NodeId, added: bool) {
     state
         .custom_elements
