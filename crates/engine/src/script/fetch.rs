@@ -1507,6 +1507,11 @@ fn body_methods(
                     state.form_data.clone(),
                 )
             };
+            #[cfg(feature = "media-startup-diagnostics")]
+            let trace_html = !request && name == "text" &&
+                typed::<ResponseData>(vm, &this, "Response").ok()
+                    .and_then(|data| Url::parse(&data.borrow().response.url).ok())
+                    .is_some_and(|url| network::qa_fetch_target(&url));
             streams.collect_bytes(
                 vm,
                 body,
@@ -1516,6 +1521,14 @@ fn body_methods(
                     FETCH_RESPONSE_BODY_LIMIT
                 },
                 Box::new(move |vm, bytes, resolve, reject| {
+                    #[cfg(feature = "media-startup-diagnostics")]
+                    if trace_html {
+                        let frames = bytes.windows(b"<turbo-frame".len())
+                            .filter(|part| part.eq_ignore_ascii_case(b"<turbo-frame")).count();
+                        let html = bytes.windows(b"<html".len())
+                            .any(|part| part.eq_ignore_ascii_case(b"<html"));
+                        eprintln!("SATIN_QA_FETCH_TEXT bytes={} frame_tags={} html_tag={}", bytes.len(), frames, html);
+                    }
                     let value = match name {
                         "arrayBuffer" => vm.new_array_buffer(bytes)?,
                         "bytes" => vm.new_uint8_array(bytes)?,

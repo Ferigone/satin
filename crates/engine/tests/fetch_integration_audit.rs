@@ -379,3 +379,39 @@ fn fetched_html_custom_element_can_be_selected_and_imported() {
     runtime.pump();
     assert_eq!(runtime.eval("outcome").unwrap(), Value::from("ok"));
 }
+
+
+#[test]
+fn fetched_html_fragment_selects_frame_from_public_response_shape() {
+    let (_, mut runtime) = realm();
+    // The live QA run may supply the actual public HTML fragment from its
+    // reference browser. Ordinary tests use a deterministic offline fixture.
+    let markup = match std::env::var_os("SATIN_QA_FRAME_FIXTURE") {
+        Some(path) => std::fs::read_to_string(path).expect("read reference fragment"),
+        None => "<turbo-frame id=\"sidebar_content_frame\"><div class=\"search_results_entry\">Warszawa</div></turbo-frame>".into(),
+    };
+    runtime.eval(r#"
+        var outcome = 'pending';
+        const headers = new Headers({Accept: 'text/html, application/xhtml+xml'});
+        headers.set('Turbo-Frame', 'sidebar_content_frame');
+        fetch('/frame', {headers})
+          .then(response => response.clone().text())
+          .then(markup => {
+            const parsed = new DOMParser().parseFromString(markup, 'text/html');
+            const id = CSS.escape('sidebar_content_frame');
+            const frame = parsed.body.querySelector('turbo-frame#' + id);
+            if (!frame || frame !== parsed.getElementById(id))
+                throw Error('frame selector');
+            const imported = document.importNode(frame, true);
+            if (imported.id !== id || imported.ownerDocument !== document)
+                throw Error('frame import');
+            outcome = 'ok';
+          }).catch(error => { outcome = error.name + ': ' + error.message; });
+    "#).unwrap();
+    let (id, request) = runtime.take_network_requests().remove(0);
+    let mut response = reply(request.url.as_str(), &markup);
+    response.headers = vec![("content-type".into(), "text/html; charset=utf-8".into())];
+    runtime.complete_network(id, Ok(response)).unwrap();
+    runtime.pump();
+    assert_eq!(runtime.eval("outcome").unwrap(), Value::from("ok"));
+}

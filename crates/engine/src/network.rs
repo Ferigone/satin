@@ -62,6 +62,14 @@ fn trace_media_fetch(request: &WebRequest, phase: &str, status: Option<u16>) {
             request.method);
     }
 }
+// Opt-in QA only: compare a single public endpoint without logging URL queries,
+ // cookies, header values, or response contents.
+#[cfg(feature = "media-startup-diagnostics")]
+pub(crate) fn qa_fetch_target(url: &Url) -> bool {
+    std::env::var("SATIN_QA_FETCH_TARGET").ok().is_some_and(|target| {
+        target == format!("{}{}", url.origin().ascii_serialization(), url.path())
+    })
+}
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(210);
 pub type HeaderList = Vec<(String, String)>;
 
@@ -919,6 +927,13 @@ impl Loader {
             }
             #[cfg(feature = "media-startup-diagnostics")]
             trace_media_fetch(&request, "request", None);
+            #[cfg(feature = "media-startup-diagnostics")]
+            if qa_fetch_target(&request.url) {
+                eprintln!("SATIN_QA_FETCH_REQUEST method={} turbo_frame={} accept_html={}",
+                    request.method, headers.contains_key("turbo-frame"),
+                    headers.get(reqwest::header::ACCEPT).and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v.contains("text/html")));
+            }
             let mut builder = self
                 .fetch_client
                 .request(method, request.url.clone())
@@ -980,6 +995,13 @@ impl Loader {
                 }
             }
             let status = response.status();
+            #[cfg(feature = "media-startup-diagnostics")]
+            if qa_fetch_target(&request.url) {
+                eprintln!("SATIN_QA_FETCH_RESPONSE status={} html={} length={:?}",
+                    status.as_u16(), response.headers().get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/html")),
+                    response.content_length());
+            }
             #[cfg(feature = "media-startup-diagnostics")]
             trace_media_fetch(&request, "response", Some(status.as_u16()));
             if status == StatusCode::UNAUTHORIZED

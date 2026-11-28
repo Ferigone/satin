@@ -67,9 +67,9 @@ jobs:
               args=[...common,'--width','1280','--height','944','--smoke-window',image,'--smoke-actions',file];
             }
             try{
-              const {stdout,stderr}=await run(satin,args,{timeout:180000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp')}});
+              const {stdout,stderr}=await run(satin,args,{timeout:180000,maxBuffer:16*1024*1024,windowsHide:true,env:{...process.env,LOCALAPPDATA:join(tmp,'localapp'),SATIN_QA_FETCH_TARGET:'https://www.openstreetmap.org/search'}});
               try{const j=JSON.parse(stdout.trim());result.receipt={version:j.version,url:j.url,title:j.title,frames:j.frames_presented,windowSmoke:j.window_smoke,layoutLimited:j.layout_limited,paintLimited:j.paint_limited,documentHeight:j.document_height,diagnostics:j.javascript?.diagnostics?.slice(0,40).map(safe)};}catch(e){result.parseError=safe(e.message)}
-              result.stderr=safe(stderr);result.exit=0;
+              result.fetchTrace=stderr.split(/\r?\n/).filter(line=>line.startsWith('SATIN_QA_FETCH_')).slice(0,40).map(safe);result.stderr=safe(stderr);result.exit=0;
             }catch(e){result.error=safe(e.message);result.stderr=safe(e.stderr);result.exit=e.code;result.killed=e.killed}
             result.elapsedMs=Math.round(performance.now()-start);
             return result;
@@ -109,6 +109,7 @@ jobs:
                             const frames=[...doc.querySelectorAll('turbo-frame')];
                             return {frameIds:frames.slice(0,30).map(e=>e.id),expectedFrame:!!doc.body.querySelector('turbo-frame#sidebar_content_frame')};
                           },source);
+                        if(record.status===200 && record.parsed.expectedFrame) await writeFile(join(process.env.RUNNER_TEMP,'osm-frame-fixture.html'),body);
                         }
                       }catch(e){record.error=safe(e.message);}
                       item.chrome.frameResponses.push(record);
@@ -193,6 +194,15 @@ jobs:
           $script | Set-Content -LiteralPath $scriptPath -Encoding utf8
           node $scriptPath
           if ($LASTEXITCODE -ne 0) { throw 'QA runner failed' }
+      - name: Replay the exact public response fragment in Satin
+        shell: pwsh
+        run: |
+          $env:SATIN_QA_FRAME_FIXTURE = Join-Path $env:RUNNER_TEMP 'osm-frame-fixture.html'
+          if (-not (Test-Path -LiteralPath $env:SATIN_QA_FRAME_FIXTURE)) { throw 'Reference response fragment was not captured' }
+          try {
+            cargo test --locked -p rust-browser-engine --test fetch_integration_audit fetched_html_fragment_selects_frame_from_public_response_shape -- --exact
+            if ($LASTEXITCODE -ne 0) { throw 'Live response fragment regression failed' }
+          } finally { Remove-Item -LiteralPath $env:SATIN_QA_FRAME_FIXTURE -ErrorAction SilentlyContinue }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
