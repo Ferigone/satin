@@ -893,3 +893,45 @@ fn toggle_attribute_returns_presence_and_only_delivers_actual_mutations() {
         )
     );
 }
+
+#[test]
+fn range_delete_contents_removes_selected_nodes_and_collapses() {
+    let (_, mut runtime) = realm("<main><div id='frame'><p>old</p><!--marker--><span>stale</span></div><p id='after'>keep</p></main>");
+    js(&mut runtime, r#"
+        const frame = document.getElementById("frame");
+        const old = frame.firstChild;
+        const observer = new MutationObserver(() => {});
+        observer.observe(frame, {childList: true});
+        const range = document.createRange();
+        range.selectNodeContents(frame);
+        const returned = range.deleteContents();
+        const records = observer.takeRecords();
+        returned === undefined && frame.childNodes.length === 0 &&
+            old.parentNode === null && old.textContent === "old" &&
+            range.collapsed && range.startContainer === frame && range.startOffset === 0 &&
+            document.getElementById("after").textContent === "keep" &&
+            records.length === 3 && records[0].removedNodes[0] === old
+    "#, true);
+}
+
+#[test]
+fn range_delete_contents_preserves_partial_ancestors_and_utf16_boundaries() {
+    let (_, mut runtime) = realm("<main id='root'><p id='a'>A😀B</p><i>remove</i><p id='b'>CDE</p></main>");
+    js(&mut runtime, r#"
+        const root = document.getElementById("root");
+        const a = document.getElementById("a"), b = document.getElementById("b");
+        const r = document.createRange();
+        r.setStart(a.firstChild, 1);
+        r.setEnd(b.firstChild, 2);
+        r.deleteContents();
+        const cross = root.children.length === 2 && a.textContent === "A" &&
+            b.textContent === "E" && r.collapsed && r.startContainer === root && r.startOffset === 1;
+        const t = document.createTextNode("A😀B");
+        r.setStart(t, 1);
+        r.setEnd(t, 3);
+        r.deleteContents();
+        const same = t.data === "AB" && r.collapsed && r.startContainer === t && r.startOffset === 1;
+        r.deleteContents();
+        cross && same && t.data === "AB"
+    "#, true);
+}

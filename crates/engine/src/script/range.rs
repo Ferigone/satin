@@ -1,6 +1,7 @@
 //! Document ranges and contextual parsing over Satin's DOM arena.
 use super::{
-    Shared, arg, document_node,
+    Shared, arg, detach, document_node, dynamic_scripts, mark_dirty, mutation_observers,
+    set_text,
     dom_api::{self, Errors},
     getter, node, selection, text, webidl, wrap,
 };
@@ -145,6 +146,91 @@ fn adjusted_bounds(
         bounds.end = point;
     }
     Ok(bounds)
+}
+
+/// Preflight the nodes and character-data edits before changing the arena.
+/// Fully contained subtrees are removed as units; partially contained
+/// ancestors survive and only their selected descendants are removed.
+enum Deletion {
+    Remove { parent: NodeId, child: NodeId },
+    Text { node: NodeId, value: String },
+}
+
+fn plan_deletion(
+    vm: &mut Vm,
+    doc: &Document,
+    bounds: Bounds,
+    errors: &Errors,
+) -> Result<(Point, Vec<Deletion>), JsError> {
+    let start = bounds.start;
+    let end = bounds.end;
+    if start.offset > node_length(vm, doc, start.node)?
+        || end.offset > node_length(vm, doc, end.node)?
+        || compare(vm, doc, start, end)?.is_none_or(|order| order.is_gt())
+    {
+        return Err(errors.exception(vm, "InvalidStateError", "Invalid range boundaries"));
+    }
+    let a = ancestry(vm, doc, start.node)?;
+    let b = ancestry(vm, doc, end.node)?;
+    let common_count = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let common = a[common_count - 1];
+    let collapse = if common == start.node {
+        start
+    } else {
+        Point {
+            node: common,
+            offset: child_offset(vm, doc, common, a[common_count])? + 1,
+        }
+    };
+    let mut operations = Vec::new();
+    let mut pending = vec![common];
+    while let Some(id) = pending.pop() {
+        vm.charge_work(1)?;
+        let entry = &doc.nodes[id.0];
+        if id != common {
+            let parent = entry.parent.expect("Range child has a parent");
+            let index = child_offset(vm, doc, parent, id)?;
+            let before = Point { node: parent, offset: index };
+            let after = Point { node: parent, offset: index + 1 };
+            if compare(vm, doc, start, before)?.is_some_and(|order| !order.is_gt())
+                && compare(vm, doc, after, end)?.is_some_and(|order| !order.is_gt())
+            {
+                // detach scans the sibling vector; charge its original length
+                // for each removal before applying any edits.
+                vm.charge_buffer_work(doc.nodes[parent.0].children.len())?;
+                operations.push(Deletion::Remove { parent, child: id });
+                continue;
+            }
+        }
+        if let Some(data) = entry.kind.character_data() {
+            let length = node_length(vm, doc, id)?;
+            let from = if id == start.node { start.offset } else { 0 };
+            let to = if id == end.node { end.offset } else { length };
+            if from < to {
+                vm.charge_buffer_work(data.len().saturating_mul(4))?;
+                let mut units: Vec<u16> = data.encode_utf16().collect();
+                units.drain(from..to);
+                operations.push(Deletion::Text {
+                    node: id,
+                    value: String::from_utf16_lossy(&units),
+                });
+            }
+            continue;
+        }
+        // Queue children in reverse so the actual removals are in tree order.
+        vm.charge_buffer_work(entry.children.len())?;
+        for (index, &child) in entry.children.iter().enumerate().rev() {
+            let before = Point { node: id, offset: index };
+            let after = Point { node: id, offset: index + 1 };
+            if compare(vm, doc, after, start)?.is_some_and(|order| !order.is_gt())
+                || compare(vm, doc, before, end)?.is_some_and(|order| !order.is_lt())
+            {
+                continue;
+            }
+            pending.push(child);
+        }
+    }
+    Ok((collapse, operations))
 }
 
 pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<Value, JsError> {
@@ -346,6 +432,48 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<Val
             Ok(Value::Undefined)
         })?;
     }
+    let owner = host.clone();
+    let delete_errors = errors.clone();
+    webidl::operation(
+        vm,
+        prototype.clone(),
+        "deleteContents",
+        0,
+        move |vm, receiver, _| {
+            let range = range(vm, &receiver)?;
+            let bounds = range.0.get();
+            if bounds.start == bounds.end {
+                return Ok(Value::Undefined);
+            }
+            let (point, operations) = {
+                let state = owner.borrow();
+                plan_deletion(vm, &state.document, bounds, &delete_errors)?
+            };
+            let mut affected = Vec::new();
+            for operation in operations {
+                match operation {
+                    Deletion::Remove { parent, child } => {
+                        let mut state = owner.borrow_mut();
+                        if state.document.nodes[child.0].parent == Some(parent) {
+                            mutation_observers::removing(&state, parent, child, false);
+                            detach(&mut state.document, child);
+                            mark_dirty(&mut state);
+                            affected.push(parent);
+                        }
+                    }
+                    Deletion::Text { node, value } => {
+                        let parent = owner.borrow().document.nodes[node.0].parent;
+                        set_text(vm, &owner, node, value)?;
+                        affected.extend(parent);
+                    }
+                }
+            }
+            update_bounds(vm, &owner, &receiver, &range, Bounds { start: point, end: point });
+            mutation_observers::schedule(vm, &owner);
+            dynamic_scripts::post_connection(vm, &owner, affected)?;
+            Ok(Value::Undefined)
+        },
+    )?;
     let owner = host.clone();
     let compare_errors = errors.clone();
     webidl::operation(
