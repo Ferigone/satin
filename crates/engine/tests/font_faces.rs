@@ -398,3 +398,39 @@ fn compound_glyph_cycle_is_rejected_before_a_rasterizer_can_recurse() {
             .contains("Cyclic glyph components")
     );
 }
+
+
+// Generated text is a layout child, not a DOM child. Icon fonts often use
+// exactly this selector shape and a CSS hexadecimal escape for the glyph.
+#[test]
+fn generated_icon_text_uses_downloaded_face_without_mutating_dom() {
+    let fonts = Fonts::new().unwrap();
+    let mut page = LoadedPage::from_html(
+        "https://fonts.test/",
+        r#"
+        <style>
+          body { margin: 0; }
+          .control { display: grid; width: 40px; height: 40px; place-content: center; }
+          .bi::before, [class*=" bi-"]::before {
+            display: inline-block; font-family: Audit !important;
+            font-size: 20px; font-style: normal; font-weight: 400;
+          }
+          .bi-plus::before { content: "\0041"; }
+        </style>
+        <a class=control><i class="bi bi-plus"></i></a>
+        "#,
+    );
+    let set = font_set("@font-face{font-family:Audit;src:url(face)}", &[WOFF2]);
+    let face_id = set.entries()[0].face.id();
+    page.fonts = Arc::new(set);
+    let icon = page.document.elements("i").next().unwrap();
+    assert!(page.document.nodes[icon.0].children.is_empty());
+    let layout = Layout::build(&page, &fonts, 200.);
+    let run = layout.commands.iter().find_map(|command| match command {
+        DrawCommand::Text { run, .. }
+            if run.glyphs.iter().any(|g| run.face_for(g).face().id() == face_id) => Some(run),
+        _ => None,
+    }).expect("generated ::before icon must reach the text painter with the downloaded face");
+    assert_close(run.advance, 16.);
+    assert!(page.document.nodes[icon.0].children.is_empty());
+}
