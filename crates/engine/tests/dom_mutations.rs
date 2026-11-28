@@ -935,3 +935,70 @@ fn range_delete_contents_preserves_partial_ancestors_and_utf16_boundaries() {
         cross && same && t.data === "AB"
     "#, true);
 }
+
+#[test]
+fn range_extract_contents_moves_nodes_and_copies_partial_ancestors() {
+    let (mut page, mut runtime) = realm("<main id='root'><p id='a'>A😀B</p><i>move</i><p id='b'>CDE</p></main>");
+    js(&mut runtime, r#"
+        const root = document.getElementById('root');
+        const a = document.getElementById('a'), b = document.getElementById('b');
+        const middle = root.children[1];
+        const r = document.createRange();
+        r.setStart(a.firstChild, 1);
+        r.setEnd(b.firstChild, 2);
+        const f = r.extractContents();
+        f instanceof DocumentFragment && f.ownerDocument === document &&
+            f.firstChild !== a && f.firstChild.textContent === '😀B' &&
+            f.children[1] === middle && middle.parentNode === f &&
+            f.lastChild !== b && f.lastChild.textContent === 'CD' &&
+            root.children.length === 2 && a.textContent === 'A' && b.textContent === 'E' &&
+            r.collapsed && r.startContainer === root && r.startOffset === 1
+    "#, true);
+    runtime.snapshot(&mut page);
+    arena(&page.document);
+}
+
+#[test]
+fn range_extract_contents_handles_text_empty_and_other_documents() {
+    let (_, mut runtime) = realm("<!doctype html><main></main>");
+    js(&mut runtime, r#"
+        const r = document.createRange();
+        const t = document.createTextNode('A😀B');
+        r.setStart(t, 1);
+        r.setEnd(t, 3);
+        const f = r.extractContents();
+        const text = f.firstChild !== t && f.textContent === '😀' && t.data === 'AB' &&
+            r.startContainer === t && r.startOffset === 1 && r.collapsed &&
+            r.extractContents().childNodes.length === 0;
+        r.selectNode(document.doctype);
+        let invalid = false;
+        try { r.extractContents(); } catch (e) { invalid = e.name === 'HierarchyRequestError'; }
+        const doctype = invalid && document.doctype !== null && !r.collapsed;
+        const d = document.implementation.createHTMLDocument('other');
+        const item = d.createElement('p');
+        d.body.append(item);
+        r.selectNodeContents(d.body);
+        const df = r.extractContents();
+        text && doctype && df.ownerDocument === d && df.firstChild === item &&
+            item.ownerDocument === d && d.body.childNodes.length === 0
+    "#, true);
+}
+
+#[test]
+fn range_extract_contents_transfers_incoming_frame_children() {
+    let (_, mut runtime) = realm("<main id='frame'><p>old</p></main>");
+    js(&mut runtime, r#"
+        const source = new DOMParser().parseFromString('<main><a href="/new">new</a><b>second</b></main>', 'text/html');
+        const incoming = document.importNode(source.querySelector('main'), true);
+        const target = document.getElementById('frame');
+        const link = incoming.firstChild;
+        const r = document.createRange();
+        r.selectNodeContents(target);
+        r.deleteContents();
+        r.selectNodeContents(incoming);
+        const f = r.extractContents();
+        target.appendChild(f);
+        target.firstChild === link && target.textContent === 'newsecond' &&
+            incoming.childNodes.length === 0 && f.childNodes.length === 0 && r.collapsed
+    "#, true);
+}

@@ -156,12 +156,12 @@ enum Deletion {
     Text { node: NodeId, value: String },
 }
 
-fn plan_deletion(
+fn mutation_context(
     vm: &mut Vm,
     doc: &Document,
     bounds: Bounds,
     errors: &Errors,
-) -> Result<(Point, Vec<Deletion>), JsError> {
+) -> Result<(NodeId, Point), JsError> {
     let start = bounds.start;
     let end = bounds.end;
     if start.offset > node_length(vm, doc, start.node)?
@@ -182,6 +182,18 @@ fn plan_deletion(
             offset: child_offset(vm, doc, common, a[common_count])? + 1,
         }
     };
+    Ok((common, collapse))
+}
+
+fn plan_deletion(
+    vm: &mut Vm,
+    doc: &Document,
+    bounds: Bounds,
+    errors: &Errors,
+) -> Result<(Point, Vec<Deletion>), JsError> {
+    let (common, collapse) = mutation_context(vm, doc, bounds, errors)?;
+    let start = bounds.start;
+    let end = bounds.end;
     let mut operations = Vec::new();
     let mut pending = vec![common];
     while let Some(id) = pending.pop() {
@@ -228,6 +240,87 @@ fn plan_deletion(
                 continue;
             }
             pending.push(child);
+        }
+    }
+    Ok((collapse, operations))
+}
+
+// Extraction differs from deletion: fully contained nodes keep their identity,
+// while partially contained ancestors and character data are copied.
+enum ExtractionKind {
+    Move,
+    Shallow,
+    Character { selected: String, remaining: String },
+}
+
+struct Extraction {
+    source: NodeId,
+    // Index of the partially contained ancestor's copy, or the result fragment.
+    parent: Option<usize>,
+    kind: ExtractionKind,
+}
+
+fn plan_extraction(
+    vm: &mut Vm,
+    doc: &Document,
+    bounds: Bounds,
+    errors: &Errors,
+) -> Result<(Point, Vec<Extraction>), JsError> {
+    let (common, collapse) = mutation_context(vm, doc, bounds, errors)?;
+    let start = bounds.start;
+    let end = bounds.end;
+    let mut operations = Vec::new();
+    let mut pending = vec![(common, None)];
+    while let Some((id, mut destination)) = pending.pop() {
+        vm.charge_work(1)?;
+        let entry = &doc.nodes[id.0];
+        if id != common {
+            let parent = entry.parent.expect("Range child has a parent");
+            let index = child_offset(vm, doc, parent, id)?;
+            let before = Point { node: parent, offset: index };
+            let after = Point { node: parent, offset: index + 1 };
+            if compare(vm, doc, start, before)?.is_some_and(|order| !order.is_gt())
+                && compare(vm, doc, after, end)?.is_some_and(|order| !order.is_gt())
+            {
+                if matches!(entry.kind, NodeKind::Doctype { .. }) {
+                    return Err(errors.exception(
+                        vm, "HierarchyRequestError", "A doctype cannot be extracted into a fragment",
+                    ));
+                }
+                operations.push(Extraction { source: id, parent: destination, kind: ExtractionKind::Move });
+                continue;
+            }
+        }
+        if let Some(data) = entry.kind.character_data() {
+            let length = node_length(vm, doc, id)?;
+            let from = if id == start.node { start.offset } else { 0 };
+            let to = if id == end.node { end.offset } else { length };
+            vm.charge_buffer_work(data.len().saturating_mul(4))?;
+            let mut units: Vec<u16> = data.encode_utf16().collect();
+            let selected = String::from_utf16_lossy(&units[from..to]);
+            units.drain(from..to);
+            operations.push(Extraction {
+                source: id,
+                parent: destination,
+                kind: ExtractionKind::Character { selected, remaining: String::from_utf16_lossy(&units) },
+            });
+            continue;
+        }
+        if id != common {
+            let index = operations.len();
+            operations.push(Extraction { source: id, parent: destination, kind: ExtractionKind::Shallow });
+            destination = Some(index);
+        }
+        vm.charge_buffer_work(entry.children.len())?;
+        for (index, &child) in entry.children.iter().enumerate().rev() {
+            let before = Point { node: id, offset: index };
+            let after = Point { node: id, offset: index + 1 };
+            if compare(vm, doc, after, start)?.is_some_and(|order| !order.is_gt())
+                || compare(vm, doc, before, end)?.is_some_and(|order| !order.is_lt())
+            {
+                continue;
+            }
+            pending.push((child, destination));
         }
     }
     Ok((collapse, operations))
@@ -472,6 +565,66 @@ pub(super) fn install(vm: &mut Vm, host: &Shared, errors: &Errors) -> Result<Val
             mutation_observers::schedule(vm, &owner);
             dynamic_scripts::post_connection(vm, &owner, affected)?;
             Ok(Value::Undefined)
+        },
+    )?;
+    let owner = host.clone();
+    let extract_errors = errors.clone();
+    webidl::operation(
+        vm,
+        prototype.clone(),
+        "extractContents",
+        0,
+        move |vm, receiver, _| {
+            let range = range(vm, &receiver)?;
+            let bounds = range.0.get();
+            let (document, fragment_proto, plan) = {
+                let state = owner.borrow();
+                let document = state.document.node_document(bounds.start.node);
+                let plan = if bounds.start == bounds.end {
+                    None
+                } else {
+                    Some(plan_extraction(vm, &state.document, bounds, &extract_errors)?)
+                };
+                (document, state.fragment_prototype.clone(), plan)
+            };
+            let fragment = dom_api::new_fragment(vm, &owner, &extract_errors, fragment_proto)?;
+            let fragment_id = node(&owner, &fragment)?;
+            owner.borrow_mut().document.adopt(fragment_id, document);
+            let Some((point, operations)) = plan else {
+                return Ok(fragment);
+            };
+            // Allocate copies before moving the original nodes. The cloning
+            // machinery preserves namespace metadata and DOM resource limits.
+            let mut results = Vec::with_capacity(operations.len());
+            for operation in &operations {
+                let id = match &operation.kind {
+                    ExtractionKind::Move => operation.source,
+                    ExtractionKind::Shallow | ExtractionKind::Character { .. } => {
+                        let copy = dom_api::clone_local_node(
+                            vm, &owner, operation.source, document, false, &extract_errors,
+                        )?;
+                        let id = node(&owner, &copy)?;
+                        if let ExtractionKind::Character { selected, .. } = &operation.kind {
+                            set_text(vm, &owner, id, selected.clone())?;
+                        }
+                        id
+                    }
+                };
+                results.push(id);
+            }
+            let mut affected = Vec::new();
+            for (index, operation) in operations.into_iter().enumerate() {
+                let parent = operation.parent.map_or(fragment_id, |p| results[p]);
+                if let ExtractionKind::Character { remaining, .. } = operation.kind {
+                    let original_parent = owner.borrow().document.nodes[operation.source.0].parent;
+                    set_text(vm, &owner, operation.source, remaining)?;
+                    affected.extend(original_parent);
+                }
+                dom_api::append_range_child(vm, &owner, parent, results[index], &extract_errors)?;
+            }
+            update_bounds(vm, &owner, &receiver, &range, Bounds { start: point, end: point });
+            dynamic_scripts::post_connection(vm, &owner, affected)?;
+            Ok(fragment)
         },
     )?;
     let owner = host.clone();

@@ -809,6 +809,25 @@ fn plan(
     })
 }
 
+/// Internal append for Range extraction, without invoking overridden JS methods.
+pub(super) fn append_range_child(
+    vm: &mut Vm,
+    host: &Shared,
+    parent: NodeId,
+    child: NodeId,
+    errors: &Errors,
+) -> Result<(), JsError> {
+    charge(vm, host, Some(parent), &[child], Walk::Ownership, false, 0)?;
+    let candidates = {
+        let mut state = host.borrow_mut();
+        plan(&state.document, parent, &[child], None, None, false, None, LIMITS)
+            .map(|mutation| mutation.commit(&mut state))
+            .map_err(|failure| errors.convert(vm, failure))?
+    };
+    mutation_observers::schedule(vm, host);
+    dynamic_scripts::post_connection(vm, host, candidates)
+}
+
 fn context(state: &State, id: NodeId, body_fallback: bool) -> FragmentContext<'_> {
     let document = &state.document;
     let tag = document.tag(id);
@@ -1540,7 +1559,7 @@ fn stage_clone(source: &Document, id: NodeId, deep: bool, target: &State) -> Che
     Ok(staged)
 }
 
-fn clone_local_node(
+pub(super) fn clone_local_node(
     vm: &mut Vm,
     host: &Shared,
     id: NodeId,
