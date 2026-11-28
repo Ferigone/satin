@@ -202,3 +202,46 @@ fn array_like_map_preserves_dom_callback_receiver() {
         "#,
     );
 }
+
+#[test]
+fn element_navigation_mixins_skip_non_elements_and_track_mutations() {
+    check(
+        r#"
+        (() => {
+            const assert = (ok, label) => { if (!ok) throw Error(label); };
+            const f = document.createDocumentFragment();
+            const a = document.createElement('div');
+            const b = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            const t = document.createTextNode('text');
+            const c = document.createComment('comment');
+            f.append(t, a, c, b, document.createTextNode('tail'));
+            assert(f.firstElementChild === a && f.lastElementChild === b &&
+                   f.childElementCount === 2, 'fragment skips non-elements');
+            assert(a.nextElementSibling === b && b.previousElementSibling === a &&
+                   t.nextElementSibling === a && c.previousElementSibling === a &&
+                   c.nextElementSibling === b, 'sibling traversal and identity');
+            assert(a.previousElementSibling === null && b.nextElementSibling === null &&
+                   a.firstElementChild === null && a.lastElementChild === null &&
+                   a.childElementCount === 0, 'empty and boundaries');
+            f.removeChild(a);
+            assert(f.firstElementChild === b && f.lastElementChild === b &&
+                   f.childElementCount === 1 && a.nextElementSibling === null &&
+                   b.previousElementSibling === null, 'live mutation');
+            a.appendChild(f);
+            assert(a.firstElementChild === b && a.lastElementChild === b &&
+                   a.childElementCount === 1 && f.firstElementChild === null &&
+                   f.childElementCount === 0, 'fragment insertion');
+            assert(document.firstElementChild === document.documentElement &&
+                   document.lastElementChild === document.documentElement &&
+                   document.childElementCount === 1, 'document skips doctype');
+            assert(t.firstElementChild === undefined &&
+                   document.doctype.nextElementSibling === undefined, 'interface placement');
+            const getter = Object.getOwnPropertyDescriptor(Element.prototype, 'firstElementChild').get;
+            let invalid = false;
+            try { getter.call(t); } catch (e) { invalid = e.name === 'TypeError'; }
+            assert(invalid, 'invalid receiver');
+            return 'ok';
+        })()
+        "#,
+    );
+}

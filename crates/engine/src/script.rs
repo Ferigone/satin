@@ -2182,6 +2182,109 @@ fn install_node(
             wrap(vm, &state, related)
         })?;
     }
+    // ParentNode navigation is live, skips non-element children, and is
+    // exposed only on the interfaces that include the mixin.
+    let parent_prototypes = {
+        let state = state.borrow();
+        [
+            element_prototype.clone(),
+            state.document_prototype.clone(),
+            state.fragment_prototype.clone(),
+        ]
+    };
+    for owner in parent_prototypes {
+        for property in ["firstElementChild", "lastElementChild", "childElementCount"] {
+            let state = state.clone();
+            getter(vm, owner.clone(), property, move |vm, this, _| {
+                let id = node(&state, &this)?;
+                let related = {
+                    let state = state.borrow();
+                    let doc = &state.document;
+                    let current = &doc.nodes[id.0];
+                    if !matches!(current.kind, NodeKind::Document | NodeKind::Element { .. }) {
+                        return Err(JsError::type_error("ParentNode receiver required"));
+                    }
+                    if property == "childElementCount" {
+                        let mut count = 0u32;
+                        for child in &current.children {
+                            vm.charge_work(1)?;
+                            if matches!(doc.nodes[child.0].kind, NodeKind::Element { .. }) {
+                                count += 1;
+                            }
+                        }
+                        return Ok(count.into());
+                    }
+                    let mut found = None;
+                    for index in 0..current.children.len() {
+                        vm.charge_work(1)?;
+                        let index = if property == "lastElementChild" {
+                            current.children.len() - 1 - index
+                        } else {
+                            index
+                        };
+                        let child = current.children[index];
+                        if matches!(doc.nodes[child.0].kind, NodeKind::Element { .. }) {
+                            found = Some(child);
+                            break;
+                        }
+                    }
+                    found
+                };
+                wrap(vm, &state, related)
+            })?;
+        }
+    }
+    // NonDocumentTypeChildNode is shared by Element and CharacterData.
+    let character_data = state.borrow().character_data_prototype.clone();
+    for owner in [element_prototype.clone(), character_data] {
+        for property in ["nextElementSibling", "previousElementSibling"] {
+            let state = state.clone();
+            getter(vm, owner.clone(), property, move |vm, this, _| {
+                let id = node(&state, &this)?;
+                let related = {
+                    let state = state.borrow();
+                    let doc = &state.document;
+                    let current = &doc.nodes[id.0];
+                    if !matches!(
+                        current.kind,
+                        NodeKind::Element { .. }
+                            | NodeKind::Text(_)
+                            | NodeKind::Cdata(_)
+                            | NodeKind::Comment(_)
+                            | NodeKind::ProcessingInstruction { .. }
+                    ) {
+                        return Err(JsError::type_error("NonDocumentTypeChildNode receiver required"));
+                    }
+                    if let Some(parent) = current.parent {
+                        let children = &doc.nodes[parent.0].children;
+                        let mut seen = false;
+                        let mut found = None;
+                        for index in 0..children.len() {
+                            vm.charge_work(1)?;
+                            let index = if property == "previousElementSibling" {
+                                children.len() - 1 - index
+                            } else {
+                                index
+                            };
+                            let child = children[index];
+                            if child == id {
+                                seen = true;
+                            } else if seen
+                                && matches!(doc.nodes[child.0].kind, NodeKind::Element { .. })
+                            {
+                                found = Some(child);
+                                break;
+                            }
+                        }
+                        found
+                    } else {
+                        None
+                    }
+                };
+                wrap(vm, &state, related)
+            })?;
+        }
+    }
     for property in ["nodeType", "nodeName", "tagName"] {
         let state = state.clone();
         let element_only = property == "tagName";
