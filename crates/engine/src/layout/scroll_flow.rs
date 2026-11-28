@@ -4,6 +4,9 @@ use super::*;
 
 pub(crate) struct ScrollFlow {
     styles: Arc<ComputedStyles>,
+    // Keep the same formatting-only arena across scroll replay; the live DOM
+    // still contains only real nodes.
+    projection: Option<Arc<crate::dom::Document>>,
     background: Color,
     commands: TrackedCommands,
     links: Vec<Link>,
@@ -42,6 +45,7 @@ impl ScrollFlow {
     pub(super) fn capture(b: &Builder<'_>, background: Color) -> Self {
         Self {
             styles: b.styles.clone(),
+            projection: (!b.styles.generated_origins.is_empty()).then(|| b.page.document.clone()),
             background,
             commands: b.commands.clone(),
             elements: b.elements.clone(),
@@ -71,6 +75,7 @@ impl ScrollFlow {
     fn replay_work(b: &Builder<'_>) -> usize {
         let mut work = b
             .styles
+            .by_node
             .len()
             .saturating_add(b.elements.len())
             .saturating_add(b.commands.len());
@@ -106,6 +111,12 @@ impl ScrollFlow {
         offsets: &HashMap<NodeId, ScrollOffset>,
         observe: bool,
     ) -> Layout {
+        let projected = self.projection.as_ref().map(|document| {
+            let mut projected = page.clone();
+            projected.document = document.clone();
+            projected
+        });
+        let page = projected.as_ref().unwrap_or(page);
         let mut b = Builder::new(page, fonts, &self.styles, viewport);
         b.commands = self.commands.clone();
         b.links = self.links.clone();
