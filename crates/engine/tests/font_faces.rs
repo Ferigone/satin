@@ -434,3 +434,63 @@ fn generated_icon_text_uses_downloaded_face_without_mutating_dom() {
     assert_close(run.advance, 16.);
     assert!(page.document.nodes[icon.0].children.is_empty());
 }
+
+
+#[test]
+fn generated_boxes_preserve_dom_selector_semantics_and_scroll_replay() {
+    use rust_browser_engine::layout::Viewport;
+    use std::collections::HashMap;
+
+    let fonts = Fonts::new().unwrap();
+    let mut page = LoadedPage::from_html(
+        "https://fonts.test/",
+        r#"
+        <style>
+          body { margin: 0; }
+          #icon { color: green; font-family: Audit; font-size: 20px; }
+          #icon:empty { --glyph: "\0041"; }
+          #icon:empty::before { content: var(--glyph); color: red; }
+          #icon::after { content: attr(data-glyph); color: blue; }
+          #icon::before { content: "B"; }
+          .hidden::before { content: "A"; color: red; }
+          .hidden::before { content: none !important; }
+          aside { position: fixed; top: 0; left: 0; }
+          main { height: 1200px; }
+        </style>
+        <aside><a href="/target"><i id="icon" data-glyph="A"></i></a>
+        <span class="hidden"></span></aside><main></main>
+        "#,
+    );
+    page.fonts = Arc::new(font_set(
+        "@font-face{font-family:Audit;src:url(face)}",
+        &[WOFF2],
+    ));
+    let count = page.document.nodes.len();
+    let icon = page.document.elements("i").next().unwrap();
+    let viewport = Viewport { width: 200., height: 100., ..Viewport::default() };
+    let first = Layout::for_scrolling(&page, &fonts, viewport, &HashMap::new(), None);
+    let second = Layout::for_scrolling(
+        &page, &fonts, Viewport { scroll_y: 100., ..viewport }, &HashMap::new(), Some(&first)
+    );
+    for layout in [&first, &second] {
+        let colored: Vec<_> = layout.commands.iter().filter_map(|command| match command {
+            DrawCommand::Text { color, run, .. } if *color == Color(255, 0, 0, 255)
+                || *color == Color(0, 0, 255, 255) => Some((*color, run.advance)),
+            _ => None,
+        }).collect();
+        assert_eq!(colored.len(), 2, "only the two unsuppressed pseudo boxes paint");
+        assert_eq!(colored[0].0, Color(255, 0, 0, 255));
+        assert_eq!(colored[1].0, Color(0, 0, 255, 255));
+        assert_close(colored[0].1, 16.);
+        assert_close(colored[1].1, 16.);
+        assert_eq!(layout.computed_styles.len(), count);
+        assert!(layout.computed_styles.get(count).is_none());
+        assert_eq!(layout.computed_styles[icon.0].color, Color(0, 128, 0, 255));
+        assert!(layout.elements.iter().all(|element| element.node.0 < count));
+        assert!(layout.links.iter().all(|link| link.node.0 < count));
+    }
+    assert_eq!(page.document.nodes.len(), count);
+    assert!(page.document.nodes[icon.0].children.is_empty());
+    assert!(!css::matches_selector(&page.document, icon, "#icon::before"));
+    assert!(css::matches_selector(&page.document, icon, "#icon:empty"));
+}
